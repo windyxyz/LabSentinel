@@ -1,0 +1,13 @@
+# LabSentinel server（Windows 开发环境）
+# 注意：onnxruntime-directml 与 onnxruntime 不可同装（M0 实测互杀）；
+#       Linux/Docker 部署改用 onnxruntime。
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.2
+onnxruntime-directml>=1.17 ; sys_platform == "win32"
+onnxruntime>=1.17 ; sys_platform != "win32"
+opencv-python-headless>=4.9
+supervision==0.25.1      # MIT：ByteTrack（0.26+ 已把跟踪器移出本包，勿升级）
+httpx>=0.27
+numpy

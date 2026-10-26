@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies (Linux 用 CPU 版 onnxruntime，requirements 已按平台分支)
+        run: pip install -r server/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+      - name: Run tests
+        run: python -m pytest server/tests -q
+        env:
+          # CI 无模型文件：跳过依赖真实模型的路径（引擎单测用 FakeSess，不加载真模型）
+          LS_PPE_MODEL: ""
+
+  web-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmmirror.com"
+      - name: Install
+        working-directory: web
+        run: npm install --registry=https://registry.npmmirror.com
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff -i https://pypi.tuna.tsinghua.edu.cn/simple
+      # 初期宽松：忽略长行/未用导入告警类，规则集随代码质量推进收紧（见 ruff 配置说明 in pyproject 或此文件注释）
+      - run: ruff check server/app --select E9,F63,F7,F82,F401 --ignore F401

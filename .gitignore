@@ -1,0 +1,49 @@
+# ---- 环境与密钥（零入库）----
+server/.env
+.env
+*.env.local
+
+# ---- 运行数据（事件库/截图/视频/标注池）----
+server/data/
+
+# ---- 模型与权重（不随库分发，见 NOTICE）----
+m0-spike/*.onnx
+m0-spike/*.pt
+m0-spike/*.classes.txt
+m0-spike/calib/
+m0-spike/out_s*/
+m0-spike/data/
+m0-spike/quantized_info.csv
+
+# ---- 数据集（1.4GB+，下载/合并脚本在 tools/）----
+datasets/
+
+# ---- 训练产物 ----
+runs/
+.training.lock
+
+# ---- 日志 ----
+logs/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# ---- Node / Web ----
+web/node_modules/
+web/dist/
+
+# ---- 临时与工具产物 ----
+.mimosa/
+*.log
+Thumbs.db
+
+# ---- 二进制组件（可再下载，见 NOTICE 与部署指南；不入库）----
+tools/ffmpeg/
+tools/go2rtc.exe
+
+# ---- 误建环境残留（防御）----
+server/LabSentinelgpu-venv/

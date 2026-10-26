@@ -1,0 +1,9 @@
+# 本文件由 LabSentinel 服务端自动生成（摄像头增删时重写），勿手工编辑
+api:
+  listen: ":1984"
+  origin: "*"
+webrtc:
+  listen: ":1984"
+streams:
+
+  "1": "ffmpeg:x.mp4"

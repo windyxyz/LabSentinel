@@ -1,0 +1,47 @@
+LabSentinel · 实验室哨兵
+Copyright (C) 2026 LabSentinel contributors
+
+本程序基于 AGPL-3.0 授权（见 LICENSE 文件）。本文件声明随项目分发的第三方组件。
+
+======================================================================
+第三方组件声明（Third-party components）
+======================================================================
+
+组件                版本            许可            用途                  来源
+--------------------------------------------------------------------------------
+FastAPI             >=0.115         BSD-3-Clause    Web API 框架          pypi.org/project/fastapi
+uvicorn             >=0.30          BSD-3-Clause    ASGI 服务器           pypi.org/project/uvicorn
+onnxruntime-directml 1.24.4         MIT             推理运行时(Windows)   pypi.org/project/onnxruntime-directml
+onnxruntime (Linux) >=1.17          MIT             推理运行时(Docker)    pypi.org/project/onnxruntime
+supervision         0.25.1（钉版）  MIT             ByteTrack 跟踪        pypi.org/project/supervision
+opencv-python       >=4.9           Apache-2.0      图像/视频处理         pypi.org/project/opencv-python
+httpx               >=0.27          BSD-3-Clause    HTTP 客户端           pypi.org/project/httpx
+pydantic-settings   >=2.2           BSD-2-Clause    配置管理              pypi.org/project/pydantic-settings
+reportlab           5.x             BSD-3-Clause    PDF 月报生成          pypi.org/project/reportlab
+go2rtc              1.9.15          MIT             WebRTC 流媒体网关     github.com/AlexxIT/go2rtc（tools/ 外置）
+ffmpeg              master 构建     GPL-2.0+        go2rtc 文件源转码     github.com/BtbN/FFmpeg-Builds（tools/ffmpeg，随库分发时需遵守 GPL）
+OpenH264            2.5.0           BSD-2-Clause    H.264 编码（Cisco）   ciscobinary.openh264.org（由部署者下载，不随库分发）
+python-multipart    0.0.32          Apache-2.0      表单/文件上传解析     pypi.org/project/python-multipart
+
+======================================================================
+仅训练/工具链使用（不随运行时分发）
+======================================================================
+
+组件                许可            说明
+--------------------------------------------------------------------------------
+ultralytics         AGPL-3.0        YOLO 训练/导出（tools/train_ppe.py 等；服务端只用导出的 ONNX）
+torch               BSD-3-Clause    训练框架
+roboflow            Apache-2.0      数据集下载客户端
+amd-quark           MIT             NPU XINT8 量化
+
+======================================================================
+模型与数据集（不随仓库分发，由部署者自行下载）
+======================================================================
+
+- 检测模型（yolo11n / yolo11n_ppe）：Ultralytics AGPL-3.0 生态，部署者按 AGPL 获取
+- LAB PPE 数据集：CC BY 4.0（Roboflow Universe，署名要求）
+- 合并数据集（ENSI PPE 等 5 个）：逐项核对许可后署名，见 datasets/ 内各 README
+
+----------------------------------------------------------------------
+模型与数据集不随本仓库分发；人脸比对模块默认关闭，开启前阅读
+docs/部署指南.md 合规章节与 docs/80-risk-register.md。

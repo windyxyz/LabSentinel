@@ -1,0 +1,2 @@
+# 静态分析配置：使用 Flutter 官方 lints 套件
+include: package:flutter_lints/flutter.yaml

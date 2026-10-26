@@ -1,0 +1,36 @@
+name: labsentinel
+description: LabSentinel 实验室哨兵 —— Flutter 安卓客户端骨架（任务 08）。
+publish_to: "none" # 仅内部使用，不发布
+version: 0.1.0+1
+
+environment:
+  # 本机交付时尚无 Flutter SDK（见 android/README.md），此处约束为
+  # 主流稳定版区间：Dart 3.4+（对应 Flutter 3.22+）。
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # REST 请求（事件列表 / 连通性测试）；WebSocket 用内置 dart:io，不引额外依赖
+  http: ^1.2.2
+
+  # 状态管理：选 provider 而非 riverpod，理由：
+  # 1) Flutter 官方（flutter.dev）维护，与框架生命周期贴合；
+  # 2) 依赖极轻、无编译期代码生成步骤，ChangeNotifier + MultiProvider 对骨架阶段完全够用；
+  # 3) riverpod/bloc 的生成器与多容器架构对当前竖切属于过度设计。
+  provider: ^6.1.2
+
+  # 服务器地址 / WS 实时开关等设置项的本地持久化
+  shared_preferences: ^2.3.2
+
+  # WS 实时开关开启后，新事件弹系统级通知
+  flutter_local_notifications: ^17.2.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
