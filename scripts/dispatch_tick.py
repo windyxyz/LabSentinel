@@ -2,7 +2,7 @@
 
 职责：
   1. 当前任务文档出现实质「## 执行报告」→ 标记完成，并派发队列下一个；
-  2. 当前任务 30 分钟无进展 → 判定子代理额度耗尽：state=paused_quota，看板记一行，输出 AUTOSTOP；
+  2. 当前任务 45 分钟无进展 → 判定子代理额度耗尽：state=paused_quota，看板记一行，输出 AUTOSTOP；
   3. 无当前任务且队列非空 → 派发队首；
   4. 其它情况只更新 updated_ts 并在「最近巡检」留一行。
 
@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TASKS = ROOT / "docs" / "50-tasks"
 STATE = TASKS / "派发状态.json"
 BOARD = TASKS / "调度看板.md"
-STALL_SECONDS = 30 * 60
+STALL_SECONDS = 45 * 60  # 用户 2026-10-28 调整：30 → 45 分钟
 KEEP_RECENT = 8
 
 
@@ -156,10 +156,10 @@ def main() -> int:
                 age = int(time.time() - max(doc.stat().st_mtime, state.get("last_progress_epoch", 0)))
                 if age >= STALL_SECONDS:
                     state["status"] = "paused_quota"
-                    state["last_progress_note"] = f"任务{current} 30分钟无进展，疑似额度耗尽"
+                    state["last_progress_note"] = f"任务{current} 45分钟无进展，疑似额度耗尽"
                     board = insert_after_header(
                         board, "## 进行中（flash 正在做）",
-                        f"- ⏸ 暂停派发（疑似 flash 额度耗尽：任务{current} 30 分钟无进展）")
+                        f"- ⏸ 暂停派发（疑似 flash 额度耗尽：任务{current} 45 分钟无进展）")
                     board = insert_after_header(
                         board, "## 最近巡检",
                         f"- {mdhm()}（巡检）：⏸ **暂停派发**——任务{current} 30 分钟无进展，"

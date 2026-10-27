@@ -1,6 +1,6 @@
 {
-  "updated_ts": "2026-10-28T00:08:45",
-  "updated_epoch": 1793117325,
+  "updated_ts": "2026-10-28T00:17:03",
+  "updated_epoch": 1793117823,
   "status": "running",
   "current_task": "35",
   "current_task_doc": "docs/50-tasks/35-v2-demo-finalize.md",
@@ -10,7 +10,11 @@
   "last_progress_iso": "2026-10-28T00:08:00",
   "last_progress_epoch": 1793117280,
   "last_progress_note": "任务 35 已派发，等待 flash 认领/执行",
-  "queue": ["36", "37", "38"],
-  "stall_minutes": 30,
+  "queue": [
+    "36",
+    "37",
+    "38"
+  ],
+  "stall_minutes": 45,
   "auto_stop": true
 }

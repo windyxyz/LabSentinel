@@ -14,7 +14,7 @@
 | 部署 | ✅ 新机一键部署链路完成：`scripts/deploy.py` + `一键启动.bat`；沙箱解压 demo 包到中文路径从零 install 成功（8/8），start-all 三件套健康 |
 | 任务 | ✅ 01–34 完成；新增 **35（已派发）→36→37→38**（M1.5 收尾/RC） |
 | Git | ✅ 工作区干净；最近提交 `e82b7c7`（部署链路）；分发包 `dist/LabSentinel-demo-20261027.zip`（94MB，已忽略） |
-| 协作 | flash（用户另开会话）+ 巡检 cron（每 5 分钟，`automation-af6a6031`；**30 分钟无进展自动停派发并删定时**） |
+| 协作 | flash（用户另开会话）+ 巡检 cron（每 5 分钟，`automation-af6a6031`；**45 分钟无进展自动停派发并删定时**） |
 
 ## 二、v2 模型事实（关键）
 
@@ -58,4 +58,4 @@
 - 镜像：pip 清华/阿里云/官方自动回退；npm npmmirror→官方；GitHub ghfast；HF hf-mirror；Roboflow 走代理 7890
 - 铁律：DML 禁并发 run（走 `Engine._run`）；重负载一次只跑一个；supervision==0.25.1；onnxruntime 互杀；numpy 钉 1.26.4；Git Bash curl 中文 JSON 损坏
 - 服务：`uvicorn app.main:app --port 8000`（server/）；`npm run dev`（web/）；go2rtc :1984
-- 巡检 cron：每 5 分钟（`automation-af6a6031`，状态机 `docs/50-tasks/派发状态.json`；30 分钟无进展自动停派发并删除定时）
+- 巡检 cron：每 5 分钟（`automation-af6a6031`，状态机 `docs/50-tasks/派发状态.json`；45 分钟无进展自动停派发并删除定时）
