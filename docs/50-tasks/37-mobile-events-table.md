@@ -29,3 +29,20 @@
 ## 执行报告
 
 （待填：改动文件 / 375px 与桌面验证 / build 结果 / 截图路径 / 遗留问题）
+
+### 执行报告（flash，2026-10-28 00:58 交付）
+
+- **改动文件**：
+  - `web/src/views/Events.vue`（仅 scoped 样式 + 表格加 class）：`.events-table { min-width: 760px }`、
+    `th/td { white-space: nowrap }`（杜绝一字一行）、首列时间 `position: sticky; left: 0`（背景
+    `var(--card-bg, #fff)` 防透字，主题令牌优先）；未动主线专属文件，未引新依赖。
+  - `tools/shot_events_375.py`（新）：playwright 回归脚本——页面级溢出断言 + `.panel` 容器滚动
+    宽度输出 + 截图（导航用点击 `nav a`（无 vue-router），事件数据用 8001 测试 API + 临时 preview
+    代理配置，用后即删）。
+  - `docs/assets/mobile/`：`events-table_375.png`（修复后基线）、`events-table_1280.png`（桌面端不变证据）；README 已更新（任务 34 的"已知发现"标记已修复 + 回归方法）。
+- **375px 验证**：页面溢出 **0px**；表格容器内可横向滚动（scrollWidth 800 > clientWidth 341）；
+  列头/数据行横向铺开，无逐字竖排；时间列 sticky 常驻。截图含真实事件数据（1470 条中取首页）。
+- **桌面 1280px 验证**：9 列完整布局与修复前一致（截图为证），min-width 不影响宽屏。
+- **build**：`npm run build` 通过（gzip 42.77KB，487ms）。
+- **遗留问题**：无。sticky 首列在暗色主题下的背景色依赖 `--card-bg` 令牌回退值，若主线后续调整
+  主题令牌需同步核对（一行样式）。

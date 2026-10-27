@@ -41,3 +41,14 @@
 ## 执行报告
 
 （待填：前置状态 / 启动与就绪耗时 / 冒烟 PASS 摘要 / 清理确认 / 遗留问题）
+
+### 执行报告（flash，2026-10-28 00:32 交付）
+
+- **前置状态**：`.training.lock` 不存在 ✓；无训练/压测进程 ✓；8000/8001/5173 全空闲 ✓；CPU 4%（<50%）✓。
+- **启动**：8001 起服务（`uvicorn app.main:app --port 8001`，日志 `logs/e2e-server.log`），`/api/system` 就绪 ≈2s（backend=**directml**，4 路预置摄像头自动 running）。
+- **冒烟结果**：`tools/e2e_smoke.py --base-url http://127.0.0.1:8001 --timeout 60` → **11 步全 PASS，退出码 0**：
+  - 前置检查 backend=directml ✓ → 注册摄像头 id=6（autostart=false）→ 安全区 → enter(L2)/enter_no_ppe(L3) 规则 → 启动后 **2s 内出 6 条事件**（v2 模型，DirectML 初始化无卡顿）→ 字段完整（含 has_snapshot）→ enter 存在 → 截图 image/jpeg ✓ → count=6 与列表一致 → 清理（连带 zone/rule）✓
+  - `enter_no_ppe` 本次未单独触发（事件类型以 enter 为主，该帧 PPE 证据不足属预期，未调阈值——符合任务 §4 说明）
+- **顺带修复（阻塞项）**：`tools/e2e_smoke.py` `step()` 返回裸 bool，摘要循环按三元组解包崩溃（`TypeError: cannot unpack`）——首次实跑即暴露此隐藏 bug（此前只验证过 --help 与不可达路径）。已修：返回 `(name, ok, detail)` 元组。修复后重跑全 PASS。
+- **收尾确认**：8001 进程已停（含 cmd 壳），8000/8001/5173 均无监听；无 `--keep`，测试摄像头/安全区/规则已由脚本删除；`git status` 无测试数据残留。
+- **遗留问题**：无。任务 22 的"完整实跑待训后窗口"至此闭环。

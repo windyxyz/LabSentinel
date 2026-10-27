@@ -29,7 +29,7 @@ ZONE_POLYGON = [[520, 180], [1180, 180], [1180, 620], [520, 620]]
 def step(name, ok, detail=""):
     mark = "PASS" if ok else "FAIL"
     print(f"[{mark}] {name}" + (f" — {detail}" if detail else ""))
-    return ok
+    return (name, ok, detail)  # 存元组供摘要复述；裸 bool 会让摘要解包崩（10-28 实测）
 
 
 def main():

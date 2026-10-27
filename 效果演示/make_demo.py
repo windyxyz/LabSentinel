@@ -26,6 +26,8 @@ def parse_args():
                     help="输出文件名后缀（如 _v2 → lab-walk-检测效果_v2.mp4）")
     ap.add_argument("--videos", nargs="*", default=[],
                     help="指定视频路径（默认跑 m0-spike/data 下两段演示视频）")
+    ap.add_argument("--device", default="directml", choices=["directml", "cpu"],
+                    help="推理后端：directml（默认，快）/ cpu（慢但结果一致，用于避免与其它推理抢 GPU）")
     return ap.parse_args()
 
 
@@ -53,7 +55,10 @@ def draw(frame, label, box, conf, color):
 
 def main():
     args = parse_args()
-    person_eng = Engine(model_path=os.path.join(BASE, 'm0-spike', 'yolo11n.onnx'), prefer='directml')
+    person_eng = Engine(model_path=os.path.join(BASE, 'm0-spike', 'yolo11n.onnx'), prefer=args.device)
+    # PpeEngine 不支持 prefer 参数，用 backend_order 控制（Engine 构造时读取一次）
+    from app.config import settings
+    settings.backend_order = args.device
     ppe_eng = PpeEngine(args.ppe, load_names(args.ppe))
 
     def annotate(frame):

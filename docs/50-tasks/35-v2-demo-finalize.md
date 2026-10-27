@@ -43,3 +43,13 @@
 ## 执行报告
 
 （待填：改了哪些文件 / 实际命令与耗时 / 产物清单 / 对比结论 / 遗留问题）
+
+### 执行报告（flash，2026-10-28 00:22 交付）
+
+- **改动文件**：`效果演示/make_demo.py`（新增 `--device {directml,cpu}`；person 引擎 `prefer=args.device`，PPE 引擎经 `settings.backend_order=args.device` 切换，帮助文本注明 CPU 用途）；新增 `docs/53-v2-demo-report.md`、`docs/assets/v2-compare/` 4 张对比图；重生成/转码 `效果演示/` 两段 v2 mp4 + 对比用 v1 mp4。
+- **实际命令与耗时**：见 53 报告 §2。v2 短视频 CPU 生成 ≈90s（508 帧），v1 同 ≈90s，x264 转码 ≈10s，逐帧差异扫描（0.5s×2 源×2 模型）≈3min。
+- **产物清单**：lab-检测效果_v2.mp4（h264/16.95s/4.2MB）、实验有风险…_v2.mp4（h264/64.23s/8.5MB）、lab-检测效果_v1.mp4（mpeg4/16.95s/12.7MB，对比素材）、v2-compare/ 4 张 PNG。
+- **对比结论**：v2 核心收益=误报收敛（lab-equip 蓝大褂场景 v1 误报 8 个时间点、v2 零误报；与 test 集 No Lab Coat P 11%→77% 一致）；检出一致时 v2 置信度更高（0.79→0.91）；单帧存在 lab coat/no lab coat 摇摆（walk 4.3–5.8s），服务端事件层聚合可吸收。
+- **过程要点**：发现旧 lab 文件实为 lab-equip 源（stem 截断覆盖）、lab-walk 仅 7.84s 不满足 ≥10s、长视频源已缺失——均已写入 53 报告 §1 勘误与 §6 遗留建议（L1–L4）。
+- **遗留问题**：L1 stem 截断修复（涉及资产命名，留主线决策）；L2 演示绘制类别扩展；L3 长视频补源；L4 抽样 jpg 不随发布。
+- **合规自查**：全程 CPU 推理（--device cpu）未与其他任务并发；未占 8000/5173；未改 m0-spike/ 与主线专属文件；无新依赖。

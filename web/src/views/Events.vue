@@ -92,8 +92,8 @@ async function mark(e, status) {
       <input type="date" v-model="endDate" @change="resetAndLoad" title="结束日期" aria-label="结束日期" />
       <button class="ghost" @click="load">刷新</button>
     </div>
-    <table>
-      <tr><th>时间</th><th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
+    <table class="events-table">
+      <tr><th class="col-time">时间</th><th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
       <tr v-for="e in rows" :key="e.id" style="cursor:pointer" @click="openDetail($event, e)">
         <td>{{ e.ts }}</td>
         <td>#{{ e.camera_id }}</td>
@@ -173,6 +173,16 @@ async function mark(e, status) {
 .panel { overflow-x: auto; }
 /* 触控尺寸 ≥40px */
 button { min-height: 40px; }
+/* ---- 任务37：375px 下表格 9 列曾被压成一字一行；给最小宽度，让滚动发生在容器内 ---- */
+.events-table { min-width: 760px; }
+.events-table th, .events-table td { white-space: nowrap; }
+/* 首列时间 sticky：横向滚动时保持可见（背景用卡片色防透字） */
+.events-table th.col-time,
+.events-table td:first-child {
+  position: sticky; left: 0;
+  background: var(--card-bg, #fff);
+  z-index: 1;
+}
 /* ---- 事件详情抽屉（17A）：WinUI ContentDialog 风格，全部用主线令牌 ---- */
 .drawer-mask {
   position: fixed; inset: 0; z-index: 50;
