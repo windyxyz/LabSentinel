@@ -1,4 +1,4 @@
-# 55 · 交接快照（2026-10-27 07:58 核验）
+# 55 · 交接快照（2026-10-28 核验）
 
 > 本文件是**上下文压缩的落点**：新会话/新协作者读这一份即可恢复全部关键状态。
 > 细节依次见：`50-tasks/调度看板.md`（协作时间线）→ `50-tasks/README.md`（任务台账）→ `52-model-eval.md`（模型评估）→ `40-roadmap.md`（实施记录）。
@@ -7,13 +7,14 @@
 
 | 维度 | 状态 |
 |---|---|
-| 服务端 | ✅ 运行中（:8000，DirectML 后端），进程启动 07:45 **晚于** v2 模型导出 07:26 → 已加载 v2 |
-| Web 端 | ✅ 运行中（:5173，WinUI 3 主题） |
-| 模型 | ✅ **v2 已上线**：`m0-spike/yolo11n_ppe.onnx`（11 类，输出 15 通道）+ `yolo11n_ppe.classes.txt`（11 类）+ `yolo11n_ppe.pt`；v1 已备份为 `*_v1.*` |
-| 测试 | ✅ **78 passed**（pytest 全量，07:58 复跑） |
-| 任务 | ✅ 任务 01–34 全部交付，执行报告齐全（12–34 见各任务文档） |
-| Git | ⚠️ 3 次提交（基线 1bce2da + 2 次素材清理）；**27 个未提交改动待 commit** |
-| 协作 | flash（用户另开会话）+ 主线巡检（cron 每 5 分钟，automation-c43e2b44）双轮询 |
+| 服务端 | ⏸ 已停止（用户要求）；上次运行 :8000 DirectML + v2 正常，事件/截图/视频全通 |
+| Web 端 | ⏸ 已停止（:5173） |
+| 模型 | ✅ **v2 已上线**：`m0-spike/yolo11n_ppe.onnx`（11 类，输出 15 通道）+ `yolo11n_ppe.classes.txt` + `yolo11n_ppe.pt`；v1 备份 `*_v1.*` |
+| 测试 | ✅ **78 passed**（pytest 全量）；`npm run build` 通过（gzip ~42.7KB） |
+| 部署 | ✅ 新机一键部署链路完成：`scripts/deploy.py` + `一键启动.bat`；沙箱解压 demo 包到中文路径从零 install 成功（8/8），start-all 三件套健康 |
+| 任务 | ✅ 01–34 完成；新增 **35（已派发）→36→37→38**（M1.5 收尾/RC） |
+| Git | ✅ 工作区干净；最近提交 `e82b7c7`（部署链路）；分发包 `dist/LabSentinel-demo-20261027.zip`（94MB，已忽略） |
+| 协作 | flash（用户另开会话）+ 巡检 cron（每 5 分钟，`automation-af6a6031`；**30 分钟无进展自动停派发并删定时**） |
 
 ## 二、v2 模型事实（关键）
 
@@ -29,12 +30,11 @@
 
 ## 三、待办（按优先级）
 
-1. **提交 Git（27 个改动）**：任务 12–34 的全部交付 + v2 模型接入文档改动 → 建议一次 `feat: 任务12-34交付 + v2 模型接入` 提交（模型文件已被 gitignore）
-2. **v2 效果对比收尾**：`效果演示/lab-检测效果_v2.mp4`、`实验有风险…-v2.mp4` 已生成（07:53）→ 与 v1 版并排核对后在看板勾掉任务 27
-3. **e2e_smoke 实跑**（训练已结束，负载空闲）：`python tools/e2e_smoke.py`，确认 PASS 表
-4. **GPU 冒烟**：确认 DML 后端下 v2 推理正常（服务端已 directml 运行，可用文件源回放验证事件语义）
-5. **真实摄像头 24h 验证**（用户侧，M1.5 出口条件）→ 通过后可宣布 v0.1.0-alpha 可发布
-6. 发布前：CI 本地验证（ruff/yaml 已校验）、发布公告（docs/发布公告.md 已写）
+1. **任务队列**（看板为准）：35 v2 演示收尾（已派发）→ 36 e2e_smoke/DML 冒烟 → 37 移动端事件表格 → 38 RC 复核
+2. **真实摄像头 24h 验证**（用户侧，M1.5 出口条件/发布硬阻塞）→ 通过后才可宣布 v0.1.0-alpha 可发布
+3. 发布前：CI 本地验证（ruff/yaml 已校验）、发布公告（docs/发布公告.md 已写）——由任务 38 统一复核
+4. 无障碍遗留：B 动态键盘/读屏走查、C Zones/Reports 硬编码色令牌化（A 对比度已于 10-28 修复）
+5. 训练与模型迭代：下一轮建议收集真实摄像头困难负样本（白大褂远景误判），见 `标注与模型迭代手册.md`
 
 ## 四、关键文档地图
 
@@ -53,8 +53,9 @@
 
 ## 五、环境要点（新会话必读）
 
-- 项目根 `D:\User\Desktop\TOOLS\监控识别`；Python venv `D:\LabSentinel\m0-venv`（py3.14）；NPU venv `D:\LabSentinel\npu-venv`（py3.12）
-- 镜像：pip 清华源 / npm npmmirror / GitHub ghfast / HF hf-mirror；Roboflow 走代理 7890
+- 项目根 `D:\User\Desktop\TOOLS\监控识别`；**首选 venv 为项目内 `.venv`（py3.12，deploy 创建，`scripts\venv_path.txt` 存相对路径）**；兼容旧 `D:\LabSentinel\m0-venv`（py3.14）；NPU venv `D:\LabSentinel\npu-venv`（py3.12）
+- 启动：双击 `一键启动.bat`（体检→自动部署→拉起→面板）或 `scripts\start-all.bat`；停止 `scripts\stop-all.bat`
+- 镜像：pip 清华/阿里云/官方自动回退；npm npmmirror→官方；GitHub ghfast；HF hf-mirror；Roboflow 走代理 7890
 - 铁律：DML 禁并发 run（走 `Engine._run`）；重负载一次只跑一个；supervision==0.25.1；onnxruntime 互杀；numpy 钉 1.26.4；Git Bash curl 中文 JSON 损坏
 - 服务：`uvicorn app.main:app --port 8000`（server/）；`npm run dev`（web/）；go2rtc :1984
-- 巡检 cron：每 5 分钟（变化驱动，含训练看门狗；automation-c43e2b44）
+- 巡检 cron：每 5 分钟（`automation-af6a6031`，状态机 `docs/50-tasks/派发状态.json`；30 分钟无进展自动停派发并删除定时）
