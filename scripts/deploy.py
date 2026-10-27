@@ -582,6 +582,7 @@ def ensure_env_file() -> None:
         "# LabSentinel 本地配置（deploy.py 自动生成；告警渠道等可选项见 server/.env.example）\n"
         f"LS_PPE_MODEL={model.as_posix()}\n"
         "LS_PPE_CLASS_NAMES=lab coat\n"
+        "LS_PPE_VIOLATION_CLASS=no lab coat\n"
         "LS_PPE_CONF=0.30\n"
         "LS_FILE_LOOP=true\n",
         encoding="utf-8")
