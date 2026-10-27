@@ -29,8 +29,10 @@
   --font-mono: "Cascadia Code", "SFMono-Regular", ui-monospace, Consolas, monospace;
 
   --accent: #007aff;
-  --accent-hover: color-mix(in srgb, var(--accent) 90%, transparent);
-  --accent-pressed: color-mix(in srgb, var(--accent) 80%, transparent);
+  /* 按钮实心底色：白字对比度 6.3:1（WCAG AA），--accent 保留给链接/焦点/指示条 */
+  --accent-strong: #005fb8;
+  --accent-hover: color-mix(in srgb, var(--accent-strong) 88%, #000);
+  --accent-pressed: color-mix(in srgb, var(--accent-strong) 76%, #000);
   --on-accent: #ffffff;
 
   --text-primary: rgba(0, 0, 0, 0.894);
@@ -75,6 +77,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --accent: #60cdff;
+    --accent-strong: #60cdff;
     --on-accent: #000000;
 
     --text-primary: #ffffff;
@@ -116,6 +119,7 @@
 /* 强制深色（[data-theme="dark"]） */
 :root[data-theme="dark"] {
   --accent: #60cdff;
+  --accent-strong: #60cdff;
   --on-accent: #000000;
   --text-primary: #ffffff;
   --text-secondary: rgba(255, 255, 255, 0.78);

@@ -136,7 +136,7 @@ button {
   font: inherit;
   font-size: 14px;
   color: var(--on-accent);
-  background: var(--accent);
+  background: var(--accent-strong);
   border: 1px solid transparent;
   border-radius: var(--control-radius);
   cursor: pointer;

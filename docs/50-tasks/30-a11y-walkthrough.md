@@ -61,3 +61,9 @@
 - **A（对比度）**：accent 按钮白字 2.63:1 —— 全局令牌问题，报告待主线决策
 - **B（动态走查）**：playwright 键盘实测/读屏器走查待 CPU 空闲窗口补做
 - **C**：Zones 画布笔色/Reports SVG 刻度的硬编码色是否抽成令牌，由主线定（功能无碍）
+
+### 主线修复（2026-10-28）
+- **A 已修**：`theme.css` 新增 `--accent-strong`（浅色 `#005fb8` / 深色 `#60cdff`）专用于按钮实心底色，
+  `--accent` 保留给链接/焦点/指示条；`style.css` 按钮改用 `--accent-strong`。
+  程序化实测对比度：浅色白字 **6.31:1**（hover 7.53 / pressed 9.11），深色黑字 **11.67:1**，均达 WCAG AA；
+  `npm run build` 通过（gzip 42.74KB）。B/C 仍待办。
