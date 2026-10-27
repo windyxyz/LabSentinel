@@ -264,8 +264,14 @@ class CameraWorker(threading.Thread):
         with self.frame_lock:
             if self.latest_frame is None:
                 return None
-            path = str(settings.snapshot_dir / f"ev_{int(time.time()*1000)}.jpg")
-            return path if cv2.imwrite(path, self.latest_frame) else None
+            path = settings.snapshot_dir / f"ev_{int(time.time()*1000)}.jpg"
+            ok, buf = cv2.imencode(".jpg", self.latest_frame)
+            if not ok:
+                return None
+            # Windows 下 cv2.imwrite 对含中文的路径静默返回 False（本项目路径即含「监控识别」），
+            # 统一走 imencode + Python 写盘，保证截图证据不丢。
+            path.write_bytes(buf.tobytes())
+            return str(path)
 
     def _dispatch_row(self, eid, behavior, level, track_id, detail, snapshot):
         row = self.store.events(limit=1)[0]

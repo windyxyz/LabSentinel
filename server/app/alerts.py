@@ -99,6 +99,10 @@ class _HttpPushChannel:
             return None
         return url
 
+    def configured(self) -> bool:
+        """是否完成配置。未配置的渠道在派发时整条跳过——不建投递记录、不重试、不产死信。"""
+        return False
+
     def _post(self, url: str, **kwargs):
         try:
             if self._transport is not None:  # 测试路径
@@ -129,6 +133,9 @@ class WeComChannel(_HttpPushChannel):
     name = "wecom"
     allowed_hosts = ALLOWED_WEBHOOK_HOSTS
 
+    def configured(self) -> bool:
+        return bool((settings.wecom_webhook or "").strip())
+
     def send(self, level: int, text: str) -> bool:
         url = self._check_url(settings.wecom_webhook)
         if not url:
@@ -145,6 +152,9 @@ class DingTalkChannel(_HttpPushChannel):
     name = "dingtalk"
     allowed_hosts = DINGTALK_ALLOWED_HOSTS
 
+    def configured(self) -> bool:
+        return bool((settings.dingtalk_webhook or "").strip())
+
     def send(self, level: int, text: str) -> bool:
         url = self._check_url(settings.dingtalk_webhook)
         if not url:
@@ -158,6 +168,9 @@ class FeishuChannel(_HttpPushChannel):
     name = "feishu"
     allowed_hosts = FEISHU_ALLOWED_HOSTS
 
+    def configured(self) -> bool:
+        return bool((settings.feishu_webhook or "").strip())
+
     def send(self, level: int, text: str) -> bool:
         url = self._check_url(settings.feishu_webhook)
         if not url:
@@ -169,6 +182,9 @@ class ServerChanChannel(_HttpPushChannel):
     """Server酱（推送到微信）：POST sctapi.ftqq.com/<SENDKEY>.send（表单 title+desp）。"""
     name = "serverchan"
     allowed_hosts = SERVERCHAN_ALLOWED_HOSTS
+
+    def configured(self) -> bool:
+        return bool((settings.serverchan_sendkey or "").strip())
 
     def send(self, level: int, text: str) -> bool:
         key = (settings.serverchan_sendkey or "").strip()
@@ -182,6 +198,9 @@ class PushPlusChannel(_HttpPushChannel):
     """PushPlus（推送到微信）：POST www.pushplus.plus/send（JSON token+content）。"""
     name = "pushplus"
     allowed_hosts = PUSHPLUS_ALLOWED_HOSTS
+
+    def configured(self) -> bool:
+        return bool((settings.pushplus_token or "").strip())
 
     def send(self, level: int, text: str) -> bool:
         token = (settings.pushplus_token or "").strip()
@@ -199,6 +218,9 @@ class QmsgChannel(_HttpPushChannel):
     name = "qmsg"
     allowed_hosts = QMSG_ALLOWED_HOSTS
 
+    def configured(self) -> bool:
+        return bool((settings.qmsg_key or "").strip() and (settings.qmsg_qq or "").strip())
+
     def send(self, level: int, text: str) -> bool:
         key = (settings.qmsg_key or "").strip()
         qq = (settings.qmsg_qq or "").strip()
@@ -212,6 +234,9 @@ class QmsgChannel(_HttpPushChannel):
 
 class EmailChannel:
     name = "email"
+
+    def configured(self) -> bool:
+        return bool(settings.smtp_host and settings.alert_email_to)
 
     def send(self, level: int, text: str) -> bool:
         if not (settings.smtp_host and settings.alert_email_to):
@@ -262,6 +287,9 @@ class AlertDispatcher:
         text = render_alert(event_row)
         event_id = event_row.get("id", 0)
         for ch in self.channels:
+            cfg = getattr(ch, "configured", None)  # 测试替身可能没有该方法，默认视为已配置
+            if callable(cfg) and not cfg():
+                continue  # 未配置渠道整条跳过：不排队、不建投递记录、不产假死信
             self._pool.submit(self._deliver_with_retry, ch, event_id,
                               event_row["level"], text)
 
@@ -275,7 +303,7 @@ class AlertDispatcher:
             attempts = i + 1
             try:
                 ok = bool(ch.send(level, text))
-                last_error = None if ok else "channel returned failure (未配置/业务码错误/HTTP非2xx)"
+                last_error = None if ok else "渠道返回失败（业务码错误或 HTTP 非 2xx）"
             except Exception as e:  # noqa: BLE001
                 ok, last_error = False, f"{type(e).__name__}: {e}"
             if ok:
@@ -293,10 +321,14 @@ class AlertDispatcher:
         results = []
         for ch in self.channels:
             name = getattr(ch, "name", type(ch).__name__)
+            cfg = getattr(ch, "configured", None)
+            if callable(cfg) and not cfg():  # 自检结果里明确标注未配置，但不落投递记录
+                results.append({"channel": name, "ok": False, "error": "未配置"})
+                continue
             did = self.store.add_delivery(0, name) if self.store else None
             try:
                 ok = bool(ch.send(1, "【测试】LabSentinel 渠道自检消息，收到即表示该渠道配置正常。"))
-                err = None if ok else "未配置或发送失败"
+                err = None if ok else "发送失败"
             except Exception as e:  # noqa: BLE001
                 ok, err = False, f"{type(e).__name__}: {e}"
             if did is not None:
