@@ -24,3 +24,9 @@
 - 截图仅用公开演示素材，**不得包含真实人脸/真实实验室敏感画面**（70-release-plan 约束）
 - 发布前如 UI 有改动（主题/新增页面），重新截图保持 README 素材与实际一致
 - README.md 的截图墙引用本目录相对路径，改文件名需同步改 README
+
+
+## 移动端断点截图（375×812，DPR 2）
+
+`mobile/` 目录为移动端基线（任务 34）：dashboard / events-drawer / zones / reports / cameras-alerts
+五张，含溢出检查结论（全部无横向溢出）与回归检查脚本要点——详见 [mobile/README.md](mobile/README.md)。

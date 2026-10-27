@@ -117,7 +117,7 @@ class Engine:
         canvas, r, dx, dy = self._letterbox(frame_bgr)
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         blob = np.transpose(rgb, (2, 0, 1))[None]
-        out = self._run(blob)[0]  # (84, 8400)
+        out = self._run(blob)[0][0]  # sess.run→[(1,C,N)]，[0][0]→(C,N)=(84,8400)
         pred = out.T  # (8400, 4+80)
         person = pred[:, 4 + self.PERSON_CLS]
         m = person > settings.conf_thres
@@ -168,7 +168,7 @@ class PpeEngine(Engine):
         canvas, r, dx, dy = self._letterbox(frame_bgr)
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         blob = np.transpose(rgb, (2, 0, 1))[None]
-        out = self._run(blob)[0]  # (4+num_cls, N)
+        out = self._run(blob)[0][0]  # sess.run→[(1,C,N)]，[0][0]→(C,N)=(4+num_cls,N)
         pred = out.T
         best = np.zeros(pred.shape[0], dtype=np.float32)
         for i in idx:

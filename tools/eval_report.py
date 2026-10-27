@@ -100,6 +100,9 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="只评估前 N 张（0=全部；冒烟用）")
     ap.add_argument("--label", default=None, help="报告行标签（默认模型文件名）")
     ap.add_argument("--report", default=None, help="Markdown 报告路径（追加对比表）")
+    ap.add_argument("--provider", default=None, choices=[None, "cpu"],
+                    help="推理提供者；默认按 settings 顺序，'cpu' 强制 CPUExecutionProvider"
+                         "（新导出模型在 DirectML 下可能触发 ORT 兼容问题时使用）")
     args = ap.parse_args()
 
     import yaml
@@ -109,7 +112,8 @@ def main():
         sys.exit(f"[error] data.yaml 的 {args.split} 目录不存在: {img_dir}")
 
     classes = load_classes(Path(args.classes))
-    engine = Engine(model_path=args.model)
+    engine = Engine(model_path=args.model, prefer="cpu") if args.provider == "cpu" \
+        else Engine(model_path=args.model)
 
     if args.limit:
         import shutil

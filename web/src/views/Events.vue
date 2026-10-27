@@ -88,8 +88,8 @@ async function mark(e, status) {
         <option value="">全部状态</option>
         <option v-for="(t, k) in STATUS_TEXT" :key="k" :value="k">{{ t }}</option>
       </select>
-      <input type="date" v-model="startDate" @change="resetAndLoad" title="开始日期" />
-      <input type="date" v-model="endDate" @change="resetAndLoad" title="结束日期" />
+      <input type="date" v-model="startDate" @change="resetAndLoad" title="开始日期" aria-label="开始日期" />
+      <input type="date" v-model="endDate" @change="resetAndLoad" title="结束日期" aria-label="结束日期" />
       <button class="ghost" @click="load">刷新</button>
     </div>
     <table>
@@ -106,10 +106,10 @@ async function mark(e, status) {
           </span>
         </td>
         <td>
-          <img v-if="e.has_snapshot" :src="`/api/events/${e.id}/snapshot`" class="snap" @click="zoom = `/api/events/${e.id}/snapshot`" />
+          <img v-if="e.has_snapshot" :src="`/api/events/${e.id}/snapshot`" alt="事件截图缩略图" class="snap" @click="zoom = `/api/events/${e.id}/snapshot`" />
         </td>
         <td>
-          <button v-if="e.has_video" class="ghost" @click="videoZoom = e.id">▶</button>
+          <button v-if="e.has_video" class="ghost" aria-label="播放事件视频" @click="videoZoom = e.id">▶</button>
         </td>
         <td style="white-space:nowrap">
           <template v-if="e.status === 'new'">
@@ -142,7 +142,7 @@ async function mark(e, status) {
             · <span :class="'lv' + drawer.level">L{{ drawer.level }}</span>
             · {{ STATUS_TEXT[drawer.status] || drawer.status }}</p>
           <p>{{ drawer.detail }}</p>
-          <img v-if="drawer.has_snapshot" :src="`/api/events/${drawer.id}/snapshot`"
+          <img v-if="drawer.has_snapshot" :src="`/api/events/${drawer.id}/snapshot`" alt="事件截图大图，点击放大"
                class="drawer-snap" @click="zoom = `/api/events/${drawer.id}/snapshot`" />
           <video v-if="drawer.has_video" :src="`/api/events/${drawer.id}/video`" controls
                  style="width:100%; border-radius:var(--overlay-radius); background:#000" />
@@ -158,11 +158,11 @@ async function mark(e, status) {
   </Teleport>
 
   <div v-if="zoom" style="position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="zoom = null">
-    <img :src="zoom" style="max-width:92vw; max-height:92vh" />
+    <img :src="zoom" alt="事件截图放大视图" style="max-width:92vw; max-height:92vh" />
   </div>
 
   <div v-if="videoZoom !== null" style="position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="videoZoom = null">
-    <video :src="`/api/events/${videoZoom}/video`" controls autoplay style="max-width:92vw; max-height:92vh" @click.stop />
+    <video :src="`/api/events/${videoZoom}/video`" controls autoplay aria-label="事件视频回放" style="max-width:92vw; max-height:92vh" @click.stop />
   </div>
 </template>
 

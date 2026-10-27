@@ -78,7 +78,7 @@ async function watchLive(cam) {
   <div class="panel">
     <h3 style="margin-bottom:10px">管理令牌</h3>
     <div class="row">
-      <input v-model="tokenInput" placeholder="服务端启用鉴权时填写（LS_ADMIN_TOKEN）" style="flex:1" />
+      <input v-model="tokenInput" placeholder="服务端启用鉴权时填写（LS_ADMIN_TOKEN）" aria-label="管理令牌" style="flex:1" />
       <button @click="saveToken">保存令牌</button>
       <span v-if="tokenMsg" class="muted">{{ tokenMsg }}</span>
     </div>
@@ -119,8 +119,8 @@ async function watchLive(cam) {
 
     <h3 style="margin:14px 0 10px">添加摄像头</h3>
     <div class="row">
-      <input v-model="form.name" placeholder="名称" style="width:120px" />
-      <input v-model="form.source" placeholder="RTSP 地址 / 视频文件路径 / 0 (USB)" style="flex:1" />
+      <input v-model="form.name" placeholder="名称" aria-label="摄像头名称" style="width:120px" />
+      <input v-model="form.source" placeholder="RTSP 地址 / 视频文件路径 / 0 (USB)" aria-label="摄像头地址" style="flex:1" />
       <select v-model="form.type">
         <option value="file">视频文件</option>
         <option value="rtsp">RTSP</option>
@@ -140,7 +140,7 @@ async function watchLive(cam) {
         <td>{{ c.name }}</td>
         <td>{{ c.type }}</td>
         <td>{{ c.status }}</td>
-        <td><img v-if="snap[c.id]" :src="`/api/cameras/${c.id}/snapshot?t=${snap[c.id]}`" class="snap" @click="snap[c.id] = Date.now()" /></td>
+        <td><img v-if="snap[c.id]" :src="`/api/cameras/${c.id}/snapshot?t=${snap[c.id]}`" alt="摄像头最新画面缩略图" class="snap" @click="snap[c.id] = Date.now()" /></td>
         <td>
           <button class="ghost" style="margin-right:6px" @click="snap[c.id] = Date.now()">看快照</button>
           <button class="ghost" style="margin-right:6px" @click="watchLive(c)">实时画面</button>

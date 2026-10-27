@@ -455,6 +455,24 @@ def export_monthly_pdf(month: str):
                              f"attachment; filename=monthly_{month}.pdf"})
 
 
+@router.get("/export/evidence.zip")
+def export_evidence_zip(camera_id: int | None = None, level: int | None = None,
+                        status: str | None = None,
+                        start_ts: str | None = None, end_ts: str | None = None):
+    """事件证据包 ZIP（任务33）：events.csv + 截图 + 视频 + README；超限 400。"""
+    from .export import build_evidence_zip
+    start_ts, end_ts = _normalize_ts_range(start_ts, end_ts)
+    try:
+        data, _stats = build_evidence_zip(store, settings.data_dir, camera_id=camera_id,
+                                          level=level, status=status,
+                                          start_ts=start_ts, end_ts=end_ts)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    filename = f"labsentinel_evidence_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
 # ---- stats ----
 @router.get("/stats/daily")
 def stats_daily(days: int = 7, camera_id: int | None = None, status: str | None = None,

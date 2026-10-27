@@ -5,7 +5,10 @@
 """
 import csv
 import io
+import os
+import zipfile
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from . import stats as stats_mod
 from .constants import TYPE_TEXT
@@ -141,3 +144,84 @@ def monthly_pdf(store, month: str) -> bytes:
     c.showPage()
     c.save()
     return buf.getvalue()
+
+
+# ---- 任务33：事件证据包 ZIP ----
+
+EVIDENCE_MAX_EVENTS = 500
+EVIDENCE_MAX_TOTAL_MB = 200
+
+
+def _within_data_dir(path: str, data_dir) -> bool:
+    """路径安全校验：必须在 data_dir 内（防穿越）。"""
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(str(data_dir))]) \
+            == os.path.abspath(str(data_dir))
+    except ValueError:
+        return False
+
+
+def event_csv_row(r: dict) -> list:
+    """单事件 → CSV 行（与任务15 列定义一致）。"""
+    return [
+        r["ts"], f"#{r['camera_id']}", TYPE_TEXT.get(r["type"], r["type"]),
+        f"L{r['level']}", r["track_id"], r["detail"],
+        STATUS_TEXT.get(r.get("status") or "new", r.get("status") or "new"),
+        r.get("handled_by") or "", r.get("handled_ts") or "",
+    ]
+
+
+def build_evidence_zip(store, data_dir, camera_id=None, level=None, status=None,
+                       start_ts=None, end_ts=None):
+    """构建证据包 ZIP 字节流。
+
+    超限抛 ValueError（调用方转 400）：事件 >500 条、文件总量 >200MB。
+    只打包 data_dir 内文件（路径校验防穿越）；不含人脸原图（系统本就未存）。
+    """
+    events = store.events(limit=EVIDENCE_MAX_EVENTS + 1, camera_id=camera_id,
+                          level=level, status=status, start_ts=start_ts, end_ts=end_ts)
+    if len(events) > EVIDENCE_MAX_EVENTS:
+        raise ValueError(f"筛选范围内事件 {len(events)} 条，超过打包上限 "
+                         f"{EVIDENCE_MAX_EVENTS}——请缩小时间范围或增加过滤条件")
+
+    files = []  # (arcname, abs_path)
+    total_bytes = 0
+    for e in events:
+        for col, sub in (("snapshot", "snapshots"), ("video", "videos")):
+            p = e.get(col)
+            if p and os.path.exists(p) and _within_data_dir(p, data_dir):
+                sz = os.path.getsize(p)
+                total_bytes += sz
+                files.append((f"{sub}/ev_{e['id']}{Path(p).suffix}", p))
+    if total_bytes > EVIDENCE_MAX_TOTAL_MB * 1e6:
+        raise ValueError(f"证据文件总量 {total_bytes/1e6:.0f}MB 超过 {EVIDENCE_MAX_TOTAL_MB}MB "
+                         f"上限——请缩小时间范围或分批导出")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        # events.csv（UTF-8 BOM，列同任务15）
+        csv_buf = io.StringIO()
+        csv_buf.write("\ufeff")
+        w = csv.writer(csv_buf)
+        w.writerow(CSV_EVENT_HEADERS)
+        for e in events:
+            w.writerow(event_csv_row(e))
+        z.writestr("events.csv", csv_buf.getvalue())
+
+        # README.txt（生成信息 + 合规提示）
+        n_snap = sum(1 for a, _ in files if a.startswith("snapshots/"))
+        n_vid = sum(1 for a, _ in files if a.startswith("videos/"))
+        z.writestr("README.txt", (
+            "LabSentinel 事件证据包\n"
+            f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"筛选条件: camera_id={camera_id or '全部'} level={level or '全部'} "
+            f"status={status or '全部'} start={start_ts or '不限'} end={end_ts or '不限'}\n"
+            f"事件数: {len(events)}（截图 {n_snap} 个 / 视频 {n_vid} 个）\n"
+            "合规提示: 证据包含个人信息与现场画面，请谨慎分发，"
+            "按机构 retention 政策处理后删除。\n"))
+
+        for arc, path in files:
+            z.write(path, arc)
+
+    return buf.getvalue(), {"events": len(events), "files": len(files),
+                            "total_mb": round(total_bytes / 1e6, 2)}

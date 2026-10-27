@@ -66,6 +66,22 @@ function linePoints(key) {
 }
 function xTick(i) { return PAD + i * (W - 2 * PAD) / Math.max(1, trendRows.value.length - 1) }
 
+// 任务33：证据包 ZIP（复用当前筛选；无自定义范围时按 days 折算起始日）
+const evidenceZipUrl = computed(() => {
+  const p = new URLSearchParams()
+  if (camId.value) p.set('camera_id', camId.value)
+  if (rangeStart.value && rangeEnd.value) {
+    p.set('start_ts', rangeStart.value)
+    p.set('end_ts', rangeEnd.value)
+  } else {
+    const st = new Date()
+    st.setDate(st.getDate() - (days.value - 1))
+    p.set('start_ts', st.toISOString().slice(0, 10))
+    p.set('end_ts', new Date().toISOString().slice(0, 10))
+  }
+  return '/api/export/evidence.zip?' + p
+})
+
 // ---- 柱状图几何 ----
 const maxHour = computed(() => Math.max(1, ...hourly.value.map(h => h.total)))
 function barGeom(h) {
@@ -113,6 +129,9 @@ function barGeom(h) {
       </a>
       <a :href="`/api/export/monthly.pdf?month=${hourDate.slice(0, 7)}`" download>
         <button class="ghost">月报 PDF</button>
+      </a>
+      <a :href="evidenceZipUrl" download>
+        <button class="ghost">导出证据包 ZIP</button>
       </a>
     </div>
   </div>

@@ -76,7 +76,7 @@ async function addRule(zoneId) {
       <span class="muted">单击加顶点 · 双击闭合并保存（≥3 顶点）</span>
     </div>
     <div style="position:relative; width:640px; height:360px; background:#000; border-radius:6px">
-      <img v-if="camId" :src="`/api/cameras/${camId}/snapshot?t=${snapT}`" width="640" height="360" @error="snapT = 0" />
+      <img v-if="camId" :src="`/api/cameras/${camId}/snapshot?t=${snapT}`" alt="摄像头画面（用于绘制安全区）" width="640" height="360" @error="snapT = 0" />
       <canvas id="zoneCanvas" class="zone-canvas" width="640" height="360" @click="onCanvasClick" @dblclick="onDblClick"></canvas>
       <p v-if="!snapT" class="muted" style="position:absolute; top:45%; width:100%; text-align:center">
         点击"取最新快照"显示画面后再画区

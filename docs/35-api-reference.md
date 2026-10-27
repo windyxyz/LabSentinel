@@ -105,6 +105,12 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
 
 `GET /api/system` 新增字段：`unhandled_today`（今日未处置数）、`alerts: {pending, failed, ok}`（投递计数）。
 
+### GET /api/export/evidence.zip?camera_id=&level=&status=&start_ts=&end_ts=（任务33）
+
+事件证据包 ZIP：`events.csv`（UTF-8 BOM，列同任务15）+ `snapshots/` + `videos/`（存在才打包）+
+`README.txt`（生成信息与合规提示）。上限：事件 500 条、文件总量 200MB（超限 400 并提示缩小范围）；
+只打包 data_dir 内文件（防穿越）。文件名 `labsentinel_evidence_<时间戳>.zip`。
+
 ### GET /api/alerts/status（任务23）
 
 `{"channels":[{"name":"wecom|dingtalk|feishu|serverchan|pushplus|qmsg|email","configured":bool,
@@ -184,3 +190,98 @@ date 格式错误 → 400。
 
 - 鉴权/多用户——M3（当前 handled_by 固定 admin/请求体可传）
 - Top 规则触发统计（月报 PDF 的规则维度，需 events 关联 rule_id）
+
+## 10. 5 分钟上手（curl / PowerShell 实操，任务31）
+
+> **版本提示**：本章含分页/`count`/事件处置等新端点，服务端需重启到最新代码（旧实例会 404）。
+> 已知小问题：`GET /api/events` 行内含 `snapshot/video` 的服务器本地绝对路径（信息泄露面小，
+> 但建议后续版本只回 `has_snapshot/has_video` 布尔——已记入主线待办，改前不动契约）。
+
+> 以下示例与当前实现逐一对照过（端点/参数名见上文各节）。`$BASE` 指 8000 服务端。
+
+### 10.1 Git Bash（curl）版
+
+```bash
+BASE=http://127.0.0.1:8000
+
+# 0) 健康检查（永不鉴权）
+curl -s "$BASE/api/system"
+
+# 1) 添加文件摄像头（autostart=false 先配置再启动）
+curl -s -X POST "$BASE/api/cameras" -H "Content-Type: application/json" \
+  -d '{"name":"demo","source":"D:/录像/lab.mp4","type":"file","autostart":false}'
+# → 返回 {"id": 5, ...}，记下 id
+
+# 2) 画安全区（多边形为 1280x720 像素坐标）
+curl -s -X POST "$BASE/api/zones" -H "Content-Type: application/json" \
+  -d '{"camera_id":5,"name":"核心区","polygon":[[520,180],[1180,180],[1180,620],[520,620]]}'
+
+# 3) 加规则：进入(L2) 与 未穿实验服(L3)
+curl -s -X POST "$BASE/api/rules" -H "Content-Type: application/json" \
+  -d '{"camera_id":5,"zone_id":1,"behavior":"enter","level":2,"cooldown_s":10}'
+curl -s -X POST "$BASE/api/rules" -H "Content-Type: application/json" \
+  -d '{"camera_id":5,"zone_id":1,"behavior":"enter_no_ppe","level":3,"cooldown_s":10}'
+
+# 4) 启动摄像头
+curl -s -X POST "$BASE/api/cameras/5/start"
+
+# 5) 查事件（分页/过滤）
+curl -s "$BASE/api/events?camera_id=5&limit=20&status=new"
+curl -s "$BASE/api/events/count?camera_id=5"
+
+# 6) 事件截图 / 视频存证
+curl -s -o snap.jpg "$BASE/api/events/1/snapshot"
+curl -s -o clip.mp4 "$BASE/api/events/1/video"
+
+# 7) 处置事件：确认 / 误报 / 忽略
+curl -s -X POST "$BASE/api/events/1/status" -H "Content-Type: application/json" \
+  -d '{"status":"acked"}'
+
+# 8) 清理（连带删除该摄像头的安全区与规则）
+curl -s -X DELETE "$BASE/api/cameras/5"
+```
+
+### 10.2 PowerShell 版
+
+```powershell
+$BASE = "http://127.0.0.1:8000"
+
+# 0) 健康检查
+Invoke-RestMethod "$BASE/api/system"
+
+# 1) 添加摄像头（中文 body 用 UTF-8 文件 + -Body 文件内容，避免乱码）
+@{"name"="演示摄像头";"source"="D:/录像/lab.mp4";"type"="file";"autostart"=$false} |
+  ConvertTo-Json | Out-File -Encoding utf8 camera.json
+Invoke-RestMethod -Method Post -Uri "$BASE/api/cameras" `
+  -ContentType "application/json; charset=utf-8" -InFile camera.json
+
+# 2-4) 安全区 / 规则 / 启动：同上结构，换 Uri 与 body 文件
+# 5) 查事件
+Invoke-RestMethod "$BASE/api/events?limit=20"
+```
+
+### 10.3 真实踩坑注意
+
+| 坑 | 说明与解法 |
+|---|---|
+| Git Bash curl 中文 JSON 损坏 | Windows 下 curl 对中文 body 会转码错乱。解法：**中文 body 写进 UTF-8 文件后 `-d @body.json`**（或加 `--data-binary`），或直接用 python httpx（服务端测试脚本均为 httpx） |
+| PowerShell 中文乱码 | 先 `chcp 65001` 切 UTF-8 代码页；`Invoke-RestMethod -ContentType "application/json; charset=utf-8"`；body 走 `-InFile` |
+| 鉴权 | `LS_ADMIN_TOKEN` 启用后，所有 POST/DELETE 需 `-H "X-Admin-Token: <token>"`；WS 连 `/ws/events?token=<token>`；`GET /api/system` 永不拦截 |
+| WebRTC | `GET /api/cameras/{id}/webrtc` 返回的 `ws_url` 是给**浏览器播放器**用的（go2rtc :1984 信令），curl 拿到即可，不能用 curl 建连 |
+| 事件视频 | `GET /api/events/{id}/video` 仅在服务端装有 OpenH264 时为浏览器可播的 H.264（见部署FAQ） |
+
+### 10.4 端到端示例脚本（免手敲）
+
+- `tools/e2e_smoke.py`：黑盒全链路（摄像头→安全区→规则→启动→事件→截图→清理），`--base-url` 可指向任意实例
+- `tools/loadtest.py`：多路并发压测（训练/压测勿并行，见 50-tasks/README 铁律）
+
+### 10.5 错误码速查（对照实现）
+
+| 码 | 常见原因 |
+|---|---|
+| 400 | 参数不合法：status 非法值、date 非 YYYY-MM-DD、month 非 YYYY-MM |
+| 401 | 管理令牌缺失/错误（LS_ADMIN_TOKEN 启用后；写操作与受保护读） |
+| 403 | 人脸功能未开启（LS_FACE_ENABLED=false）时的 /api/face 写操作 |
+| 404 | 资源不存在：摄像头/事件/投递记录 id 无效 |
+| 502 | 上游（CompreFace）不可用或返回错误（人脸注册/列表/删除） |
+| 503 | 功能未配置：人脸缺 API Key、投递查询早于 store 绑定 |
