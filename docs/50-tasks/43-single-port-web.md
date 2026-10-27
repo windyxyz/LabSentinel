@@ -33,3 +33,20 @@
 ## 执行报告
 
 （待填：改动文件 / 新测试 / 单端口实测 / 兼容性检查 / 遗留问题）
+
+### 执行报告（flash，2026-10-28 01:18 交付）
+
+- **改动文件**：
+  - `server/app/config.py`：+`web_dist: Path = BASE_DIR.parent/"web"/"dist"`（env `LS_WEB_DIST` 自动映射）。
+  - `server/app/main.py`：`SPAStaticFiles(StaticFiles)` 覆写 `get_response`——404 且末段无扩展名 →
+    回 index.html（SPA 回退），带扩展名仍 404；`mount_web(app)` 可重入挂载（先移除 name=web_dist
+    的旧路由再挂），dist 缺失时 `GET /` 返回提示 JSON；import 时调用一次，位于 include_router 与
+    `/ws/events` 之后保证 API/WS/Docs 优先。
+  - `server/tests/test_web_static.py`（新，6 用例）：/ 出 index、/events SPA 回退、/assets/app.js 200、
+    /assets/missing.js 404、/api/system JSON 且 /docs 200（优先级）、缺 dist 提示 JSON。
+  - `.env.example`（+LS_WEB_DIST 段）、`docs/部署指南.md`（部署形态节加单端口说明）。
+- **坑与修复**：StaticFiles 抛的是 **starlette** 的 HTTPException，用 fastapi 的子类 except 接不住
+  （SPA 回退首次全 404）——改从 starlette.exceptions 导入后 6/6 过。
+- **验证**：`pytest tests -q` **84 passed**（78+6）；单端口 8001 实测：`/` 200 html、`/events` 刷新
+  200（回 index）、`/assets/missing.js` 404、`/api/system` 200 JSON、`/docs` 200；收尾 8000/8001/5173 全空闲。
+- **遗留问题**：无。任务 44（便携运行时）可直接依赖本能力（不再带 Node/Vite）。

@@ -42,4 +42,14 @@
 
 ## 执行报告
 
-（待填：命令/时间线 / 事件与截图证据 / 重连耗时 / 发现与建议 / 清理确认）
+### 执行报告（flash，2026-10-28 04:55 交付；完整证据见 [docs/54-rtsp-loopback-report.md](../../54-rtsp-loopback-report.md)）
+
+- **RTSP 接入**：go2rtc 1.9.15 本构建不支持 `ffmpeg:` 源，改用 `exec:ffmpeg … -f mpegts pipe:1`；
+  ffprobe 确认 h264/1280×720；服务端 8001 临时库接入后 status=running、**fps=25**、**6s 出首条 enter**、
+  60s 累计 20+ 事件、截图 200。
+- **断线重连**：`taskkill go2rtc` 后 worker 不死亡、status 保持 running；重启 go2rtc 后 **≈2s 恢复**
+  （fps 24.9 + 新事件），无需人工干预。
+- **发现**：R1 建议统一用 `exec:` 做文件→RTSP 常驻模拟源；R2 fps 统计窗口导致断线时读数缓慢回落
+  （非缺陷，M2 可讨论显式 offline 状态）。
+- **清理**：rtsp_test.db / rtsp_data / rtsp-sim.yaml 全删，1984/8554/8001 无监听，主库零写入。
+- **主线验收（2026-10-28 07:22）**：报告与清理证据齐全；pytest 84 passed；RTSP/重连结论可用。

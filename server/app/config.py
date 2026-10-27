@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     smtp_pass: str | None = None
     alert_email_to: str | None = None
 
+    # 单端口模式（任务43）：托管 web/dist，npm run build 后只开一个端口
+    web_dist: Path = BASE_DIR.parent / "web" / "dist"
+
     class Config:
         env_prefix = "LS_"
         env_file = ".env"

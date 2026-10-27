@@ -48,3 +48,31 @@
 ## 执行报告
 
 （待填：端口/数据目录 / 无黑框与单实例验证 / 停止验证 / 日志样例 / 已知问题）
+
+### 执行报告（flash，2026-10-28 02:20 交付）
+
+- **新增**：
+  - `scripts/portable_launcher.py`（纯标准库，pythonw 运行）：数据外置 `%LOCALAPPDATA%\LabSentinel\`
+    （首次从 .env.template 生成 config.env 并把模型路径改绝对）；env 注入
+    `LS_DATA_DIR/LS_DB_PATH/LS_SNAPSHOT_DIR/LS_VIDEO_DIR/LS_ANNOTATION_POOL_DIR/LS_PPE_MODEL/
+    LS_MODEL_FP32/LS_WEB_DIST` + config.env 里 LS_* 透传；端口 config `port`（默认 8000）被占则
+    8100–8199 试 bind 并写回；单实例 `logs/launcher.lock` 记 "pid port"；uvicorn 子进程
+    CREATE_NO_WINDOW、日志 `logs/server-<日期>.log`；就绪轮询 30s → webbrowser.open（失败弹
+    MessageBox）；`--stop` 按锁 PID taskkill 后删锁。
+  - `scripts/portable_start.bat` / `portable_stop.bat`（内容纯 ASCII，构建时复制为包根
+    `启动.bat`/`停止.bat`——中文文件名不影响 cmd，内容零 GBK 依赖）；pythonw 缺失回退 python.exe。
+  - `build_portable.py`：+入口复制；模板补 `LS_MODEL_FP32`（便携布局下 Engine 默认路径不存在，
+    首次实测 /api/system 500 即此因）；冒烟后自动清理 config 导入期产生的空 data 目录。
+- **实测**（便携目录复制到纯 ASCII 路径 D:\tmp\pt + `set PATH=C:\Windows\System32`，5 步全过）：
+  1. 首次启动：bat rc=0、pythonw 无黑框（tasklist 可见）、**pid=21272 port=8000 health=OK**；
+  2. 数据外置：data/logs/config.env 全落 LOCALAPPDATA，模型路径绝对化 ✓；
+  3. 二次启动：锁不变（pid/port 均同）→ 不重复起服务 ✓；
+  4. 端口冲突：停实例→占住 8000→重启→**自动切 8100**（pid=15432）✓；
+  5. `停止.bat`：进程退出、端口释放、锁删除 ✓。
+- **关键坑（已修）**：`pid_alive` 原用 tasklist 输出解析——tasklist 输出是 ANSI/GBK，Python 跑在
+  UTF-8 模式时读取线程 UnicodeDecodeError → stdout 空 → **活进程被判死 → 单实例失效起了第二实例**
+  （02:13 实测翻车）。改为 **ctypes OpenProcess** 判活（无编码依赖）后 5 步全过。
+- **遗留问题**：
+  - 无系统托盘（约束只用标准库；阶段 2 再议 pystray）；
+  - 停止.bat 用 python.exe 会闪一个控制台窗口（按任务规格保留，pause 需按任意键）；
+  - 启动失败仅 MessageBox+日志，无重试。

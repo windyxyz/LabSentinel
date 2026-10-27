@@ -58,3 +58,25 @@
 ## 执行报告
 
 （待填：下载源/耗时 / 目录体积 / PATH 剥离冒烟 / zip 产物 / 已知缺失）
+
+### 执行报告（flash，2026-10-28 01:32 交付）
+
+- **新增**：`scripts/build_portable.py`（标准库 + 复用 deploy.py 的 http_download/公网校验/GBK venv
+  标记读取；幂等：runtime/site-packages/资产各自跳过判断）。
+- **下载**：CPython 3.12.8 embed-amd64（11MB）——首跑命中 **npmmirror**（未触发回退），zip CRC 全量校验
+  通过；耗时 ≈20s。pip 预装（.venv pip `--target runtime/Lib/site-packages -r requirements.txt`，
+  清华镜像，`--no-warn-script-location`）≈5 分钟。
+- **产物结构**（dist/portable/LabSentinel/）：`runtime/`（嵌入 Python + site-packages）、
+  `app/server/app/`（服务端代码，无 data/无 __pycache__）、`app/web/`（dist 产物）、`models/`
+  （yolo11n.onnx + yolo11n_ppe.onnx + classes.txt）、`tools/`（ffmpeg.exe + go2rtc.exe）、
+  `app/server/.env.template`（相对路径 ../../models/...，供任务 45 启动器改写）+ .env.example +
+  LICENSE/NOTICE。ffprobe 未带（61MB，任务约束默认不带）。
+- **PATH 剥离冒烟**（`set PATH=C:\Windows\System32`）：
+  `providers= ['DmlExecutionProvider', 'CPUExecutionProvider']`（**DirectML 可用**）；
+  `app.main import OK`（_pth 隔离模式不带 cwd，冒烟显式 `sys.path.insert(0,'.')` 模拟——
+  运行时由 uvicorn 自行插入，任务 45 启动器直接用 `-m uvicorn` 即可）。
+- **体积**：runtime 582MB + app 1MB + models 21MB + tools 104MB = **合计 708MB**（与 58 号方案
+  预估一致）；zip `dist/LabSentinel-portable-20261028.zip` = **269MB**。
+- **过程发现**：`config.py` 模块级 `data_dir.mkdir` 在导入时于 app/server 下创建空 data 目录——
+  已在脚本冒烟后自动清理（任务 45 数据外置后此路径不会落到安装目录）。
+- **遗留问题**：无。**任务 45 启动器可直接开工**（pythonw + .env 绝对路径改写 + 数据外置 + 单实例）。
