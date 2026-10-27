@@ -1,6 +1,6 @@
 {
-  "updated_ts": "2026-10-28T01:00:46",
-  "updated_epoch": 1793120446,
+  "updated_ts": "2026-10-28T01:02:10",
+  "updated_epoch": 1793120530,
   "status": "running",
   "current_task": "39",
   "current_task_doc": "docs/50-tasks/39-rtsp-loopback.md",
@@ -11,6 +11,10 @@
   "last_progress_epoch": 1793120446,
   "last_progress_note": "任务39已派发",
   "queue": [
+    "43",
+    "44",
+    "45",
+    "46",
     "40",
     "41",
     "42"
