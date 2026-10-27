@@ -1,19 +1,19 @@
 {
-  "updated_ts": "2026-10-28T00:17:03",
-  "updated_epoch": 1793117823,
+  "updated_ts": "2026-10-28T01:00:46",
+  "updated_epoch": 1793120446,
   "status": "running",
-  "current_task": "35",
-  "current_task_doc": "docs/50-tasks/35-v2-demo-finalize.md",
-  "dispatched_at": "2026-10-28T00:08:00",
-  "dispatch_epoch": 1793117280,
-  "task_doc_mtime_at_dispatch": 1793117258,
-  "last_progress_iso": "2026-10-28T00:08:00",
-  "last_progress_epoch": 1793117280,
-  "last_progress_note": "任务 35 已派发，等待 flash 认领/执行",
+  "current_task": "39",
+  "current_task_doc": "docs/50-tasks/39-rtsp-loopback.md",
+  "dispatched_at": "2026-10-28T01:00:46",
+  "dispatch_epoch": 1793120446,
+  "task_doc_mtime_at_dispatch": 1793120360,
+  "last_progress_iso": "2026-10-28T01:00:46",
+  "last_progress_epoch": 1793120446,
+  "last_progress_note": "任务39已派发",
   "queue": [
-    "36",
-    "37",
-    "38"
+    "40",
+    "41",
+    "42"
   ],
   "stall_minutes": 45,
   "auto_stop": true
