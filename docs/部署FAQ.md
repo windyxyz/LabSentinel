@@ -153,3 +153,35 @@ body `errcode≠0` 也判失败（`_is_ok`）。失败会重试（1s/4s/15s 三�
 **Q：写接口 401**
 → 服务端启用了管理鉴权（LS_ADMIN_TOKEN）。「摄像头」页顶部填写令牌（存浏览器 localStorage），
 所有 POST/DELETE 自动携带。
+
+## 9. 新机部署脚本（2026-10-27 修复）
+
+**Q：新电脑双击 `一键启动.bat` 提示"python 不是内部或外部命令"**
+→ 旧版直接调 `python`。现改为先试 `py -3` 再试 `python`，都没有时给出安装指引；同时不再自动 UAC 提权
+（提权会切换到管理员环境，新机上反而可能丢掉用户 PATH 里的 Python）。
+
+**Q：首次部署卡在 OpenH264 下载失败，后面 Node/ffmpeg/配置全没执行**
+→ 旧版把可选组件当致命错误，且三个源都不可用（npmmirror 无 openh264 目录、Cisco 裸 `.dll` 返回 403、
+GitHub 直连不稳）。现改为：先扫本机已有 DLL 直接复用；下载只认 Cisco 官方 `.bz2`（自动解压）+ GitHub
+加速镜像兜底；仍失败只警告——事件视频会回退系统 H.264（MSMF）/ mp4v，不影响分析与截图。
+
+**Q：实时画面打不开，go2rtc 日志报 `did not find expected hexdecimal number`**
+→ deploy 写 yaml 时 Windows 路径带反斜杠，YAML 双引号串把它当转义。现统一转 `/`；重跑部署会重写
+`tools/go2rtc.yaml`。
+
+**Q：本机装了 Node，但 Web 面板起不来**
+→ 便携版 Node 解压后只有 deploy 进程的 PATH 知道，`start-all.bat` 新开的 cmd 找不到 `npm`。现在会先扫
+本机 Node（Program Files / 用户目录 / nvm），用目录联接挂到 `tools/node`；下载的便携版也会把
+`tools/node` 加入 Web 启动的 PATH。
+
+**Q：venv 路径乱码 / start-all 找不到解释器**
+→ `scripts/venv_path.txt` 现在写相对路径 `.venv\Scripts\python.exe`（纯 ASCII）；start-all 优先项目内
+`.venv`，兼容旧绝对路径（GBK）与 `D:\LabSentinel\m0-venv`。
+
+**Q：启动器等待超时，或浏览器打开是空白/404**
+→ 旧版只等服务端 8000 就打开面板，Vite 还没就绪。现在要等 API + Web 都就绪（最多 60 秒），Web 检测
+同时探 IPv6 与 IPv4。
+
+**Q：下载策略到底是什么**
+→ 先扫本机（venv / Node / ffmpeg / OpenH264），找到就不下载；确实缺才联网：pip 清华 → 阿里云 → 官方，
+npm npmmirror → 官方 registry，Node npmmirror → nodejs.org，ffmpeg/ffprobe 首选 npmmirror CDN。
