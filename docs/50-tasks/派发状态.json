@@ -2,26 +2,27 @@
   "updated_ts": "2026-10-28T07:24:28",
   "updated_epoch": 1793143468,
   "status": "running",
-  "current_task": "51",
-  "current_task_doc": "docs/50-tasks/51-seed-single-source.md",
+  "current_task": "52",
+  "current_task_doc": "docs/50-tasks/52-ci-portable-artifact.md",
   "dispatched_at": "2026-10-28T07:24:28",
   "dispatch_epoch": 1793143468,
   "task_doc_mtime_at_dispatch": 1793120371,
   "last_progress_iso": "2026-10-28T07:24:28",
   "last_progress_epoch": 1793143468,
-  "last_progress_note": "复审后批量派发 51/52/53/54（播种单源/CI/M2 备忘录/文档口径）",
+  "last_progress_note": "任务51已交付；52进行中；53-55/57排队；主线暂停写交接",
   "queue": [
-    "52",
     "53",
     "54",
-    "55"
+    "55",
+    "57"
   ],
   "batch": [
     "51",
     "52",
     "53",
     "54",
-    "55"
+    "55",
+    "57"
   ],
   "batch_dispatched_at": "2026-10-28T07:35:00",
   "stall_minutes": 45,
