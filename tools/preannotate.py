@@ -115,7 +115,11 @@ def main():
             cv2.putText(img, f"{name} {conf:.2f}", (int(x1), max(12, int(y1) - 4)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
         out_dir.joinpath(img_path.stem + ".txt").write_text("\n".join(lines), encoding="utf-8")
-        cv2.imwrite(str(preview_dir / img_path.name), img)
+        # cv2.imwrite 对含中文的路径静默失败（项目路径含「监控识别」），统一 imencode + Python 写盘
+        ext = img_path.suffix.lower() if img_path.suffix.lower() in (".jpg", ".jpeg", ".png") else ".jpg"
+        ok, buf = cv2.imencode(ext, img)
+        if ok:
+            (preview_dir / (img_path.stem + ext)).write_bytes(buf.tobytes())
 
     print(f"完成：{len(images)} 张图 → {out_dir}（preview 见 {preview_dir}）")
     for name in sorted(counts):

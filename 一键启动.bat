@@ -20,12 +20,22 @@ if not defined PYCMD (
     if not errorlevel 1 set "PYCMD=python"
 )
 if not defined PYCMD (
+    if exist "dist\portable\LabSentinel\启动.bat" (
+        echo [兜底] 未找到 Python，但检测到便携包，改为启动便携版...
+        start "" "dist\portable\LabSentinel\启动.bat"
+        exit /b 0
+    )
     echo [失败] 未找到 Python 3.10+（首次自动部署需要它）。
     echo        请从 https://www.python.org/downloads/ 安装，勾选 "Add python.exe to PATH"，
     echo        装好后重新双击本脚本；或在已装 Python 的终端里执行：
     echo          py -3 scripts\deploy.py install
     pause
     exit /b 1
+)
+
+rem 便携包兜底：普通用户已有 dist\portable\LabSentinel 时优先提示/启动便携版
+if exist "dist\portable\LabSentinel\启动.bat" (
+    echo [提示] 检测到便携包：普通用户建议直接运行 dist\portable\LabSentinel\启动.bat（无需 Python/Node）。
 )
 
 echo [体检] 检查运行环境...

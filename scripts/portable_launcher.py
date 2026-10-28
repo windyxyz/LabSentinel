@@ -133,11 +133,34 @@ def seed_if_empty() -> None:
         db.close()
 
 
+def repair_media_paths() -> None:
+    """便携包被移动/改名后，播种摄像头可能指向旧 media 路径；按文件名在 media/ 重新定位。"""
+    import sqlite3
+    db_path = DATA / "labsentinel.db"
+    if not db_path.exists():
+        return
+    db = sqlite3.connect(db_path)
+    try:
+        fixed = 0
+        for cid, src in db.execute("select id, source from cameras where type='file'").fetchall():
+            name = Path(src).name if src else ""
+            target = MEDIA / name
+            if name and target.exists() and (not src or not Path(src).exists()):
+                db.execute("update cameras set source=? where id=?", (target.as_posix(), cid))
+                fixed += 1
+        if fixed:
+            db.commit()
+            log.info("修复演示摄像头媒体路径 %d 条（便携包移动后自愈）", fixed)
+    finally:
+        db.close()
+
+
 def first_run(cfg: dict) -> None:
     """首次运行：建数据目录；从模板生成 config.env，模板相对路径改便携包绝对路径。"""
     for d in (DATA, DATA / "snapshots", DATA / "videos", DATA / "annotation_pool", LOGS):
         d.mkdir(parents=True, exist_ok=True)
     seed_if_empty()
+    repair_media_paths()
     if CONFIG.exists():
         return
     text = TEMPLATE.read_text(encoding="utf-8") if TEMPLATE.exists() else ""

@@ -46,7 +46,7 @@
 ### 方式 B：源码部署（开发模式，Windows）
 
 ```bash
-# 1. 服务端（Python 3.11+）
+# 1. 服务端（Python 3.10+）
 cd server
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python -m uvicorn app.main:app --port 8000
@@ -60,7 +60,8 @@ npm run dev     # http://localhost:5173（API 已代理到 8000）
 ```
 
 一键脚本（自动体检/部署/端口检测/日志落盘/健康检查/停止）：见 [scripts/README.md](scripts/README.md)；
-首次运行会自动播种演示数据（`scripts/deploy.py`）。
+源码部署由 `scripts/deploy.py` 播种演示数据，便携包由 `scripts/portable_launcher.py` 首次启动自动播种。
+`一键启动.bat` 属于**源码/开发模式**；若机器上没有 Python 且已构建便携包，它会自动改为启动便携版。
 
 Docker 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道申请、合规自查清单）：
 **[docs/部署指南.md](docs/部署指南.md)**。
