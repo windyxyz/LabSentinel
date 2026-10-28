@@ -139,3 +139,12 @@ def test_ppe_class_names_sidecar(tmp_path, monkeypatch):
     empty_model.write_bytes(b"x")
     empty_model.with_suffix(".classes.txt").write_text("\n# 只有注释\n", encoding="utf-8")
     assert eng._load_class_names(empty_model) == ["lab coat"]
+
+
+def test_capture_source_usb_numeric():
+    """USB 源 "0"/"1" 必须转 int（字符串会被 OpenCV 当文件名）；RTSP/文件原样。"""
+    from app.pipeline import capture_source
+    assert capture_source({"type": "usb", "source": "0"}) == 0
+    assert capture_source({"type": "usb", "source": " 1 "}) == 1
+    assert capture_source({"type": "usb", "source": "OBS Virtual Camera"}) == "OBS Virtual Camera"
+    assert capture_source({"type": "rtsp", "source": "rtsp://127.0.0.1:8554/lab"}) == "rtsp://127.0.0.1:8554/lab"

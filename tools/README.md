@@ -13,6 +13,15 @@ M0 实测背景见 [../docs/40-roadmap.md](../docs/40-roadmap.md) 的「实测�
 
 快照：`m0-spike/npu-venv-freeze.txt`。**改 venv 包版本是禁忌**（会破坏现有 server 推理与量化环境）。
 
+## 一.5 摄像头联调工具（任务 56）
+
+| 脚本 | 用途 |
+|---|---|
+| `list_cameras.py` | 枚举 DirectShow 摄像头索引/分辨率/fps；`--snapshot-dir` 保存首帧确认画面 |
+| `virtual_cam_feed.py` | 用 pyvirtualcam 把演示视频喂给 OBS Virtual Camera（`pip install pyvirtualcam`），供 `type=usb` 联调 |
+
+用法与注意事项见 [../docs/部署指南.md](../docs/部署指南.md) §3.1 与 [../docs/64-usb-virtual-camera-report.md](../docs/64-usb-virtual-camera-report.md)。
+
 ## 二、流水线四步
 
 ```bash

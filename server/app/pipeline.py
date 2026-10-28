@@ -36,6 +36,16 @@ class _Recording:
         self.done = threading.Event()
 
 
+def capture_source(camera: dict):
+    """OpenCV 打开源：USB 允许 "0"/"1" 这类设备号（字符串会被当文件名），其余原样。"""
+    src = camera.get("source")
+    if camera.get("type") == "usb":
+        s = str(src).strip()
+        if s.isdigit():
+            return int(s)
+    return src
+
+
 class CameraWorker(threading.Thread):
     def __init__(self, camera: dict, store: Store, rules: RuleEngine):
         super().__init__(daemon=True, name=f"cam-{camera['id']}")
@@ -59,7 +69,7 @@ class CameraWorker(threading.Thread):
     # ---- 主循环 ----
     def run(self):
         cid = self.camera["id"]
-        cap = cv2.VideoCapture(self.camera["source"])
+        cap = cv2.VideoCapture(capture_source(self.camera))
         if not cap.isOpened():
             self.store.set_camera_status(cid, "error")
             print(f"[cam-{cid}] cannot open {self.camera['source']}")
@@ -68,7 +78,10 @@ class CameraWorker(threading.Thread):
         engine = get_engine()
         self.ppe = get_ppe_engine()  # 可能为 None（未配置实验服模型）
         interval = 1.0 / settings.analysis_fps
-        file_fps = cap.get(cv2.CAP_PROP_FPS) or 30  # 文件源按原速播放（否则读帧瞬间耗尽、分析只抽到几帧）
+        # USB 摄像头常返回 fps=-1；为录像 writer/环形缓冲兜底到 30
+        file_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        if not isinstance(file_fps, (int, float)) or file_fps <= 0 or file_fps > 240:
+            file_fps = 30.0
         self._rec_fps = file_fps
         self._init_ring(file_fps)
         recorder = threading.Thread(target=self._recorder_loop, daemon=True, name=f"cam-{cid}-rec")
@@ -87,7 +100,7 @@ class CameraWorker(threading.Thread):
                         break
                     time.sleep(1.0)
                     cap.release()
-                    cap = cv2.VideoCapture(self.camera["source"])
+                    cap = cv2.VideoCapture(capture_source(self.camera))
                     if not cap.isOpened():
                         self.store.set_camera_status(cid, "error")
                         time.sleep(5)
