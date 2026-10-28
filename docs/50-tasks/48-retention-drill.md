@@ -45,3 +45,17 @@
 ## 执行报告
 
 （待填：临时实例 / 事件与旧化 / cleanup 结果 / 文件校验 / 未实测项 / 清理确认）
+
+### 执行报告（flash，2026-10-28 08:12 交付）
+
+- **全链路通过**（隔离 8001 + retention_test.db + retention_data/，主库零写入）：
+  - 造数据：事件 id=3（截图 235,113 bytes）+ 误报池副本 ✓；
+  - 造旧：ts → 2026-09-18（40 天前）、池 mtime 同步 ✓；
+  - 近期事件：id=1/2/4（相机继续跑产生）✓；
+  - `POST /api/maintenance/cleanup` → `deleted_events=1, deleted_files=3, freed_mb=5.43` ✓；
+  - 行校验：旧删近期留 ✓；文件校验：旧截图/池副本均删 ✓；
+  - `maintenance/status`：last_cleanup + disk_free_gb=107.94 ✓。
+- **未实测项**：磁盘紧急清理分支（无法安全模拟小剩余空间，按任务说明记录，不伪造）；
+  视频存证文件（本次事件未产生视频）。
+- **清理确认**：retention_test.db / retention_data 全删，8001 已停，主库未动 ✓。
+- 报告：`docs/57-retention-drill.md`。

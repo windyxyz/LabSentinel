@@ -57,9 +57,10 @@ ByteTrack vs simple IOU tracker on lab footage: 4 tracked events vs 15 duplicate
 
 ## Installation
 
+- **Portable package (Windows, recommended for evaluation)**: `LabSentinel-portable-*.zip` — extract, run `安装.bat`, launch from desktop shortcut. Embedded Python runtime included; **no Python/Node installation and no network required** (see docs/59-portable-install.md).
 - Docker: `docker compose up -d` (see docs/部署指南.md §2)
-- Windows native: `scripts\start-all.bat` (health check & stop scripts included; see docs/部署指南.md §1)
-- Requirements: Python 3.11+, Node 20 (web dev), models downloaded separately per NOTICE.
+- Windows native (from source): `scripts\start-all.bat` (health check & stop scripts included; see docs/部署指南.md §1)
+- Requirements (source path only): Python 3.11+, Node 20 (web dev), models downloaded separately per NOTICE.
 
 ## Links (placeholders until the repository is published)
 

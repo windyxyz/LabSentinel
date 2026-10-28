@@ -50,3 +50,19 @@
 ## 执行报告
 
 （待填：事件 id/时间线 / 池文件与字节校验 / 抽帧数量 / 发现 / 清理确认）
+
+### 执行报告（flash，2026-10-28 08:05 交付）
+
+- **全链路实跑通过**（隔离 8001 + 临时库/目录，主库零写入）：
+  - 事件：文件摄像头 → 安全区 → enter 规则 → 启动 → **6s 出事件**（id=3, enter）；
+  - 误报：`{"ok": true, "status": "false_positive"}`；池副本
+    `ev3_20261028_075137_cam1_enter.jpg` **字节一致 235,113**（复制非移动）；原截图仍 200；
+    `?status=false_positive` 筛选命中 ✓；
+  - 抽帧：**0 张 → 修复 → 8 张**。根因：m0-venv 的 cv2.imwrite 对任意路径（含 ASCII）静默
+    返回 False——cv2 DLL 依赖导入时 PATH 注入（server 进程有 app/__init__ 注入正常，独立
+    工具进程全败；make_demo 抽样图从未写出的同根因）。修复：frame_sampler.py 改
+    imencode+tofile（tools 非业务代码），重跑 8 帧+manifest 全落盘；
+  - preannotate --help 正常（含 --model），未实跑预标注（避免推理叠加）。
+- **清理确认**：flywheel_test.db / 三个临时目录 / flywheel_frames 全删；8001 已停 ✓。
+- **发现**：R1 frame_sampler 修复已顺手完成；preannotate 如有 imwrite 建议同修（留建议）；
+  R2 抽帧拼版属增强非缺陷。详见 `docs/56-flywheel-e2e.md`。

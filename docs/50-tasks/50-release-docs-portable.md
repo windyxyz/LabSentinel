@@ -36,3 +36,21 @@
 ## 执行报告
 
 （待填：改动文件 / 链接检查 / 命令核对 / 合规措辞自查）
+
+### 执行报告（flash，2026-10-28 08:35 交付）
+
+- **改动文件**（纯文档 + 链接核对，git diff 已核）：
+  - `README.md`：快速开始改为 **方式 A 便携包（推荐）** / 方式 B 源码部署双路径；补数据位置、
+    停止/卸载、`安装.bat`；链接 59/58/scripts/README/快速开始。
+  - `快速开始.md`：顶部加"只想马上用→便携包"指引 + 与 demo 包/源码部署的区别说明。
+  - `docs/部署指南.md`：部署形态表新增"便携包（推荐入门）"行，链接 59/44。
+  - `docs/发布公告.md`：新增"获取方式"节——**便携包（候选）**事实描述，未写"已发布/已认证"，
+    未承诺日期。
+  - `docs/release-notes-v0.1.0-alpha.md`：Installation 首条补便携包（candidates 措辞）。
+- **链接检查**：新增相对链接逐个验证本地可打开（脚本核对：README 4、快速开始 2、部署指南 2、
+  公告 1，errors=0）；实参文件（deploy/portable_launcher/install_portable/build_portable/
+  59/58/验收清单）全部存在。
+- **命令核对**：`安装.bat`/`启动.bat`/`停止.bat`/`卸载.bat`、`scripts/install_portable.py`
+  实参与 scripts/ 实际文件一致。
+- **合规自查**：无"已发布/已认证"措辞；无未验证数字；无日期承诺；git diff 无主线专属文件
+  （theme.css/style.css/App.vue/main.js 未动）。

@@ -45,3 +45,18 @@
 ## 执行报告
 
 （待填：改动 / 命令与耗时 / 新旧文件对照 / 打包检查 / 遗留 L3）
+
+### 执行报告（flash，2026-10-28 07:45 交付）
+
+- **改动**：`效果演示/make_demo.py`（L1 NAME_MAP+regex 回退命名；L2 `--draw`+11 类颜色表
+  COLORS，未知类别 SystemExit；L4 `--samples`→`logs/demo_samples/`，默认不写 jpg）；
+  `docs/53-v2-demo-report.md`（L1/L2/L4 标记已解决 + 新旧命名对照节）；重生成两段 v2 + x264 转码。
+- **命令与耗时**：`--device cpu --suffix _v2 --samples`（两段 ≈3.5min）+ x264 转码 ≈10s；
+  `--help` 含 `--draw/--samples` ✓；`--draw "lab coat,hairnet2"` 正确报错退出 ✓。
+- **验收对照**：两段新命名 mp4 存在且互不覆盖（lab-walk 7.84s/196 帧、lab-equip 16.95s/508 帧，
+  均 h264、时长与源一致、非 0 字节）✓；`logs/demo_samples/` 6 张 jpg（仅 --samples 时）✓；
+  `效果演示/` 无新增 jpg ✓；`zipfile.namelist()` 实测打包清单不含抽样图 ✓；docs/53 已更新、
+  旧文件保留标注历史命名 ✓。
+- **过程发现（顺带修）**：cv2.imwrite 对中文路径**静默失败**（此前所有 帧jpg 从未写出过）——
+  改 cv2.imencode+tofile 后 6 张抽样图正常落盘。
+- **遗留**：L3（长视频补源）按任务说明保留暂缓。

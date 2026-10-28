@@ -118,6 +118,12 @@ def copy_assets() -> None:
         src = ROOT / "m0-spike" / name
         assert src.exists(), f"缺模型文件 {src}"
         shutil.copy2(src, DIST / "models" / name)
+    # 演示视频（任务47：首次运行播种 4 路演示摄像头用）
+    (DIST / "media").mkdir(parents=True, exist_ok=True)
+    for fn in ("lab-walk-24076.mp4", "lab-equip-21453.mp4"):
+        src = ROOT / "m0-spike" / "data" / fn
+        assert src.exists() and src.stat().st_size > 1_000_000, f"缺演示视频 {src}"
+        shutil.copy2(src, DIST / "media" / fn)
     # 二进制
     tools = DIST / "tools"
     tools.mkdir(parents=True, exist_ok=True)

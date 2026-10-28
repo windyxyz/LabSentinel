@@ -49,7 +49,11 @@ def sample_video(video: Path, out_dir: Path, interval: float, max_frames: int,
                     float(cv2.absdiff(small, prev_small).mean()) >= diff_thresh:
                 name = f"{video.stem}_{sec:06.1f}.jpg"
                 path = out_dir / name
-                cv2.imwrite(str(path), frame)
+                # imencode+tofile：cv2.imwrite 依赖导入时的 PATH 注入（cv2 DLL），
+                # 独立工具进程里即使 ASCII 路径也静默返回 False（任务41 实测）
+                ok_jpg, buf = cv2.imencode(".jpg", frame)
+                if ok_jpg:
+                    buf.tofile(str(path))
                 manifest_rows.append({
                     "source": str(video), "timestamp": f"{sec:.2f}",
                     "frame_file": name, "resolution": f"{w}x{h}",

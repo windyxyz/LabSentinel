@@ -48,3 +48,21 @@
 ## 执行报告
 
 （待填：脚本参数 / 自测 CSV 样例 / 摘要 / 清单路径 / 发现与建议 / 清理确认）
+
+### 执行报告（flash，2026-10-28 08:06 交付）
+
+- **新增**：
+  - `tools/camera_soak.py`（标准库：urllib+csv；参数 --base-url/--camera-id/--duration(24h|90m|3600)/
+    --interval/--out/--timeout；每轮 /api/system + /api/events?limit=1；CSV 8 列；摘要含 API 可用率/
+    running 占比/非 running 最长持续/fps min-avg-max/事件增量；Ctrl+C 落盘；退出码 0/2/3）；
+  - `docs/摄像头24h验收清单.md`（前置/步骤/通过标准/证据归档/不通过排查）。
+- **自测**（8001 隔离实例 + soak_test.db，文件摄像头 autostart+FILE_LOOP，PATH 无 Python/Node 依赖）：
+  - 60s/5s 间隔：**CSV 12 行**、camera running 12/12=100%、API 失败 0、
+    fps min/avg/max = 0.0/19.7/21.8（首样 0.0 为统计窗口预热，属预期）；
+  - 摘要样例：`API 失败次数: 0 | 非 running 最长持续: 0s | 事件增量: 0（id 0 → 0）`；
+  - **Ctrl+C（CTRL_BREAK）落盘：3 行**（24h 计划被中断，部分数据保留）✓；
+  - 自测未建安全区/规则 → 事件增量为 0 属预期（soak 只读 API，机制与 CSV 已验证）。
+- **过程修复**：漏 `from pathlib import Path`（NameError）；events_today 改取 today_counts 合计。
+- **清理确认**：soak_test.db/soak_data 已删，8001 已停；CSV 留 logs/ 作证据
+  （soak-selftest.csv 12 行、soak-selftest-ctrl.csv 3 行）。
+- **遗留建议**：真实 24h 由用户按清单执行；若需断线告警推送可后续给 soak 加 webhook 通知（非本任务）。

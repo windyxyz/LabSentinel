@@ -68,10 +68,10 @@ tools\ffmpeg\ffmpeg.exe -y -i 效果演示\lab-检测效果_v2.mp4 -c:v libx264 
 
 ## 6. 遗留建议
 
-- **L1** `make_demo.py` stem 截断（`split('-')[0]`）导致多源同名覆盖：建议改为 `basename.rsplit('-', 1)[0]` 并显式映射输出名（涉及既有资产命名，留给主线决策）。
-- **L2** 演示绘制类别扩展（加 Gloves/HairNet 等颜色映射）。
+- ~~**L1** stem 截断~~：**任务 40 已修复**——NAME_MAP 显式映射 + `re.sub(r"-\d+$")` 回退；输出名 lab-walk/lab-equip-检测效果*.mp4（旧名文件保留为历史命名）。
+- ~~**L2** 绘制类别扩展~~：**任务 40 已修复**——`--draw` 参数（默认 lab coat,no lab coat 不变）+ 11 类颜色表，未知类别报错退出。
 - **L3** 补充长视频源素材或改用 lab-walk+lab-equip 拼接替代。
-- **L4** `效果演示/` 下的 `*-帧*_v1/_v2.jpg` 为 make_demo 顺带抽样产物，发布打包时可不带（已在 make_demo_zip 之外，无影响）。
+- ~~**L4** 抽样图~~：**任务 40 已修复**——默认不写 jpg；`--samples` 才输出到 `logs/demo_samples/`（gitignored，打包清单已实测不含）。
 
 ## 执行报告（任务 35）
 
@@ -80,3 +80,17 @@ tools\ffmpeg\ffmpeg.exe -y -i 效果演示\lab-检测效果_v2.mp4 -c:v libx264 
 - **验收对照**：`--help` 含 `--device` ✓；两段 v2 mp4 = h264 / 16.95s≥10s / 64.23s≥30s / 非 0 字节 ✓；本报告含复现命令、4 组对比帧、test 指标引用、局限 ✓；调度看板已勾销任务 27 ✓。
 - **过程记录**：初次用默认两源生成时发现 stem 冲突与时长不符（7.84s<10s），溯源后改用 lab-equip 源重新生成；全部推理走 CPU（`--device cpu`），未与其他任务并发，未占 8000/5173，未改 m0-spike。
 - **遗留问题**：§6 L1–L4。
+
+## 任务 40 收尾更新（2026-10-28）
+
+- **新命名产物**（互不覆盖，`--device cpu --suffix _v2` 重生成 + x264 转码）：
+  - `效果演示/lab-walk-检测效果_v2.mp4`（h264 / 7.84s / 196 帧）
+  - `效果演示/lab-equip-检测效果_v2.mp4`（h264 / 16.95s / 508 帧）
+- **历史命名对照**（保留未删，内容为新命名产物的同源早期版本）：
+  - `效果演示/lab-检测效果_v2.mp4`（旧 stem 截断命名，h264，= lab-equip 源）
+  - `效果演示/实验有风险，防护需穿戴-检测效果_v2.mp4`（源视频已缺失，仅存产物）
+  - `效果演示/lab-检测效果_v1.mp4`（v1 对比素材）
+- **新增能力**：`--draw`（11 类颜色表，未知类别报错）、`--samples`（抽样 jpg →
+  `logs/demo_samples/`，gitignored；打包清单实测不含）、cv2.imwrite 中文路径静默失败改
+  imencode+tofile。
+- 复现命令不变（见 §2），另加 `--draw "lab coat,no lab coat,hairnet"` 示例。

@@ -40,3 +40,19 @@
 ## 执行报告
 
 （待填：构建改动 / 首次播种证据 / 二次启动检查 / 体积 / 数据恢复确认）
+
+### 执行报告（flash，2026-10-28 07:55 交付）
+
+- **构建改动**：`build_portable.py` 复制两段演示视频 → `DIST/media/`（含存在性与 >1MB 校验；
+  体积报告行同口径）。
+- **启动器改动**：`portable_launcher.py` 新增 `seed_if_empty()`（sqlite3 直接建表+播种，schema 与
+  server/app/store.py 同步）：仅当 cameras 表为空且 media 齐全 → 播 4 路文件摄像头（绝对路径指向
+  包内 media）+ 每路 1 区 2 规则；media 缺失只警告；`first_run()` 在建目录后调用。
+- **实测**（备份 LOCALAPPDATA\LabSentinel → .bak，robocopy 到 ASCII 路径 D:\tmp\pt47，PATH=System32）：
+  1. 首次启动：**4 路摄像头全部出现**（/api/system）；
+  2. 启动第 1 路：60s 内 **14 条 enter 事件**、截图 `200 image/jpeg` ✓；
+  3. 停止 → 二次启动：**cameras 仍 4 路，无重复播种** ✓；
+  4. 手动删光 cameras 再插 1 路 `user-cam` → 重启后仅 1 路 user-cam，**用户数据不被覆盖** ✓；
+  5. 清理：测试目录/测试数据删除，备份已恢复。
+- **体积**：media +8.4MB（两段 mp4），总 708MB → 716MB 量级。
+- **遗留问题**：无。（播种状态为 stopped，用户在 UI 点启动；LS_FILE_LOOP=true 由 config.env 带入。）

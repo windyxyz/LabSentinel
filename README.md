@@ -31,7 +31,19 @@
 
 > 更多截图见 [docs/assets/](docs/assets/README.md)（共 5 张，含人脸管理页）。
 
-## 🚀 快速开始（开发模式，Windows）
+## 🚀 快速开始
+
+### 方式 A：便携包（推荐，Windows 双击即用）
+
+下载 `LabSentinel-portable-*.zip` 解压 → 双击 **`安装.bat`**（生成桌面/开始菜单快捷方式）→
+双击桌面 **LabSentinel** → 浏览器自动打开控制面板。
+
+- **不需要安装 Python/Node**（包内自带嵌入式运行时与全部依赖），安装/运行均无需联网
+- 首次启动自动播种 4 路演示摄像头，开箱即可看到检测效果
+- 数据在 `%LOCALAPPDATA%\LabSentinel`；`停止.bat` / `卸载.bat` 可停服与干净卸载
+- 详见 [docs/59-portable-install.md](docs/59-portable-install.md)、[docs/58-packaging-strategy.md](docs/58-packaging-strategy.md)
+
+### 方式 B：源码部署（开发模式，Windows）
 
 ```bash
 # 1. 服务端（Python 3.11+）
@@ -47,7 +59,8 @@ npm run dev     # http://localhost:5173（API 已代理到 8000）
 # 3. 浏览器操作：添加摄像头（可用视频文件路径测试）→ 安全区配置画多边形、加规则 → 启动摄像头 → 仪表盘看实时事件
 ```
 
-一键脚本（端口检测/日志落盘/健康检查/停止）：见 [scripts/README.md](scripts/README.md)。
+一键脚本（自动体检/部署/端口检测/日志落盘/健康检查/停止）：见 [scripts/README.md](scripts/README.md)；
+首次运行会自动播种演示数据（`scripts/deploy.py`）。
 
 Docker 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道申请、合规自查清单）：
 **[docs/部署指南.md](docs/部署指南.md)**。

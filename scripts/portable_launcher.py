@@ -23,6 +23,7 @@ from pathlib import Path
 APP_ROOT = Path(__file__).resolve().parent.parent      # scripts/ 的上一级 = 便携包根
 RUNTIME = APP_ROOT / "runtime"
 SERVER = APP_ROOT / "app" / "server"
+MEDIA = APP_ROOT / "media"
 TEMPLATE = SERVER / ".env.template"
 DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(APP_ROOT / "_userdata"))) / "LabSentinel"
 DATA = DATA_ROOT / "data"
@@ -31,6 +32,41 @@ CONFIG = DATA_ROOT / "config.env"
 LOCK = LOGS / "launcher.lock"
 PORT_DEFAULT = 8000
 CREATE_NO_WINDOW = 0x08000000
+
+# 首次播种（任务47）：schema 与 server/app/store.py 同步；仅空库执行，绝不覆盖用户数据
+SEED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cameras(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, status TEXT DEFAULT 'stopped');
+CREATE TABLE IF NOT EXISTS zones(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
+CREATE TABLE IF NOT EXISTS rules(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, zone_id INTEGER,
+  behavior TEXT, level INTEGER, cooldown_s INTEGER,
+  time_start TEXT, time_end TEXT, threshold INTEGER, enabled INTEGER);
+CREATE TABLE IF NOT EXISTS events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, type TEXT,
+  level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT,
+  status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT);
+CREATE TABLE IF NOT EXISTS face_consents(
+  subject TEXT PRIMARY KEY, ts TEXT);
+CREATE TABLE IF NOT EXISTS alert_deliveries(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER, channel TEXT,
+  status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0,
+  last_error TEXT, updated_ts TEXT);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);
+"""
+SEED_CAMERAS = [  # (名称, 演示视频, 区名)
+    ("lab-slice", "lab-walk-24076.mp4", "reagent-area"),
+    ("ppe-regress", "lab-walk-24076.mp4", "reagent"),
+    ("ppe-final", "lab-walk-24076.mp4", "reagent"),
+    ("ppe-equip", "lab-equip-21453.mp4", "bench"),
+]
+SEED_ZONES = {
+    "reagent-area": "[[520, 180], [1180, 180], [1180, 620], [520, 620]]",
+    "reagent": "[[520, 180], [1180, 180], [1180, 620], [520, 620]]",
+    "bench": "[[100, 50], [1180, 50], [1180, 650], [100, 650]]",
+}
 
 log = logging.getLogger("launcher")
 
@@ -66,10 +102,42 @@ def write_config_port(port: int) -> None:
     CONFIG.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+def seed_if_empty() -> None:
+    """首次运行播种（任务47）：cameras 表为空且 media 在 → 播 4 路演示摄像头/区域/规则。
+    用户已有数据（cameras 非空）绝不覆盖；media 缺失只警告不阻塞。"""
+    import sqlite3
+    db_path = DATA / "labsentinel.db"
+    db = sqlite3.connect(db_path)
+    try:
+        db.executescript(SEED_SCHEMA)
+        n = db.execute("select count(*) from cameras").fetchone()[0]
+        if n:
+            log.info("已有 %d 路摄像头，跳过播种", n)
+            return
+        media_ok = all((MEDIA / fn).exists() for _, fn, _ in SEED_CAMERAS)
+        if not media_ok:
+            log.warning("media/ 演示视频缺失，跳过播种（不影响启动）")
+            return
+        for name, fn, zname in SEED_CAMERAS:
+            cid = db.execute("insert into cameras(name, source, type) values(?,?,'file')",
+                             (name, (MEDIA / fn).as_posix())).lastrowid
+            zid = db.execute("insert into zones(camera_id, name, polygon) values(?,?,?)",
+                             (cid, zname, SEED_ZONES[zname])).lastrowid
+            for behavior, level in (("enter", 2), ("enter_no_ppe", 3)):
+                db.execute("insert into rules(camera_id, zone_id, behavior, level, cooldown_s,"
+                           " time_start, time_end, threshold, enabled) values(?,?,?,?,5,'00:00','23:59',0,1)",
+                           (cid, zid, behavior, level))
+        db.commit()
+        log.info("首次播种完成：4 路演示摄像头 + 区域/规则（media=%s）", MEDIA)
+    finally:
+        db.close()
+
+
 def first_run(cfg: dict) -> None:
     """首次运行：建数据目录；从模板生成 config.env，模板相对路径改便携包绝对路径。"""
     for d in (DATA, DATA / "snapshots", DATA / "videos", DATA / "annotation_pool", LOGS):
         d.mkdir(parents=True, exist_ok=True)
+    seed_if_empty()
     if CONFIG.exists():
         return
     text = TEMPLATE.read_text(encoding="utf-8") if TEMPLATE.exists() else ""

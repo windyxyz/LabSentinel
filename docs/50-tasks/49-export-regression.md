@@ -40,3 +40,16 @@
 ## 执行报告
 
 （待填：隔离实例 / 事件数 / 四端点响应 / ZIP 清单 / CSV/PDF 校验 / 边界 / 清理）
+
+### 执行报告（flash，2026-10-28 08:25 交付）
+
+- **四端点全过**（隔离 8001 + export_test.db，10 事件/6 含视频）：
+  - events.csv：200，BOM+表头+**10 行=事件数**+中文无乱码 ✓；
+  - stats.csv：200，31 行（30 天窗口空日补 0）✓；
+  - monthly.pdf：200，50,127B，**%PDF 魔数 ✓**（本机无 PDF 解析库，页解析未做）；
+  - evidence.zip：200，42.2MB/18 条目，events.csv+README+快照+**videos/ 6 条 mp4** ✓，
+    路径穿越检查 ✓，内嵌 CSV 行数=事件数 ✓。
+- **空库边界**：events.csv 200 表头 78B（0 行）；evidence.zip 200 最小 2 条目——合法空产物非 5xx ✓。
+- **未实测**：500 条上限（按任务说明）；PDF 页级解析（无解析库，建议后续装 pypdf 人工目检）。
+- **清理确认**：export_test.db / export_data / logs/export-check 全删，8001 停，主库零写入 ✓。
+- 报告：`docs/61-export-regression.md`。

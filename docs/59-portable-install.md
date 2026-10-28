@@ -30,6 +30,15 @@ runtime\python.exe scripts\install_portable.py install --source . --autostart
 | 运行日志 + 启动锁 | `%LOCALAPPDATA%\LabSentinel\logs\` |
 | 端口等用户配置 | `%LOCALAPPDATA%\LabSentinel\config.env` |
 
+## 首次运行自动播种（演示数据）
+
+首次启动若库为空，启动器自动播种 **4 路演示摄像头**（包内 `media\` 两段演示视频循环播放）
++ 每路安全区与 enter/enter_no_ppe 规则——打开仪表盘即可看到"开箱即用"的效果。
+- 只在**空库**时播种；你添加过摄像头/有事件后，重装/升级都不会动你的数据。
+- 想清空回演示状态：停止服务（`停止.bat`）→ 删除 `%LOCALAPPDATA%\LabSentinel\data\labsentinel.db`
+  → 再次启动即可重新播种。
+- 包内缺 `media\` 时跳过播种（只警告，不阻塞启动）。
+
 ## 端口
 
 默认 8000；被占用时启动器自动从 8100–8199 选一个可用端口并在 `config.env` 写回，
