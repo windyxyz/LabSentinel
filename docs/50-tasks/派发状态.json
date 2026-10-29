@@ -1,30 +1,30 @@
 {
-  "updated_ts": "2026-10-28T07:24:28",
-  "updated_epoch": 1793143468,
+  "updated_ts": "2026-10-30T00:05:00",
+  "updated_epoch": 1793289900,
   "status": "running",
-  "current_task": "52",
-  "current_task_doc": "docs/50-tasks/52-ci-portable-artifact.md",
-  "dispatched_at": "2026-10-28T07:24:28",
-  "dispatch_epoch": 1793143468,
-  "task_doc_mtime_at_dispatch": 1793120371,
-  "last_progress_iso": "2026-10-28T07:24:28",
-  "last_progress_epoch": 1793143468,
-  "last_progress_note": "任务51已交付；52进行中；53-55/57排队；主线暂停写交接",
+  "current_task": "57",
+  "current_task_doc": "docs/50-tasks/57-multi-rtsp-sim.md",
+  "dispatched_at": "2026-10-30T00:05:00",
+  "dispatch_epoch": 1793289900,
+  "last_progress_iso": "2026-10-30T00:05:00",
+  "last_progress_epoch": 1793289900,
+  "last_progress_note": "51-55 已验收并提交 04cb605；57 重新派发，58-62 排队；串行 57->58->59->60->61->62",
   "queue": [
-    "53",
-    "54",
-    "55",
-    "57"
+    "58",
+    "59",
+    "60",
+    "61",
+    "62"
   ],
   "batch": [
-    "51",
-    "52",
-    "53",
-    "54",
-    "55",
-    "57"
+    "57",
+    "58",
+    "59",
+    "60",
+    "61",
+    "62"
   ],
-  "batch_dispatched_at": "2026-10-28T07:35:00",
+  "batch_dispatched_at": "2026-10-30T00:05:00",
   "stall_minutes": 45,
   "auto_stop": true
 }

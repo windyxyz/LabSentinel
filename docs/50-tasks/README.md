@@ -78,6 +78,18 @@
 | [14-data-retention.md](./14-data-retention.md) | 数据保留与清理（合规+磁盘保护） | ★★ | flash 可 |
 | [15-report-export.md](./15-report-export.md) | 报表导出（CSV/PDF 月报） | ★★ | flash 可 |
 
+### 近期批次（M1.5 / 发布收尾）
+
+| 文档 | 任务 | 状态 |
+|---|---|---|
+| [56-usb-virtual-camera.md](./56-usb-virtual-camera.md) | USB/OBS 虚拟摄像头接入验证 | ✅ 2026-10-28 |
+| [57-multi-rtsp-sim.md](./57-multi-rtsp-sim.md) | 多路模拟 RTSP 压测 | 执行中 |
+| [58-release-manifest.md](./58-release-manifest.md) | 发布产物清单/SHA256 | 已派发 |
+| [59-portable-smoke.md](./59-portable-smoke.md) | 便携包一键冒烟 | 已派发 |
+| [60-usb-device-discovery.md](./60-usb-device-discovery.md) | USB 设备枚举 API + UI | 已派发 |
+| [61-logging-diagnostics.md](./61-logging-diagnostics.md) | 日志轮转 + 诊断包 | 已派发 |
+| [62-backup-restore.md](./62-backup-restore.md) | 备份/恢复 CLI | 已派发 |
+
 > 完成情况（2026-10-26 晚）：01–11 全部交付（07 压测待锁修复后补测、08 apk 待 Flutter SDK）。
 > 12–15 为 2026-10-26 新派发批次（框架期任务，与模型训练解耦，可立即开工）。
 > 关联文档：架构 [../30-architecture.md](../30-architecture.md) · API 契约 [../35-api-reference.md](../35-api-reference.md) · 模型接入 [../45-model-onboarding.md](../45-model-onboarding.md) · 里程碑 [../60-milestones.md](../60-milestones.md)。
