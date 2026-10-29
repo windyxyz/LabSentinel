@@ -1,114 +1,123 @@
-# 55 · 交接快照（2026-10-28 09:15，主线暂停点）
+# 55 · 交接快照（2026-10-30 00:10，恢复派发）
 
 > 本文件是**上下文压缩的落点**：新会话/新协作者先读这一份，再按链接进细节。
-> 当前状态：M1/M1.5 功能、回归、便携分发包基本就绪；**主线已暂停**，flash 子代理仍在执行 51–55/57。
-> 发布唯一硬阻塞：**真实 RTSP 摄像头 24h 验证**（用户侧硬件）。
+> 当前状态：M1/M1.5 功能与便携分发包已验收；**批次 57–62 已通过看板派发给 flash 会话（对面会话）**，
+> 主线负责验收与提交。发布唯一硬阻塞：**真实 RTSP 摄像头 24h + 模型止损线**（用户侧硬件/数据）。
 
 ## 一、总体状态
 
 | 维度 | 状态 |
 |---|---|
-| 服务端/Web | ⏸ 已停止；8000/8001/1984/8554/5173 均无监听 |
-| 测试 | ✅ **pytest 91 passed**（含 USB 源解析、单端口 SPA、种子单源）；`npm run build` 通过（gzip 42.77KB） |
+| 服务端/Web | ⏸ 当前未启动；8000/8001/1984/8554/5173 均无监听 |
+| 测试 | ✅ **pytest 91 passed**（2026-10-30 主线复跑）；`npm run build` 通过（gzip 42.77KB） |
 | 模型 | ✅ v2 已接入：`m0-spike/yolo11n_ppe.onnx`（11 类）+ classes.txt；v1 备份 `*_v1.*` |
-| 便携包 | ✅ `dist/LabSentinel-portable-20261028.zip` **265MB**（08:48 重建，含 media + seed_demo）；安装后 **709MB**；首启自动播种 4 路演示摄像头（实测） |
-| 启动 EXE | ⏳ 任务 55 待做（C# winexe；csc 已确认可用）；当前只有 `启动.bat`/`pythonw` |
+| 便携包 | ✅ `dist/LabSentinel-portable-20261029.zip` **264.8MiB / 12544 项**；含 `LabSentinel.exe`、`scripts/seed_demo.py`、media、安装/卸载脚本；安装后约 709MB |
+| 启动 EXE | ✅ 任务 55 已交付并验收：`LabSentinel.exe`（C# winexe，5.5KB，无黑框；`--stop` 可用）；无 csc 构建自动降级到 `启动.bat`/pythonw |
 | 部署 | ✅ 便携包（普通用户）+ `一键启动.bat`/`deploy.py`（开发模式，无 Python 时自动改启便携包） |
-| Git | 最近提交 `ec5443a`（USB/OBS）；**工作区有 flash 未提交的 51/52 代码**（见 §五，勿回滚） |
-| 协作 | 旧 5 分钟 cron 已删除（熔断后无法自删，主会话手动删）；当前按需批量派发 |
+| Git | 最近提交 `f9dd9cb`（批次 57–62 派发）；工作区干净 |
+| 协作 | ⚠️ **无定时自动化**（旧 5 分钟 cron 已删除）；派发方式 = 更新 `调度看板.md` + `派发状态.json`，flash 会话读取后执行 |
 | 发布 | ⛔ 被真实摄像头 24h + 模型停止线阻塞；其余自动可验项全绿 |
 
-## 二、任务状态（01–57）
+## 二、任务状态（01–62）
 
-- **01–39：已完成**（详见各任务文档执行报告）。
-- **40/47/41/42/48/49/50：已交付并主线初验**（pytest 85/build/首启播种/soak/清理/导出/文档）。
-- **51 播种单源化：已交付待提交**（flash，08:43）：新增 `scripts/seed_demo.py`，
-  deploy/portable/build 共用；`server/tests/test_seed_demo.py`；pytest 90；便携包已重建。
-- **52 CI 便携包流水线：进行中**（flash）：`.github/workflows/portable.yml` 已落盘（08:43），执行报告未写。
-- **53 M2 方案备忘录：排队**（未开工）。
-- **54 文档口径统一：排队**（未开工）。
-- **55 启动 EXE：排队**（需与 51 串行，51 已完成，可开工）。
-- **56 本机 USB/OBS 虚拟摄像头：主线已完成**（09:05，提交 `ec5443a`）：
-  - 物理 HD Webcam index 0（当前黑屏/遮挡）→ status=running、fps 12.5、快照 200；
-  - OBS Virtual Camera index 1（pyvirtualcam 播 lab-walk）→ **fps 29.6、3 条事件、截图 200/196KB**；
-  - 修复 `usb` 源 `"0"/"1"` 被当文件名（`capture_source()`）与 FPS=-1 兜底；
-  - 新增 `tools/list_cameras.py`、`tools/virtual_cam_feed.py`；报告 `docs/64-usb-virtual-camera-report.md`；
-  - **仅设备链路，不替代真实 RTSP 24h**。
-- **57 多路模拟 RTSP 压测：已派发**（`docs/50-tasks/57-multi-rtsp-sim.md`）：go2rtc 3 路 + 8001，
-  10 分钟受控；模拟非真实 24h；排在 55 之后。
+- **01–50：已完成并验收**（详见各任务文档执行报告；40/47/41/42/48/49/50 于 10-28 初验）。
+- **51–55：已完成、主线验收并提交（2026-10-30，commit `04cb605`）**：
+  - **51 播种单源化**：`scripts/seed_demo.py` 单源（schema 与 store 对拍），deploy/portable/build 共用；
+    `server/tests/test_seed_demo.py` 5 用例。
+  - **52 CI 便携包流水线**：`.github/workflows/portable.yml`（workflow_dispatch + tags v*、windows-latest、
+    build_portable --zip、SHA256SUMS、upload-artifact）；**仅静态验证，未在真实 runner 跑过**；
+    启用前提：模型/tools 二进制不入库，需 LFS/artifact 通道。
+  - **53 M2 方案备忘录**：`docs/63-m2-options.md`（七方向对比 + 推荐顺序 A→(E∥D)→G）。
+  - **54 文档口径统一**：部署指南/FAQ/README 共 9 处 m0-venv 服务端命令改为 `.venv`/deploy 口径。
+  - **55 启动 EXE**：`scripts/launcher_exe/LabSentinelLauncher.cs` + `build_launcher_exe.py`；
+    build_portable 产 `LabSentinel.exe`；install_portable 快捷方式优先 exe；实测隔离启动 6s 就绪、
+    `--stop` rc=0；pytest 91。
+- **56 本机 USB/OBS 虚拟摄像头：主线完成**（10-28，commit `ec5443a`）：物理 HD Webcam index 0
+  （黑屏/遮挡但 running、fps 12.5）与 OBS Virtual Camera index 1（fps 29.6、3 事件、截图 200）；
+  修复 USB 源 `"0"/"1"` 解析与 FPS=-1；工具 `tools/list_cameras.py`、`tools/virtual_cam_feed.py`；
+  报告 `docs/64-usb-virtual-camera-report.md`。**不替代真实 RTSP 24h**。
+- **57–62：已派发（flash 会话执行中/排队）**，串行顺序：
+  1. **57 多路模拟 RTSP 压测**（`57-multi-rtsp-sim.md`）：go2rtc 3 路 + 8001，10 分钟受控；
+     **执行报告仍为占位 = 尚未开工**；模拟≠真实 24h。
+  2. **58 发布产物清单/校验和**（`58-release-manifest.md`）：`scripts/release_manifest.py`，
+     只读现有 zip 产 `SHA256SUMS.txt` + `RELEASE-MANIFEST.json`，`--verify`。
+  3. **59 便携包一键冒烟**（`59-portable-smoke.md`）：`scripts/smoke_portable.py`，
+     完全隔离 LOCALAPPDATA，zip→启动→健康→首启播种→停止→清理。
+  4. **60 USB 设备枚举 API+UI**（`60-usb-device-discovery.md`）：`GET /api/cameras/usb-devices`
+     （ffmpeg dshow 解析、10s 缓存）+ Cameras.vue 下拉选择。
+  5. **61 文件日志轮转+诊断包**（`61-logging-diagnostics.md`）：RotatingFileHandler（5MB×3）、
+     `/api/diagnostics/summary`、`scripts/collect_diagnostics.py`（脱敏 zip）。
+  6. **62 备份/恢复 CLI**（`62-backup-restore.md`）：SQLite backup API、verify、restore（默认保守、
+     路径穿越防护、`.bak-<ts>`）。
+- **并行约束**：57 是重负载，必须独占；58→59 都动 `dist/` 与 `docs/59`；60 动 `api.py`/`Cameras.vue`；
+  61 动 `main.py`/`config.py`；62 独立。一次只做一个，写前重读共享文件。
 
 ## 三、最近提交
 
 ```
+f9dd9cb docs(dispatch): 批次57-62派发（压测/发布清单/冒烟/USB枚举/日志诊断/备份）
+04cb605 feat: 批次51-55交付并验收（播种单源/CI/EXE/文档口径）
+cb26e4d docs: 主线暂停交接快照 + 任务57多路RTSP压测派发
 ec5443a feat: USB/OBS 虚拟摄像头接入验证 + usb 源解析修复
 764094a docs(dispatch): 新增任务55 启动EXE（无黑框，脚本/EXE双入口）
 60072ee docs(dispatch): 复审后新批 51-54（播种单源/CI便携包/M2备忘录/文档口径）
 db19dc9 fix+docs: 项目复审与三处兜底修复（preannotate/一键启动/便携移动自愈）
-fe8cfbc feat: 任务40/47/41/42/48/49/50 交付
-9810645 docs(dispatch): 批量任务补充并行约束
 ```
 
-## 四、本轮关键修复（复审 + 摄像头）
+## 四、本轮验收证据（2026-10-30）
 
-1. `tools/preannotate.py`：预览图改 imencode+bytes，中文路径不再静默丢失。
-2. `一键启动.bat`：无 Python 且存在便携包 → 自动改启便携版；有 Python 时提示优先便携包。
-3. `portable_launcher.py`：新增 `repair_media_paths()`，便携包移动/改名后按 media 文件名自愈。
-4. `server/app/pipeline.py`：`capture_source()` 修 USB 设备号；USB FPS=-1 兜底 30。
-5. SPA 静态回退不再吞未知 `/api/*`（任务43，测试覆盖）。
-6. README：Python 3.10+、便携/源码双路径播种说明。
+1. `pytest tests/ -q` → **91 passed**（2 个 Pydantic 弃用警告，非阻塞）。
+2. `cd web && npm run build` → 通过，`index-*.js` gzip **42.77KB**。
+3. 便携包条目核对：`LabSentinel.exe`、`runtime/pythonw.exe`、`scripts/seed_demo.py`、
+   `scripts/portable_launcher.py`、`media/*.mp4`、`启动.bat`、`安装.bat`、`app/VERSION` 全部存在；
+   zip **264.8MiB / 12544 项**。
+4. 51–55 代码/文档逐项核对后提交 `04cb605`；工作区干净。
 
-## 五、未提交工作（重要，勿回滚）
+## 五、未提交工作
 
-`git status` 当前（flash 51/52 在途）：
-
-```
- M docs/50-tasks/51-seed-single-source.md
- M scripts/build_portable.py
- M scripts/deploy.py
- M scripts/portable_launcher.py
-?? .github/workflows/portable.yml
-?? scripts/seed_demo.py
-?? server/tests/test_seed_demo.py
-?? docs/50-tasks/批次断点-51至55.md
- M docs/50-tasks/调度看板.md / 派发状态.json（主线刚更新，含 57）
-```
-
-- **不要**为了"干净"回滚这些文件；它们属于任务 51/52 交付，等 flash 写执行报告后，
-  主线复跑 `pytest tests -q`（应 ≥91）→ 提交。
-- 51 与 55 都改 `scripts/build_portable.py`，必须 **51→55 串行**；52/53/54 可并行。
-- 53/54 纯文档；55 需要 `csc.exe`（已确认 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`）。
+**无**（2026-10-30 00:10 `git status` 为空）。flash 后续交付的文件由主线复核后再提交；
+**不要**为了"干净"回滚 flash 的在途文件。
 
 ## 六、发布差距（v0.1.0-alpha）
 
-1. **真实 RTSP 摄像头 24h**（唯一硬阻塞）+ 模型停止线（Lab Coat ≥60%、误报 ≤20%/天）。
+1. **真实 RTSP 摄像头 24h**（唯一硬阻塞）+ 模型止损线（Lab Coat ≥60%、误报 ≤20%/天）。
    - 工具：`tools/camera_soak.py` + `docs/摄像头24h验收清单.md`。
-   - 虚拟摄像头/模拟 RTSP **不能**替代。
-2. 干净 Windows VM：安装/启动/卸载/自启（46 在本机自启被环境阻塞）；无 Python/Node。
+   - 虚拟摄像头 / 3 路模拟 RTSP **不能**替代。
+2. 干净 Windows VM：安装/启动/卸载/自启（46 在本机自启被安全软件阻塞）；无 Python/Node。
 3. GitHub 远端 + Actions 实际跑 52（当前本地 git、无远端）；Release 附件/zip+sha256/公告定稿。
-4. 代码签名（可选，影响 SmartScreen/杀软）。
+4. 代码签名（可选，影响 SmartScreen/杀软）；exe 无签名、无自定义图标。
 5. 不在 alpha 范围：Android APK（仅 Flutter 骨架）、iOS/HarmonyOS、人脸实测（默认关）、
    真实多路吞吐、NPU 打包、GB28181；告警真实 webhook 未实测。
-6. 未完善项：日志轮转、自动更新、备份恢复、多用户/角色、导出 500 上限/PDF 页级解析/磁盘紧急清理。
+6. 本轮 57–62 完成后将补上：多路压测数据、发布清单、冒烟脚本、USB 枚举、日志轮转/诊断、备份恢复；
+   剩余未完善：自动更新、多用户/角色、导出 500 上限/PDF 页级解析/磁盘紧急清理。
 
-## 七、恢复工作建议（新会话直接照做）
+## 七、恢复/继续工作建议（新会话直接照做）
 
-1. 读本文件 + `docs/50-tasks/调度看板.md` + `docs/62-project-audit-2026-10-28.md`。
-2. `git status`：若 51/52 已有执行报告，跑全量 pytest/build 后提交；再让 flash 继续 53/54/55/57。
-3. 55 完成后：`python scripts/build_portable.py --zip`，用 `dist/LabSentinel-portable-*.zip` 做干净 PATH 首启；
-   安装器快捷方式应指向 `LabSentinel.exe`。
-4. 57 完成后看 `docs/65-multi-rtsp-sim-report.md`，确认 DML 串行锁下 3 路稳定。
+1. 读本文件 + `docs/50-tasks/调度看板.md` + `docs/50-tasks/派发状态.json`。
+2. 看 flash 是否已写 `57` 的执行报告（占位 `（待填` 即未开工）；按 57→58→59→60→61→62 顺序推进。
+3. 每项完成后主线验收：
+   - 通用：`cd server && D:\LabSentinel\m0-venv\Scripts\python.exe -m pytest tests/ -q`；前端改动跑 `npm run build`；
+   - 57：报告数字/清理/端口/主库 mtime；
+   - 58：对当前 zip 实跑 manifest + `--verify`；
+   - 59：冒烟脚本 PASS + 真实 LOCALAPPDATA 未变；
+   - 60：端点实跑 JSON + 前端下拉 + build；
+   - 61：日志生成/轮转 + 诊断 zip 脱敏；
+   - 62：备份→恢复一致性 + 路径穿越反例。
+4. **61/62 合并后重建便携包**（服务端代码变了）：`python scripts/build_portable.py --zip`；
+   然后用 58 重新生成 manifest、用 59 对新 zip 冒烟。
 5. 用户接真实摄像头后：按 `docs/摄像头24h验收清单.md` 跑 24h → 通过才发布 v0.1.0-alpha。
-6. **不要**重新创建每 5 分钟自动巡检除非先修"心跳"（任务文档 mtime 会误判；应把 `server/app`、
-   `web/src`、`scripts` 最新 mtime 也算进度，且 cron 无法自删，需主会话删）。
+6. **不要**重新创建每 5 分钟自动巡检，除非先修"心跳"：任务文档 mtime 会误判（flash 写代码不写文档），
+   应把 `server/app`、`web/src`、`scripts` 最新 mtime 也算进度；且运行中的 cron 无法自删，需主会话删。
 
 ## 八、环境要点
 
 - 项目根 `D:\User\Desktop\TOOLS\监控识别`；首选 venv 项目 `.venv`（py3.12，`scripts\venv_path.txt` 相对路径）；
-  旧装兼容 `D:\LabSentinel\m0-venv`（py3.14，训练/工具）；NPU venv `D:\LabSentinel\npu-venv`。
-- 普通用户：便携包 `安装.bat`/`启动.bat`（55 后加 `LabSentinel.exe`）；开发：`一键启动.bat`/`scripts/start-all.bat`。
+  旧装兼容 `D:\LabSentinel\m0-venv`（py3.14，pytest/训练/工具）；NPU venv `D:\LabSentinel\npu-venv`。
+- 普通用户：便携包 `安装.bat` / `LabSentinel.exe` / `启动.bat`；开发：`一键启动.bat` / `scripts/start-all.bat`。
 - 单端口：`npm run build` 后只开 8000；`LS_WEB_DIST` 可覆盖。
-- OBS 虚拟摄像头联调：`pip install pyvirtualcam`（已装 m0-venv）；`python tools/virtual_cam_feed.py`；
-  服务端 `type=usb, source=1`；设备索引用 `tools/list_cameras.py` 枚举。
+- USB/OBS：`tools/list_cameras.py` 枚举索引；`python tools/virtual_cam_feed.py` 喂 OBS 虚拟摄像头；
+  服务端 `type=usb, source=1`。ffmpeg 在 `tools/ffmpeg/ffmpeg.exe`。
+- go2rtc：`tools/go2rtc.exe`；1.9.15 **不支持** `ffmpeg:` 源，必须 `exec:ffmpeg ... -f mpegts pipe:1`。
 - 铁律：DML 禁并发 run（`Engine._run` 串行锁）；重负载一次一个；supervision 0.25.1；onnxruntime 互杀；
   Git Bash curl 中文 JSON 损坏（用 httpx）。
 - 镜像：pip 清华/阿里云/官方；npm npmmirror/官方；GitHub ghfast；HF hf-mirror；Roboflow 代理 7890。
@@ -118,9 +127,11 @@ fe8cfbc feat: 任务40/47/41/42/48/49/50 交付
 | 想知道什么 | 看哪里 |
 |---|---|
 | 协作/任务状态 | `50-tasks/调度看板.md` + `派发状态.json` |
+| 本批任务规格 | `50-tasks/57-multi-rtsp-sim.md` … `62-backup-restore.md` |
 | 项目复审（bug/优化） | `62-project-audit-2026-10-28.md` |
 | USB/OBS 摄像头 | `64-usb-virtual-camera-report.md` + `50-tasks/56-...md` |
 | 打包分发 | `58-packaging-strategy.md` + `59-portable-install.md` |
+| M2 方向决策 | `63-m2-options.md` |
 | 模型评估 | `52-model-eval.md` |
 | 发布 | `70-release-plan.md` + `发布核对报告.md` + `发布公告.md` |
 | 真实摄像头 24h | `摄像头24h验收清单.md` + `tools/camera_soak.py` |
