@@ -38,40 +38,15 @@ FFMPEG_DIR = ROOT / "tools" / "ffmpeg"
 PIPI = "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"
 NPMR = "--registry=https://registry.npmmirror.com"
 
-# 与 server/app/store.py SCHEMA 同步（deploy 只建新库/种子，不碰已有库结构）
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS cameras(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, status TEXT DEFAULT 'stopped');
-CREATE TABLE IF NOT EXISTS zones(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
-CREATE TABLE IF NOT EXISTS rules(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, zone_id INTEGER,
-  behavior TEXT, level INTEGER, cooldown_s INTEGER,
-  time_start TEXT, time_end TEXT, threshold INTEGER, enabled INTEGER);
-CREATE TABLE IF NOT EXISTS events(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, type TEXT,
-  level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT,
-  status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT);
-CREATE TABLE IF NOT EXISTS face_consents(
-  subject TEXT PRIMARY KEY, ts TEXT);
-CREATE TABLE IF NOT EXISTS alert_deliveries(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER, channel TEXT,
-  status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0,
-  last_error TEXT, updated_ts TEXT);
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);
-"""
+# 播种单源（任务51）：schema/演示摄像头/区域/规则统一在 scripts/seed_demo.py 维护
+import seed_demo  # noqa: E402
 
-SEED_VIDEOS = {
-    "lab-slice": "m0-spike/data/lab-walk-24076.mp4",
-    "ppe-regress": "m0-spike/data/lab-walk-24076.mp4",
-    "ppe-final": "m0-spike/data/lab-walk-24076.mp4",
-    "ppe-equip": "m0-spike/data/lab-equip-21453.mp4",
-}
-SEED_ZONES = {  # name -> polygon（与原演示配置一致）
-    "reagent-area": "[[520, 180], [1180, 180], [1180, 620], [520, 620]]",
-    "reagent": "[[520, 180], [1180, 180], [1180, 620], [520, 620]]",
-    "bench": "[[100, 50], [1180, 50], [1180, 650], [100, 650]]",
+# 演示视频文件名（用于已有库的失效路径修正，按名称匹配）
+SEED_VIDEO_FILES = {
+    "lab-slice": "lab-walk-24076.mp4",
+    "ppe-regress": "lab-walk-24076.mp4",
+    "ppe-final": "lab-walk-24076.mp4",
+    "ppe-equip": "lab-equip-21453.mp4",
 }
 PORTS = (1984, 8000, 5173)
 
@@ -614,42 +589,30 @@ def write_go2rtc_yaml() -> None:
 
 
 def seed_database() -> None:
-    """新库播种演示摄像头/区域/规则；已有库仅把指向失效的文件源路径修正到当前安装位置。"""
+    """播种/路径修正（任务51：播种逻辑单源 scripts/seed_demo.py，本函数只做源码模式适配）。
+
+    新库 → seed_demo.seed_database（media= m0-spike/data）；
+    已有库 → 按名称把指向失效的文件源路径修正到当前安装位置。
+    """
     db_path = ROOT / "server" / "data" / "labsentinel.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(db_path)
-    db.executescript(SCHEMA)
+    media_dir = ROOT / "m0-spike" / "data"
+    inserted = seed_demo.seed_database(db_path, media_dir)
+    if inserted:
+        log(f"  [8] 播种演示摄像头 {inserted} 路（单源 scripts/seed_demo.py）")
+        return
+    db = sqlite3.connect(str(db_path))
     cams = db.execute("select id, name, source from cameras").fetchall()
-    if not cams:
-        log("  [8] 播种演示摄像头（4 路）与区域/规则")
-        for name, rel in SEED_VIDEOS.items():
-            db.execute("insert into cameras(name, source, type) values(?,?,'file')",
-                       (name, str(ROOT / rel)))
-        for cname, zname in (("lab-slice", "reagent-area"), ("ppe-regress", "reagent"),
-                             ("ppe-final", "reagent"), ("ppe-equip", "bench")):
-            cid = db.execute("select id from cameras where name=?", (cname,)).fetchone()[0]
-            zid = db.execute(
-                "insert into zones(camera_id, name, polygon) values(?,?,?)",
-                (cid, zname, SEED_ZONES[zname])).lastrowid
-            db.execute(
-                "insert into rules(camera_id, zone_id, behavior, level, cooldown_s,"
-                " time_start, time_end, threshold, enabled) values(?,?,?,2,5,'00:00','23:59',0,1)",
-                (cid, zid, "enter"))
-            db.execute(
-                "insert into rules(camera_id, zone_id, behavior, level, cooldown_s,"
-                " time_start, time_end, threshold, enabled) values(?,?,?,3,5,'00:00','23:59',0,1)",
-                (cid, zid, "enter_no_ppe"))
-    else:
-        by_name = {n: str(ROOT / rel) for n, rel in SEED_VIDEOS.items()}
-        fixed = 0
-        for cid, name, src in cams:
-            want = by_name.get(name)
-            if want and (not src or not Path(src).exists()) and Path(want).exists():
-                db.execute("update cameras set source=? where id=?", (want, cid))
-                fixed += 1
-        log(f"  [8] 数据库已有 {len(cams)} 路摄像头，修正失效路径 {fixed} 条")
+    by_name = {name: str(media_dir / fn) for name, fn in SEED_VIDEO_FILES.items()}
+    fixed = 0
+    for cid, name, src in cams:
+        want = by_name.get(name)
+        if want and (not src or not Path(src).exists()) and Path(want).exists():
+            db.execute("update cameras set source=? where id=?", (want, cid))
+            fixed += 1
     db.commit()
     db.close()
+    log(f"  [8] 数据库已有 {len(cams)} 路摄像头，修正失效路径 {fixed} 条")
 
 
 def check_model_files() -> bool:

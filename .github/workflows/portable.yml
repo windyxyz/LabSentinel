@@ -1,0 +1,71 @@
+# 便携包构建流水线（任务52）：windows-latest 构建 zip + SHA256 + artifact
+# 触发：手动 workflow_dispatch / 推送 v* 标签（不在每次 push 构建，节省分钟数）
+# 注意：模型文件（m0-spike/*.onnx）不入仓库 —— 需要发布时先临时提交或改用 artifact 传递（见报告"未实测项"）
+name: portable
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-portable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install server deps
+        run: pip install -r server/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+      - name: Build web dist
+        working-directory: web
+        run: |
+          npm ci --registry=https://registry.npmmirror.com
+          npm run build
+
+      - name: Build portable package
+        run: python scripts/build_portable.py --zip
+
+      - name: Generate SHA256SUMS
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist/LabSentinel-portable-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($zip.Name)" | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LabSentinel-portable
+          path: |
+            dist/LabSentinel-portable-*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-build-logs
+          path: dist/portable/**/*
+          if-no-files-found: ignore

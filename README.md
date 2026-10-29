@@ -36,11 +36,12 @@
 ### 方式 A：便携包（推荐，Windows 双击即用）
 
 下载 `LabSentinel-portable-*.zip` 解压 → 双击 **`安装.bat`**（生成桌面/开始菜单快捷方式）→
-双击桌面 **LabSentinel** → 浏览器自动打开控制面板。
+双击桌面 **LabSentinel**（或包目录里的 `LabSentinel.exe` / `启动.bat`）→ 浏览器自动打开控制面板。
 
 - **不需要安装 Python/Node**（包内自带嵌入式运行时与全部依赖），安装/运行均无需联网
 - 首次启动自动播种 4 路演示摄像头，开箱即可看到检测效果
-- 数据在 `%LOCALAPPDATA%\LabSentinel`；`停止.bat` / `卸载.bat` 可停服与干净卸载
+- `LabSentinel.exe` 为无控制台启动器（.NET Framework 4.x 系统自带），黑框脚本版 `启动.bat` 保留为脚本入口
+- 数据在 `%LOCALAPPDATA%\LabSentinel`；`LabSentinel.exe --stop` / `停止.bat` / `卸载.bat` 可停服与干净卸载
 - 详见 [docs/59-portable-install.md](docs/59-portable-install.md)、[docs/58-packaging-strategy.md](docs/58-packaging-strategy.md)
 
 ### 方式 B：源码部署（开发模式，Windows）

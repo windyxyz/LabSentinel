@@ -34,7 +34,9 @@ def ps(script: str) -> None:
     r = subprocess.run([exe, "-NoProfile", "-Command", script],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        raise RuntimeError(f"PowerShell 失败: {r.stderr.strip()[:200]}")
+        # text=True 在 PYTHONUTF8=1 下遇到 PS 的 GBK 报错输出会解码崩→stdout/stderr 变 None
+        err = (r.stderr or "").strip()[:200]
+        raise RuntimeError(f"PowerShell 失败: {err or f'exit {r.returncode}（输出解码失败，多为路径不存在/权限）'}")
 
 
 def desktop_dir() -> Path:
@@ -48,6 +50,7 @@ def desktop_dir() -> Path:
 def make_shortcuts(install: Path) -> None:
     pythonw = install / "runtime" / "pythonw.exe"
     launcher = install / "scripts" / "portable_launcher.py"
+    exe = install / "LabSentinel.exe"
     desktop = desktop_dir()
     smenu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "LabSentinel"
     smenu.mkdir(parents=True, exist_ok=True)
@@ -56,20 +59,26 @@ def make_shortcuts(install: Path) -> None:
         """PowerShell 单引号字符串转义：' -> ''。"""
         return s.replace("'", "''")
 
-    def lnk(path: Path, args: str) -> None:
+    def lnk(path: Path, target: Path, args: str) -> None:
         script = (
             f"$ws = New-Object -ComObject WScript.Shell; "
             f"$s = $ws.CreateShortcut('{esc(str(path))}'); "
-            f"$s.TargetPath = '{esc(str(pythonw))}'; "
-            f"$s.Arguments = '\"{esc(str(launcher))}\"'; "
+            f"$s.TargetPath = '{esc(str(target))}'; "
+            f"$s.Arguments = '{esc(args)}'; "
             f"$s.WorkingDirectory = '{esc(str(install))}'; "
             f"$s.Save()")
         ps(script)
 
-    lnk(desktop / "LabSentinel.lnk", f'"{launcher}"')
-    lnk(smenu / "LabSentinel.lnk", f'"{launcher}"')
+    if exe.exists():  # 任务55：优先无控制台 EXE；缺 csc 的包回退 pythonw
+        lnk(desktop / "LabSentinel.lnk", exe, "")
+        lnk(smenu / "LabSentinel.lnk", exe, "")
+        log("  快捷方式目标：LabSentinel.exe（无控制台）")
+    else:
+        lnk(desktop / "LabSentinel.lnk", pythonw, f'"{launcher}"')
+        lnk(smenu / "LabSentinel.lnk", pythonw, f'"{launcher}"')
+        log("  快捷方式目标：runtime\\pythonw.exe（包内无 LabSentinel.exe，回退）")
     lnk(smenu / "卸载.lnk",
-        f'"{install / "scripts" / "install_portable.py"}" uninstall --purge-data')
+        pythonw, f'"{install / "scripts" / "install_portable.py"}" uninstall --purge-data')
     log(f"  快捷方式：桌面 + 开始菜单（{smenu.name}）")
 
 
@@ -153,9 +162,13 @@ def do_uninstall(install: Path, purge: bool) -> int:
             f.write(f"{datetime.now():%H:%M:%S}.{datetime.now().microsecond // 1000:03d} {msg}\n")
     trace(f"uninstall entry dir={install} purge={purge}")
     log(f"[卸载] {install}")
-    subprocess.run([str(install / "runtime" / "python.exe"),
-                    str(install / "scripts" / "portable_launcher.py"), "--stop"],
-                   capture_output=True)
+    exe = install / "LabSentinel.exe"
+    if exe.exists():  # 任务55：优先 EXE 停止入口，回退 Python 启动器
+        subprocess.run([str(exe), "--stop"], capture_output=True)
+    else:
+        subprocess.run([str(install / "runtime" / "python.exe"),
+                        str(install / "scripts" / "portable_launcher.py"), "--stop"],
+                       capture_output=True)
     trace("stopped")
     time.sleep(1)  # 给刚被 kill 的 uvicorn 句柄释放时间
     remove_shortcuts()
@@ -202,7 +215,7 @@ def do_uninstall(install: Path, purge: bool) -> int:
     # 进程内只删未锁定部分（app/models/tools/scripts/LICENSE/NOTICE/入口 bat；
     # runtime 由下方哨兵守卫的延迟 rd 处理——不碰它）
     for name in ("app", "models", "tools", "scripts", "LICENSE", "NOTICE",
-                 "启动.bat", "停止.bat", "安装.bat", "卸载.bat"):
+                 "LabSentinel.exe", "启动.bat", "停止.bat", "安装.bat", "卸载.bat"):
         p = install / name
         if not p.exists():
             continue

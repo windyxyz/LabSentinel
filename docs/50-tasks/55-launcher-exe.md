@@ -47,4 +47,59 @@
 
 ## 执行报告
 
-（待填：csc 路径/编译命令 / exe 大小 / 启动与停止验证 / 快捷方式 / 降级说明）
+**flash 2026-10-29 完成（全部验收项实测通过）**
+
+### 交付物
+
+- `scripts/launcher_exe/LabSentinelLauncher.cs`：C# 5 语法（v4.0.30319 自带 csc 可编译），
+  winexe 无控制台。职责刻意最小——单实例/端口/健康检查/开浏览器全在 Python 启动器里，
+  EXE 只做：校验 `runtime\pythonw.exe` 与 `scripts\portable_launcher.py` 存在（缺失弹
+  MessageBox 报日志路径，rc=2）→ `Process.Start`（UseShellExecute=false、CreateNoWindow=true、
+  工作目录=包根）启动 `pythonw portable_launcher.py` 后自身退出；`--stop` 走
+  `python.exe portable_launcher.py --stop` 并 WaitForExit 返回其退出码；异常 MessageBox（rc=1）。
+- `scripts/build_launcher_exe.py`：csc 探测顺序 `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319`
+  → Framework(32位) → PATH；`csc /nologo /target:winexe /optimize+ /r:System.dll
+  /r:System.Windows.Forms.dll`；csc 缺失或编译失败 → 警告返回 None（不阻塞构建）；
+  `--check` 只探测 csc。
+- `build_portable.py`：copy_assets 内调用 compile_exe(DIST)，包根产 `LabSentinel.exe`；
+  失败仅告警（启动.bat 仍可用）。
+- `install_portable.py`：快捷方式优先 `LabSentinel.exe`（无参数、WorkingDirectory=安装目录），
+  无 exe 回退 `pythonw + portable_launcher.py`；卸载停止优先 `LabSentinel.exe --stop` 回退
+  Python 启动器；卸载进程内删除名单加入 `LabSentinel.exe`。
+
+### 实测证据（PATH 无关，隔离 LOCALAPPDATA 数据目录，端口 8180）
+
+| 验收项 | 结果 |
+|---|---|
+| csc 路径 | `C:\WINDOWS\Microsoft.NET\Framework64\v4.0.30319\csc.exe` |
+| exe 大小 | **5.5KB**（<100KB 达标）；PE 子系统=2（GUI，无控制台，程序化验证） |
+| 便携包重建 | 包根有 LabSentinel.exe；DML 冒烟 providers=[Dml, CPU] 照常；zip 278MB |
+| 双击启动 | exe 秒退（Popen 2s 后 poll 非 None→已退出），服务 6s 就绪 `/api/system` 200、backend=directml、演示数据已播种；数据落隔离 `%LOCALAPPDATA%` 确认 |
+| `--stop` | rc=0（3.1s），端口 8180 释放、launcher.lock 删除 |
+| 安装器快捷方式 | 隔离 harness（重定向桌面/开始菜单到临时目录）：有 exe → `TARGET=...\LabSentinel.exe ARGS=`；无 exe → 回退 `pythonw + 脚本`；卸载.lnk 行为不变 ✓ |
+| pytest | **91 passed**（无业务代码改动，基线不受影响） |
+
+### 两个如实记录的细节
+
+1. **自动化 harness 中的调用阻塞**：`subprocess.run(exe)` 会等到服务退出才返回——GUI 进程以
+   `UseShellExecute=false` 启动子进程时继承父 stdio 管道，harness 等 EOF。**双击场景不受影响**
+   （无管道），exe 本体实测秒退。未来若要 CI 驱动 exe，可在 C# 里加 `RedirectStandardOutput=true`
+   或改 `UseShellExecute=true`（spec 指定 false，未改）。
+2. **顺手加固**：`install_portable.ps()` 在 `PYTHONUTF8=1` 下遇 PowerShell GBK 报错输出会
+   解码崩→`r.stderr=None`→AttributeError 掩盖真实错误。已加 None 兜底并给出可读错误
+   （harness 实测暴露，真实安装链路受益）。同步重建 zip 已包含。
+
+### 无 csc 时的降级
+
+Win10/11 均自带 .NET Framework 4.x（csc 在 `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\`）；
+若裁剪版系统无 csc：构建端编译失败仅警告（包无 exe），运行端快捷方式自动回退 pythonw、
+卸载停止回退 Python 启动器——全部功能等价，仅入口少一个。
+
+### 未做（记录为后续发布项）
+
+- exe 无代码签名（与 zip 同策略，见 52 报告"签名"项）；图标未定制（默认图标，可后续加 `/win32icon`）。
+
+### 文档
+
+- `docs/59-portable-install.md` 安装章节改为 exe 主入口（含两种入口行为一致的说明、--stop）；
+- `README.md` 方式 A 同步（exe / 启动.bat 双入口 + .NET 4.x 自带说明）。

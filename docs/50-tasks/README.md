@@ -16,10 +16,10 @@
 | 项目根 | `D:\User\Desktop\TOOLS\监控识别` |
 | 服务端 | `server/`（FastAPI，代码在 `server/app/`） |
 | Web 端 | `web/`（Vue3+Vite，源码 `web/src/`） |
-| Python 环境 | `D:\LabSentinel\m0-venv\Scripts\python.exe`（Python 3.14，勿动其中包版本） |
-| 启动服务端 | `cd server && D:\LabSentinel\m0-venv\Scripts\python.exe -m uvicorn app.main:app --port 8000` |
+| Python 环境 | 项目内 `.venv\Scripts\python.exe`（`python scripts\deploy.py install` 创建，路径见 `scripts/venv_path.txt`）。**m0-venv（`D:\LabSentinel\m0-venv`）是旧装训练专用环境**（ultralytics/torch），仅训练/导出用，勿动其中包版本 |
+| 启动服务端 | `cd server && ..\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000`（推荐直接跑 `一键启动.bat` 或 `scripts\start-all.bat`） |
 | 启动 Web 开发服 | `cd web && npm run dev`（浏览器 http://localhost:5173；仅绑 IPv6 localhost，curl 测试用 `[::1]`） |
-| 单元测试 | `cd server && D:\LabSentinel\m0-venv\Scripts\python.exe -m pytest tests/ -q`（当前 6/6 必须保持通过） |
+| 单元测试 | `cd server && D:\LabSentinel\m0-venv\Scripts\python.exe -m pytest tests/ -q`（pytest 装在训练环境 m0-venv；项目 `.venv` 未装 pytest，当前基线 91 passed，以最近执行报告为准） |
 | 演示视频 | `m0-spike/data/lab-walk-24076.mp4`、`lab-equip-21453.mp4` |
 | 模型文件 | `m0-spike/*.onnx`、`m0-spike/*.pt` |
 

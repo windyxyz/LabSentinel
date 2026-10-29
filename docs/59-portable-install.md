@@ -9,9 +9,15 @@
 2. 双击包目录里的 **`安装.bat`**（内容为纯 ASCII；`runtime\python.exe` 运行安装器）。
 3. 完成后：
    - 程序复制到 `%LOCALAPPDATA%\Programs\LabSentinel\`
-   - 桌面 + 开始菜单生成 `LabSentinel.lnk`（指向 `runtime\pythonw.exe` 启动器，无黑框）
+   - 桌面 + 开始菜单生成 `LabSentinel.lnk`（优先指向 **`LabSentinel.exe`**——无控制台的
+     应用程序入口；包内无 exe 时回退 `runtime\pythonw.exe` 启动器，同样无黑框）
    - 开始菜单另有 `卸载.lnk`
-4. 双击桌面快捷方式（或包目录 `启动.bat`）→ 等约 10 秒 → 浏览器自动打开控制面板。
+4. 双击桌面快捷方式，或包目录里的 **`LabSentinel.exe`**（或 `启动.bat`）→ 等约 10 秒 →
+   浏览器自动打开控制面板。
+
+> `LabSentinel.exe` 是 C# 无控制台启动器（.NET Framework 4.x，Win10/11 自带，无需安装），
+> 只负责拉起 Python 启动器；单实例/端口/健康检查/开浏览器逻辑全部在 Python 启动器里，
+> 两种入口行为完全一致。`LabSentinel.exe --stop` 亦可停止服务。
 
 ### 开机自启（可选）
 
@@ -61,6 +67,23 @@ runtime\python.exe scripts\install_portable.py install --source . --autostart
   即时删除；进程内先删 `app/models/tools/...`（**绝不碰 runtime**——卸载器解释器的惰性 stdlib
   从 `runtime\python312.zip` 加载，删了会当场崩，实测 04:33），再对带 `runtime\PENDING_DELETE`
   哨兵的目录发起后台 rd 重试链（约 3 分钟视距）。重装的新目录没有哨兵，绝不会被晚到的 rd 误删。
+
+## CI 产物 / 校验和验证（任务 52）
+
+正式发布时由 GitHub Actions（`.github/workflows/portable.yml`，触发：推 `v*` 标签或手动
+workflow_dispatch）在 `windows-latest` 上自动执行 `python scripts/build_portable.py --zip`，
+artifact 名 `LabSentinel-portable`，内含便携包 zip 与 `SHA256SUMS.txt`（保留 14 天）。
+
+下载后校验完整性（PowerShell）：
+
+```powershell
+Get-FileHash .\LabSentinel-portable-<版本>.zip -Algorithm SHA256
+# 输出的 Hash 与 SHA256SUMS.txt 中该文件名对应的哈希一致即为完整包
+```
+
+> 注意：模型文件（`m0-spike/*.onnx`）与部分 tools 二进制不随仓库分发，CI checkout 后
+> `build_portable.py` 的资产断言会失败。真实启用流水线前需先解决模型进 CI 的通道
+> （Git LFS / artifact 传递 / 发布时临时提交），详见任务 52 执行报告。
 
 ## FAQ
 

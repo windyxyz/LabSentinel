@@ -11,7 +11,7 @@
 | Flutter SDK | stable 通道，≥ 3.22（Dart ≥ 3.4，满足 pubspec 的 sdk 约束） |
 | Android SDK | Platform-Tools + 对应 compileSdk（`flutter doctor` 全绿为准） |
 | JDK | 17+（交付机器已有 Temurin JDK 21 / 25，可直接用） |
-| 服务端 | 局域网内运行：`cd server && D:\LabSentinel\m0-venv\Scripts\python.exe -m uvicorn app.main:app --port 8000` |
+| 服务端 | 局域网内运行：`cd server && ..\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000`（`.venv` 由 `python scripts\deploy.py install` 创建；详见 [部署指南](../docs/部署指南.md)） |
 
 ## 二、初始化与构建
 

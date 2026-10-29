@@ -78,7 +78,8 @@ taskkill /PID <pid> /F
 **Q：浏览器打开事件视频无法播放**
 → 缺 OpenH264 编码库（服务器端生成时回退了 mp4v）。解决：下载 `openh264-2.5.0-win64.dll`
 （Cisco 官方 CDN：`http://ciscobinary.openh264.org/openh264-2.5.0-win64.dll.bz2`，解压得 dll）放入
-`m0-venv\Lib\site-packages\cv2\`——`server/app/__init__.py` 已自动把该目录加进 DLL 搜索路径。
+**服务端 venv** 的 `Lib\site-packages\cv2\`（项目内 `.venv`；`deploy.py install` 会自动下载放置；
+便携包自带无需处理）——`server/app/__init__.py` 已自动把该目录加进 DLL 搜索路径。
 
 ## 4. 模型与推理
 

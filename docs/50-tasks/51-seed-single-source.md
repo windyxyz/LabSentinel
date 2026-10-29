@@ -33,3 +33,21 @@
 ## 执行报告
 
 （待填：模块接口 / 两个调用点 / 测试结果 / 便携包重建 / 遗留）
+
+### 执行报告（flash，2026-10-28 08:35 交付）
+
+- **新增** `scripts/seed_demo.py`（单源）：`SCHEMA`（与 store.py `_SCHEMA` 表/索引集合一致，单测
+  对拍）、`SEED_CAMERAS`/`SEED_ZONES`、`seed_database(db_path, media_dir) -> int`（仅空库播种，
+  返回插入数；media 缺失返回 0；用户数据绝不覆盖）；`--selftest`（临时库 4/4/8 + 幂等 + 不覆盖）✓。
+- **调用点改造**：
+  - `deploy.py`：删自有 SCHEMA/SEED_VIDEOS/SEED_ZONES → `seed_demo.seed_database(db, m0-spike/data)`；
+    已有库的按名称失效路径修正保留（SEED_VIDEO_FILES 常量本地化）；
+  - `portable_launcher.py`：删自有 SEED_* → `seed_demo.seed_database(DATA/"labsentinel.db", MEDIA)`；
+    `repair_media_paths()` 保留；
+  - `build_portable.py`：`seed_demo.py` 复制进便携包 `scripts/`（启动器可导入）。
+- **测试**：新增 `server/tests/test_seed_demo.py` 5 用例（空库 4/4/8、来源绝对路径指向 media、
+  幂等返回 0、用户数据不覆盖、media 缺失跳过但 schema 已建、与 store.py schema 对拍）——
+  **pytest 90 passed**（84+5+1 改）。
+- **便携包重建 + 实测**：首次播种 4 路 ✓、启动 1 路 14 事件+截图 ✓、二次启动不重复 ✓、
+  user-cam 不被覆盖 ✓、备份恢复 ✓（与任务 47 行为一致，仅实现单源化）。
+- **遗留**：无。
