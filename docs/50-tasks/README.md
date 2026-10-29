@@ -89,6 +89,20 @@
 | [60-usb-device-discovery.md](./60-usb-device-discovery.md) | USB 设备枚举 API + UI | 已派发 |
 | [61-logging-diagnostics.md](./61-logging-diagnostics.md) | 日志轮转 + 诊断包 | 已派发 |
 | [62-backup-restore.md](./62-backup-restore.md) | 备份/恢复 CLI | 已派发 |
+| [63-health-errors-requestid.md](./63-health-errors-requestid.md) | 健康探针/统一错误/请求 ID | 已派发 |
+| [64-sqlite-wal-concurrency.md](./64-sqlite-wal-concurrency.md) | SQLite WAL + busy_timeout | 已派发 |
+| [65-camera-observability.md](./65-camera-observability.md) | 摄像头可观测性 | 已派发 |
+| [66-frontend-states.md](./66-frontend-states.md) | 前端加载/错误/空状态 | 已派发 |
+| [67-generic-webhook.md](./67-generic-webhook.md) | 通用 Webhook 告警 | 已派发 |
+| [68-retention-preview-disk-alert.md](./68-retention-preview-disk-alert.md) | 保留预演 + 磁盘预警 | 已派发 |
+| [69-schema-migrations.md](./69-schema-migrations.md) | schema 版本/迁移框架 | 已派发 |
+| [70-doctor.md](./70-doctor.md) | doctor 自检 | 已派发 |
+| [71-installer-silent.md](./71-installer-silent.md) | 安装器静默/自定义目录 | 已派发 |
+| [72-static-cache-gzip.md](./72-static-cache-gzip.md) | 静态缓存 + 选择性 gzip | 已派发 |
+| [73-ops-manual.md](./73-ops-manual.md) | 运维手册 | 已派发 |
+| [74-release-final-check.md](./74-release-final-check.md) | 发布文档终检 | 已派发 |
+
+> **夜间连续执行**：从 57 开始按序做，规则见 [批次57-74-夜间执行说明.md](./批次57-74-夜间执行说明.md)。
 
 > 完成情况（2026-10-26 晚）：01–11 全部交付（07 压测待锁修复后补测、08 apk 待 Flutter SDK）。
 > 12–15 为 2026-10-26 新派发批次（框架期任务，与模型训练解耦，可立即开工）。

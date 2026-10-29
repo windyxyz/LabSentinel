@@ -1,7 +1,7 @@
 # 55 · 交接快照（2026-10-30 00:10，恢复派发）
 
 > 本文件是**上下文压缩的落点**：新会话/新协作者先读这一份，再按链接进细节。
-> 当前状态：M1/M1.5 功能与便携分发包已验收；**批次 57–62 已通过看板派发给 flash 会话（对面会话）**，
+> 当前状态：M1/M1.5 功能与便携分发包已验收；**批次 57–74（18 项夜间批次）已通过看板派发给 flash 会话（对面会话）**，
 > 主线负责验收与提交。发布唯一硬阻塞：**真实 RTSP 摄像头 24h + 模型止损线**（用户侧硬件/数据）。
 
 ## 一、总体状态
@@ -14,7 +14,7 @@
 | 便携包 | ✅ `dist/LabSentinel-portable-20261029.zip` **264.8MiB / 12544 项**；含 `LabSentinel.exe`、`scripts/seed_demo.py`、media、安装/卸载脚本；安装后约 709MB |
 | 启动 EXE | ✅ 任务 55 已交付并验收：`LabSentinel.exe`（C# winexe，5.5KB，无黑框；`--stop` 可用）；无 csc 构建自动降级到 `启动.bat`/pythonw |
 | 部署 | ✅ 便携包（普通用户）+ `一键启动.bat`/`deploy.py`（开发模式，无 Python 时自动改启便携包） |
-| Git | 最近提交 `f9dd9cb`（批次 57–62 派发）；工作区干净 |
+| Git | 最近提交 `4869de6` 后又有 57–74 派发文档待提交；工作区当前只有本批文档改动 |
 | 协作 | ⚠️ **无定时自动化**（旧 5 分钟 cron 已删除）；派发方式 = 更新 `调度看板.md` + `派发状态.json`，flash 会话读取后执行 |
 | 发布 | ⛔ 被真实摄像头 24h + 模型停止线阻塞；其余自动可验项全绿 |
 
@@ -36,7 +36,8 @@
   （黑屏/遮挡但 running、fps 12.5）与 OBS Virtual Camera index 1（fps 29.6、3 事件、截图 200）；
   修复 USB 源 `"0"/"1"` 解析与 FPS=-1；工具 `tools/list_cameras.py`、`tools/virtual_cam_feed.py`；
   报告 `docs/64-usb-virtual-camera-report.md`。**不替代真实 RTSP 24h**。
-- **57–62：已派发（flash 会话执行中/排队）**，串行顺序：
+- **57–74：已派发（18 项夜间批次，flash 会话执行中/排队）**；总规则与时间预算见
+  [批次57-74-夜间执行说明](./50-tasks/批次57-74-夜间执行说明.md)。串行顺序：
   1. **57 多路模拟 RTSP 压测**（`57-multi-rtsp-sim.md`）：go2rtc 3 路 + 8001，10 分钟受控；
      **执行报告仍为占位 = 尚未开工**；模拟≠真实 24h。
   2. **58 发布产物清单/校验和**（`58-release-manifest.md`）：`scripts/release_manifest.py`，
@@ -49,8 +50,24 @@
      `/api/diagnostics/summary`、`scripts/collect_diagnostics.py`（脱敏 zip）。
   6. **62 备份/恢复 CLI**（`62-backup-restore.md`）：SQLite backup API、verify、restore（默认保守、
      路径穿越防护、`.bak-<ts>`）。
-- **并行约束**：57 是重负载，必须独占；58→59 都动 `dist/` 与 `docs/59`；60 动 `api.py`/`Cameras.vue`；
-  61 动 `main.py`/`config.py`；62 独立。一次只做一个，写前重读共享文件。
+  7. **63 健康探针/统一错误/请求 ID**（`63-health-errors-requestid.md`）：`/api/health/live|ready`、
+     `X-Request-ID`、错误体 `{detail,request_id,code}`。
+  8. **64 SQLite WAL + busy_timeout**（`64-sqlite-wal-concurrency.md`）：读写并行、并发写测试、62 回归。
+  9. **65 摄像头可观测性**（`65-camera-observability.md`）：last_error/重连次数/帧龄、单路状态端点、UI。
+  10. **66 前端加载/错误/空状态**（`66-frontend-states.md`）：四页三态、轮询失败不清空、按钮防重。
+  11. **67 通用 Webhook 告警**（`67-generic-webhook.md`）：HMAC 签名、http 开关、本地接收器测试。
+  12. **68 保留预演+磁盘预警**（`68-retention-preview-disk-alert.md`）：preview 只读、Dashboard 磁盘卡。
+  13. **69 schema 版本/迁移框架**（`69-schema-migrations.md`）：schema_version、旧库兼容、失败回滚。
+  14. **70 doctor 自检**（`70-doctor.md`）：只读检查模型/web/DB/端口/磁盘，入便携包。
+  15. **71 安装器静默/自定义目录**（`71-installer-silent.md`）：修 `--install-dir` 失效、
+      `--silent/--dry-run`、隔离测试。
+  16. **72 静态缓存 + 选择性 gzip**（`72-static-cache-gzip.md`）：assets immutable、index no-cache、
+      不压 zip/video。
+  17. **73 运维手册**（`73-ops-manual.md`）：日常巡检/排障/升级/备份/安全一本通。
+  18. **74 发布文档终检**（`74-release-final-check.md`）：`release_check.py` + 发布核对报告 + 发布清单。
+- **并行约束**：57 是重负载，必须独占；58→59 都动 `dist/` 与 `docs/59`；60/65/66 都动 `Cameras.vue`；
+  61/63/72 都动 `main.py`；62/64/69 都动数据库相关；67/68 都动 config/Dashboard。
+  一次只做一个，写前重读共享文件。
 
 ## 三、最近提交
 
@@ -88,13 +105,16 @@ db19dc9 fix+docs: 项目复审与三处兜底修复（preannotate/一键启动/�
 4. 代码签名（可选，影响 SmartScreen/杀软）；exe 无签名、无自定义图标。
 5. 不在 alpha 范围：Android APK（仅 Flutter 骨架）、iOS/HarmonyOS、人脸实测（默认关）、
    真实多路吞吐、NPU 打包、GB28181；告警真实 webhook 未实测。
-6. 本轮 57–62 完成后将补上：多路压测数据、发布清单、冒烟脚本、USB 枚举、日志轮转/诊断、备份恢复；
-   剩余未完善：自动更新、多用户/角色、导出 500 上限/PDF 页级解析/磁盘紧急清理。
+6. 本轮 57–74 完成后将补上：多路压测数据、发布清单、冒烟脚本、USB 枚举、日志轮转/诊断、备份恢复、
+   健康探针/请求 ID、SQLite WAL、相机可观测、前端三态、通用 Webhook、清理预演/磁盘预警、schema 迁移、
+   doctor、安装器静默、静态缓存、运维手册、发布终检；剩余未完善：自动更新、多用户/角色、
+   导出 500 上限/PDF 页级解析。
 
 ## 七、恢复/继续工作建议（新会话直接照做）
 
 1. 读本文件 + `docs/50-tasks/调度看板.md` + `docs/50-tasks/派发状态.json`。
-2. 看 flash 是否已写 `57` 的执行报告（占位 `（待填` 即未开工）；按 57→58→59→60→61→62 顺序推进。
+2. 看 flash 是否已写 `57` 的执行报告（占位 `（待填` 即未开工）；按 57→…→74 顺序推进，
+   总规则见 `docs/50-tasks/批次57-74-夜间执行说明.md`（阻塞记录后跳下一项，不等待主线）。
 3. 每项完成后主线验收：
    - 通用：`cd server && D:\LabSentinel\m0-venv\Scripts\python.exe -m pytest tests/ -q`；前端改动跑 `npm run build`；
    - 57：报告数字/清理/端口/主库 mtime；
