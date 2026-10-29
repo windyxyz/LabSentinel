@@ -72,4 +72,20 @@ python scripts/backup_data.py verify --zip <zip>
 
 ## 执行报告
 
-（待填：改动文件 / 实跑输出 / 测试 / 遗留）
+**flash 2026-10-30 完成（pytest 117 passed，真实库只读备份验证通过）**
+
+- **交付**：`scripts/backup_data.py`（backup/verify/restore 三子命令，纯标准库）：backup 用
+  `sqlite3.Connection.backup()` 热快照（服务运行中可直接备）+ 媒体三目录 + manifest（哈希/计数/
+  integrity/tool_version）；verify 只读校验（manifest 字段、db sha256、PRAGMA integrity_check、
+  条目路径安全）；restore 先 verify、无 --force 拒绝覆盖、--force 转存 .bak-<ts>（保留 3 个）、
+  保守恢复不删多余文件、恢复后复检 integrity。
+- **测试**：`test_backup_restore.py` 8 用例（往返含中文媒体文件名 / --no-media 双向 / 无 force 拒绝
+  +force 生成 .bak / .bak 保留 3 个 / 路径穿越三种 `../`、盘符、绝对路径全拒 / 篡改 db sha256 不匹配 /
+  缺 manifest / 非 zip）。全量 **pytest 117 passed**（109 + 8）。
+  （过程中修一处自坑：backup 的 --no-media 初版未生效。）
+- **真实数据实跑（只读，未 restore）**：`server/data` → 临时 zip：**1673 文件 / 341.7MB**
+  （db 0.4MB + 媒体 1671 个/342.1MB，integrity=ok）；verify OK（sha256 前缀 c6bfe2c93edf…）；
+  **事件行数 源库=1201 = 快照=1201**；临时 zip 已删除。
+- **文档**：部署FAQ 加「如何备份/迁移数据/恢复前注意」（含保守语义与 .bak 说明）；docs/59 数据
+  位置节加便携版三命令（runtime\python.exe）。
+- **遗留**：无。

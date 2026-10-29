@@ -47,12 +47,14 @@ def desktop_dir() -> Path:
     return Path(r.stdout.strip() or (Path.home() / "Desktop"))
 
 
-def make_shortcuts(install: Path) -> None:
+def make_shortcuts(install: Path, desktop: Path | None = None,
+                   start_menu: Path | None = None) -> None:
     pythonw = install / "runtime" / "pythonw.exe"
     launcher = install / "scripts" / "portable_launcher.py"
     exe = install / "LabSentinel.exe"
-    desktop = desktop_dir()
-    smenu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "LabSentinel"
+    desktop = desktop or desktop_dir()
+    smenu = Path(start_menu) if start_menu else \
+        Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "LabSentinel"
     smenu.mkdir(parents=True, exist_ok=True)
 
     def esc(s: str) -> str:
@@ -110,11 +112,55 @@ def set_autostart(install: Path, on: bool) -> None:
         log("  开机自启：已关闭/清除")
 
 
-def do_install(src: Path, autostart: bool) -> int:
+def _validate_install_dir(p: Path) -> str | None:
+    """危险安装目标检查（任务71）：返回原因文本，None=允许。"""
+    if not p.is_absolute():
+        return "安装目录必须是绝对路径"
+    rp = Path(os.path.normpath(str(p)))
+    if rp.parent == rp:
+        return "不能安装到盘符根目录"
+    win = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    if rp == win or rp.parent == win:  # 系统目录本身/直接子目录（更深如 %TEMP% 子目录属合法测试目标）
+        return "不能安装到 Windows 目录内"
+    if rp == Path.home():
+        return "不能安装到用户主目录根"
+    if rp == Path(os.environ.get("LOCALAPPDATA", "/__na__")):
+        return "不能安装到 LOCALAPPDATA 根"
+    return None
+
+
+def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
+               silent: bool = False, shortcuts: bool = True, dry_run: bool = False,
+               force: bool = False, desktop_dir: Path | None = None,
+               start_menu_dir: Path | None = None) -> int:
     if not (src / "runtime" / "python.exe").exists():
-        raise SystemExit(f"[失败] 源不是便携包（缺 runtime\\python.exe）：{src}")
-    install = Path(os.environ["LOCALAPPDATA"]) / "Programs" / "LabSentinel"
+        log(f"[失败] 源不是便携包（缺 runtime\\python.exe）：{src}")
+        return 2
+    install = Path(install_dir) if install_dir else \
+        Path(os.environ["LOCALAPPDATA"]) / "Programs" / "LabSentinel"
+    reason = _validate_install_dir(install)
+    if reason:
+        log(f"[失败] 安装目录被拒绝：{install} —— {reason}")
+        return 2
     upgrading = install.exists()
+    if upgrading:
+        is_ls_install = (install / "runtime" / "python.exe").exists()
+        non_empty = any(install.iterdir())
+        if not is_ls_install and non_empty and not force:
+            log(f"[失败] 目标 {install} 已存在且不是 LabSentinel 安装目录（非空、缺 runtime\\python.exe）。"
+                "确认覆盖请加 --force")
+            return 2
+    data_root = Path(os.environ["LOCALAPPDATA"]) / "LabSentinel"
+    if dry_run:
+        log(f"[dry-run] 将执行（未写任何文件/注册表）：")
+        log(f"  复制 {src} -> {install}{'（覆盖升级，数据目录不动）' if upgrading else '（全新安装）'}")
+        log(f"  快捷方式：{'桌面+开始菜单' if shortcuts else '跳过（--no-shortcuts）'}"
+            + (f"（桌面覆盖={desktop_dir} 开始菜单覆盖={start_menu_dir}）"
+               if shortcuts and (desktop_dir or start_menu_dir) else ""))
+        log(f"  开机自启：{'开启（HKCU Run）' if autostart else '不开'}")
+        log(f"  数据目录：{data_root}（安装/升级都不动）")
+        log(f"  卸载方式：{install / '卸载.bat'} 或 开始菜单 卸载.lnk")
+        return 0
     log(f"[安装] {'覆盖升级' if upgrading else '全新安装'}：{src} -> {install}")
     install.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, install, dirs_exist_ok=True,
@@ -124,8 +170,11 @@ def do_install(src: Path, autostart: bool) -> int:
     if not ver_file.exists():
         ver_file.write_text(VERSION_DEFAULT, encoding="ascii")
     log(f"  版本：{ver_file.read_text(encoding='ascii').strip()}"
-        + ("（用户数据在 %LOCALAPPDATA%\\LabSentinel，升级不受影响）" if upgrading else ""))
-    make_shortcuts(install)
+        + ("（用户数据在数据目录，升级不受影响）" if upgrading else ""))
+    if shortcuts:
+        make_shortcuts(install, desktop=desktop_dir, start_menu=start_menu_dir)
+    else:
+        log("  快捷方式：已跳过（--no-shortcuts）")
     set_autostart(install, autostart)
     (install / "卸载.bat").write_text(
         "@echo off\n"
@@ -136,11 +185,13 @@ def do_install(src: Path, autostart: bool) -> int:
         "choice /C YN /M \"Also delete user data (events/snapshots/config)\"\n"
         "if errorlevel 2 (set \"PURGE=\") else (set \"PURGE=--purge-data\")\n"
         "cd /d %TEMP%\n"
-        "\"%HERE%runtime\\python.exe\" \"%HERE%scripts\\install_portable.py\" uninstall --purge-data %PURGE%\n"
+        "\"%HERE%runtime\\python.exe\" \"%HERE%scripts\\install_portable.py\" uninstall --install-dir \"%HERE%\" %PURGE%\n"
         "pause\n",
         encoding="ascii")
-    log(f"[安装] 完成。启动方式：桌面/开始菜单快捷方式，或 {install / '启动.bat'}")
-    log("  卸载：开始菜单 卸载.lnk 或安装目录 卸载.bat（默认保留数据）")
+    log(f"[安装] 完成。版本：{ver_file.read_text(encoding='ascii').strip()}  安装目录：{install}")
+    log(f"  启动方式：{'桌面/开始菜单快捷方式' if shortcuts else '(无快捷方式)'}，或 {install / 'LabSentinel.exe'} / 启动.bat")
+    log(f"  数据目录：{data_root}（升级/卸载默认保留）")
+    log(f"  卸载方式：开始菜单 卸载.lnk 或 {install / '卸载.bat'}（默认保留数据）")
     return 0
 
 
@@ -233,12 +284,25 @@ def main() -> int:
     ap.add_argument("--source", type=Path, default=Path(__file__).resolve().parent.parent,
                     help="便携包根（默认=脚本上一级）")
     ap.add_argument("--install-dir", type=Path,
-                    default=Path(os.environ["LOCALAPPDATA"]) / "Programs" / "LabSentinel")
+                    default=Path(os.environ["LOCALAPPDATA"]) / "Programs" / "LabSentinel",
+                    help="安装目标（install/uninstall 都按它；默认 %%LOCALAPPDATA%%\\Programs\\LabSentinel）")
     ap.add_argument("--autostart", action="store_true", help="安装时开启开机自启（HKCU）")
+    ap.add_argument("--no-autostart", action="store_true", help="明确不开自启（默认行为；与 --autostart 互斥）")
     ap.add_argument("--purge-data", action="store_true", help="卸载时同时删除用户数据")
+    ap.add_argument("--silent", action="store_true", help="静默安装：无交互提示，结果仍打印 stdout")
+    ap.add_argument("--no-shortcuts", action="store_true", help="跳过桌面/开始菜单快捷方式")
+    ap.add_argument("--dry-run", action="store_true", help="只打印将执行的动作，不写任何文件/注册表")
+    ap.add_argument("--force", action="store_true", help="覆盖非 LabSentinel 的非空目标目录")
+    ap.add_argument("--desktop-dir", type=Path, help="覆盖桌面快捷方式位置（隔离测试用）")
+    ap.add_argument("--start-menu-dir", type=Path, help="覆盖开始菜单位置（隔离测试用）")
     a = ap.parse_args()
+    if a.autostart and a.no_autostart:
+        print("[失败] --autostart 与 --no-autostart 互斥")
+        return 2
     if a.action == "install":
-        return do_install(a.source, a.autostart)
+        return do_install(a.source, a.autostart, a.install_dir, silent=a.silent,
+                          shortcuts=not a.no_shortcuts, dry_run=a.dry_run, force=a.force,
+                          desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir)
     return do_uninstall(a.install_dir, a.purge_data)
 
 

@@ -60,4 +60,25 @@
 
 ## 执行报告
 
-（待填：改动文件 / 响应头证据 / 测试 / 遗留）
+**flash 2026-10-30 完成（pytest 161 passed，8001 实跑四类响应头全达标）**
+
+- **改动**（全部在 `server/app/main.py`，无新依赖）：
+  - `SPAStaticFiles.get_response` 加缓存策略：`assets/*` → `public, max-age=31536000, immutable`；
+    `index.html` 与 SPA 回退 → `no-cache`；其余静态 → `public, max-age=3600`；304 响应同享；
+    `/api`、`/ws` 不经此处（行为不变）。保留 Starlette ETag/Last-Modified。
+  - 自写选择性 gzip 中间件：只压 `text/*`、`image/svg+xml`、`application/javascript`、
+    `application/json`；zip/video/jpeg/octet-stream 天然不在白名单；≥1024 字节才压；Range 请求
+    让路（视频/证据包断点续传优先）；加 `Vary: Accept-Encoding`。
+- **测试**：`test_web_static.py` 扩展 4 用例（缓存头三档 + 304 带 immutable / gzip 资产解压后与
+  原文一致 + Vary / zip 不压 + Range 优先 / 既有 SPA 回退与未知 API 404 保持）。全量
+  **pytest 161 passed**（157 + 4）。
+- **8001 实跑响应头证据**：
+  - `GET /assets/index-oKAKbDXN.js`（Accept-Encoding: gzip）→ 200，
+    `cache-control=public, max-age=31536000, immutable`、`content-encoding=gzip`、
+    `vary=Accept-Encoding`、`content-length=44923`（原始 117.62KB → **压缩后 44.9KB，-62%**）；
+  - `GET /` 与 `GET /events` → `cache-control=no-cache`；
+  - `GET /api/export/evidence.zip` → `content-encoding` 无（`application/zip` 不压）。
+- **实跑暴露并修复的 1 个问题**：`GET /` 时 StaticFiles 内部传给 get_response 的 path 是
+  `"."`（非空串）——首次实现漏判导致 / 命中 1h 档；已把 `"."` 纳入 index 判定（插桩定位）。
+- **文档**：部署FAQ「升级后页面还是旧的怎么办」；部署指南单端口注记补缓存策略。
+- **遗留**：无。

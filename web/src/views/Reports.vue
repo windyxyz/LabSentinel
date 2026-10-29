@@ -3,6 +3,7 @@
 // 图表用原生 SVG（体积敏感，不引 ECharts）。
 import { computed, onMounted, ref, watch } from 'vue'
 import { api, TYPE_TEXT } from '../api'
+import AsyncState from '../components/AsyncState.vue'
 
 const days = ref(7)
 const camId = ref('')
@@ -18,17 +19,29 @@ const summary = ref(null)
 const rangeStart = ref('')
 const rangeEnd = ref('')
 
+// 任务66：三态
+const loading = ref(true)
+const error = ref('')
+
 async function load() {
   const base = camId.value ? { camera_id: camId.value } : {}
-  summary.value = await api.statsSummary({ days: 30, ...base })
-  hourly.value = (await api.statsHourly({ date: hourDate.value, ...base })).hours
-  if (viewMode.value === 'week') {
-    weekly.value = (await api.statsWeekly({ weeks: weekCount.value, ...base })).weeks
-  } else if (rangeStart.value && rangeEnd.value) {
-    daily.value = (await api.statsDaily({
-      start_ts: rangeStart.value, end_ts: rangeEnd.value, ...base })).days
-  } else {
-    daily.value = (await api.statsDaily({ days: days.value, ...base })).days
+  try {
+    summary.value = await api.statsSummary({ days: 30, ...base })
+    hourly.value = (await api.statsHourly({ date: hourDate.value, ...base })).hours
+    if (viewMode.value === 'week') {
+      weekly.value = (await api.statsWeekly({ weeks: weekCount.value, ...base })).weeks
+    } else if (rangeStart.value && rangeEnd.value) {
+      daily.value = (await api.statsDaily({
+        start_ts: rangeStart.value, end_ts: rangeEnd.value, ...base })).days
+    } else {
+      daily.value = (await api.statsDaily({ days: days.value, ...base })).days
+    }
+    error.value = ''
+  } catch (e) {
+    // 失败保留旧图表数据，只提示
+    error.value = String(e.message || e)
+  } finally {
+    loading.value = false
   }
 }
 function setView(m) {
@@ -136,7 +149,11 @@ function barGeom(h) {
     </div>
   </div>
 
-  <div class="panel">
+  <AsyncState :loading="loading" :error="error" :notice="summary ? '刷新失败，仍显示上一次数据' : ''"
+              :empty="summary && summary.total === 0"
+              empty-text="所选区间没有事件数据 —— 试试更换日期范围、选择全部摄像头，或先去摄像头页启动采集"
+              @retry="load">
+    <div class="panel">
     <b>{{ viewMode === 'week' ? '每周事件趋势' : '每日事件趋势' }}</b>
     <svg :viewBox="`0 0 ${W} ${H}`" style="width:100%; margin-top:8px">
       <!-- 网格与 Y 轴刻度 -->
@@ -184,4 +201,5 @@ function barGeom(h) {
       </tr>
     </table>
   </div>
+  </AsyncState>
 </template>

@@ -3,11 +3,14 @@ import csv
 import io
 import os
 import shutil
-from datetime import datetime
+import sqlite3
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import cv2
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from . import go2rtc
 from .alerts import dispatcher, render_alert
@@ -66,13 +69,66 @@ def _event_row(row: dict) -> dict:
     return row
 
 
+# ---- health（任务63）：轻量探针，永不触发推理 ----
+@router.get("/health/live")
+def health_live():
+    """存活探针：进程活着即 200；不查 DB、不读模型。"""
+    return {"status": "ok"}
+
+
+@router.get("/health/ready")
+def health_ready():
+    """就绪探针：逐项检查，全过 200，否则 503。不加载 ONNX 会话（避免 DML 并发）。"""
+    import shutil
+    checks = {}
+
+    try:
+        con = sqlite3.connect(f"file:{store.path}?mode=ro", uri=True)
+        con.execute(f"PRAGMA busy_timeout={int(settings.sqlite_busy_timeout_ms)}")
+        try:
+            con.execute("SELECT 1").fetchone()
+        finally:
+            con.close()
+        checks["db"] = {"ok": True, "detail": "select 1 ok"}
+    except Exception as e:  # noqa: BLE001
+        checks["db"] = {"ok": False, "detail": str(e)[:120]}
+
+    try:
+        probe = settings.data_dir / ".ready_probe"
+        probe.write_text("ok", encoding="ascii")
+        probe.unlink(missing_ok=True)
+        checks["data_dir"] = {"ok": True, "detail": "可写"}
+    except OSError as e:
+        checks["data_dir"] = {"ok": False, "detail": f"不可写: {e}"[:120]}
+
+    model = settings.ppe_model or settings.model_fp32
+    checks["model"] = {"ok": bool(model and Path(model).exists()),
+                       "detail": str(model or "(未配置)")}
+
+    try:
+        free_gb = shutil.disk_usage(settings.data_dir).free / 1e9
+        checks["disk"] = {"ok": free_gb >= settings.ready_min_free_gb,
+                          "free_gb": round(free_gb, 1)}
+    except OSError as e:
+        checks["disk"] = {"ok": False, "free_gb": None, "detail": str(e)[:120]}
+
+    ready = all(v.get("ok") for v in checks.values())
+    return JSONResponse({"status": "ready" if ready else "degraded", "checks": checks},
+                        status_code=200 if ready else 503)
+
+
 # ---- system ----
+def _system_version() -> str:
+    return "0.1.0-m1"
+
+
 @router.get("/system")
 def system():
     today = store.today_event_counts()
     unhandled = sum(n for lv, n in today.items()) - store.count_events_today_handled()
     return {
-        "version": "0.1.0-m1",
+        "version": _system_version(),
+        "schema_version": store.schema_version(),  # 任务69
         "backend": get_engine().backend,
         **(manager.status() if manager else {"cameras": []}),
         "today_counts": today,
@@ -85,6 +141,17 @@ def system():
 @router.get("/cameras")
 def cameras():
     return store.cameras()
+
+
+@router.get("/cameras/usb-devices", dependencies=[Depends(require_read)])
+def usb_devices(refresh: int = 0):
+    """枚举本机 DirectShow USB 摄像头（任务60）。
+
+    index 为枚举顺序（通常与 CAP_DSHOW 一致，驱动/插拔变化后可能改变，设备名更稳定）；
+    失败一律 200 + devices=[] + 中文 error（前端回退手输索引）。
+    """
+    from . import usb_devices as usb
+    return usb.list_devices(refresh=bool(refresh))
 
 
 @router.post("/cameras", dependencies=[Depends(require_admin)])
@@ -122,6 +189,31 @@ def camera_webrtc(cid: int, request: Request):
         raise HTTPException(404, "camera not found")
     host = request.url.hostname or "localhost"
     return {"camera_id": cid, "ws_url": f"ws://{host}:1984/api/ws?src={cid}"}
+
+
+@router.get("/cameras/{cid}/status", dependencies=[Depends(require_read)])
+def camera_status(cid: int):
+    """单路运行指标（任务65）：帧龄/最近错误（已脱敏）/重连次数/累计帧数。"""
+    cam = store.camera(cid)
+    if cam is None:
+        raise HTTPException(404, "camera not found")
+    w = manager.workers.get(cid) if manager else None
+    out = {"id": cid, "name": cam["name"], "type": cam["type"], "status": cam["status"],
+           "fps": None, "last_frame_ts": None, "frame_age_s": None, "last_error": None,
+           "last_error_ts": None, "reconnect_count": 0, "opened_at": None, "frames_total": 0}
+    if w is not None:
+        lfw = w.last_frame_ts
+        out.update({
+            "fps": round(w.analysis_fps_now, 1),
+            "last_frame_ts": lfw,
+            "frame_age_s": round(time.time() - lfw, 1) if lfw else None,
+            "last_error": w.last_error,
+            "last_error_ts": w.last_error_ts,
+            "reconnect_count": w.reconnect_count,
+            "opened_at": w.opened_at,
+            "frames_total": w.frames_total,
+        })
+    return out
 
 
 @router.get("/cameras/{cid}/snapshot")
@@ -340,6 +432,7 @@ def alerts_status():
         "pushplus": bool((settings.pushplus_token or "").strip()),
         "qmsg": bool((settings.qmsg_key or "").strip() and (settings.qmsg_qq or "").strip()),
         "email": bool(settings.smtp_host and settings.alert_email_to),
+        "webhook": bool((settings.webhook_url or "").strip()),  # 任务67
     }
     by_ch = dispatcher.store.delivery_counts_by_channel() if dispatcher.store else {}
     channels = []
@@ -397,11 +490,94 @@ def maintenance_cleanup():
     return retention.run_cleanup(store)
 
 
+@router.get("/diagnostics/summary", dependencies=[Depends(require_read)])
+def diagnostics_summary():
+    """诊断聚合（任务61）：只读、可公开的聚合信息；错误取自进程内 RingHandler。"""
+    from . import diagnostics
+    return diagnostics.summary(store)
+
+
+@router.get("/maintenance/preview", dependencies=[Depends(require_read)])
+def maintenance_preview():
+    """清理预演（任务68）：只读，返回将删除的事件数/字节与释放预估，绝不删除。"""
+    from . import retention
+    return retention.preview_cleanup(store)
+
+
 @router.get("/maintenance/status")
 def maintenance_status():
+    """维护状态（任务14/68）：清理结果 + 磁盘水位/数据体量/增速预估（估算值已标注）。"""
+    import os
     from . import retention
+
+    def _core_bytes() -> int:
+        """db + 截图/视频/标注池四目录的递归大小。"""
+        total = 0
+        roots = [settings.data_dir / "labsentinel.db", settings.snapshot_dir,
+                 settings.video_dir, settings.annotation_pool_dir]
+        for r in roots:
+            if r.is_file():
+                total += r.stat().st_size
+            elif r.is_dir():
+                for dirpath, _d, files in os.walk(r):
+                    for f in files:
+                        try:
+                            total += os.path.getsize(os.path.join(dirpath, f))
+                        except OSError:
+                            pass
+        return total
+
+    def _data_bytes() -> tuple[int, bool]:
+        """全 data_dir 递归大小；超 2 万文件退化为四核心目录（防大目录卡 API）。"""
+        total, n = 0, 0
+        for dirpath, _d, files in os.walk(settings.data_dir):
+            for f in files:
+                n += 1
+                if n > 20000:
+                    return _core_bytes(), True
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, f))
+                except OSError:
+                    pass
+        return total, False
+
+    data_bytes, capped = _data_bytes()
+    free_gb = retention._disk_free_gb()
+    try:
+        total_gb = shutil.disk_usage(str(settings.data_dir)).total / 1e9
+        free_pct = round(free_gb / total_gb * 100, 1) if total_gb else None
+    except OSError:
+        total_gb, free_pct = None, None
+    # forecast_days（粗略估算）：近 7 天事件关联文件的日均字节 → 剩余空间可撑天数
+    forecast_days = None
+    try:
+        with store._conn() as c:
+            rows = c.execute(
+                "SELECT snapshot, video FROM events WHERE ts >= ? LIMIT 5000",
+                ((datetime.now() - timedelta(days=7)).isoformat(timespec="seconds"),)).fetchall()
+        week_bytes = 0
+        for r in rows:
+            for col in ("snapshot", "video"):
+                p = r[col]
+                if p and os.path.isfile(p):
+                    try:
+                        week_bytes += os.path.getsize(p)
+                    except OSError:
+                        pass
+        if week_bytes > 0:
+            per_day_gb = (week_bytes / 7) / 1e9
+            if per_day_gb > 0:
+                forecast_days = round(free_gb / per_day_gb)
+    except Exception:  # noqa: BLE001  预估失败不阻塞状态端点
+        forecast_days = None
     return {"last_cleanup": retention.last_result(),
-            "disk_free_gb": retention._disk_free_gb(),
+            "disk_free_gb": round(free_gb, 2),
+            "disk_total_gb": round(total_gb, 2) if total_gb else None,
+            "disk_free_pct": free_pct,
+            "data_bytes": data_bytes,
+            "data_bytes_capped": capped,
+            "low_disk": free_gb < settings.disk_min_free_gb,
+            "forecast_days": forecast_days,  # 估算值：近7天日均增速推算，仅供预警参考
             "retention": {"events_days": settings.retention_events_days,
                           "pool_days": settings.retention_pool_days,
                           "disk_min_free_gb": settings.disk_min_free_gb}}

@@ -52,4 +52,21 @@ python scripts/smoke_portable.py --zip dist/LabSentinel-portable-*.zip [--port 8
 
 ## 执行报告
 
-（待填：运行输出 / 隔离证据 / 反例 / 遗留）
+**flash 2026-10-30 完成（正例 8/8 PASS ×2 路径 + 反例全过，未改启动器/安装器）**
+
+- **交付**：`scripts/smoke_portable.py`（纯标准库，8 步 PASS/FAIL，try/finally 兜底杀残留）；
+  docs/59 与 scripts/README.md 已加命令与说明。未改 portable_launcher/install_portable/build_portable。
+- **正例实跑**（dist/LabSentinel-portable-20261029.zip，端口 8180）：
+  `8/8 PASS`，exit 0——隔离解压→`LabSentinel.exe` 启动→锁出现→`/api/system 200 backend=directml
+  version=0.1.0-m1`→首页根标记命中+`/assets/index-DHSDXJpu.js 200`→播种 cameras=4→`--stop` rc=0
+  端口释放锁删除→**真实 %LOCALAPPDATA%\LabSentinel 文件数/mtime 前后不变 (59, ...)→临时目录已删**。
+  stop_cmd 重构后复跑一遍仍 8/8。
+- **回退分支实测**：解压真实 zip 剥除 `LabSentinel.exe` 后 `--dir` 模式 → 入口=启动.bat，
+  同样 8/8 PASS exit 0。
+- **反例**：`--zip 不存在` → `[失败] zip 不存在` exit 1；缺参数 → argparse 用法报错 rc=2。
+- **发现的 bug（修复于冒烟脚本自身，未动产品代码）**：初版 `stop_cmd` 固定指向 LabSentinel.exe，
+  回退分支（无 exe）停止时 FileNotFoundError 直接崩溃——已改为随入口切换停止命令并复测。
+  产品代码无 bug 发现。
+- **边界处理**：`--timeout` ≥30 钳到 25（避开启动器 30s MessageBox）；端口被占不漂移直接失败。
+- **pytest**：无服务端代码改动，基线不受影响（当前 **95 passed**，含任务 58 新增 4 例）。
+- **遗留**：无。CI 化时把本脚本接进 portable.yml 的构建后步骤即可（记入 52 报告的后续优化）。

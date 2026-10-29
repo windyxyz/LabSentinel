@@ -14,7 +14,7 @@ python scripts/release_check.py [--root .] [--zip dist/LabSentinel-portable-*.zi
 检查项（每项 PASS/WARN/FAIL + 证据）：
 
 1. **相对链接**：扫描 `README.md`、`docs/*.md`、`docs/50-tasks/*.md` 中的
-   `[...](相对路径)` 与 `![](...)`，目标文件存在；跳过 http(s)/锚点/代码块内链接；
+   Markdown 行内链接与图片链接（方括号+圆括号语法，目标为相对路径），目标文件存在；跳过 http(s)/锚点/代码块内链接；
 2. **版本一致性**：`server/app/main.py` 的 FastAPI version、`server/app/api.py` `/api/system`
    返回的 version、`docs/release-notes-v0.1.0-alpha.md`/`docs/发布公告.md` 中出现的版本串，
    列出不一致（允许 release notes 使用 `v0.1.0-alpha`）；
@@ -73,4 +73,20 @@ python scripts/release_check.py [--root .] [--zip dist/LabSentinel-portable-*.zi
 
 ## 执行报告
 
-（待填：改动文件 / 检查摘要 / 修复项 / 遗留阻塞）
+**flash 2026-10-30 完成（pytest 165 passed，真实仓库终检 FAIL 0，断链 7 条全修）**
+
+- **改动**：新增 `scripts/release_check.py`（六类检查：相对链接 194 条（跳过 http/锚点/代码块内/
+  外链不联网）/ 版本一致性（`0.1.0-alpha` 别名列入允许口径）/ 敏感信息 grep（allowlist 豁免示例
+  占位，LS_ADMIN_TOKEN 非空专项）/ TODO 清单（排除自身）/ 必需文件 9 项 / 便携包 manifest 复用
+  任务 58 函数重算 sha）；`--json` 支持；退出码 FAIL=2。新增 `test_release_check.py` 4 用例
+  （临时目录造 repo：断链/代码块忽略/版本 WARN 与别名/密钥与 allowlist/缺文件）。
+  全量 **pytest 165 passed**（161 + 4）。
+- **真实仓库终检输出**：链接 PASS（首跑 7 断链→修：53 报告 4 条 `../assets`→`assets`、39/44
+  `../../x`→`../x`、74 规格字面示例改措辞）；版本 WARN（候选另名，规格允许）；敏感信息/TODO/
+  必需文件/manifest 全 PASS。**FAIL 0**。
+- **文档终检修复**：发布公告"v2 训练中"陈旧表述改"v2 已上线"（mAP50=0.723 引 52 报告，不夸大；
+  仍无"已验证 24h"类表述）；release-notes 补完整性引用（SHA256SUMS+manifest，勿信手抄数字）；
+  README 文档索引加运维手册与发布核对报告；发布核对报告追加「2026-10-30 发布终检」小节+
+  六项人工发布清单（24h 为唯一硬阻塞）。
+- **遗留阻塞（非本批可解）**：真实摄像头 24h（用户侧）、GitHub 远端与 Actions 实跑（52 启用前提）、
+  可选签名。详见发布核对报告发布清单。

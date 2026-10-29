@@ -48,4 +48,26 @@ slot 默认内容 + retry 事件），四页复用它；也可用每页局部实
 
 ## 执行报告
 
-（待填：改动文件 / 四页验证 / build 体积 / 遗留）
+**flash 2026-10-30 完成（playwright 自动验证 13/13 PASS，gzip 44.88KB）**
+
+- **改动文件**：新增 `web/src/components/AsyncState.vue`（loading/error+重试/empty/notice 四态，
+  401 时附"到摄像头页填令牌"提示，样式全 scoped）；四页接入：
+  - **Dashboard**：reload 包 try/catch/finally + **5s 轮询**（规格提到，现状原无轮询，新增后
+    错误/提示分支可达）；轮询失败保留旧卡片只出"刷新失败"轻提示；空事件流指向摄像头页。
+  - **Events**：加载态/错误条+重试；筛选空态带语义（"当前筛选条件下没有事件" vs "暂无事件——
+    启动摄像头…"）；处置按钮（确认/误报/忽略，表格与抽屉两处）busyEvent 防重复；轮询现状=无
+    （手动刷新），失败保留旧数据出提示。
+  - **Reports**：三态 + 空态文案（换日期/选全部摄像头/先启动采集）；失败保留旧图表出提示。
+  - **Cameras**：列表三态 + 空态指向添加表单；添加/启动/删除按钮 disabled+文案变化；删除加
+    confirm 确认（超出规格的防误删，报告注明）。
+- **过程中发现并修复的真 bug**：Dashboard reload 初版把 `loading=false` 放 try 内，失败路径
+  loading 永远为 true → **错误条永不出现、页面卡死"加载中…"**（playwright 复现抓到）；
+  已补 finally 并复测。
+- **自动验证**（gpu-venv playwright + 8001 临时实例，脚本 D:\tmp\ls66_verify.py，截图
+  D:\tmp\ls66_shots\*.png）：**13/13 PASS**——空库四页空态 ✓；路由拦截 /api/system → 错误条
+  （"Failed to fetch"+重试按钮，页面不白屏）✓；解除拦截点重试 → 数据恢复 ✓；恢复拦截 → 5s 轮询
+  失败旧卡片保留+提示出现 ✓；375px 四页+错误条横向溢出全部 0px ✓。
+- **build**：通过，gzip **44.88KB**（43.43 → +1.45KB，预算 +10KB 内）。
+- **pytest**：纯前端改动，无服务端影响（当前基线 130 passed）。
+- **遗留**：Face 页未接入（规格允许顺带不强制，其已有 catch 提示）；Events 无自动轮询（现状即
+  手动刷新，未强加）。

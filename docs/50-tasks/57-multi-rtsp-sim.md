@@ -42,4 +42,24 @@
 
 ## 执行报告
 
-（待填：配置/时间线 / 三路 fps 与事件 / CPU/内存 / 异常 / 清理 / 结论）
+**flash 2026-10-30 完成（10 分钟全程跑满，各项判定通过）**
+
+- **配置**：go2rtc `logs/multi-rtsp.yaml` 3 路 `exec:` 源（lab1=lab-walk 从头、lab2=lab-equip 从头、
+  lab3=lab-walk `-ss 2` 错开；ffmpeg `-c copy -f mpegts pipe:1`，方案沿用 docs/54 §2）；ffprobe 三路均
+  `h264,1280,720` ✓。隔离服务端 8001 + `D:\tmp\ls57` 临时目录；3 路 rtsp 摄像头 + 全画幅安全区 +
+  enter L2 规则（cooldown 5s）全部启动。
+- **harness**：`D:\tmp\ls57\{setup,monitor,cleanup}.py`（setup 曾因漏调 start_go2rtc/start_server 报
+  "go2rtc 未就绪"，排查后修复；zones 422 为 polygon 需传数组非 JSON 串，均已修）。
+- **实测（21 采样点/601s）**：
+  - 三路**全程 running**，fps 稳定值 25.0/30.0/25.0＝各自源帧率，**串行锁未造成降帧**；
+  - 事件 61→648（+587/10min，三路持续 enter L2）；截图 cam1 289KB / cam2 205KB `200 image/jpeg`；
+  - API /events 延迟 p50=20ms max=30ms；服务日志 718 行**零错误**（Traceback/analyze error/worker
+    stopped 计数 0）；无 worker 死亡、无死机、无驱动异常。
+  - **进程资源**（真实 uvicorn pid 现采补齐，monitor 曾误采 venv stub——缺陷如实记录）：全程平均
+    **2.90 核**、现采 3.03 核；WS 2278MB / 峰值 2876MB；go2rtc 0.06 核/27MB。**3 路并发 ≈1 核/路**。
+- **未降级复测**：3 路全程稳定，未触发"降为 2 路/1 路"条件。
+- **清理**：3 摄像头删除、8001+go2rtc(含 ffmpeg) 停止、go2rtc.yaml 字节级还原、multi-rtsp.yaml 与
+  临时数据删除；1984/8554/8001 全空闲；**主库 mtime 未变（零写入）** ✓。
+- **报告**：[docs/65-multi-rtsp-sim-report.md](../65-multi-rtsp-sim-report.md)（含 R1 harness 坑 /
+  R2 多路上限留真机 / R3 H.265 转码开销提示；含"模拟≠真实 24h"声明）。
+- **遗留**：无阻塞。4 路以上外推未实测，留给真实摄像头批次。

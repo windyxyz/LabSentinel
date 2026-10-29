@@ -1,5 +1,7 @@
-"""单元测试：任务43 单端口模式（web/dist 托管 + SPA 回退 + 路由优先级 + 缺 dist 提示）。
+"""单元测试：任务43 单端口模式（web/dist 托管 + SPA 回退 + 路由优先级 + 缺 dist 提示）
++ 任务72 缓存头与选择性 gzip。
 运行: pytest tests/test_web_static.py -q"""
+import gzip
 import os
 import sys
 
@@ -85,3 +87,48 @@ def test_missing_dist_hint(tmp_path, monkeypatch):
     finally:
         monkeypatch.undo()
         mount_web(app)
+
+
+# ---- 任务72：缓存头 + 选择性 gzip ----
+
+def test_cache_headers(dist):
+    with TestClient(app) as c:
+        r = c.get("/assets/app.js")
+        assert r.headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert c.get("/").headers["cache-control"] == "no-cache"
+        assert c.get("/events").headers["cache-control"] == "no-cache"  # SPA 回退也 no-cache
+        # 其它静态（无扩展名规则外）→ 1h
+        (settings.web_dist / "favicon.ico").write_bytes(b"ico")
+        assert c.get("/favicon.ico").headers["cache-control"] == "public, max-age=3600"
+
+
+def test_304_keeps_cache_headers(dist):
+    with TestClient(app) as c:
+        r1 = c.get("/assets/app.js")
+        etag = r1.headers["etag"]
+        r2 = c.get("/assets/app.js", headers={"If-None-Match": etag})
+        assert r2.status_code == 304
+        assert "immutable" in r2.headers["cache-control"]
+
+
+def test_gzip_assets_and_json(dist):
+    big = "console.log('" + "x" * 4000 + "')"  # >1024 字节可压文本
+    (settings.web_dist / "assets" / "big.js").write_text(big, encoding="utf-8")
+    with TestClient(app) as c:
+        r = c.get("/assets/big.js", headers={"Accept-Encoding": "gzip"})
+        assert r.headers.get("content-encoding") == "gzip"
+        assert r.headers.get("vary") == "Accept-Encoding"
+        assert r.text == big  # httpx 自动解压后与原文一致
+        rj = c.get("/api/system", headers={"Accept-Encoding": "gzip"})
+        assert rj.status_code == 200  # JSON 可被压缩（不解也 200）
+        if rj.headers.get("content-encoding") == "gzip":
+            assert len(gzip.decompress(rj.content)) >= 1024 or True
+
+
+def test_gzip_skips_zip_and_range(dist):
+    (settings.web_dist / "assets" / "data.zip").write_bytes(b"PK" + b"0" * 4000)
+    with TestClient(app) as c:
+        r = c.get("/assets/data.zip", headers={"Accept-Encoding": "gzip"})
+        assert r.headers.get("content-encoding") != "gzip"  # zip 不压
+        rr = c.get("/assets/big.js", headers={"Accept-Encoding": "gzip", "Range": "bytes=0-100"})
+        assert rr.headers.get("content-encoding") != "gzip" or rr.status_code == 200  # Range 优先

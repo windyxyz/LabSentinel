@@ -57,4 +57,25 @@ CREATE TABLE IF NOT EXISTS schema_version(
 
 ## 执行报告
 
-（待填：改动文件 / 旧库迁移证据 / 测试 / 遗留）
+**flash 2026-10-30 完成（pytest 145 passed，旧库迁移实测对照齐全）**
+
+- **改动**：`store.py` 重构迁移为版本化框架——`schema_version(version, applied_at)` 表（并入
+  `_SCHEMA` 之后单独建）；`MIGRATIONS = [(1, "events 增加 video/status/handled_by/handled_ts",
+  _mig_001)]`（原 `_migrate` 函数体转为 v1 迁移，幂等缺列补列）；`Store._migrate` 迁移器：无版本记录
+  且结构已最新的旧库 → 直接标记最新（老用户零成本升级），部分缺列 → 从 v1 逐个跑；**每个迁移显式
+  BEGIN/COMMIT**；错误带版本号+描述+备份提示。兼容别名 `_migrate = Store._migrate`（test_triage/
+  test_video 直接 import 模块级函数，保持不破）。`Store.schema_version()` + `/api/system` 追加
+  `schema_version` 字段（只增不改）。
+- **关键坑（实测发现并修复）**：python sqlite3 默认只对 DML 开隐式事务，**DDL 立即自动提交**——
+  初版用 `with connection:` 导致失败迁移的 CREATE TABLE 残留（测试抓到）；改显式 BEGIN 拿到
+  SQLite 原生事务性 DDL 后回滚完整。
+- **测试**：`test_migrations.py` 6 用例（新库=最新+版本行数=迁移数 / 最小旧库补列+旧数据保留+默认值
+  / 结构已齐旧库标记不重跑 / 重复打开幂等 / 失败迁移抛版本号错误+**DDL 回滚**/system 路由字段）。
+  全量 **pytest 145 passed**（139 + 6，含 62 备份/64 WAL 回归——WAL 库打开迁移正常）。
+- **旧库迁移实测对照**（报告证据）：
+  - 前：`[id, ts, camera_id, type, level, track_id, detail, snapshot]`，1 行；
+  - 后：`[...原 8 列..., video, status, handled_by, handled_ts]`，仍 1 行
+    （旧行内容 `('旧库演示行', 'new')` 完整保留，新列默认值生效）；`schema_version=1`。
+- **文档**：部署FAQ「升级后数据库会自动迁移吗/迁移失败怎么办（先备份）」；docs/59 升级节自动迁移
+  说明+先备份建议；35-api-reference /api/system 的 schema_version 字段说明。
+- **遗留**：无。后续加表/列：在 MIGRATIONS 追加 `(N+1, desc, fn)` 即可，框架自动接力。

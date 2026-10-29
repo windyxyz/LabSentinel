@@ -1,10 +1,28 @@
 """SQLite 存储（stdlib sqlite3；全部使用字面量 SQL + 参数占位符）。"""
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime
 
 from .config import settings
+
+log = logging.getLogger("app.store")
+
+
+def connect(path, *, readonly: bool = False) -> sqlite3.Connection:
+    """统一连接入口（任务64）：每条连接设 busy_timeout（PRAGMA 是 per-connection 的）。
+
+    WAL 模式下锁竞争会返回 busy 而非立即抛错，等 busy_timeout 毫秒后再报。
+    """
+    if readonly:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    else:
+        c = sqlite3.connect(path)
+    c.row_factory = sqlite3.Row
+    c.execute(f"PRAGMA busy_timeout={int(settings.sqlite_busy_timeout_ms)}")
+    c.execute("PRAGMA synchronous=NORMAL")  # per-connection；WAL 下 NORMAL 够用且更快
+    return c
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras(
@@ -33,8 +51,8 @@ CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);
 EVENT_STATUSES = ("new", "acked", "false_positive", "ignored")
 
 
-def _migrate(c: sqlite3.Connection):
-    """旧库兼容：缺列时逐列补（ALTER TABLE ... ADD COLUMN）。"""
+def _mig_001(c: sqlite3.Connection):
+    """v1：events 补 video/status/handled_by/handled_ts 列（幂等：缺哪列补哪列）。"""
     cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
     if "video" not in cols:
         c.execute("ALTER TABLE events ADD COLUMN video TEXT")
@@ -46,18 +64,74 @@ def _migrate(c: sqlite3.Connection):
         c.execute("ALTER TABLE events ADD COLUMN handled_ts TEXT")
 
 
+# 版本化迁移（任务69）：只做加列/加表/索引，不做破坏性变更；每个迁移幂等、在事务内执行
+MIGRATIONS: list[tuple[int, str, object]] = [
+    (1, "events 增加 video/status/handled_by/handled_ts", _mig_001),
+]
+SCHEMA_VERSION_LATEST = max(v for v, _d, _f in MIGRATIONS)
+
+
 class Store:
     def __init__(self, path=None):
         self.path = str(path or settings.db_path)
         self._lock = threading.Lock()
         with self._conn() as c:
+            self._enable_wal(c)  # 任务64：WAL + synchronous=NORMAL（建库一次；失败只警告）
             c.executescript(_SCHEMA)
-            _migrate(c)
+            c.execute("CREATE TABLE IF NOT EXISTS schema_version("
+                      "version INTEGER PRIMARY KEY, applied_at TEXT)")
+            self._migrate(c)
+
+    def schema_version(self) -> int:
+        with self._conn() as c:
+            row = c.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()
+            return int(row[0])
+
+    @staticmethod
+    def _migrate(c: sqlite3.Connection) -> None:
+        """执行未应用的迁移（任务69）。旧库兼容：无版本记录但结构已最新 → 直接标记为最新。"""
+        current = c.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()[0]
+        if current == 0:
+            # 探测：无版本记录的旧库，若最新迁移的目标结构已齐（events 全部目标列存在），
+            # 视为"已迁移过"直接标记最新；部分缺列则从 v1 逐个跑（迁移函数幂等补列）
+            cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
+            need_cols = {"video", "status", "handled_by", "handled_ts"}
+            if need_cols <= cols:
+                now = datetime.now().isoformat(timespec="seconds")
+                for v, _d, _fn in MIGRATIONS:
+                    c.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) "
+                              "VALUES(?,?)", (v, now))
+                current = SCHEMA_VERSION_LATEST
+        for ver, desc, fn in MIGRATIONS:
+            if ver <= current:
+                continue
+            # 显式 BEGIN/COMMIT：python sqlite3 默认只对 DML 开隐式事务，DDL 会立即自动提交——
+            # 必须 BEGIN 才能拿到 SQLite 原生的事务性 DDL（失败迁移整体回滚，含 ALTER/CREATE）
+            try:
+                c.execute("BEGIN")
+                fn(c)
+                c.execute("INSERT INTO schema_version(version, applied_at) VALUES(?,?)",
+                          (ver, datetime.now().isoformat(timespec="seconds")))
+                c.execute("COMMIT")
+            except Exception as e:  # noqa: BLE001
+                try:
+                    c.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise RuntimeError(f"数据库迁移 v{ver}（{desc}）失败：{e}——"
+                                   "请先备份数据库后反馈此错误") from e
+
+    @staticmethod
+    def _enable_wal(c: sqlite3.Connection) -> None:
+        try:
+            mode = c.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if str(mode).lower() != "wal":
+                log.warning("journal_mode 返回 %s（期望 wal）——内存/只读库属预期，继续用默认模式", mode)
+        except sqlite3.DatabaseError as e:
+            log.warning("WAL 启用失败（%s），继续用默认 journal 模式", e)
 
     def _conn(self):
-        c = sqlite3.connect(self.path)
-        c.row_factory = sqlite3.Row
-        return c
+        return connect(self.path)
 
     # ---- cameras ----
     def cameras(self):
@@ -330,3 +404,7 @@ class Store:
             if r["status"] in ("ok", "failed", "pending"):
                 out[r["channel"]][r["status"]] = r["n"]
         return out
+
+
+# 兼容别名：旧测试/外部脚本直接 import _migrate（现实现为 Store._migrate 静态方法）
+_migrate = Store._migrate

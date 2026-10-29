@@ -64,4 +64,24 @@
 
 ## 执行报告
 
-（待填：改动文件 / 实跑 JSON / 测试 / 遗留）
+**flash 2026-10-30 完成（pytest 122 passed，8001 实跑四类响应全过）**
+
+- **改动文件**：`api.py` 加 `GET /api/health/live|ready`（live 不碰 DB/模型；ready 逐项 db select 1/
+  data_dir 写删探针/模型文件存在/磁盘≥1GB（`LS_READY_MIN_FREE_GB` 新 settings 字段），503 语义，
+  **不加载 ONNX**）；`main.py` 加请求 ID 中间件（X-Request-ID 1–128 回显否则 uuid4.hex，contextvars
+  保存）+ 三个异常处理器（StarletteHTTPException→原码 `http_<status>`、RequestValidationError→422
+  首错可读摘要 `validation_error`、Exception→500 固定文案 `internal_error`，堆栈只进日志）+ 中间件层
+  兜底；`logging_setup.py` 格式升级为 `[req=%(request_id)s]`（过滤器从 contextvars 注入，ring/文件
+  handler 共用）。`config.py` 加 `ready_min_free_gb`。
+- **测试**：`test_health_errors.py` 5 用例（live/ready 全过→删模型引用 503 且 model.ok=false/
+  请求 ID 回显·生成·超长忽略/404·422 错误体三字段齐/500 体不含内部异常文本+caplog 断言日志含
+  request_id 与路径）。全量 **pytest 122 passed**（117 + 5）。
+- **8001 实跑**：live `{"status":"ok"}`；ready 200 四项全过（model 指向 yolo11n_ppe.onnx）；
+  404 `{"detail":"Not Found","request_id":"d883…","code":"http_404"}`；422
+  `{"detail":"body.name: Field required","code":"validation_error"}`。
+- **发现并修复的真问题**：未捕获异常日志最初写 `uvicorn.error`——该 logger **不向 root 传播**，
+  server.log 里永远检索不到 `[req=...]`（实跑验证为空）。已改 `app.errors` logger（向 root 传播 →
+  落 server.log），测试 caplog 断言钉死该行为。
+- **文档**：35-api-reference 新增 §8.1（探针/请求 ID/错误体约定）；部署FAQ 加「怎么判断服务是否
+  就绪 / request_id 怎么查日志」。
+- **遗留**：无。

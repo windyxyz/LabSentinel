@@ -47,4 +47,20 @@
 
 ## 执行报告
 
-（待填：改动文件 / 实跑输出 / 测试结果 / 遗留）
+**flash 2026-10-30 完成（真实 zip 实跑通过，pytest 95 passed）**
+
+- **改动文件**：新增 `scripts/release_manifest.py`（纯标准库）、`server/tests/test_release_manifest.py`
+  （4 用例）；docs/59"CI 产物/校验和验证"小节扩为"发布产物清单 / 校验和验证"（含 release_manifest
+  用法与 --verify）；docs/发布核对报告.md 追加「2026-10-30 便携包发布核对」（数字全部来自本次脚本输出）。
+  未改 build_portable.py（无需集成——manifest 独立于构建运行）。
+- **实跑输出**（dist/LabSentinel-portable-20261029.zip）：version=2026.10、277,673,200 字节、
+  sha256=6f61a730…c734、条目 12,544、必需条目齐全、可选仅缺 `卸载.bat`（安装器生成属预期）、
+  git=d17dd59 dirty=True、`--verify` OK、退出码 0。输出 dist/SHA256SUMS.txt + RELEASE-MANIFEST.json。
+- **布局核对说明**：必需条目按 build_portable 实际布局写死（`app/web/index.html` 而非规格草稿的
+  `web/dist/index.html`；模型在 `models/`；`卸载.bat` 归可选——zip 内本就没有）。
+- **测试**：4 用例（全条目 manifest 字段齐全+哈希正确 / 缺必需 rc=2 且 missing_required 有内容 /
+  verify 原包 OK+篡改 rc=2 / 最新 zip 选取）。全量 **pytest 95 passed**（基线 91 + 新 4）。
+- **修的两个小坑**：①归一化名与包内原名混用导致读 VERSION KeyError（加 orig 映射）；
+  ②verify 约定 manifest 与 zip 同目录（测试已按此约定放置）。
+- **遗留**：无。CI（任务 52）的 pwsh Get-FileHash 产物格式与 SHA256SUMS.txt 一致，可无缝替换为
+  本脚本以同时获得 JSON manifest（记为 CI 启用时的小优化）。

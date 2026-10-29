@@ -106,7 +106,7 @@ def test_delivery_api_and_retry_and_test(client, monkeypatch):
     r = c.post("/api/alert-test")
     assert r.status_code == 200
     results = r.json()
-    assert len(results) == 7 and all(item["ok"] is False for item in results)
+    assert len(results) == 8 and all(item["ok"] is False for item in results)  # 任务67 +webhook
     # 列表 + 计数
     r = c.get("/api/alert-deliveries", params={"status": "failed"})
     assert r.status_code == 200

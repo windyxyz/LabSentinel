@@ -89,4 +89,21 @@ python scripts/collect_diagnostics.py --out diag.zip [--data-dir server/data] [-
 
 ## 执行报告
 
-（待填：改动文件 / 实跑证据 / 测试 / 遗留）
+**flash 2026-10-30 完成（pytest 109 passed，端点/文件日志/诊断包实跑全过）**
+
+- **改动文件**：新增 `server/app/logging_setup.py`（幂等文件日志 5MB×3+RingHandler 200 条 WARNING+、
+  LS_LOG_LEVEL/LS_LOG_FILE、uptime）、`server/app/diagnostics.py`（summary 聚合）、
+  `scripts/collect_diagnostics.py`（6 条目脱敏 zip）、`server/tests/conftest.py`（测试会话默认
+  LS_LOG_FILE=0 防污染）；`api.py` 加 `GET /api/diagnostics/summary`（require_read 口径）+ 抽出
+  `_system_version()` 单一来源；`main.py` 导入阶段调 `setup_file_logging()`（失败静默）。
+- **测试**：`test_logging_diag.py` 7 用例（幂等与参数/关闭开关/小 maxBytes 轮转产生 .1/ring 捕获
+  ERROR/脱敏函数全类/summary 端点字段与 ring/诊断包条目+脱敏+拒绝覆盖+不整库打包）。全量
+  **pytest 109 passed**（102 + 7）。
+- **实跑**（8001 临时实例 + 敏感 env LS_ADMIN_TOKEN）：summary 200（version/backend/uptime_s/
+  counts 五表计数/disk/logs/recent_errors 齐全）；`logs/server.log` 实际生成；诊断包 6 条目 1.9KB，
+  **zip 全文 grep 不到真实 token** ✓；轮转用例以 2KB maxBytes 实际产生 server.log.1。
+- **如实记录**：uvicorn 的 access 日志不进 server.log（其 logger propagate=False 且约束要求不删
+  不改 uvicorn handler）；业务模块（engine/pipeline 等）日志走 root 正常落盘。
+- **文档**：部署FAQ 加「日志在哪/诊断包/轮转策略」；docs/59 数据位置节补 server.log 轮转说明与
+  便携版诊断包命令。
+- **遗留**：无。

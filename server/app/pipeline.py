@@ -4,6 +4,7 @@
 """
 import os
 import queue
+import re
 import threading
 import time
 from collections import deque
@@ -24,6 +25,17 @@ from .zones import ZoneState, boxes_overlap, parse_polygon, point_inside
 VIDEO_PRE_S = 2.0
 VIDEO_POST_S = 2.0
 MAX_CONCURRENT_RECORDINGS = 3
+
+# 任务65：rtsp/usb 打开失败/断流的有限重试（file 源坏路径直接退出，不反复刷）
+MAX_OPEN_RETRIES = 5
+RETRY_INTERVAL_S = 3.0
+
+_CRED_RE = re.compile(r"(?i)(\w[\w+.-]*://)([^/@\s:]+):([^@\s]+)@")
+
+
+def redact_creds(msg: str, limit: int = 200) -> str:
+    """错误文案脱敏：URL 凭证 user:pass@ → ***:***@，截断 200 字。"""
+    return _CRED_RE.sub(r"\1***:***@", str(msg))[:limit]
 
 
 class _Recording:
@@ -62,6 +74,23 @@ class CameraWorker(threading.Thread):
         self._recs: list[_Recording] = []  # 进行中的录像任务
         self._rec_q: queue.Queue = queue.Queue()  # 已补齐待写盘的任务
         self._face = FaceGate()  # 人脸比对门控：默认关闭时 check() 恒返回 None
+        # 任务65 运行指标（简单赋值；读取允许轻微竞态）
+        self.last_frame_ts: float | None = None
+        self.last_error: str | None = None
+        self.last_error_ts: float | None = None
+        self.reconnect_count: int = 0
+        self.opened_at: float | None = None
+        self.frames_total: int = 0
+        self._exit_status: str = "stopped"  # finally 写库用：重试耗尽/打开失败保持 error
+
+    # ---- 任务65 指标辅助 ----
+    def _set_error(self, msg: str) -> None:
+        self.last_error = redact_creds(msg)
+        self.last_error_ts = time.time()
+
+    def _clear_error(self) -> None:
+        self.last_error = None
+        self.last_error_ts = None
 
     def _init_ring(self, fps: float):
         self._ring = deque(maxlen=int(fps * VIDEO_PRE_S) + 10)
@@ -70,10 +99,23 @@ class CameraWorker(threading.Thread):
     def run(self):
         cid = self.camera["id"]
         cap = cv2.VideoCapture(capture_source(self.camera))
-        if not cap.isOpened():
+        retries = 0
+        while not cap.isOpened():
+            self._set_error(f"打开失败: {self.camera.get('source', '')}")
             self.store.set_camera_status(cid, "error")
-            print(f"[cam-{cid}] cannot open {self.camera['source']}")
-            return
+            if self.camera["type"] == "file" or retries >= MAX_OPEN_RETRIES:
+                # file 坏路径直接退出；rtsp/usb 重试 5 次（间隔 3s）后放弃
+                print(f"[cam-{cid}] cannot open {self.camera['source']}"
+                      + (f"（重试 {retries} 次后放弃）" if retries else ""))
+                self._exit_status = "error"
+                return
+            retries += 1
+            self.reconnect_count += 1
+            if self.stop_flag.wait(RETRY_INTERVAL_S):
+                return
+            cap = cv2.VideoCapture(capture_source(self.camera))
+        self._clear_error()
+        self.opened_at = time.time()
         self.store.set_camera_status(cid, "running")
         engine = get_engine()
         self.ppe = get_ppe_engine()  # 可能为 None（未配置实验服模型）
@@ -98,13 +140,30 @@ class CameraWorker(threading.Thread):
                             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                             continue
                         break
-                    time.sleep(1.0)
+                    # rtsp/usb 断流：有限重连（任务65）
+                    self.reconnect_count += 1
+                    self._set_error("读帧中断，重连中")
                     cap.release()
-                    cap = cv2.VideoCapture(capture_source(self.camera))
-                    if not cap.isOpened():
+                    reopened = False
+                    for attempt in range(MAX_OPEN_RETRIES):
+                        if self.stop_flag.wait(RETRY_INTERVAL_S):
+                            return
+                        cap = cv2.VideoCapture(capture_source(self.camera))
+                        if cap.isOpened():
+                            reopened = True
+                            break
+                        self._set_error(f"重连失败（{attempt + 1}/{MAX_OPEN_RETRIES}）")
+                    if not reopened:
                         self.store.set_camera_status(cid, "error")
-                        time.sleep(5)
+                        self._exit_status = "error"
+                        print(f"[cam-{cid}] 重连 {MAX_OPEN_RETRIES} 次失败，退出")
+                        return
+                    self._clear_error()
+                    self.opened_at = time.time()
+                    self.store.set_camera_status(cid, "running")
                     continue
+                self.last_frame_ts = time.time()
+                self.frames_total += 1
                 if self.camera["type"] == "file":
                     time.sleep(1.0 / file_fps)
                 frame = cv2.resize(frame, (1280, 720))
@@ -119,6 +178,7 @@ class CameraWorker(threading.Thread):
                         # 自愈：单帧推理异常（如设备瞬时故障）只丢这一帧，不杀死 worker 线程。
                         # 2026-10-26 多路压测中发现 DML 并发崩溃会让 worker 静默死亡、摄像头永久 stopped，
                         # 根因已在 engine.py 串行化修复，这里是兜底。
+                        self._set_error(f"analyze: {e}")  # 任务65：只记指标，不改 running 状态
                         print(f"[cam-{cid}] analyze error (frame skipped): {e}")
                     next_t = now + interval
                 frames += 1
@@ -138,7 +198,7 @@ class CameraWorker(threading.Thread):
                 except queue.Empty:
                     break
             cap.release()
-            self.store.set_camera_status(cid, "stopped")
+            self.store.set_camera_status(cid, self._exit_status)
 
     # ---- 视频存证 ----
     def _feed_recordings(self, frame):
@@ -359,10 +419,19 @@ class CameraManager:
             return w.latest_frame
 
     def status(self):
-        return {
-            "cameras": [
-                {"id": cid, "fps": round(w.analysis_fps_now, 1),
-                 "status": "running" if w.is_alive() else "stopped"}
-                for cid, w in self.workers.items()
-            ]
-        }
+        now = time.time()
+        cams = []
+        for cid, w in self.workers.items():
+            lfw = w.last_frame_ts
+            cams.append({
+                "id": cid, "fps": round(w.analysis_fps_now, 1),
+                "status": "running" if w.is_alive() else "stopped",
+                "last_frame_ts": lfw,
+                "frame_age_s": round(now - lfw, 1) if lfw else None,
+                "last_error": w.last_error,
+                "last_error_ts": w.last_error_ts,
+                "reconnect_count": w.reconnect_count,
+                "opened_at": w.opened_at,
+                "frames_total": w.frames_total,
+            })
+        return {"cameras": cams}

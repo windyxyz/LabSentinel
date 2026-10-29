@@ -72,7 +72,9 @@ Docker 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道�
 | 文档 | 内容 |
 |---|---|
 | [docs/部署指南.md](docs/部署指南.md) | Windows/Docker 部署、摄像头接入、告警配置、合规自查 |
-| [docs/部署FAQ.md](docs/部署FAQ.md) | 踩坑集中答疑（网络/依赖/推理/训练/告警） |
+| [docs/运维手册.md](docs/运维手册.md) | **部署后日常运维一本通**：巡检清单/排障/备份恢复/升级回滚/故障速查 |
+| [docs/发布核对报告.md](docs/发布核对报告.md) | 发布前核对与终检记录（版本/校验和/阻塞项） |
+| [docs/部署FAQ.md](docs/部署FAQ.md) | 踩坑集中答疑（网络/依赖/推理/训练/告警）；启动失败先跑 `python scripts/doctor.py` 自检 |
 | [docs/30-architecture.md](docs/30-architecture.md) | 架构总览（线程模型、推理锁机制、扩展点） |
 | [docs/35-api-reference.md](docs/35-api-reference.md) | REST/WS API 完整契约（客户端开发唯一依据） |
 | [docs/45-model-onboarding.md](docs/45-model-onboarding.md) | 模型接入手册（换模型零改代码） |

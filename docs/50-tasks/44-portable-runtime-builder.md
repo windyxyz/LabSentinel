@@ -1,6 +1,6 @@
 # 任务 44 · 便携运行时构建器（嵌入式 Python + 依赖 + 资产）
 
-> 背景：任务 43 让服务端能单端口托管 UI；本任务把「Python 环境」也打进包：用户侧不需要装 Python/pip，双击即可运行。方案见 [docs/58-packaging-strategy.md](../../58-packaging-strategy.md)。
+> 背景：任务 43 让服务端能单端口托管 UI；本任务把「Python 环境」也打进包：用户侧不需要装 Python/pip，双击即可运行。方案见 [docs/58-packaging-strategy.md](../58-packaging-strategy.md)。
 
 ## 目标
 

@@ -43,10 +43,10 @@ tools\ffmpeg\ffmpeg.exe -y -i 效果演示\lab-检测效果_v2.mp4 -c:v libx264 
 
 | 对比帧 | v1 表现 | v2 表现 | 解读 |
 |---|---|---|---|
-| [walk_t1.0s_v1miss_v2hit.png](../assets/v2-compare/walk_t1.0s_v1miss_v2hit.png) | 无检出（漏检） | lab coat 0.37 | v2 对远处走入的白大褂更敏感 |
-| [walk_t4.8s_conflict.png](../assets/v2-compare/walk_t4.8s_conflict.png) | lab coat 0.57 | no lab coat 0.51 | **边界帧摇摆**：两者在 4.3–5.8s 区间来回翻转，属单帧不稳定（见 §5） |
-| [walk_t7.2s_conf.png](../assets/v2-compare/walk_t7.2s_conf.png) | lab coat 0.79 | lab coat 0.91 | 检出一致时 v2 置信度更高、框更贴合 |
-| [equip_t5.6s_v1fp.png](../assets/v2-compare/equip_t5.6s_v1fp.png) | 误报 no lab coat 0.33（红框画在蓝衣人物后脑勺） | 正确静默 | **v2 核心收益**：蓝大褂/便装不再被误判为违规；逐帧扫描显示 v1 在 lab-equip 全程误报 8 个时间点，v2 零误报 |
+| [walk_t1.0s_v1miss_v2hit.png](assets/v2-compare/walk_t1.0s_v1miss_v2hit.png) | 无检出（漏检） | lab coat 0.37 | v2 对远处走入的白大褂更敏感 |
+| [walk_t4.8s_conflict.png](assets/v2-compare/walk_t4.8s_conflict.png) | lab coat 0.57 | no lab coat 0.51 | **边界帧摇摆**：两者在 4.3–5.8s 区间来回翻转，属单帧不稳定（见 §5） |
+| [walk_t7.2s_conf.png](assets/v2-compare/walk_t7.2s_conf.png) | lab coat 0.79 | lab coat 0.91 | 检出一致时 v2 置信度更高、框更贴合 |
+| [equip_t5.6s_v1fp.png](assets/v2-compare/equip_t5.6s_v1fp.png) | 误报 no lab coat 0.33（红框画在蓝衣人物后脑勺） | 正确静默 | **v2 核心收益**：蓝大褂/便装不再被误判为违规；逐帧扫描显示 v1 在 lab-equip 全程误报 8 个时间点，v2 零误报 |
 
 ## 4. 与 test 集指标互相印证（引用 docs/52-model-eval.md，491 图）
 

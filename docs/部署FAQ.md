@@ -1,5 +1,6 @@
 # 部署与运维 FAQ（任务 24）
 
+> 日常运维（巡检/备份/升级/告警排障）请看 **[运维手册](运维手册.md)**；本文按主题收录踩坑问答。
 > 全部条目来自本项目开发过程中**实际遇到并解决过**的问题（2026-10-25/27）。
 > 格式：**现象 → 原因 → 解决**。查不到 here 的问题先看 [80-risk-register.md](80-risk-register.md)。
 
@@ -81,6 +82,68 @@ taskkill /PID <pid> /F
 **服务端 venv** 的 `Lib\site-packages\cv2\`（项目内 `.venv`；`deploy.py install` 会自动下载放置；
 便携包自带无需处理）——`server/app/__init__.py` 已自动把该目录加进 DLL 搜索路径。
 
+**Q：USB 摄像头索引变了 / 添加页面"未发现设备"**
+→ 索引是 DirectShow 枚举顺序，**拔插顺序、驱动/系统更新后可能变化（设备名更稳定）**。处理顺序：
+1. 「添加摄像头」选 USB 类型 → 点「刷新设备」重新枚举（接口有 10 秒缓存，`?refresh=1` 强制刷新）；
+2. 仍无设备：检查 USB 线/隐私挡板，**关掉正在占用摄像头的会议软件**（Zoom/腾讯会议独占时枚举不到）；
+3. OBS Virtual Camera 未启动 OBS 时不会出现——先开 OBS 并启动虚拟摄像头；
+4. 以上都不行：回退手动输入索引（输入框仍在），用 `python tools\list_cameras.py` 确认可用索引。
+
+**Q：摄像头显示 error / 画面停滞，怎么看问题在哪？**
+→ 「摄像头」页状态列现在有可观测信息（任务65）：红字 `last_error` 是最近一次失败的原因
+（RTSP 账号密码已脱敏）；`画面停滞 Ns` 表示 running 但超过 10 秒没读到新帧；`重连 N 次` 是
+断流后自动重连的累计。排查顺序：
+1. `error` + "打开失败"：RTSP 地址/账号错（401/404）、USB 索引变了、文件路径不存在——按提示修；
+   rtsp/usb 会自动重试 5 次（间隔 3s），file 源直接报错退出；
+2. `画面停滞`：网络抖动（子码流带宽）、摄像头端掉线、被会议软件抢占——看 `重连 N 次` 是否在涨；
+   重连成功会自动恢复 running 并清掉 last_error；
+3. `analyze:` 开头的错误是推理侧瞬时异常（单帧丢弃自愈，不影响状态）；频繁出现才需要查日志；
+4. 仍不明确：看 `GET /api/cameras/{id}/status` 的完整字段 + `server.log` 按 request_id/时间检索。
+
+**Q：数据库目录出现 `-wal`/`-shm` 文件正常吗？`database is locked` 怎么调？**
+→ **正常，不要手删**（任务64 起默认 WAL 模式）：`labsentinel.db-wal` 是预写日志、`-shm` 是共享
+索引，正常关闭服务会自动 checkpoint 合并回主库。备份**必须用 backup API**
+（`scripts/backup_data.py`，任务62）——只拷 `.db` 会丢 WAL 里未合并的数据。
+
+`database is locked`：WAL + `busy_timeout`（默认等 5000ms）已消除绝大多数场景；若仍出现
+（如外部工具长期占写锁），调大 `LS_SQLITE_BUSY_TIMEOUT_MS`，或排查是否有第三方 SQLite 客户端
+（DB Browser 等）开着同一库。
+
+**Q：怎么判断服务是否就绪？报错里的 request_id 怎么查日志？**
+→ 就绪/存活分开看：`GET /api/health/live` 200 = 进程活着；`GET /api/health/ready` 200 = DB/数据目录/
+模型文件/磁盘（≥1GB，`LS_READY_MIN_FREE_GB` 可调）全部就绪，503 时 `checks` 里逐项给出原因。
+前端报错弹出的 `request_id`（响应头 `X-Request-ID`，错误体同名字段）：
+
+```bash
+grep "[req=<那个id>]" server/data/logs/server.log     # 该请求的完整堆栈就在这行下面
+```
+
+**Q：如何备份 / 迁移数据？恢复前注意什么？**
+→ 用任务 62 的 CLI（**运行中也可直接备份**——SQLite backup API 保证一致快照，不需要停服）：
+
+```bash
+python scripts/backup_data.py backup --data-dir server/data --out backup-20261030.zip
+python scripts/backup_data.py verify --zip backup-20261030.zip      # 校验 manifest/sha256/integrity
+python scripts/backup_data.py restore --zip backup-20261030.zip --data-dir <新机数据目录> --force
+```
+
+- 便携版 `--data-dir` 填 `%LOCALAPPDATA%\LabSentinel\data`；`--no-media` 只备 db（截图/视频不含）；
+- 恢复是**保守**的：目标已有 db 时必须 `--force`（现有 db 自动转存 `.bak-<时间戳>`，保留最近 3 个），
+  且不删除目标中备份没有的文件；
+- 换机迁移：新机装好同版本 → restore → 启动即可（数据库 + 截图/视频一起迁移）。
+
+**Q：日志在哪 / 怎么生成诊断包 / 轮转策略**
+→ 源码模式：`server/data/logs/server.log`（服务端，5MB×4 份轮转）+ `logs/server-<日期>.log`
+（uvicorn 控制台重定向）；便携模式：`%LOCALAPPDATA%\LabSentinel\logs\`。级别可用 `LS_LOG_LEVEL`
+调（默认 INFO），`LS_LOG_FILE=0` 关闭文件日志。报障一键打包（脱敏，不含截图/视频/密钥/整库）：
+
+```bash
+python scripts/collect_diagnostics.py --out diag.zip --data-dir server/data
+```
+
+运行中实例的聚合状态另见 `GET /api/diagnostics/summary`（版本/后端/运行时长/各表计数/
+磁盘剩余/最近 20 条 ERROR）。
+
 ## 4. 模型与推理
 
 **Q：多路摄像头时 worker 全部静默死亡，甚至整机死机**
@@ -154,6 +217,46 @@ body `errcode≠0` 也判失败（`_is_ok`）。失败会重试（1s/4s/15s 三�
 **Q：写接口 401**
 → 服务端启用了管理鉴权（LS_ADMIN_TOKEN）。「摄像头」页顶部填写令牌（存浏览器 localStorage），
 所有 POST/DELETE 自动携带。
+
+**Q：能装到 D 盘吗？公司批量部署怎么做？覆盖升级会丢数据吗？**
+→ 可以：`install --source . --install-dir "D:\Apps\LabSentinel"`（任务71，默认仍是
+%LOCALAPPDATA%\Programs\LabSentinel）。批量部署：`--silent --no-shortcuts --dry-run` 预检后
+`--silent` 静默安装（可用 `--install-dir` 统一路径、`--autostart` 开自启）；卸载按
+`--install-dir` 定位。**覆盖升级不会丢数据**：程序文件覆盖、`%LOCALAPPDATA%\LabSentinel`
+（数据库/截图/配置）原样保留——升级前按习惯可先用任务 62 的 backup 命令做一份快照。
+卸载/重装默认都保留数据，只有显式 `--purge-data` 才删。
+
+**Q：升级后页面还是旧的怎么办？**
+→ 单端口模式已按资源类型区分缓存（任务72）：`/assets/*`（Vite 内容 hash 文件名）缓存一年
+（immutable）——内容一变文件名就变，不存在旧缓存问题；`index.html` 与前端路由回退响应是
+**no-cache**（每次回源校验 ETag），升级后刷新即加载新资源。若浏览器仍显示旧页：强刷
+（Ctrl+F5）或清缓存即可；极少数情况是浏览器拿不到新 index.html（代理层缓存），检查中间层
+是否吞掉了 no-cache 头。API 响应不带缓存头（行为不变）。
+
+**Q：doctor 自检输出怎么读？**
+→ `python scripts/doctor.py`（便携包用 `runtime\python.exe scripts\doctor.py`）输出 10 项
+PASS/WARN/FAIL：**FAIL 必须处理**（缺模型/程序文件/数据库损坏/写权限），WARN 可选（缺 ffmpeg/
+go2rtc 影响实时画面、端口占用可能是旧实例在跑、磁盘低）。每项下面的 `↳` 是修复建议；
+`--json` 供支持脚本采集；退出码：有 FAIL=2，否则 0。全程只读，不会改动系统。
+
+**Q：升级后数据库会自动迁移吗？迁移失败怎么办？**
+→ 会（任务69）：程序首次启动检测 `schema_version` 表，自动执行未应用的迁移（只做加列/加表/索引，
+不做破坏性变更；无版本记录的旧库若结构已最新会自动标记）。`/api/system` 的 `schema_version` 字段
+可查当前库版本。迁移失败时启动会报「数据库迁移 vN 失败」——**先备份**（用任务 62 的 backup 命令
+或直接拷贝 data 目录），然后带着该错误反馈；不要手工改库结构。
+
+**Q：清理前怎么预演？磁盘预警阈值怎么调？**
+→ 「报表/维护」之外有只读预演端点：`GET /api/maintenance/preview` 返回**将会**删除的事件数、
+文件字节与预计释放空间，不删任何东西；确认后再 POST `/api/maintenance/cleanup` 执行。
+磁盘预警：仪表盘「磁盘」卡显示剩余/总量；`low_disk`（剩余 < `LS_DISK_MIN_FREE_GB`，默认 5GB）时
+卡片变红提示将触发紧急清理；「按当前增速约 N 天」为近 7 天日均增速的**估算值**（数据不足不显示）。
+
+**Q：自建服务接通用 Webhook 怎么验签？为什么 http 被拒绝？**
+→ 配置 `LS_WEBHOOK_URL`（+可选 `LS_WEBHOOK_SECRET`）后，告警会 POST JSON 到该地址；
+签名对**原始请求体字节**计算 `hex(hmac_sha256(secret, body))`，放 `X-LS-Signature: sha256=<hex>`——
+验签必须读原始字节（先 `request.body` 再 json 解析，不要框架帮你重序列化），用 `hmac.compare_digest`
+防时序攻击。http 被拒是**默认安全策略**（明文会泄露告警内容与签名）；内网自建服务确认风险后设
+`LS_WEBHOOK_ALLOW_HTTP=true` 放行。带 `user:pass@` 的 URL 一律拒绝（凭证不入 URL/日志）。
 
 ## 9. 新机部署脚本（2026-10-27 修复）
 

@@ -68,4 +68,24 @@
 
 ## 执行报告
 
-（待填：改动文件 / 实跑 JSON / 测试与 build / 遗留）
+**flash 2026-10-30 完成（端点实跑返回真实设备，pytest 102 passed，build 通过）**
+
+- **改动文件**：新增 `server/app/usb_devices.py`（解析/降级/10s 缓存/refresh，模块自含便于单测）；
+  `api.py` 加 `GET /api/cameras/usb-devices`（require_read 口径，200 语义降级）；`web/src/api.js` 加
+  `usbDevices(refresh)`；`Cameras.vue` USB 类型→设备下拉（`名称（索引 N）`）+「刷新设备」按钮
+  （loading 态）+ 无设备/报错回退手输框并展示 error 文案 + watch 切 USB 自动拉取；scoped 样式沿用既有块。
+- **实跑 JSON**（8001 临时实例，与任务 56 实况一致，未编造）：
+  ```json
+  {"devices":[{"index":0,"name":"HD Webcam","source":"0"},
+              {"index":1,"name":"OBS Virtual Camera","source":"1"}],
+   "error":null,"ffmpeg":"D:\\...\\tools\\ffmpeg\\ffmpeg.exe"}
+  ```
+  `?refresh=1` 生效（重复实测 200）。索引注释已写明"枚举顺序仅本机参考，设备名更稳定"。
+- **测试**：`server/tests/test_usb_devices.py` 7 用例（2video+1audio 过滤与顺序 / 中文引号空格名 /
+  空输入 / ffmpeg 缺失 200 语义 / 缓存一次 subprocess+refresh 再执行 / 超时降级 / TestClient 鉴权双口径）。
+  全量 **pytest 102 passed**（95 基线 + 7）。修一处测试自身坑：monkeypatch 的 FFMPEG 必须指向真实
+  存在的文件才会走到 subprocess 分支。
+- **build**：通过，gzip **43.16KB**（42.77 → +0.39KB，USB 选择器增量）。
+- **文档**：部署指南 §3.1 补"页面直接选设备"；部署FAQ §3 加「USB 摄像头索引变了/找不到设备怎么办」
+  （刷新→拔插/挡板/会议软件占用→OBS 需先启动→回退手输）。
+- **遗留**：无。设备名展示已按"名称（索引 N）"，索引漂移场景有 FAQ 兜底。

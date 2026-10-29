@@ -60,4 +60,23 @@
 
 ## 执行报告
 
-（待填：改动文件 / 本地接收器证据 / 测试 / 遗留）
+**flash 2026-10-30 完成（pytest 135 passed，本地接收器实跑签名验证通过）**
+
+- **改动**：`config.py` 加 4 配置项（webhook_url/secret/allow_http/timeout_s）；`alerts.py` 加
+  `GenericWebhookChannel`（继承 _HttpPushChannel：独立 URL 放行——默认仅 https、http 需
+  allow_http、拒绝非 http(s) 与带 user:pass@ 的 URL、沿用不跟随重定向；成功判定=HTTP 2xx 覆盖
+  基类业务码解析；HMAC-SHA256 对**原始 body 字节**签名 → `X-LS-Signature: sha256=<hex>` +
+  `X-LS-Event: alert` + `X-LS-Timestamp`；body 含 version/title/text/level/ts/source，事件行可用时附
+  event_id/camera_id/type/detail）；`redact_url()` 日志脱敏；dispatcher 注册第 8 渠道；
+  **dispatch 通过 `_send_accepts_event()`（inspect 签名探测）向支持 event 参数的渠道附带完整事件行，
+  其余 7 渠道签名不变**（规格要求的兼容方式）。
+- **既有测试同步**：test_alerts_page / test_push 的渠道清单断言 7→8（新渠道入列）。
+- **测试**：`test_generic_webhook.py` 5 用例（configured 空白/URL 规则矩阵：https✓ http默认✗
+  allow_http✓ ftp✗ 带凭证✗ / **本地 ThreadingHTTPServer 接收器实跑**：JSON 字段+独立计算 HMAC
+  与 X-LS-Signature 一致+时间戳存在 / 5xx→False 无密钥 2xx→True / status 含 webhook 且 alert-test
+  未配置返回「未配置」+不建投递行）。全量 **pytest 135 passed**（130 + 5）。
+- **过程中修的真问题**：渠道类初版漏写 `configured()`（基类恒 False，alert-test/status 全失真）；
+  `/api/alerts/status` 的 configured_map 漏 webhook 键。
+- **文档**：部署指南告警表加通用 Webhook 行+验签 Python 片段+独立放行说明；.env.example 4 项注释；
+  部署FAQ 加「自建服务怎么验签 / 为什么 http 被拒」。
+- **遗留**：无。真实 n8n 等外部系统联调属用户侧配置（本地接收器已等价验证签名与 2xx 判定）。

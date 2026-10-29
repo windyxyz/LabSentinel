@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     retention_events_days: int = 180  # 事件记录保留天数（含截图/视频文件）
     retention_pool_days: int = 90  # 误报标注池文件保留天数
     disk_min_free_gb: float = 5.0  # 磁盘低于此值触发紧急清理
+    ready_min_free_gb: float = 1.0  # 就绪探针磁盘阈值（任务63，LS_READY_MIN_FREE_GB）
+    sqlite_busy_timeout_ms: int = 5000  # 写锁等待窗口（任务64，LS_SQLITE_BUSY_TIMEOUT_MS；WAL 模式）
     pdf_font: str | None = None  # PDF 中文字体路径（默认 C:\Windows\Fonts\msyh.ttc）
 
     # 管理鉴权（任务16）：admin_token 为空 = 不启用（内网信任场景）；启用后写操作需 X-Admin-Token
@@ -65,6 +67,11 @@ class Settings(BaseSettings):
     smtp_user: str | None = None
     smtp_pass: str | None = None
     alert_email_to: str | None = None
+    # 通用 Webhook（任务67）：推给自建服务；HMAC-SHA256 签名；默认仅 https
+    webhook_url: str | None = None
+    webhook_secret: str | None = None  # 配置后每个请求带 X-LS-Signature: sha256=<hex>
+    webhook_allow_http: bool = False  # 局域网自建 http 服务显式放行
+    webhook_timeout_s: float = 5.0
 
     # 单端口模式（任务43）：托管 web/dist，npm run build 后只开一个端口
     web_dist: Path = BASE_DIR.parent / "web" / "dist"

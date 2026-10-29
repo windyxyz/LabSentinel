@@ -70,4 +70,22 @@
 
 ## 执行报告
 
-（待填：改动文件 / 实跑 JSON / 测试与 build / 遗留）
+**flash 2026-10-30 完成（pytest 130 passed、build 43.43KB、8001 实跑指标流动验证）**
+
+- **改动**：`pipeline.py`——CameraWorker 新增 6 个指标字段（last_frame_ts/last_error/last_error_ts/
+  reconnect_count/opened_at/frames_total）+ `redact_creds()`（URL 凭证 `***:***@` + 200 字截断）；
+  打开失败/断流改**有限重连**（rtsp/usb 5 次×3s，file 直接退出），重连成功清错误+刷新 opened_at+
+  置 running，重试耗尽 `_exit_status="error"`（finally 按它写库，不再一律 stopped）；分析异常只记
+  `analyze:` 前缀错误不改状态（沿用自愈语义）；CameraManager.status() 每路追加全部指标 + frame_age_s。
+  `api.py` 加 `GET /api/cameras/{id}/status`（无 worker 的摄像头返回零值指标；404 语义）。
+  `Cameras.vue` 状态列三态着色 + fps + 红字 last_error（60 字截断+title 全文）+ 画面停滞黄字（>10s）
+  + 重连次数；`refresh()` 并拉 /api/system 合并（viewFor）。
+- **测试**：`test_camera_status.py` 4 用例（脱敏函数含截断/manager.status 字段与 frame_age_s 固定值
+  /端点 200·404·鉴权双口径/system 路由新字段）。全量 **pytest 130 passed**（126 + 4）。
+- **实跑**（8001 + 文件源循环）：`{"status":"running","fps":21.4,"frame_age_s":0.0,
+  "frames_total":191,"reconnect_count":0,"last_error":null}`，**frames_total 126→191 持续增长**；
+  删除摄像头后 /api/system cameras=[]。
+- **build**：通过，gzip **43.43KB**（43.16 → +0.27KB）。
+- **文档**：35-api-reference 加 §8.2（单路指标字段/有限重连行为）；部署FAQ 加「摄像头显示 error/
+  画面停滞怎么看」排查顺序。
+- **遗留**：无。断线重连的实测（杀 go2rtc）已在 docs/54 §4 演练过 ≈2s 恢复，本次为指标可观测化。

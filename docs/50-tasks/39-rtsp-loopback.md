@@ -42,7 +42,7 @@
 
 ## 执行报告
 
-### 执行报告（flash，2026-10-28 04:55 交付；完整证据见 [docs/54-rtsp-loopback-report.md](../../54-rtsp-loopback-report.md)）
+### 执行报告（flash，2026-10-28 04:55 交付；完整证据见 [docs/54-rtsp-loopback-report.md](../54-rtsp-loopback-report.md)）
 
 - **RTSP 接入**：go2rtc 1.9.15 本构建不支持 `ffmpeg:` 源，改用 `exec:ffmpeg … -f mpegts pipe:1`；
   ffprobe 确认 h264/1280×720；服务端 8001 临时库接入后 status=running、**fps=25**、**6s 出首条 enter**、

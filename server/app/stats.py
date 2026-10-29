@@ -2,16 +2,16 @@
 
 时间解析用 ts 字段的 ISO 前缀：substr(ts,1,10)=日期、substr(ts,12,2)=小时。
 """
-import sqlite3
+import sqlite3  # noqa: F401  （保留给类型标注/兼容）
 from datetime import date, timedelta
+
+from .store import connect
 
 _EMPTY = {"total": 0, "l1": 0, "l2": 0, "l3": 0}
 
 
 def _conn(store):
-    c = sqlite3.connect(store.path)
-    c.row_factory = sqlite3.Row
-    return c
+    return connect(store.path)
 
 
 def _agg(rows) -> dict:

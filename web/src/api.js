@@ -28,6 +28,7 @@ async function req(method, path, body) {
 export const api = {
   system: () => req('GET', '/api/system'),
   cameras: () => req('GET', '/api/cameras'),
+  usbDevices: (refresh = false) => req('GET', '/api/cameras/usb-devices' + (refresh ? '?refresh=1' : '')),
   addCamera: (d) => req('POST', '/api/cameras', d),
   startCamera: (id) => req('POST', `/api/cameras/${id}/start`),
   delCamera: (id) => req('DELETE', `/api/cameras/${id}`),
@@ -45,6 +46,8 @@ export const api = {
   alertDeliveryRetry: (id) => req('POST', `/api/alert-deliveries/${id}/retry`),
   setEventStatus: (id, status) => req('POST', `/api/events/${id}/status`, { status }),
   cameraWebrtc: (id) => req('GET', `/api/cameras/${id}/webrtc`),
+  maintenanceStatus: () => req('GET', '/api/maintenance/status'),
+  maintenancePreview: () => req('GET', '/api/maintenance/preview'),
   faceStatus: () => req('GET', '/api/face/status'),
   facePersons: () => req('GET', '/api/face/persons'),
   faceRegister: (formData) => req('POST', '/api/face/persons', formData),

@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, onUnmounted, nextTick, ref } from 'vue'
 import { api, TYPE_TEXT, STATUS_TEXT } from '../api'
+import AsyncState from '../components/AsyncState.vue'
 
 const rows = ref([])
 const camId = ref('')
@@ -18,6 +19,11 @@ const endDate = ref('')
 const drawer = ref(null)        // 详情抽屉：当前事件对象
 const drawerEl = ref(null)      // 抽屉 DOM（焦点管理）
 let lastFocus = null
+// 任务66：三态 + 按钮防重复
+const loading = ref(true)
+const loaded = ref(false)
+const error = ref('')
+const busyEvent = ref(null)   // 正在处置的事件 id
 
 async function load() {
   const params = { limit: PAGE_SIZE, offset: offset.value }
@@ -26,8 +32,23 @@ async function load() {
   if (status.value) params.status = status.value
   if (startDate.value) params.start_ts = startDate.value
   if (endDate.value) params.end_ts = endDate.value
-  rows.value = await api.events(params)
-  total.value = (await api.eventsCount(params)).count
+  try {
+    rows.value = await api.events(params)
+    total.value = (await api.eventsCount(params)).count
+    error.value = ''
+    loaded.value = true
+  } catch (e) {
+    // 刷新失败保留旧数据（rows 不清空），只提示
+    error.value = String(e.message || e)
+  } finally {
+    loading.value = false
+  }
+}
+
+function clearFilters() {
+  camId.value = ''; level.value = ''; status.value = ''
+  startDate.value = ''; endDate.value = ''
+  resetAndLoad()
 }
 function resetAndLoad() { offset.value = 0; load() }   // 筛选变化重置页码
 function nextPage() { if (offset.value + PAGE_SIZE < total.value) { offset.value += PAGE_SIZE; load() } }
@@ -62,11 +83,14 @@ function closeDrawer() {
 async function mark(e, status) {
   if (status === 'false_positive' &&
       !confirm(`确认把事件 #${e.id} 标记为误报？\n截图会复制到标注池（用于模型改进），事件保留但状态变更。`)) return
+  if (busyEvent.value !== null) return
+  busyEvent.value = e.id
   try {
     await api.setEventStatus(e.id, status)
     if (drawer.value && drawer.value.id === e.id) drawer.value = { ...drawer.value, status }
     load()
   } catch (err) { alert(String(err.message || err)) }
+  busyEvent.value = null
 }
 </script>
 
@@ -92,7 +116,11 @@ async function mark(e, status) {
       <input type="date" v-model="endDate" @change="resetAndLoad" title="结束日期" aria-label="结束日期" />
       <button class="ghost" @click="load">刷新</button>
     </div>
-    <table class="events-table">
+    <AsyncState :loading="loading" :error="error" :notice="loaded && error ? '刷新失败，仍显示上一次数据' : ''"
+                :empty="loaded && !rows.length"
+                :empty-text="camId || level || status || startDate || endDate ? '当前筛选条件下没有事件' : '暂无事件 —— 启动摄像头并配置规则后，事件会出现在这里'"
+                @retry="load">
+      <table class="events-table">
       <tr><th class="col-time">时间</th><th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
       <tr v-for="e in rows" :key="e.id" style="cursor:pointer" @click="openDetail($event, e)">
         <td>{{ e.ts }}</td>
@@ -113,20 +141,22 @@ async function mark(e, status) {
         </td>
         <td style="white-space:nowrap">
           <template v-if="e.status === 'new'">
-            <button class="ghost" style="margin-right:4px" @click="mark(e, 'acked')">确认</button>
-            <button class="ghost" style="margin-right:4px" @click="mark(e, 'false_positive')">误报</button>
-            <button class="ghost" @click="mark(e, 'ignored')">忽略</button>
+            <button class="ghost" style="margin-right:4px" :disabled="busyEvent !== null"
+                    @click="mark(e, 'acked')">确认</button>
+            <button class="ghost" style="margin-right:4px" :disabled="busyEvent !== null"
+                    @click="mark(e, 'false_positive')">误报</button>
+            <button class="ghost" :disabled="busyEvent !== null" @click="mark(e, 'ignored')">忽略</button>
           </template>
           <span v-else class="muted" style="font-size:12px">{{ e.handled_ts?.slice(5, 16) }}</span>
         </td>
       </tr>
     </table>
-    <p v-if="!rows.length" class="muted">暂无事件</p>
     <div class="row pager">
       <button class="ghost" :disabled="offset === 0" @click="prevPage">上一页</button>
       <span class="muted">第 {{ offset + 1 }}-{{ Math.min(offset + PAGE_SIZE, total) }} 条 / 共 {{ total }} 条</span>
       <button class="ghost" :disabled="offset + PAGE_SIZE >= total" @click="nextPage">下一页</button>
     </div>
+    </AsyncState>
   </div>
 
   <!-- 事件详情抽屉（任务17A：WinUI ContentDialog 风格） -->
@@ -147,9 +177,9 @@ async function mark(e, status) {
           <video v-if="drawer.has_video" :src="`/api/events/${drawer.id}/video`" controls
                  style="width:100%; border-radius:var(--overlay-radius); background:#000" />
           <div v-if="drawer.status === 'new'" class="row">
-            <button @click="mark(drawer, 'acked')">确认</button>
-            <button class="ghost" @click="mark(drawer, 'false_positive')">误报</button>
-            <button class="ghost" @click="mark(drawer, 'ignored')">忽略</button>
+            <button :disabled="busyEvent !== null" @click="mark(drawer, 'acked')">确认</button>
+            <button class="ghost" :disabled="busyEvent !== null" @click="mark(drawer, 'false_positive')">误报</button>
+            <button class="ghost" :disabled="busyEvent !== null" @click="mark(drawer, 'ignored')">忽略</button>
           </div>
           <p v-else class="muted">处理人 {{ drawer.handled_by || '-' }} · {{ drawer.handled_ts || '-' }}</p>
         </div>

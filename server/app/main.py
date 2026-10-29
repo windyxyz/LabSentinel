@@ -3,10 +3,16 @@
 运行: uvicorn app.main:app --port 8000
 """
 import asyncio
+import gzip
+import logging
+import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException  # StaticFiles 抛的是 starlette 版
 
@@ -15,8 +21,25 @@ from .api import init, router, ws_events
 from . import go2rtc
 from . import retention
 from .config import settings
+from .logging_setup import setup_file_logging  # 任务61：导入阶段挂文件日志（尽早捕获启动错误）
 from .pipeline import CameraManager
 from .store import Store
+
+setup_file_logging()  # LS_LOG_FILE=0 关闭；失败静默（console 照常）
+
+# 请求 ID（任务63）：中间件写入，日志过滤器读取（见 logging_setup 的格式 [req=...]）
+request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
+
+
+def _client_request_id(request: Request) -> str:
+    rid = request.headers.get("X-Request-ID", "")
+    if 1 <= len(rid) <= 128:
+        return rid
+    return uuid.uuid4().hex
+
+
+def _rid(request: Request) -> str:
+    return getattr(request.state, "request_id", request_id_var.get("-"))
 
 
 def _face_compliance_notice():
@@ -53,26 +76,113 @@ app = FastAPI(title="LabSentinel", version="0.1.0-m1", lifespan=lifespan)
 app.include_router(router)
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """任务63：响应头始终带 X-Request-ID（客户端合法传入则回显，否则生成 uuid4）。"""
+    rid = _client_request_id(request)
+    request.state.request_id = rid
+    request_id_var.set(rid)
+    try:
+        response = await call_next(request)
+    except Exception:  # noqa: BLE001  某些中间件层异常不走 exception_handler，也兜住
+        logging.getLogger("app.errors").exception(
+            "[req=%s] %s %s 未捕获异常（中间件层）", rid, request.method, request.url.path)
+        return JSONResponse({"detail": "服务器内部错误", "request_id": rid, "code": "internal_error"},
+                            status_code=500)
+    response.headers["X-Request-ID"] = rid
+    return response
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exc_handler(request: Request, exc: StarletteHTTPException):
+    body = {"detail": exc.detail,
+            "request_id": _rid(request),
+            "code": f"http_{exc.status_code}"}
+    return JSONResponse(body, status_code=exc.status_code, headers=getattr(exc, "headers", None))
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exc_handler(request: Request, exc: RequestValidationError):
+    first = exc.errors()[0] if exc.errors() else {}
+    loc = ".".join(str(x) for x in first.get("loc", []))
+    summary = f"{loc}: {first.get('msg', '参数校验失败')}" if loc else "参数校验失败"
+    return JSONResponse({"detail": summary, "request_id": _rid(request), "code": "validation_error"},
+                        status_code=422)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exc_handler(request: Request, exc: Exception):
+    rid = _rid(request)
+    # 用 app.* logger（向 root 传播 → server.log 能按 [req=...] 检索）；uvicorn.error 不向 root 传播
+    logging.getLogger("app.errors").exception(
+        "[req=%s] %s %s 未捕获异常", rid, request.method, request.url.path)  # 堆栈只进日志
+    return JSONResponse({"detail": "服务器内部错误", "request_id": rid, "code": "internal_error"},
+                        status_code=500)
+
+
 @app.websocket("/ws/events")
 async def events_ws(ws: WebSocket):
     await ws_events(ws)
 
 
 class SPAStaticFiles(StaticFiles):
-    """静态托管 + SPA 回退（任务43）：404 且路径末段无扩展名 → 回 index.html，
-    让 /events 等前端路由刷新不 404；带扩展名的缺失资源仍 404，避免把坏 js 伪装成 html。"""
+    """静态托管 + SPA 回退（任务43）+ 缓存策略（任务72）：
+    - 404 且路径末段无扩展名 → 回 index.html，让 /events 等前端路由刷新不 404；
+    - Cache-Control：assets/*（Vite 内容 hash）→ immutable 一年；index.html 与 SPA 回退 → no-cache
+      （保证升级立即生效）；其余静态 → 1h；304 响应同样携带；/api、/ws 不经过此处。"""
 
     async def get_response(self, path: str, scope):
         # Windows 上 StaticFiles 传入的 path 用反斜杠（如 api\x），统一成 / 再判断
         norm = path.replace("\\", "/").lstrip("/")
         try:
-            return await super().get_response(norm, scope)
+            resp = await super().get_response(norm, scope)
         except StarletteHTTPException as e:
             if (e.status_code == 404 and "." not in Path(norm).name
                     and not norm.startswith(("api/", "ws/"))):
                 # 未知 API/WS 路径保持 404，不能被 SPA 回退成 HTML（客户端会误解析）
-                return await super().get_response("index.html", scope)
+                resp = await super().get_response("index.html", scope)
+                resp.headers["Cache-Control"] = "no-cache"
+                return resp
             raise
+        first = norm.split("/")[0] if norm else ""
+        if first == "assets":
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif norm.strip("/.") in ("", "index.html"):  # "." 是 StaticFiles 对 "/" 的内部表示
+            resp.headers["Cache-Control"] = "no-cache"
+        else:
+            resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
+
+
+# ---- 选择性 gzip（任务72）：只压文本类；Range/已压缩/小体积极跳过；视频/zip/图片不压 ----
+GZIP_MIN_BYTES = 1024
+GZIP_TYPE_PREFIXES = ("text/", "image/svg+xml", "application/javascript", "application/json")
+
+
+@app.middleware("http")
+async def selective_gzip_middleware(request: Request, call_next):
+    resp = await call_next(request)
+    if "gzip" not in request.headers.get("accept-encoding", "").lower():
+        return resp
+    if request.headers.get("range"):
+        return resp  # Range（视频/证据包断点续传）优先，gzip 让路
+    ct = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+    if not ct.startswith(GZIP_TYPE_PREFIXES) or resp.headers.get("content-encoding"):
+        return resp
+    if resp.status_code == 304:
+        resp.headers.setdefault("Vary", "Accept-Encoding")
+        return resp
+    body = b""
+    async for chunk in resp.body_iterator:
+        body += chunk
+    if len(body) < GZIP_MIN_BYTES:
+        return Response(content=body, status_code=resp.status_code,
+                        headers=dict(resp.headers), media_type=None)
+    gz = gzip.compress(body, compresslevel=6)
+    headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
+    headers["Content-Encoding"] = "gzip"
+    headers["Vary"] = "Accept-Encoding"
+    return Response(content=gz, status_code=resp.status_code, headers=headers, media_type=None)
 
 
 def mount_web(app: FastAPI = None) -> None:

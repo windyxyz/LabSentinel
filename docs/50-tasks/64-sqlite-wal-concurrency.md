@@ -51,4 +51,22 @@
 
 ## 执行报告
 
-（待填：改动文件 / 并发结果 / 回归 / 遗留）
+**flash 2026-10-30 完成（pytest 126 passed，含 62 备份/retention 回归全绿）**
+
+- **改动**：`store.py` 新增统一连接助手 `connect(path, readonly=False)`（**每条连接**设
+  `busy_timeout` + `synchronous=NORMAL`——两者都是 per-connection PRAGMA，只在 init 设一次无效，
+  实测 synchronous 曾返回 2=FULL）；`Store.__init__` 建库执行 `journal_mode=WAL`（失败只警告：
+  内存库返回 memory 属预期）；`stats.py` 直连改走助手（消除漂移）；`api.py` 就绪探针只读连接补
+  busy_timeout；`config.py` 加 `sqlite_busy_timeout_ms=5000`；`.env.example` 加 SQLite/日志段。
+- **测试**：`test_sqlite_wal.py` 4 用例（journal_mode=wal + busy_timeout=5000 + synchronous=1 /
+  **并发 4 写线程×50 事件 + 2 读线程持续读：0 locked 错误、最终 200 行、耗时 0.22s** /
+  -wal 文件存在 + checkpoint(TRUNCATE) 后清空 / 内存库降级只警告）。
+  全量 **pytest 126 passed**——任务 62 的 `test_backup_restore.py`（8 用例，backup API 在 WAL 下
+  一致）与 `test_retention.py` 全部通过，无回归。
+- **与备份/保留的冲突排查**：backup 用 `Connection.backup()` 走 SQLite 内部快照机制，WAL 源一致
+  （62 回归验证）；collect_diagnostics 的 mode=ro 只读打开在同用户可写目录下可建 -shm，正常；
+  保留清理为常规 SQL 写，WAL 兼容。**无需回退 PRAGMA**。
+- **文档**：部署FAQ 加「-wal/-shm 正常吗 / locked 怎么调」（明确不要手删 + 备份必须走 backup API）；
+  docs/59 数据位置节加 WAL 文件说明与备份警告。
+- **遗留**：无。真实库 journal_mode 未被测试改动（测试全用临时库；真实库将在服务下次重启时由
+  init 自然切到 WAL）。

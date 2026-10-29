@@ -36,6 +36,54 @@ def _disk_free_gb() -> float:
         return float("inf")
 
 
+def preview_cleanup(store) -> dict:
+    """只读预演（任务68）：与 run_cleanup 同一套阈值/路径安全判断，**绝不删除任何东西**。"""
+    import os
+    cutoff = (datetime.now() - timedelta(days=settings.retention_events_days)).isoformat(timespec="seconds")
+    ev_count, ev_bytes = 0, 0
+    while True:
+        with store._conn() as c:
+            rows = c.execute(
+                "SELECT id, snapshot, video FROM events WHERE ts < ? LIMIT ?",
+                (cutoff, _BATCH)).fetchall()
+        if not rows:
+            break
+        for r in rows:
+            ev_count += 1
+            for col in ("snapshot", "video"):
+                p = r[col]
+                if p and _safe_within(p, settings.data_dir):
+                    try:
+                        ev_bytes += os.path.getsize(p)
+                    except OSError:
+                        pass  # 文件缺失按 0 计（run_cleanup 同语义：跳过）
+        if len(rows) < _BATCH:
+            break
+    pool_files, pool_bytes = 0, 0
+    try:
+        pool = settings.annotation_pool_dir
+        if pool.exists():
+            for f in pool.iterdir():
+                if f.is_file() and datetime.fromtimestamp(f.stat().st_mtime) < \
+                        datetime.now() - timedelta(days=settings.retention_pool_days):
+                    try:
+                        pool_files += 1
+                        pool_bytes += f.stat().st_size
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    free = _disk_free_gb()
+    return {
+        "cutoff": cutoff,
+        "events": {"count": ev_count, "bytes": ev_bytes},
+        "pool": {"files": pool_files, "bytes": pool_bytes},
+        "disk_free_gb": round(free, 2),
+        "estimated_free_gb": round(free + (ev_bytes + pool_bytes) / 1e9, 2),
+        "would_emergency_clean": free < settings.disk_min_free_gb,
+    }
+
+
 def run_cleanup(store) -> dict:
     """执行一轮清理，返回统计 {deleted_events, deleted_files, freed_mb}。幂等可重入。"""
     stats = {"deleted_events": 0, "deleted_files": 0, "freed_mb": 0.0}

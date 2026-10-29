@@ -56,4 +56,24 @@
 
 ## 执行报告
 
-（待填：改动文件 / 隔离安装证据 / 测试 / 遗留）
+**flash 2026-10-30 完成（pytest 157 passed，dry-run 实机验证，真实注册表/桌面零触碰）**
+
+- **改动**：`install_portable.py`——`--install-dir` **真正生效**（install/uninstall/卸载.bat 都按它，
+  默认值不变）；新增 `--silent`（无交互，结果仍打 stdout）/`--no-shortcuts`/`--no-autostart`
+  （与 --autostart 互斥，exit 2）/`--dry-run`（只打印动作，零写入）/`--force`/`--desktop-dir`/
+  `--start-menu-dir`（快捷方式位置覆盖，供隔离测试）。安全边界：`_validate_install_dir` 拒绝
+  相对路径/盘符根/Windows 目录（本身+直接子目录）/用户主目录/LOCALAPPDATA 根（exit 2）；
+  覆盖"非 LabSentinel 的非空目录"需 --force。安装完成摘要打印版本/安装目录/启动方式/数据目录/
+  卸载方式（silent 也打）。
+- **测试**：`test_installer_options.py` 6 用例（全部隔离：LOCALAPPDATA/APPDATA/桌面指向临时目录）：
+  dry-run 零写入 / 自定义目录+跳过快捷方式（ps 调用计数=0）/ 覆盖升级数据文件保留 / 危险目录
+  （C:\Windows、相对路径、外来非空目录）拒绝+--force 放行 / 快捷方式目录覆盖生效 / 互斥参数。
+  全量 **pytest 157 passed**（151 + 6）。
+- **实跑**：真机仅 `--dry-run`（输出目标/快捷方式/自启/数据目录/卸载方式五项，RC=0，未写任何
+  文件/注册表）；隔离测试覆盖默认安装、自定义目录、覆盖升级、force 四项全流程。
+- **测试暴露并修复的 2 个问题**：①Windows 目录检查过宽（pytest 的 C:\Windows\Temp 下 tmp_path
+  被误拒）→ 收紧为本身+直接子目录；②快捷方式目录覆盖时桌面目录不存在 → 测试自建（真实桌面
+  天然存在，安装器不代建桌面属正确行为）。
+- **文档**：docs/59 加「静默安装/自定义目录/批量部署」命令表（含安全边界说明）；部署FAQ 加
+  「装 D 盘/批量部署/覆盖升级丢不丢数据」。
+- **遗留**：无。企业级 MSI/Intune 打包超出范围（脚本+参数已足够脚本化部署）。

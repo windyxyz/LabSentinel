@@ -66,4 +66,26 @@
 
 ## 执行报告
 
-（待填：改动文件 / 预演与实删对比 / 测试与 build / 遗留）
+**flash 2026-10-30 完成（pytest 139 passed、build 45.27KB、8001 实跑预演/水位/红卡全过）**
+
+- **改动**：`retention.py` 加 `preview_cleanup(store)`（与 run_cleanup 同一套 cutoff/`_safe_within`
+  路径判断/缺失文件跳过语义，分批 SELECT 只读统计，**零删除**；run_cleanup 本体未动——复用预演
+  需重构删除循环，为保"行为不变"约束选择不并，避免两套阈值漂移靠共享常量 `_BATCH`/settings 阈值
+  达成）；`api.py` 加 `GET /api/maintenance/preview`；`maintenance/status` 追加 disk_total_gb/
+  disk_free_pct/data_bytes（os.walk 超 2 万文件退化为 db+三目录统计，`data_bytes_capped` 标注）/
+  low_disk/forecast_days（近 7 天事件关联文件日均字节估算，带"估算"标注，异常不阻塞端点）。
+  `Dashboard.vue` 加「磁盘」卡（free/total 1 位小数；low_disk 红卡+"将触发紧急清理"；
+  forecast"按当前增速约 N 天（估算）" title 提示；轮询随 reload 每 5s 刷新）。
+- **测试**：`test_retention_preview.py` 4 用例（预演 count/bytes 正确且**文件与行原样在**/实删
+  deleted_events 与预演一致且池文件语义正确/缺失文件与 `../../` 穿越路径不崩且穿越不计字节/
+  status+preview 端点字段齐全）。全量 **pytest 139 passed**（135 + 4）。
+  （坑：TestClient lifespan 会启动 retention 后台线程当场删掉过期数据——测试 monkeypatch
+  start_scheduler 关调度。）
+- **8001 实跑**：preview `{"events":{"count":1,"bytes":2048},...,"would_emergency_clean":true}`
+  （LS_DISK_MIN_FREE_GB=99999 强制低水位）；status `disk_free_gb=145.44 disk_total_gb=828.06
+  low_disk=true forecast_days=994193088`（日增仅 1KB 时的天文数字估算，真实负载下有意义）；
+  playwright 确认磁盘卡渲染 + 红色"磁盘不足，将触发紧急清理" ✓（截图 D:\tmp\ls68_disk_card.png）。
+- **build**：通过，gzip **45.27KB**（44.88 → +0.39KB）。
+- **文档**：35-api-reference 加 §8.2 维护/预演（原 8.2 顺延 8.3）；部署FAQ 加「清理前怎么预演/
+  磁盘预警阈值怎么调」；docs/59 数据目录节补磁盘水位说明。
+- **遗留**：无。

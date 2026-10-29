@@ -186,6 +186,41 @@ date 格式错误 → 400。
 4. WebSocket 消息可能乱序（多 worker 线程）——按 id 排序展示
 5. 大文件（视频/截图）用 URL 拉取，不进 JSON
 
+## 8.1 健康探针与错误约定（任务63）- `GET /api/health/live` → `200 {"status":"ok"}`（进程存活即返回，不查 DB/模型；负载均衡存活探测用）
+- `GET /api/health/ready` → 全过 `200 {"status":"ready","checks":{db,data_dir,model,disk}}`，
+  任一不过 **503** + `"status":"degraded"`（磁盘阈值 `LS_READY_MIN_FREE_GB` 默认 1GB；不加载 ONNX）
+- **请求 ID**：每个响应头都带 `X-Request-ID`（客户端传入 1–128 字符则回显，否则生成 uuid4）；
+  报障时提供该 ID，可在 `server.log` 按 `[req=<id>]` 检索对应错误堆栈。
+- **错误体统一格式**（成功响应结构不变）：`{"detail": <可读信息>, "request_id": "...", "code": ...}`：
+  - HTTPException → 原状态码，`code="http_<status>"`；
+  - 参数校验失败 → 422，`code="validation_error"`，`detail` 为首个错误摘要（非整段 pydantic）；
+  - 未捕获异常 → 500，`code="internal_error"`，`detail` 固定"服务器内部错误"（堆栈只进日志）。
+
+`/api/system` 响应含 `schema_version`（任务69）：数据库结构版本，随迁移单调递增，客户端可用于
+兼容性判断（只增不改）。
+
+## 8.2 维护与清理预演（任务14/68）
+
+- `GET /api/maintenance/preview`（任务68，**只读预演**）：返回 `cutoff`（保留期截点）、
+  `events{count,bytes}`（将删除的过期事件及关联文件字节）、`pool{files,bytes}`（过期误报池文件）、
+  `disk_free_gb`、`estimated_free_gb`（执行后预计剩余）、`would_emergency_clean`。绝不删除任何东西。
+- `GET /api/maintenance/status` 新增（任务68）：`disk_total_gb`/`disk_free_gb`/`disk_free_pct`、
+  `data_bytes`（超 2 万文件时退化为四核心目录统计并置 `data_bytes_capped=true`）、
+  `low_disk`（free < LS_DISK_MIN_FREE_GB）、`forecast_days`（**估算值**：按近 7 天日均增速推算
+  可用天数，数据不足为 null）。
+- `POST /api/maintenance/cleanup`：真实清理（任务14，写操作需管理令牌）——建议先 preview 预演。
+
+## 8.3 单路摄像头运行指标（任务65）
+
+- `GET /api/cameras/{id}/status` → 该路 DB 信息（name/type/status）+ 运行指标：
+  `fps`、`last_frame_ts`、`frame_age_s`（无帧为 null；>10s 可视为画面停滞）、
+  `last_error`（最近一次打开/读帧/分析异常的简短原因，**已脱敏**：RTSP 凭证以 `***:***@` 显示，
+  分析异常带 `analyze:` 前缀）、`reconnect_count`（打开重试+断流重连累计）、`opened_at`、
+  `frames_total`（累计帧数）。未启动过 worker 的摄像头返回各指标零值。不存在 → 404。
+- `/api/system` 的 `cameras[]` 同步追加上述指标字段（原有键不变，向后兼容）。
+- 行为：rtsp/usb 打开失败或断流做**有限重连**（5 次 × 3s，`reconnect_count` 计数），
+  耗尽转 `error` 并退出线程；file 源坏路径直接 `error` 退出。
+
 ## 9. 未实现（规划中，勿在代码中假设）
 
 - 鉴权/多用户——M3（当前 handled_by 固定 admin/请求体可传）

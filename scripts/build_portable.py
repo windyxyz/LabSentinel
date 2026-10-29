@@ -153,6 +153,7 @@ def copy_assets() -> None:
     shutil.copy2(here / "portable_launcher.py", DIST / "scripts" / "portable_launcher.py")
     shutil.copy2(here / "install_portable.py", DIST / "scripts" / "install_portable.py")
     shutil.copy2(here / "seed_demo.py", DIST / "scripts" / "seed_demo.py")  # 播种单源（任务51）
+    shutil.copy2(here / "doctor.py", DIST / "scripts" / "doctor.py")  # 自检工具（任务70）
     # C# 启动 EXE（任务55）：csc 缺失/编译失败只警告，包仍可用 启动.bat
     import build_launcher_exe
     exe = build_launcher_exe.compile_exe(DIST)

@@ -66,4 +66,23 @@ python scripts/doctor.py [--root <包根/项目根>] [--port 8000] [--json] [--v
 
 ## 执行报告
 
-（待填：改动文件 / 实跑输出 / 测试 / 遗留）
+**flash 2026-10-30 完成（pytest 151 passed，源码/便携双模式实跑 10 PASS / 0 FAIL）**
+
+- **改动**：新增 `scripts/doctor.py`（纯标准库，9 大项 10 检查：运行时/程序文件/模型（>1MB+词表
+  非空，MIN_MODEL_BYTES 可 monkeypatch）/演示媒体/ffmpeg+go2rtc/配置（**LS_ADMIN_TOKEN 只输出
+  已设置/未设置**，相对路径按 server 目录解析）/数据库（integrity_check+行数+wal 大小）/端口
+  bind/磁盘（<5GB WARN）/写权限（临时文件写删））；`--json` 机器可读；退出码 FAIL=2 否则 0；
+  双布局自动探测（runtime/python.exe 存在=便携包，否则源码）。`build_portable.py` 已复制
+  doctor.py 进包（与 seed_demo 同处）。
+- **测试**：`test_doctor.py` 6 用例（importlib 加载；最小假包全 PASS / 删模型 FAIL+建议 / 删
+  web dist FAIL / 坏 db FAIL+备份建议 / --json 可解析 / 小模型过不了阈值）。全量
+  **pytest 151 passed**（145 + 6）。
+- **实跑**：
+  - 源码根：**10 PASS / 0 WARN / 0 FAIL**（模型 10.7MB、db integrity=ok cameras=4 events=40）；
+  - 便携包目录（dist/portable/LabSentinel）：**10 PASS / 0 FAIL**（ffmpeg 扁平布局已识别）。
+- **实跑暴露并修复的 3 个检查缺陷**：①mkstemp 句柄未关→Windows 删不掉误报写权限 FAIL；
+  ②ffmpeg 只查 `tools/ffmpeg/ffmpeg.exe` 漏了便携包扁平布局 `tools/ffmpeg.exe`；
+  ③config 相对路径按 CWD 解析→改为按 server 目录解析（与运行时一致）。
+- **文档**：docs/59 加"启动失败先自检"小节；部署FAQ 加「doctor 输出怎么读」；README 文档表
+  故障排查行加 doctor 提示。
+- **遗留**：无。

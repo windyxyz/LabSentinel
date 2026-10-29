@@ -32,7 +32,7 @@ def test_alerts_status_channels_traversal(env, monkeypatch):
     monkeypatch.setattr(settings, "alert_email_to", None)   # email 需要 host+to 同时非空
     body = c.get("/api/alerts/status").json()
     names = [ch["name"] for ch in body["channels"]]
-    assert names == ["wecom", "dingtalk", "feishu", "serverchan", "pushplus", "qmsg", "email"]
+    assert names == ["wecom", "dingtalk", "feishu", "serverchan", "pushplus", "qmsg", "email", "webhook"]  # 任务67 +通用Webhook
     cfg = {ch["name"]: ch["configured"] for ch in body["channels"]}
     assert cfg["wecom"] is True and cfg["dingtalk"] is False
     assert cfg["qmsg"] is False        # 缺 qq
