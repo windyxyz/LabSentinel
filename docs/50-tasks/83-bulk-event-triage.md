@@ -1,0 +1,61 @@
+# 任务 83 · 事件批量处置（P1）
+
+> 背景：Events 页只能逐条点“确认/误报/忽略”。一次误报风暴（如清洁时段）要处理几十条，逐条点很痛苦。
+> 本任务增加批量处置 API 与前端多选，复用现有状态机与误报入库逻辑。
+
+## 目标
+
+### 1. API `POST /api/events/bulk-status`（require_admin）
+
+body：
+```json
+{"ids":[1,2,3],"status":"acked|false_positive|ignored","handled_by":"admin"}
+```
+
+- `ids`：1–200 个整数，去重；空/超限 400。
+- 先查存在的 id；不存在的计入 `missing`，不报 404（批量容错）。
+- 对每个存在事件执行与单条端点**完全相同的逻辑**：
+  - 更新 status/handled_by/handled_ts；
+  - `false_positive` 时把截图复制到 `annotation_pool/`（文件名规则与单条一致，避免冲突）；
+  - 已经是目标状态的跳过（`skipped`），已是其它非 new 状态的也按“只允许 new→处置”语义处理
+    （与单条端点保持一致；在报告说明）。
+- 返回 `{"updated":n,"skipped":n,"missing":[ids],"failed":[{"id":..,"error":".."}]}`；
+- 单条失败不中断整批；每条的异常记录在 failed。
+
+### 2. 前端 `web/src/views/Events.vue`
+
+- 表格首列 checkbox；表头全选/反选当前页；
+- 选中 N 条时显示操作条：`已选 N 条` + 「确认」「误报」「忽略」「清除选择」；
+- 批量操作前 confirm（误报会进标注池，文案说明）；
+- 请求期间 buttons disabled；完成后清空选择并刷新列表/计数；
+- 保留单条按钮；不新增路由，不改全局四件套。
+
+### 3. 测试 `server/tests/test_bulk_triage.py`
+
+- 3 条 new → bulk acked：updated=3、DB 状态/handled_ts 正确；
+- 混合：1 条已 acked + 1 条 new + 1 个不存在 id → updated=1、skipped=1、missing 含不存在 id；
+- false_positive：截图复制到 pool（用临时文件）、重复调用不重复复制/不报错；
+- ids 空/201 个/非法状态 → 400；
+- 鉴权 401（启用 token 时）。
+
+### 4. 文档
+
+- `docs/35-api-reference.md` 新增端点（请求/响应/限制）；
+- `docs/运维手册.md` 事件处置一节加批量操作；
+- `docs/部署FAQ.md` 可选：误报批量处理注意标注池。
+
+## 约束
+
+- 复用单条逻辑（抽公共函数），不允许两套状态规则漂移；
+- 不开长事务；逐条短事务，单条失败不影响其它；
+- 不改变事件状态机；不引入依赖。
+
+## 验收
+
+- `pytest tests/ -q` 全绿；`npm run build` 通过；
+- 8001 临时库实跑：造 5 条事件→批量误报→状态/标注池/计数正确；
+- 报告附批量响应 JSON。
+
+## 执行报告
+
+（待填：改动文件 / 批量证据 / 测试与 build / 遗留）
