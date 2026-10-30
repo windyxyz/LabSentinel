@@ -36,4 +36,16 @@
 
 ## 执行报告
 
-（待填：改动文件 / 阈值实测 / pytest / 遗留）
+**flash 2026-10-31 完成（pytest 185 passed，阈值行为双向实测）**
+
+- **改动**：`main.py` gzip 中间件加大小/流式保护——`Content-Length` 缺失（chunked/流式）→ 不压；
+  已知且 > `settings.gzip_max_bytes`（新增配置，默认 4MB，`LS_GZIP_MAX_BYTES`）→ 不压；
+  非法值不压。保留 Vary/Range 让路/类型白名单/304/attachment 跳过（任务 72 语义不变）。
+  `.env.example` 补注释（LS_GZIP_MAX_BYTES 与既有 LS_LOG 等同段）。
+- **测试**（test_web_static.py +3）：大已知尺寸（阈值调 1000B + 3000B 文件）→ 不 gzip 且 body
+  完整、缓存头不变；同尺寸在阈值放宽 → gzip（证明跳过由阈值触发）；流式 CSV 导出（无 CL +
+  attachment）→ 不 gzip 且内容完整（断言行完整）。既有 zip/Range 用例保持。
+- **FAQ**：部署FAQ「升级后页面还是旧的」同段补大导出无 gzip 的原因（保护内存）。
+- **8001 实测**：未单独跑（与 75 验收共用环境；阈值行为已由双向单测覆盖，>4MB 真实 CSV 构造
+  成本高，用阈值 monkeypatch 等价验证——如实说明）。
+- **遗留**：无。

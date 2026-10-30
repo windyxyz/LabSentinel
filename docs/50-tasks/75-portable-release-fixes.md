@@ -96,4 +96,69 @@
 
 ## 执行报告
 
+**flash 2026-10-31 完成（六项全修 + 重建复验全过；pytest 176 passed）**
+
+### 75.1 USB 枚举便携布局——已修（实测复验抓到两轮根因）
+
+- **修复前现象**：便携包 `/api/cameras/usb-devices` 返回"未找到 ffmpeg"——`parents[2]` 硬编码
+  在便携布局指向 `app/tools/`（不存在）。
+- **修复**：新增 `detect_root()` + `resolve_ffmpeg(root)`（纯函数）：候选 LS_FFMPEG →
+  `tools/ffmpeg/ffmpeg.exe` → `tools/ffmpeg.exe` → `ffmpeg.exe`，返回命中者与尝试列表；
+  `list_devices(refresh, root=None)` 每次重新解析，error 文案列出尝试过的路径。
+- **实测复验抓到的两轮根因（都在 detect_root）**：
+  ①"含 server/ 目录"判定在便携布局误命中 `pkg/app`（它下面有 server/）→ 改精确标记
+  `server/app/main.py`；②仍错——便携包把 server 树嵌在 `pkg/app/server`，`pkg/app` 同时满足
+  该标记 → **改两趟扫描**：先全线上找 `runtime/python.exe`（便携），再找源码标记。
+- **复验**：解压新 zip 隔离启动 → usb-devices 命中包内扁平 `tools\ffmpeg.exe`，返回本机真实
+  设备（HD Webcam + OBS Virtual Camera）✓；测试 9 用例含 detect_root 便携布局回归
+  （复制真实 usb_devices.py 到假包树验证向上推导）。
+
+### 75.2 备份/诊断脚本随包——已修
+
+- build_portable 增复制 `backup_data.py`、`collect_diagnostics.py`；解压复验：
+  `runtime\python.exe scripts\backup_data.py --help` 与 `...collect_diagnostics.py --help` 均 RC=0。
+
+### 75.3 collect_diagnostics 便携路径——已修
+
+- 新增 `detect_server_dir()`（runtime 标记 → `app/server`，否则 `server`）与
+  `default_data_dir()`（便携=LOCALAPPDATA\LabSentinel\data）；`sys.path`/import 按探测结果；
+  隔离实测：诊断包在便携布局成功生成。
+
+### 75.4 SMTP 密码泄露——已由审阅覆盖（2026-10-30），本次补规格测试
+
+- `_SENSITIVE` 已含 `PASS\b|CREDENTIAL`、query-token 抹除、日志尾逐行脱敏；本次按规格补
+  `test_logging_diag.test_redaction` 断言清单（smtp_pass/admin_token/webhook_secret/qmsg_key=***，
+  smtp_host/user 不误脱敏）；实测诊断包 grep 不到测试令牌。
+
+### 75.5 release_check 自身测试夹具误报——已由审阅覆盖
+
+- 文件级豁免 `test_release_check.py` 已在（105 P1-3 修）；真实仓库复跑 FAIL 0 / 退出码 0 ✓。
+
+### 75.6 中间件层 500 缺 X-Request-ID 头——已修
+
+- request_id_middleware catch-all 的 JSONResponse 补 `headers={"X-Request-ID": rid}`。
+
+### 重建与复验（75 验收链全做）
+
+| 步骤 | 结果 |
+|---|---|
+| npm run build | ✓ gzip 45.48KB |
+| build_portable --zip | ✓ `LabSentinel-portable-20261031.zip` 278.1MB / 12565 条目 |
+| release_manifest + --verify | ✓ sha256=`b1a0168042e4…` 必需条目齐全、可选仅缺卸载.bat |
+| smoke_portable | ✓ **8/8 PASS**（隔离 LOCALAPPDATA，真实 %LOCALAPPDATA% 不变） |
+| doctor（解压根） | ✓ **10 PASS / 0 WARN / 0 FAIL** |
+| backup/collect --help | ✓ 双脚本 RC=0 |
+| 便携 USB 枚举 | ✓ 命中包内扁平 ffmpeg + 真实设备返回 |
+| 诊断包泄漏检查 | ✓ grep 不到测试令牌 |
+| 端口漂移 | ✓ 8000 被占（主线预览）→ 漂移 8100 启动成功 |
+| pytest | ✓ **176 passed**（usb 解析器 1 组 4 用例替换旧 2 用例 + detect_root 便携回归） |
+| release_check | ✓ FAIL 0，退出码 0 |
+
+### 遗留
+
+- 无。`docs/发布核对报告.md` 已更新为 20261031 包数字；`docs/59` 路径无变化（ffmpeg 双布局
+  解析对用户透明）。
+
+## 执行报告
+
 （待填：修复项 / 新 zip 数字 / smoke/doctor/diagnostics 证据 / pytest / release_check / 遗留）

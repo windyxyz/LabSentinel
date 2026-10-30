@@ -199,6 +199,19 @@ date 格式错误 → 400。
 `/api/system` 响应含 `schema_version`（任务69）：数据库结构版本，随迁移单调递增，客户端可用于
 兼容性判断（只增不改）。
 
+### 配置导入导出（任务79，仅管理员）
+
+- `GET /api/config/export?with_secrets=0` → `{"format":"labsentinel-config","version":1,
+  "schema_version":N,"exported_at":...,"cameras":[{name,source,type}],
+  "zones":[{camera_name,name,polygon}],"rules":[{camera_name,zone_name,behavior,level,...}}`。
+  默认把 RTSP 凭证脱敏为 `***:***@`；`with_secrets=1` 返回真实 source（响应 no-store）。
+  不含事件/截图/人脸数据。
+- `POST /api/config/import` body `{"mode":"merge|replace","confirm_replace":false,"data":{导出JSON}}`：
+  merge 按名称去重（同名摄像头/区域/规则跳过）；replace 需 `confirm_replace=true`
+  （清空现有摄像头/区域/规则，**事件保留但失去对应摄像头**，重新导入同名可恢复关联）。
+  校验失败 400 且不产生部分写入；导入不自动启动摄像头。
+  返回 `{"created":{...},"skipped":{...},"warnings":[...]}`。
+
 ## 8.2 维护与清理预演（任务14/68）
 
 - `GET /api/maintenance/preview`（任务68，**只读预演**）：返回 `cutoff`（保留期截点）、

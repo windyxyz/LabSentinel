@@ -218,6 +218,12 @@ body `errcode≠0` 也判失败（`_is_ok`）。失败会重试（1s/4s/15s 三�
 → 服务端启用了管理鉴权（LS_ADMIN_TOKEN）。「摄像头」页顶部填写令牌（存浏览器 localStorage），
 所有 POST/DELETE 自动携带。
 
+**Q：如何批量部署多路摄像头？换机怎么迁移配置？导入会覆盖事件吗？**
+→ 「摄像头」页 → 配置导入导出（任务79）：先在一路上调好区域/规则 → 导出 JSON（默认脱敏
+RTSP 密码）→ 改文件里的摄像头名/地址 → 导入（merge 跳过同名，replace 需勾选确认）。
+换机迁移：新机装好 → 导入配置 JSON → 再用任务 62 的 backup zip 恢复事件数据。
+**导入不会动事件表**；replace 模式事件保留但会失去对应摄像头（重新导入同名摄像头即恢复）。
+
 **Q：能装到 D 盘吗？公司批量部署怎么做？覆盖升级会丢数据吗？**
 → 可以：`install --source . --install-dir "D:\Apps\LabSentinel"`（任务71，默认仍是
 %LOCALAPPDATA%\Programs\LabSentinel）。批量部署：`--silent --no-shortcuts --dry-run` 预检后

@@ -55,4 +55,26 @@
 
 ## 执行报告
 
-（待填：改动文件 / preflight 输出 / 单测 / 遗留）
+**flash 2026-10-31 完成（pytest 193 passed；camera_soak 8 用例；--help/--preflight 短测过）**
+
+- **改动**：`tools/camera_soak.py` 重写（保持 CLI 兼容）——
+  - 多路：`--camera-id` 可重复 / `--all`（默认全部），每路每采样点一行；
+  - 新 CSV 列（规格 12 列全有）：fps/frame_age_s/reconnect_count/last_error/events_total
+    （改用 `/api/events/count`）/api_latency_ms/cpu_percent/rss_mb/disk_free_gb；
+  - `SystemMetrics`（ctypes GetSystemTimes）整机 CPU%（标准库，无 psutil；整机口径已在
+    --help/报告注明）；`rss_mb` 本轮留空列（无 psutil，避免误报——记录为遗留）；
+  - 汇总 JSON：时长/采样数/API 率+p50/p95/max/每路 running 率/平均 fps/最大帧龄/停滞采样/
+    重连/错误种类/事件增长/CPU·RSS 峰值/磁盘下降/**判定 PASS|WARN|FAIL**（阈值参数化）；
+  - `--preflight`：服务可达/每路 RTSP ffprobe（H.265→WARN、失败→FAIL）/模型词表/DB integrity/
+    磁盘 ≥20GB/默认密码 WARN；FAIL 退出码 2；
+  - 纯函数拆分：parse_duration/parse_ffprobe_json/build_row/summarize/render_summary/
+    parse_ffprobe_stream 均可独立单测。
+- **测试**：`server/tests/test_camera_soak.py` 8 用例（时长含非法/ffprobe h264+h265+0/0+垃圾/
+  汇总 PASS/FAIL（错误+running 率）/WARN（重连>10 与停滞>3×stall）/停滞边界 age==stall 不算/
+  事件增长与延迟分位/build_row 列序/preflight 无服务清晰失败 rc=2）。
+- **短测**：`--help` 全参数；`--preflight` 对不可达服务 → `[FAIL] 服务可达…` + rc=2（输出见上）。
+  **未跑 24h，不得声称已完成 24h**。
+- **文档**：24h 验收清单新增 §〇 预检（命令+通过标准+"虚拟摄像头不能替代"）、§二 多路命令与
+  中断恢复/产物说明、§二.5 PASS/WARN/FAIL 发布证据表；运维手册 §12 改 `--all` 多路口径并链预检。
+- **遗留**：rss_mb 列当前恒空（需 psutil 或读进程句柄，属引入依赖范畴）——CSV 列已在，
+  后续可补；preflight 的"摄像头账号不含默认密码"检查以启发式 WARN 落地（admin:admin/12345）。

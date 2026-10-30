@@ -68,4 +68,50 @@
 
 ## 执行报告
 
-（待填：改动文件 / 边界测试证据 / pytest / 遗留）
+**flash 2026-10-31 完成（pytest 182 passed，特殊字符路径全链路实测）**
+
+### 1. `_safe_within` 真实路径包含判断——已修
+
+- resolve + `is_relative_to(base)`（Py3.9+）；**不存在的文件 → False**（规格明确）；兄弟前缀
+  （data-evil）、`..\` 穿越、绝对越界全部 False；测试 6 分支覆盖（含 parent 同目录文件 True）。
+
+### 2. `ro_uri` 统一只读 URI——已修并全局落地
+
+- `store.ro_uri()`（`Path.as_uri()+"?mode=ro"`，百分号编码空格/中文/#）；
+- 落地点：`store.connect(readonly=True)`、`api.health_ready`、`backup_data._ro_uri` 副本、
+  `collect_diagnostics._ro_uri` 副本（2 处连接）、`doctor._ro_uri` 副本（integrity 检查）——
+  脚本内副本均注释"与 store.ro_uri 保持一致"。
+- **测试**（test_path_uri_security.py 6 用例）：目录名含 **空格+中文+#**（`数据 目录 #test`）：
+  只读连接/Store 只读/doctor 完整性 PASS/collect_diagnostics 打包成功；`#` 必须被编码为 `%23`
+  断言（否则被 URI fragment 截断）。
+
+### 3. 请求 ID 兜底响应头——已在 75.6 完成，跳过
+
+### 4. 边界项判断（如实说明）
+
+- `_disk_free_gb` 异常返回 `inf`：**保留现状**。语义是"data_dir 不可访问时视为未知→不触发
+  紧急清理"——紧急清理误触发会删用户事件，比"漏一次清理"代价高；且 data_dir 在部署中恒存在。
+  已写测试说明现状（test_disk_free 语义以本报告为准，不加行为断言）。
+- `sanitize_source` file→`***`：保持 ✓。
+- `backup_data._safe_entry`：补测 `..\evil.txt`（反斜杠穿越）与 `C:foo.txt`（盘符相对）——
+  均已正确拒绝（反斜杠归一后命中 `..` 判断、`C:` 命中盘符判断），中文条目放行 ✓。
+
+### 连带修复
+
+- conftest autouse 追加 `go2rtc_yaml` 隔离——测试 lifespan 会重写**真实的** tools/go2rtc.yaml
+  （审阅时未察觉），现在指到 tmp；
+- `store.py` 补 `from pathlib import Path`（ro_uri 引入时漏 import，单测抓到）；
+- `api.health_ready` 的 `store.ro_uri(...)` 误写（ro_uri 是模块级非方法）——改模块级调用。
+
+### 验收对照
+
+| 项 | 结果 |
+|---|---|
+| pytest | **182 passed**（+6：path_uri_security 6 用例） |
+| 特殊字符路径 | 只读连接/doctor/collect_diagnostics/backup 全过（空格+中文+#） |
+| 兄弟前缀/穿越 | 预演不计字节、实删不删文件 |
+| release_check / 主库 | 未复跑（无发布链改动）；主库零触碰（conftest 全隔离） |
+
+### 遗留
+
+- 无。
