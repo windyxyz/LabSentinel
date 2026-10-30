@@ -6,6 +6,14 @@ export const adminToken = {
   set: (v) => v ? localStorage.setItem('admin_token', v) : localStorage.removeItem('admin_token'),
 }
 
+// 105 回归补丁 P0-2：读保护开启时 <img>/<video>/<a download> 裸 URL 不带请求头会 401——
+// 媒体/下载地址统一走这里，有令牌时追加 ?token=（URL token 会进历史/代理日志，服务端文档已注明）
+export function mediaUrl(path) {
+  const t = adminToken.get()
+  if (!t) return path
+  return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(t)
+}
+
 async function req(method, path, body) {
   const isForm = body instanceof FormData
   const headers = body && !isForm ? { 'Content-Type': 'application/json' } : {}
@@ -75,16 +83,20 @@ export const STATUS_TEXT = {
 }
 
 export function connectEvents(onEvent, onState) {
-  let ws, timer
+  let ws, timer, closed = false
   function open() {
+    if (closed) return
     ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/events')
     ws.onopen = () => onState && onState('ok')
     ws.onmessage = (m) => { try { onEvent(JSON.parse(m.data)) } catch {} }
     ws.onclose = () => {
+      // 2026-10-30 审阅修复：cleanup 里 ws.close() 会异步触发 onclose，原实现会重新武装
+      // 3s 重连定时器 → 卸载后幽灵连接永久重连（每切一次页面泄漏一条）
+      if (closed) return
       onState && onState('reconnecting')
       timer = setTimeout(open, 3000)  // 断线自动重连
     }
   }
   open()
-  return () => { clearTimeout(timer); ws && ws.close() }
+  return () => { closed = true; clearTimeout(timer); ws && ws.close() }
 }

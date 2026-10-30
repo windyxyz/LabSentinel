@@ -19,13 +19,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-_SENSITIVE = re.compile(r"TOKEN|PASSWORD|SECRET|KEY", re.IGNORECASE)
+
+
+def detect_server_dir(root: Path) -> Path:
+    """75 修复：便携包（root/runtime/python.exe）→ root/app/server；源码 → root/server。"""
+    return root / "app" / "server" if (root / "runtime" / "python.exe").exists() else root / "server"
+
+
+def default_data_dir(root: Path) -> Path:
+    """便携包：数据外置 %LOCALAPPDATA%\\LabSentinel\\data；源码：root/server/data。"""
+    if (root / "runtime" / "python.exe").exists():
+        return Path(os.environ.get("LOCALAPPDATA", str(root / "_userdata"))) / "LabSentinel" / "data"
+    return root / "server" / "data"
+# 2026-10-30 审阅修复：原正则只认 PASSWORD，匹配不到 LS_SMTP_PASS（明文密码进"可公开"包）——
+# 补 PASS\b/CREDENTIAL；webhook_url 这类 query-token 凭证由 URL 抹除规则覆盖 user:pass@，query 型
+# 见 redact_value 的 query 参数掩码。
+_SENSITIVE = re.compile(r"TOKEN|PASSWORD|SECRET|KEY|PASS\b|CREDENTIAL", re.IGNORECASE)
 _URL_CRED = re.compile(r"(?i)(\w[\w+.-]*://)([^/@\s:]+):([^@\s]+)@")
+_URL_QUERY_TOKEN = re.compile(
+    r"(?i)([?&](?:token|key|access_token|sign|signature|secret)=)[^&\s]+")
 
 
 def redact_value(v: str) -> str:
-    """值级脱敏：敏感键名 → ***；URL 凭证 user:pass@ → ***:***@。"""
+    """值级脱敏：URL 凭证 user:pass@ 与 query 型 token=… 都抹除。"""
     s = _URL_CRED.sub(r"\1***:***@", str(v))
+    s = _URL_QUERY_TOKEN.sub(r"\1***", s)
     return s
 
 
@@ -71,7 +89,8 @@ def git_commit() -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="LabSentinel 一键诊断包（任务61）")
     ap.add_argument("--out", type=Path, default=Path("diag.zip"))
-    ap.add_argument("--data-dir", type=Path, default=ROOT / "server" / "data")
+    ap.add_argument("--data-dir", type=Path, default=None,
+                    help="数据目录（缺省自动：便携包=%%LOCALAPPDATA%%\\LabSentinel\\data，源码=server/data）")
     ap.add_argument("--log-lines", type=int, default=500)
     ap.add_argument("--force", action="store_true", help="覆盖已存在的 --out")
     a = ap.parse_args()
@@ -79,7 +98,9 @@ def main() -> int:
         print(f"[失败] {a.out} 已存在（--force 覆盖）")
         return 1
 
-    data_dir = a.data_dir
+    # 75 修复：server 目录与默认 data 目录按"便携包/源码"布局探测（import app.config 也要指对）
+    server_dir = detect_server_dir(ROOT)
+    data_dir = a.data_dir or default_data_dir(ROOT)
     db = data_dir / "labsentinel.db"
     log_file = data_dir / "logs" / "server.log"
 
@@ -94,7 +115,7 @@ def main() -> int:
     # 生效配置：settings（pydantic-settings，含 .env 值）以 LS_<字段> 形式输出并脱敏
     config_lines = ["# 当前生效配置（脱敏；TOKEN/PASSWORD/SECRET/KEY 一律 ***，URL 凭证已抹除）"]
     try:
-        sys.path.insert(0, str(ROOT / "server"))
+        sys.path.insert(0, str(server_dir))  # 75 修复：便携包指向 app/server
         from app.config import settings  # noqa: E402
         for k, v in settings.model_dump().items():
             config_lines.append(redact_line(f"LS_{k.upper()}", str(v)))
@@ -128,8 +149,9 @@ def main() -> int:
             con.close()
 
     if log_file.exists():
+        # 2026-10-30 审阅修复：日志尾原样打包会泄露 RTSP 密码/webhook token——逐行过脱敏
         tail = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-a.log_lines:]
-        log_txt = "\n".join(tail) or "(空日志)"
+        log_txt = "\n".join(redact_value(ln) for ln in tail) or "(空日志)"
     else:
         log_txt = f"(日志文件不存在: {log_file})"
 

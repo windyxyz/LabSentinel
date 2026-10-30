@@ -125,8 +125,10 @@ def pick_port(cfg: dict) -> int:
     want = int(cfg.get("port", PORT_DEFAULT))
 
     def free(p):
+        # 2026-10-30 审阅修复：Windows 上 SO_REUSEADDR 允许绑到已被监听的端口，探测恒"空闲"，
+        # 端口漂移机制被完全架空——必须用 SO_EXCLUSIVEADDRUSE（独占语义）才能测出真占用
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             try:
                 s.bind(("127.0.0.1", p))
                 return True
@@ -215,11 +217,15 @@ def do_start() -> int:
 
     lock = read_lock()
     if lock and pid_alive(lock[0]):
-        if health(lock[1]):
-            log.info("服务已在运行 pid=%d port=%d，直接打开浏览器", *lock)
-            open_browser(lock[1])
-            return 0
-        log.info("锁内 pid=%d 存活但健康检查失败，视为陈旧锁，清理后重启", lock[0])
+        # 服务已在运行：健康检查重试几次（首次启动模型加载可能 >2s，单次失败≠僵死——
+        # 2026-10-30 审阅：单次失败即重启会造成双实例共写同一库）
+        for _ in range(3):
+            if health(lock[1]):
+                log.info("服务已在运行 pid=%d port=%d，直接打开浏览器", *lock)
+                open_browser(lock[1])
+                return 0
+            time.sleep(2)
+        log.info("锁内 pid=%d 存活但健康检查连续失败，视为陈旧锁，清理后重启", lock[0])
         LOCK.unlink(missing_ok=True)
     elif lock:
         LOCK.unlink(missing_ok=True)

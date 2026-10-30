@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted, nextTick, ref } from 'vue'
-import { api, TYPE_TEXT, STATUS_TEXT } from '../api'
+import { api, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
 import AsyncState from '../components/AsyncState.vue'
 
 const rows = ref([])
@@ -22,10 +22,13 @@ let lastFocus = null
 // 任务66：三态 + 按钮防重复
 const loading = ref(true)
 const loaded = ref(false)
+const stale = ref(false)      // 有旧数据时的刷新失败（只提示，不进错误分支）
 const error = ref('')
 const busyEvent = ref(null)   // 正在处置的事件 id
+let loadSeq = 0               // 2026-10-30 审阅：请求序号，防旧响应覆盖新结果
 
 async function load() {
+  const seq = ++loadSeq  // 2026-10-30 审阅：快速切换筛选时旧响应可能后到覆盖新结果
   const params = { limit: PAGE_SIZE, offset: offset.value }
   if (camId.value) params.camera_id = camId.value
   if (level.value) params.level = level.value
@@ -33,15 +36,21 @@ async function load() {
   if (startDate.value) params.start_ts = startDate.value
   if (endDate.value) params.end_ts = endDate.value
   try {
-    rows.value = await api.events(params)
-    total.value = (await api.eventsCount(params)).count
+    const newRows = await api.events(params)
+    const newTotal = (await api.eventsCount(params)).count
+    if (seq !== loadSeq) return  // 已有更新的请求在途，丢弃旧结果
+    rows.value = newRows
+    total.value = newTotal
+    // 有旧数据时刷新失败只出提示（AsyncState 的 error 分支会隐藏内容）
     error.value = ''
     loaded.value = true
   } catch (e) {
-    // 刷新失败保留旧数据（rows 不清空），只提示
-    error.value = String(e.message || e)
+    if (seq !== loadSeq) return
+    if (loaded.value) error.value = ''
+    stale.value = true
+    if (!loaded.value) error.value = String(e.message || e)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -53,10 +62,12 @@ function clearFilters() {
 function resetAndLoad() { offset.value = 0; load() }   // 筛选变化重置页码
 function nextPage() { if (offset.value + PAGE_SIZE < total.value) { offset.value += PAGE_SIZE; load() } }
 function prevPage() { offset.value = Math.max(0, offset.value - PAGE_SIZE); load() }
-onMounted(async () => {
-  cams.value = await api.cameras()
-  load()
+// 2026-10-30 审阅修复：原 onMounted 里 `await api.cameras()` 失败会跳过 load()/事件监听注册，
+// 页面永久卡"加载中…"。改为同步注册监听 + load 先行 + 摄像头列表失败单独降级
+onMounted(() => {
   window.addEventListener('keydown', onKey)
+  load()
+  api.cameras().then(list => { cams.value = list }).catch(() => { /* 筛选下拉留空即可 */ })
 })
 onUnmounted(() => window.removeEventListener('keydown', onKey))
 
@@ -116,7 +127,7 @@ async function mark(e, status) {
       <input type="date" v-model="endDate" @change="resetAndLoad" title="结束日期" aria-label="结束日期" />
       <button class="ghost" @click="load">刷新</button>
     </div>
-    <AsyncState :loading="loading" :error="error" :notice="loaded && error ? '刷新失败，仍显示上一次数据' : ''"
+    <AsyncState :loading="loading" :error="error" :notice="stale ? '刷新失败，仍显示上一次数据' : ''"
                 :empty="loaded && !rows.length"
                 :empty-text="camId || level || status || startDate || endDate ? '当前筛选条件下没有事件' : '暂无事件 —— 启动摄像头并配置规则后，事件会出现在这里'"
                 @retry="load">
@@ -134,7 +145,7 @@ async function mark(e, status) {
           </span>
         </td>
         <td>
-          <img v-if="e.has_snapshot" :src="`/api/events/${e.id}/snapshot`" alt="事件截图缩略图" class="snap" @click="zoom = `/api/events/${e.id}/snapshot`" />
+          <img v-if="e.has_snapshot" :src="mediaUrl(`/api/events/${e.id}/snapshot`)" alt="事件截图缩略图" class="snap" @click="zoom = mediaUrl(`/api/events/${e.id}/snapshot`)" />
         </td>
         <td>
           <button v-if="e.has_video" class="ghost" aria-label="播放事件视频" @click="videoZoom = e.id">▶</button>
@@ -172,9 +183,9 @@ async function mark(e, status) {
             · <span :class="'lv' + drawer.level">L{{ drawer.level }}</span>
             · {{ STATUS_TEXT[drawer.status] || drawer.status }}</p>
           <p>{{ drawer.detail }}</p>
-          <img v-if="drawer.has_snapshot" :src="`/api/events/${drawer.id}/snapshot`" alt="事件截图大图，点击放大"
-               class="drawer-snap" @click="zoom = `/api/events/${drawer.id}/snapshot`" />
-          <video v-if="drawer.has_video" :src="`/api/events/${drawer.id}/video`" controls
+          <img v-if="drawer.has_snapshot" :src="mediaUrl(`/api/events/${drawer.id}/snapshot`)" alt="事件截图大图，点击放大"
+               class="drawer-snap" @click="zoom = mediaUrl(`/api/events/${drawer.id}/snapshot`)" />
+          <video v-if="drawer.has_video" :src="mediaUrl(`/api/events/${drawer.id}/video`)" controls
                  style="width:100%; border-radius:var(--overlay-radius); background:#000" />
           <div v-if="drawer.status === 'new'" class="row">
             <button :disabled="busyEvent !== null" @click="mark(drawer, 'acked')">确认</button>
@@ -192,7 +203,7 @@ async function mark(e, status) {
   </div>
 
   <div v-if="videoZoom !== null" style="position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="videoZoom = null">
-    <video :src="`/api/events/${videoZoom}/video`" controls autoplay aria-label="事件视频回放" style="max-width:92vw; max-height:92vh" @click.stop />
+    <video :src="mediaUrl(`/api/events/${videoZoom}/video`)" controls autoplay aria-label="事件视频回放" style="max-width:92vw; max-height:92vh" @click.stop />
   </div>
 </template>
 

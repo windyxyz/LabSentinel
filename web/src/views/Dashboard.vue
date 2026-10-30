@@ -30,13 +30,15 @@ async function reload() {
 }
 
 onMounted(async () => {
-  await reload()
-  pollTimer = setInterval(reload, 5000)  // 任务66：卡片 5s 轮询；失败保留旧值只出提示
+  // 2026-10-30 审阅修复：onUnmounted 必须在首个 await 之前注册（Vue 只在同步段收集生命周期钩子，
+  // 原写在 await reload() 之后是 no-op → WS 永不清理）；WS 建立同样前移，不依赖首屏数据
   const close = connectEvents(
     (ev) => { feed.value = [ev, ...feed.value].slice(0, 100) },
     (s) => (wsState.value = s),
   )
   onUnmounted(close)
+  pollTimer = setInterval(reload, 5000)  // 任务66：卡片 5s 轮询；失败保留旧值只出提示
+  await reload()
 })
 onUnmounted(() => clearInterval(pollTimer))
 </script>

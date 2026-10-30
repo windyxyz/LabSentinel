@@ -16,7 +16,7 @@ import backup_data as bd  # noqa: E402
 
 def make_data(tmp_path: Path, with_media: bool = True) -> Path:
     d = tmp_path / "data"
-    d.mkdir()
+    d.mkdir(exist_ok=True)  # conftest autouse 已建同名目录树（105 补丁 P1-2）
     con = sqlite3.connect(d / "labsentinel.db")
     con.execute("create table cameras(id integer primary key, name text)")
     con.execute("create table events(id integer primary key, camera_id integer, detail text)")
@@ -27,10 +27,10 @@ def make_data(tmp_path: Path, with_media: bool = True) -> Path:
     con.close()
     if with_media:
         s = d / "snapshots"
-        s.mkdir()
+        s.mkdir(exist_ok=True)
         (s / "snap-中文-1.jpg").write_bytes(b"\xff\xd8fake")
         v = d / "videos"
-        v.mkdir()
+        v.mkdir(exist_ok=True)
         (v / "ev-1.mp4").write_bytes(b"0" * 1024)
     return d
 
@@ -85,10 +85,12 @@ def test_restore_refuses_and_force_baks(tmp_path):
     (target / "labsentinel.db").write_bytes(b"old")
     assert run(["restore", "--zip", str(out), "--data-dir", str(target)]) == 1  # 无 force 拒绝
     assert (target / "labsentinel.db").read_bytes() == b"old"
+    # 2026-10-30 审阅修复：保守恢复"不删目标多出的文件"原先没被真正测到（恒真断言）——
+    # 先放一个额外文件，restore 后它必须仍在
+    (target / "user-extra.txt").write_text("x", encoding="ascii")
     assert run(["restore", "--zip", str(out), "--data-dir", str(target), "--force"]) == 0
     assert len(list(target.glob("labsentinel.db.bak-*"))) == 1
-    # 保守恢复：不删目标多出的文件
-    assert (target / "user-extra.txt").exists() if (target / "user-extra.txt").write_text("x") else True
+    assert (target / "user-extra.txt").read_text(encoding="ascii") == "x"
 
 
 def test_bak_retention_3(tmp_path):
@@ -139,3 +141,55 @@ def test_corrupt_inputs(tmp_path):
     junk = tmp_path / "junk.zip"
     junk.write_bytes(b"not a zip")
     assert run(["verify", "--zip", str(junk)]) == 1
+
+
+# ---- 105 补丁 P0-3：restore 顺序重排（拒绝不碰文件/checkpoint 后清理 WAL/孤儿 WAL 清理）----
+
+def test_restore_refuse_keeps_wal(tmp_path):
+    """有 WAL、无 --force 拒绝覆盖：返回失败且 WAL 文件原样保留。"""
+    data = make_data(tmp_path, with_media=False)
+    out = tmp_path / "b.zip"
+    assert run(["backup", "--data-dir", str(data), "--out", str(out)]) == 0
+    target = tmp_path / "t"
+    target.mkdir()
+    (target / "labsentinel.db").write_bytes(b"old-db")
+    wal = target / "labsentinel.db-wal"
+    wal.write_bytes(b"WAL-CONTENT-MUST-SURVIVE")
+    rc = run(["restore", "--zip", str(out), "--data-dir", str(target)])
+    assert rc == 1
+    assert wal.read_bytes() == b"WAL-CONTENT-MUST-SURVIVE"  # 拒绝分支不碰任何文件
+    assert (target / "labsentinel.db").read_bytes() == b"old-db"
+
+
+def test_restore_force_checkpoints_and_cleans_wal(tmp_path):
+    """--force：checkpoint 后 .bak 生成、WAL/SHM 清理、新库 integrity ok。"""
+    import sqlite3
+    data = make_data(tmp_path, with_media=False)
+    out = tmp_path / "b.zip"
+    assert run(["backup", "--data-dir", str(data), "--out", str(out)]) == 0
+    target = tmp_path / "t"
+    target.mkdir()
+    con = sqlite3.connect(target / "labsentinel.db")
+    con.execute("create table x(a)")  # 现有库带 WAL 活动
+    con.execute("insert into x values(1)")
+    con.commit()
+    con.close()
+    assert run(["restore", "--zip", str(out), "--data-dir", str(target), "--force"]) == 0
+    assert list(target.glob("labsentinel.db.bak-*"))
+    assert not (target / "labsentinel.db-wal").exists()
+    assert not (target / "labsentinel.db-shm").exists()
+    con = sqlite3.connect(target / "labsentinel.db")
+    assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    con.close()
+
+
+def test_restore_orphan_wal_cleaned(tmp_path):
+    """目标无 db 但有孤儿 WAL：恢复前清理，不回放进新库。"""
+    data = make_data(tmp_path, with_media=False)
+    out = tmp_path / "b.zip"
+    assert run(["backup", "--data-dir", str(data), "--out", str(out)]) == 0
+    target = tmp_path / "t"
+    target.mkdir()
+    (target / "labsentinel.db-wal").write_bytes(b"orphan")
+    assert run(["restore", "--zip", str(out), "--data-dir", str(target)]) == 0
+    assert not (target / "labsentinel.db-wal").exists()

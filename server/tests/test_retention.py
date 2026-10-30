@@ -23,7 +23,7 @@ def env(tmp_path, monkeypatch):
     snap = data_dir / "snapshots"
     vids = data_dir / "videos"
     for d in (snap, vids):
-        d.mkdir(parents=True)
+        d.mkdir(parents=True, exist_ok=True)  # conftest autouse 已建（105 补丁 P1-2）
     monkeypatch.setattr(api_mod, "store", s)
     monkeypatch.setattr(settings, "data_dir", data_dir)
     monkeypatch.setattr(settings, "snapshot_dir", snap)

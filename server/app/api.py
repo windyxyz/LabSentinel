@@ -51,9 +51,17 @@ def require_admin(request: Request):
 
 
 def require_read(request: Request):
-    """读操作守卫：仅 LS_AUTH_READ_PROTECTED=true 时生效。"""
-    if settings.auth_read_protected and not _token_ok(request.headers.get("X-Admin-Token")):
-        raise HTTPException(401, "需要管理令牌（X-Admin-Token）")
+    """读操作守卫：仅 LS_AUTH_READ_PROTECTED=true 时生效。
+
+    105 回归补丁 P0-2：`<img>/<video>/<a download>` 裸 URL 不带 X-Admin-Token 头，读保护开启后
+    截图/视频/导出全 401——接受 `?token=` 查询参数作为回退（与 header 同用 hmac.compare_digest）。
+    URL token 会进浏览器历史/代理日志，文档建议配合独立令牌与 Referrer-Policy（任务 89）。
+    """
+    if not settings.auth_read_protected:
+        return
+    provided = request.headers.get("X-Admin-Token") or request.query_params.get("token")
+    if not provided or not _token_ok(provided):
+        raise HTTPException(401, "需要管理令牌（X-Admin-Token 头或 ?token= 查询参数）")
 
 
 def init(s: Store, m: CameraManager):
@@ -138,7 +146,10 @@ def system():
 
 
 # ---- cameras ----
-@router.get("/cameras")
+# 2026-10-30 审阅：读保护口径统一——/api/system 与 /api/health/* 例外永不拦截（启动器健康检查用），
+# 其余 GET（cameras/zones/rules/snapshot/webrtc/stats/maintenance/export）一律 require_read。
+# 此前 export/evidence.zip、实时快照等含敏感数据的端点漏挂，读保护形同虚设。
+@router.get("/cameras", dependencies=[Depends(require_read)])
 def cameras():
     return store.cameras()
 
@@ -182,7 +193,7 @@ def delete_camera(cid: int):
     return {"ok": True}
 
 
-@router.get("/cameras/{cid}/webrtc")
+@router.get("/cameras/{cid}/webrtc", dependencies=[Depends(require_read)])
 def camera_webrtc(cid: int, request: Request):
     """返回该路流的 go2rtc WebRTC 信令地址（浏览器直连 go2rtc :1984）。"""
     if store.camera(cid) is None:
@@ -216,7 +227,7 @@ def camera_status(cid: int):
     return out
 
 
-@router.get("/cameras/{cid}/snapshot")
+@router.get("/cameras/{cid}/snapshot", dependencies=[Depends(require_read)])
 def camera_snapshot(cid: int):
     frame = manager.latest_frame(cid)
     if frame is None:
@@ -230,7 +241,7 @@ def camera_snapshot(cid: int):
 
 
 # ---- zones ----
-@router.get("/zones")
+@router.get("/zones", dependencies=[Depends(require_read)])
 def zones(camera_id: int | None = None):
     return store.zones(camera_id)
 
@@ -239,6 +250,12 @@ def zones(camera_id: int | None = None):
 def add_zone(body: ZoneCreate):
     if store.camera(body.camera_id) is None:
         raise HTTPException(404, "camera not found")
+    # 2026-10-30 审阅：入库前校验——坏 polygon 原先会静默入库，worker 每帧 parse 抛错，
+    # 摄像头显示 running 却零事件。parse_polygon 的 ValueError 也在此一并转 400。
+    if len(body.polygon) < 3:
+        raise HTTPException(400, "安全区至少需要 3 个顶点")
+    if any(len(pt) != 2 for pt in body.polygon):
+        raise HTTPException(400, "顶点格式应为 [x, y]")
     try:
         zid = store.add_zone(body.camera_id, body.name, body.polygon)
     except ValueError as e:
@@ -253,7 +270,7 @@ def delete_zone(zid: int):
 
 
 # ---- rules ----
-@router.get("/rules")
+@router.get("/rules", dependencies=[Depends(require_read)])
 def rules(camera_id: int | None = None):
     return store.rules(camera_id)
 
@@ -262,6 +279,15 @@ def rules(camera_id: int | None = None):
 def add_rule(body: RuleCreate):
     if body.behavior not in ("enter_no_ppe", "enter", "exit", "occupancy_over"):
         raise HTTPException(400, "unknown behavior")
+    if store.camera(body.camera_id) is None:  # 2026-10-30 审阅：指向不存在摄像头的规则静默失活
+        raise HTTPException(404, "camera not found")
+    if body.zone_id is not None:
+        zone = store.zone(body.zone_id)
+        if zone is None:
+            raise HTTPException(404, "zone not found")
+        if zone["camera_id"] != body.camera_id:  # 105 补丁 P1-1：跨摄像头规则静默失活，入库即拒
+            raise HTTPException(400, f"区域 {body.zone_id} 属于摄像头 #{zone['camera_id']}，"
+                                     f"不能挂到摄像头 #{body.camera_id}")
     rid = store.add_rule(body.model_dump())
     return {"id": rid}
 
@@ -313,7 +339,7 @@ def set_event_status(eid: int, body: dict):
     status = (body or {}).get("status", "")
     if status not in EVENT_STATUSES or status == "new":
         raise HTTPException(400, f"status 必须是 {'|'.join(EVENT_STATUSES[1:])}")
-    row = next((r for r in store.events(limit=10**9) if r["id"] == eid), None)
+    row = store.event_by_id(eid)  # 2026-10-30 审阅：不再全表拉取
     if row is None:
         raise HTTPException(404, "event not found")
     if not store.set_event_status(eid, status, handled_by=(body or {}).get("handled_by", "admin")):
@@ -421,7 +447,7 @@ def face_delete(subject: str):
 
 
 # ---- alert deliveries（任务13：推送可靠性）----
-@router.get("/alerts/status")
+@router.get("/alerts/status", dependencies=[Depends(require_read)])
 def alerts_status():
     """渠道状态页数据（任务23A，只读）：configured 判定不含敏感值；deliveries 汇总自投递表。"""
     configured_map = {
@@ -463,8 +489,7 @@ def alert_delivery_retry(did: int):
     if ch is None:
         raise HTTPException(400, f"未知渠道: {rec['channel']}")
     if rec["event_id"]:
-        ev = store.events(limit=10**9)
-        row = next((r for r in ev if r["id"] == rec["event_id"]), None)
+        row = store.event_by_id(rec["event_id"])  # 2026-10-30 审阅：按 id 单查（原全表拉取）
         if row is None:
             raise HTTPException(404, "原事件已不存在")
         text = render_alert(row)
@@ -504,7 +529,7 @@ def maintenance_preview():
     return retention.preview_cleanup(store)
 
 
-@router.get("/maintenance/status")
+@router.get("/maintenance/status", dependencies=[Depends(require_read)])
 def maintenance_status():
     """维护状态（任务14/68）：清理结果 + 磁盘水位/数据体量/增速预估（估算值已标注）。"""
     import os
@@ -584,7 +609,7 @@ def maintenance_status():
 
 
 # ---- export（任务15：报表导出）----
-@router.get("/export/events.csv")
+@router.get("/export/events.csv", dependencies=[Depends(require_read)])
 def export_events_csv(days: int = 30, camera_id: int | None = None, status: str | None = None):
     """事件 CSV（UTF-8 带 BOM，Excel 中文不乱码；生成器流式返回）。"""
     from .export import iter_events_csv
@@ -601,7 +626,7 @@ def export_events_csv(days: int = 30, camera_id: int | None = None, status: str 
                              headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
-@router.get("/export/stats.csv")
+@router.get("/export/stats.csv", dependencies=[Depends(require_read)])
 def export_stats_csv(days: int = 30, camera_id: int | None = None):
     from .export import stats_csv
     buf = io.StringIO()
@@ -614,7 +639,7 @@ def export_stats_csv(days: int = 30, camera_id: int | None = None):
                  f"attachment; filename=stats_{datetime.now().strftime('%Y%m%d')}.csv"})
 
 
-@router.get("/export/monthly.pdf")
+@router.get("/export/monthly.pdf", dependencies=[Depends(require_read)])
 def export_monthly_pdf(month: str):
     """月报 PDF（不含截图/人脸，合规）。month=2026-10。"""
     from .export import monthly_pdf
@@ -631,7 +656,7 @@ def export_monthly_pdf(month: str):
                              f"attachment; filename=monthly_{month}.pdf"})
 
 
-@router.get("/export/evidence.zip")
+@router.get("/export/evidence.zip", dependencies=[Depends(require_read)])
 def export_evidence_zip(camera_id: int | None = None, level: int | None = None,
                         status: str | None = None,
                         start_ts: str | None = None, end_ts: str | None = None):
@@ -650,27 +675,30 @@ def export_evidence_zip(camera_id: int | None = None, level: int | None = None,
 
 
 # ---- stats ----
-@router.get("/stats/daily")
+@router.get("/stats/daily", dependencies=[Depends(require_read)])
 def stats_daily(days: int = 7, camera_id: int | None = None, status: str | None = None,
                 start_ts: str | None = None, end_ts: str | None = None):
-    start_ts, end_ts = _normalize_ts_range(start_ts, end_ts)
-    return stats_daily_query(store, days=days, camera_id=camera_id, status=status,
-                             start_ts=start_ts, end_ts=end_ts)
+    try:  # 2026-10-30 审阅：非法日期统一 400（原 ValueError 冒泡成 500，与 hourly 口径不一致）
+        start_ts, end_ts = _normalize_ts_range(start_ts, end_ts)
+        return stats_daily_query(store, days=days, camera_id=camera_id, status=status,
+                                 start_ts=start_ts, end_ts=end_ts)
+    except ValueError as e:
+        raise HTTPException(400, f"日期格式错误: {e}")
 
 
-@router.get("/stats/weekly")
+@router.get("/stats/weekly", dependencies=[Depends(require_read)])
 def stats_weekly(weeks: int = 4, camera_id: int | None = None, status: str | None = None):
     """按 ISO 周聚合（周一为起点），最近 N 周（任务21）。"""
     return stats_weekly_query(store, weeks=weeks, camera_id=camera_id, status=status)
 
 
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(require_read)])
 def stats_summary(days: int = 30, camera_id: int | None = None, status: str | None = None):
     """汇总卡片：总数/分级/分类型/Top 事件日（任务21）。"""
     return stats_summary_query(store, days=days, camera_id=camera_id, status=status)
 
 
-@router.get("/stats/hourly")
+@router.get("/stats/hourly", dependencies=[Depends(require_read)])
 def stats_hourly(date: str, camera_id: int | None = None):
     try:
         return stats_hourly_query(store, date, camera_id=camera_id)

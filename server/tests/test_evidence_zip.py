@@ -21,7 +21,7 @@ def env(tmp_path, monkeypatch):
     s = Store(path=tmp_path / "t.db")
     data_dir = tmp_path / "data"
     snap, vids = data_dir / "snapshots", data_dir / "videos"
-    snap.mkdir(parents=True); vids.mkdir(parents=True)
+    snap.mkdir(parents=True, exist_ok=True); vids.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(api_mod, "store", s)
     monkeypatch.setattr(settings, "data_dir", data_dir)
     return s, data_dir, snap, vids

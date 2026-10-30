@@ -7,6 +7,9 @@
   RTSP 源原样透传）。ffmpeg.exe 放 tools/ffmpeg/，start-all.bat 已加 PATH。
 - go2rtc 未运行时：把期望配置写入 yaml 供其冷启动读取；运行时以 API 为准。
 go2rtc 与分析 worker 共用同一路 RTSP 源（go2rtc 自行拉流，不增加摄像头出流量）。
+
+注意（2026-10-30 审阅修复）：曾把状态变量与取客户端函数都命名为 `_client`，变量赋值在函数定义
+之后执行导致函数被覆盖为 None，热同步整条链路静默失效——现改名为 `_http`，两者不再冲突。
 """
 import httpx
 
@@ -42,20 +45,20 @@ def build_yaml(cameras: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+_http: httpx.Client | None = None
+
+
 def _client() -> httpx.Client:
     """go2rtc 本机服务的会话。地址来自运维配置（默认回环 127.0.0.1:1984）；
     非 https 且目标不是回环地址时拒绝启动该客户端（防配置失误把事件流打到外网）。"""
-    global _client
-    if _client is None:
+    global _http
+    if _http is None:
         host = settings.go2rtc_api.split(":")[0] or "127.0.0.1"
         loopback = host in ("127.0.0.1", "localhost", "::1")
         if not loopback:
             print(f"[go2rtc] 提示：目标 {settings.go2rtc_api} 非回环地址，请确保为可信内网网关")
-        _client = httpx.Client(base_url=f"http://{settings.go2rtc_api}/", timeout=2)
-    return _client
-
-
-_client: httpx.Client | None = None
+        _http = httpx.Client(base_url=f"http://{settings.go2rtc_api}/", timeout=2)
+    return _http
 
 
 def sync_streams(store) -> None:
@@ -83,8 +86,10 @@ def sync_streams(store) -> None:
         if changed:
             print(f"[go2rtc] 已热同步 {changed} 路流（共 {len(desired)} 路）")
         return
-    except Exception:  # noqa: BLE001  连接失败 = go2rtc 未运行
-        pass
+    except httpx.HTTPError:
+        pass  # 连接失败 = go2rtc 未运行，走冷启动
+    except Exception as e:  # noqa: BLE001  非连接类异常必须留痕（2026-10-30 审阅：曾静默吞掉）
+        print(f"[go2rtc] 热同步异常（转冷启动）: {type(e).__name__}: {e}")
 
     try:  # 冷启动路径：写 yaml，go2rtc 下次启动时读取
         path = settings.go2rtc_yaml

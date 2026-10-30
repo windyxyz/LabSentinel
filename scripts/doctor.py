@@ -130,6 +130,15 @@ def run_checks(root: Path, port: int) -> list[dict]:
                                  f"{db.name} {db.stat().st_size / 1e6:.1f}MB integrity={integrity} "
                                  f"cameras={cams} events={evs} wal={wal.stat().st_size if wal.exists() else 0}B",
                                  "数据库损坏——用 scripts/backup_data.py 的最新备份恢复" if not ok else ""))
+        except sqlite3.OperationalError as e:
+            # 2026-10-30 审阅：服务正在写库时 integrity_check 会撞 busy——这是"忙"不是"坏"，
+            # 原实现误报 FAIL（退出码 2）并建议删库重播种，纯属误导
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                results.append(check("数据库", True, f"数据库被占用（服务正在运行），跳过完整性检查",
+                                     "", level="PASS"))
+            else:
+                results.append(check("数据库", False, f"打不开: {e}",
+                                     "数据库损坏——用 scripts/backup_data.py 的最新备份恢复"))
         except sqlite3.Error as e:
             results.append(check("数据库", False, f"打不开: {e}",
                                  "数据库损坏——用最新备份恢复或删除该库重新播种（会丢事件）"))

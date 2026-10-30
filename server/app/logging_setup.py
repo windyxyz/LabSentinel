@@ -89,9 +89,11 @@ def setup_file_logging(data_dir: Path | None = None) -> Path | None:
         h.addFilter(_RID_FILTER)
         h.setLevel(level)
         root = logging.getLogger()
+        # 2026-10-30 审阅修复：原条件写反——root 默认 WARNING 且 level=INFO 时两个分支都不成立，
+        # root 维持 WARNING 导致 app.* 的 INFO 日志在源头被丢弃、文件里只有 WARNING+
+        if root.level == logging.NOTSET or root.level > level:
+            root.setLevel(level)
         root.addHandler(h)
-        if root.level > level or root.level == logging.NOTSET and level < logging.INFO:
-            root.setLevel(min(root.level or level, level))
         _file_handler = h
         return target
     except OSError:

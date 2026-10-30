@@ -156,6 +156,7 @@ def main() -> int:
                     ok = bool(sysinfo.get("backend")) and bool(sysinfo.get("version"))
                     detail = f"backend={sysinfo.get('backend')} version={sysinfo.get('version')} port={lock_port}"
                     break
+                time.sleep(1)  # 2026-10-30 审阅：非 200 也要等，否则 20 连发空转后立即判负
             except OSError:
                 time.sleep(1)
         if not step("3b /api/system 200 且 backend/version 非空", ok, detail):

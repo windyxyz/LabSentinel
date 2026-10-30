@@ -220,6 +220,24 @@ class Store:
             )
             return cur.lastrowid
 
+    def event_by_id(self, eid: int) -> dict | None:
+        """按 id 单查事件（2026-10-30 审阅新增：替代 events(limit=1) 取"最新行"的竞态写法）。"""
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM events WHERE id=?", (eid,)).fetchone()
+            return dict(r) if r else None
+
+    def zone(self, zid: int) -> dict | None:
+        """按 id 单查安全区（add_rule 存在性校验用）。"""
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM zones WHERE id=?", (zid,)).fetchone()
+            return dict(r) if r else None
+
+    def delivery_by_id(self, did: int) -> dict | None:
+        """按 id 单查投递记录（同上，替代全表拉取）。"""
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM alert_deliveries WHERE id=?", (did,)).fetchone()
+            return dict(r) if r else None
+
     def events(self, limit=50, camera_id=None, level=None, status=None,
                offset=0, start_ts=None, end_ts=None):
         """事件查询；status 过滤（'unhandled'='new'）；offset 分页；start_ts/end_ts 时间范围（含边界）。"""

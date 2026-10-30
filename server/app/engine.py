@@ -140,12 +140,15 @@ class Engine:
 
 
 _engine: Engine | None = None
+_init_lock = threading.Lock()  # 2026-10-30 审阅：多 worker 并发冷启动会建两个 DML 会话（双份显存）
 
 
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = Engine()
+        with _init_lock:
+            if _engine is None:
+                _engine = Engine()
     return _engine
 
 
@@ -212,13 +215,16 @@ def get_ppe_engine() -> PpeEngine | None:
     global _ppe_engine, _ppe_engine_tried
     if _ppe_engine_tried:
         return _ppe_engine
-    _ppe_engine_tried = True
-    if not settings.ppe_model or not Path(str(settings.ppe_model)).exists():
-        return None
-    try:
-        _ppe_engine = PpeEngine(settings.ppe_model, _load_class_names(Path(str(settings.ppe_model))))
-        print(f"[engine] ppe model loaded: {settings.ppe_model}")
-    except Exception as e:  # noqa: BLE001
-        print(f"[engine] ppe model load failed: {e}")
+    with _init_lock:  # 与 get_engine 同一把：双 worker 并发冷启动防双会话
+        if _ppe_engine_tried:
+            return _ppe_engine
+        _ppe_engine_tried = True
+        if not settings.ppe_model or not Path(str(settings.ppe_model)).exists():
+            return None
+        try:
+            _ppe_engine = PpeEngine(settings.ppe_model, _load_class_names(Path(str(settings.ppe_model))))
+            print(f"[engine] ppe model loaded: {settings.ppe_model}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[engine] ppe model load failed: {e}")
     return _ppe_engine
 

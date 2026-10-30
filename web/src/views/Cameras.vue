@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref, watch } from 'vue'
-import { api, adminToken } from '../api'
+import { api, adminToken, mediaUrl } from '../api'
 import WebrtcPlayer from '../components/WebrtcPlayer.vue'
 import AsyncState from '../components/AsyncState.vue'
 
@@ -9,6 +9,7 @@ const form = ref({ name: '', source: '', type: 'file', autostart: false })
 // 任务66：三态 + 按钮防重复
 const loading = ref(true)
 const loaded = ref(false)
+const stale = ref(false)      // 2026-10-30 审阅：有旧列表时的刷新失败
 const camsError = ref('')
 const busyCam = ref(null)      // start/del 进行中的摄像头 id
 const adding = ref(false)
@@ -80,9 +81,12 @@ async function refresh() {
   try {
     cams.value = await api.cameras()
     camsError.value = ''
+    stale.value = false
     loaded.value = true
   } catch (e) {
-    camsError.value = String(e.message || e)   // 失败保留旧列表
+    // 2026-10-30 审阅：有旧列表时只出提示（AsyncState error 分支会隐藏内容，提示会变假话）
+    if (loaded.value) stale.value = true
+    else camsError.value = String(e.message || e)
   } finally {
     loading.value = false
   }
@@ -201,7 +205,7 @@ async function watchLive(cam) {
   </div>
 
   <div class="panel">
-    <AsyncState :loading="loading" :error="camsError" :notice="loaded && camsError ? '刷新失败，仍显示上一次列表' : ''"
+    <AsyncState :loading="loading" :error="camsError" :notice="stale ? '刷新失败，仍显示上一次列表' : ''"
                 :empty="loaded && !cams.length"
                 empty-text="暂无摄像头 —— 用上方表单添加：视频文件/RTSP/USB 均可，添加后回到这里启动"
                 @retry="refresh">
@@ -220,7 +224,7 @@ async function watchLive(cam) {
             <div v-if="v.reconnect_count > 0" class="muted">重连 {{ v.reconnect_count }} 次</div>
           </template>
         </td>
-        <td><img v-if="snap[c.id]" :src="`/api/cameras/${c.id}/snapshot?t=${snap[c.id]}`" alt="摄像头最新画面缩略图" class="snap" @click="snap[c.id] = Date.now()" /></td>
+        <td><img v-if="snap[c.id]" :src="mediaUrl(`/api/cameras/${c.id}/snapshot?t=${snap[c.id]}`)" alt="摄像头最新画面缩略图" class="snap" @click="snap[c.id] = Date.now()" /></td>
         <td>
           <button class="ghost" style="margin-right:6px" @click="snap[c.id] = Date.now()">看快照</button>
           <button class="ghost" style="margin-right:6px" @click="watchLive(c)">实时画面</button>

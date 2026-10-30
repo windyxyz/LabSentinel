@@ -1,7 +1,8 @@
-"""单元测试：任务60 USB 设备枚举（parse_dshow / list_devices 降级与缓存 / API 鉴权口径）。
-运行: pytest tests/test_usb_devices.py -q"""
+"""单元测试：任务60 USB 设备枚举（parse_dshow / list_devices 降级与缓存 / API 鉴权口径）
++ 任务75 ffmpeg 路径解析器（源码/便携双布局、LS_FFMPEG、全缺失报错）。"""
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -44,13 +45,49 @@ def fresh_cache():
     usb._cache.update(ts=0.0, data=None)
 
 
+def make_ffmpeg(tmp_path: Path, layout: str) -> Path:
+    """按布局造 ffmpeg.exe：source=<根>/tools/ffmpeg/，portable=<根>/tools/ 扁平。"""
+    d = tmp_path / "tools" / ("ffmpeg" if layout == "source" else "")
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "ffmpeg.exe"
+    f.write_bytes(b"x")
+    return f
+
+
+def test_resolve_ffmpeg_layouts(tmp_path, monkeypatch):
+    """75.1：源码布局 / 便携扁平布局 / LS_FFMPEG 覆盖 / 全缺失。"""
+    monkeypatch.delenv("LS_FFMPEG", raising=False)
+    # 源码布局
+    make_ffmpeg(tmp_path / "src", "source")
+    hit, tried = usb.resolve_ffmpeg(tmp_path / "src")
+    assert hit == tmp_path / "src" / "tools" / "ffmpeg" / "ffmpeg.exe"
+    # 便携扁平布局
+    make_ffmpeg(tmp_path / "pkg", "portable")
+    hit, _ = usb.resolve_ffmpeg(tmp_path / "pkg")
+    assert hit == tmp_path / "pkg" / "tools" / "ffmpeg.exe"
+    # LS_FFMPEG 优先（存在才用）
+    f = make_ffmpeg(tmp_path / "env", "portable")
+    monkeypatch.setenv("LS_FFMPEG", str(f))
+    hit, _ = usb.resolve_ffmpeg(tmp_path / "pkg")
+    assert hit == f
+    # 全缺失：返回第一个候选用于报错，且列出尝试路径
+    monkeypatch.delenv("LS_FFMPEG")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    hit, tried = usb.resolve_ffmpeg(empty)
+    assert not hit.exists() and len(tried) >= 3
+
+
 def test_missing_ffmpeg_degrades(tmp_path, monkeypatch, fresh_cache):
-    monkeypatch.setattr(usb, "FFMPEG", tmp_path / "nope" / "ffmpeg.exe")
-    r = usb.list_devices()
+    empty = tmp_path / "no-tools"
+    empty.mkdir()
+    monkeypatch.delenv("LS_FFMPEG", raising=False)
+    r = usb.list_devices(root=empty)
     assert r["devices"] == [] and r["error"]  # 200 语义：空列表 + 可读原因
+    assert "尝试过" in r["error"] and "LS_FFMPEG" in r["error"]  # 列出尝试路径
 
 
-def test_cache_and_refresh(monkeypatch, fresh_cache):
+def test_cache_and_refresh(tmp_path, monkeypatch, fresh_cache):
     calls = {"n": 0}
 
     def fake_run(*a, **k):
@@ -61,28 +98,30 @@ def test_cache_and_refresh(monkeypatch, fresh_cache):
 
         return R()
 
-    monkeypatch.setattr(usb, "FFMPEG", __import__("pathlib").Path(__file__).resolve())  # 需真实存在，才会走到 subprocess
+    f = make_ffmpeg(tmp_path, "portable")  # 需真实存在，才会走到 subprocess
     monkeypatch.setattr(usb.subprocess, "run", fake_run)
-    r1 = usb.list_devices()
-    r2 = usb.list_devices()
+    r1 = usb.list_devices(root=tmp_path)
+    r2 = usb.list_devices(root=tmp_path)
     assert calls["n"] == 1 and len(r1["devices"]) == 2 and r2 is r1  # 命中缓存同一对象
-    r3 = usb.list_devices(refresh=True)
+    r3 = usb.list_devices(refresh=True, root=tmp_path)
     assert calls["n"] == 2 and len(r3["devices"]) == 2
+    assert r1["ffmpeg"] == str(f)
 
 
-def test_timeout_degrades(monkeypatch, fresh_cache):
+def test_timeout_degrades(tmp_path, monkeypatch, fresh_cache):
     import subprocess as sp
 
-    monkeypatch.setattr(usb, "FFMPEG", __import__("pathlib").Path(__file__).resolve())
+    make_ffmpeg(tmp_path, "portable")
+
     def fake_run(*a, **k):
         raise sp.TimeoutExpired(cmd="ffmpeg", timeout=10)
     monkeypatch.setattr(usb.subprocess, "run", fake_run)
-    r = usb.list_devices(refresh=True)
+    r = usb.list_devices(refresh=True, root=tmp_path)
     assert r["devices"] == [] and "超时" in r["error"]
 
 
 def test_api_ok_and_auth(tmp_path, monkeypatch):
-    monkeypatch.setattr(usb, "list_devices", lambda refresh=False: {
+    monkeypatch.setattr(usb, "list_devices", lambda refresh=False, root=None: {
         "devices": [{"index": 0, "name": "HD Webcam", "source": "0"}], "error": None, "ffmpeg": "x"})
     import app.api as api_mod  # noqa: F401  （路由内 from . import usb_devices，monkeypatch 生效）
     # settings 打回默认（不启用读保护）
@@ -94,9 +133,10 @@ def test_api_ok_and_auth(tmp_path, monkeypatch):
         assert r.json()["devices"][0]["name"] == "HD Webcam"
         r2 = c.get("/api/cameras/usb-devices?refresh=1")
         assert r2.status_code == 200
-    # 读保护开 + 令牌启用 → 无令牌 401、带令牌 200
+    # 读保护开 + 令牌启用 → 无令牌 401、带令牌/header/query 均 200
     monkeypatch.setattr(settings, "auth_read_protected", True)
     monkeypatch.setattr(settings, "admin_token", "tok60")
     with TestClient(app) as c:
         assert c.get("/api/cameras/usb-devices").status_code == 401
         assert c.get("/api/cameras/usb-devices", headers={"X-Admin-Token": "tok60"}).status_code == 200
+        assert c.get("/api/cameras/usb-devices", params={"token": "tok60"}).status_code == 200

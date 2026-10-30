@@ -34,6 +34,9 @@ def isolated(tmp_path, monkeypatch):
     (tmp_path / "localappdata").mkdir()
     (tmp_path / "appdata").mkdir()
     monkeypatch.setattr(ip, "desktop_dir", lambda: tmp_path / "desktop")
+    # 2026-10-30 审阅修复：--no-autostart 走 set_autostart(False) 会 reg delete 真实 HKCU Run 键——
+    # 若开发机恰好装了自启会被测试静默删掉。彻底隔离注册表。
+    monkeypatch.setattr(ip, "set_autostart", lambda install, on: None)
     yield tmp_path
 
 
@@ -68,8 +71,9 @@ def test_install_custom_dir_no_shortcuts(isolated, monkeypatch, capsys):
     assert (target / "app" / "VERSION").read_text(encoding="ascii").strip() == "2099.01"
     assert (target / "卸载.bat").exists()
     assert called["ps"] == 0  # 未生成快捷方式
-    assert "lab" not in os.listdir(isolated / "localappdata" / "Programs") if \
-        (isolated / "localappdata" / "Programs").exists() else True
+    prog = isolated / "localappdata" / "Programs"
+    if prog.exists():
+        assert "LabSentinel" not in os.listdir(prog)  # 2026-10-30 审阅：原断言大小写敏感且恒真
     out = capsys.readouterr().out
     assert "2099.01" in out and "数据目录" in out  # 完成摘要（含版本/数据目录/卸载方式）
 

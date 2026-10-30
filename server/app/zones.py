@@ -27,6 +27,11 @@ class ZoneState:
     def __init__(self):
         self._inside: dict[int, bool] = {}
 
+    @property
+    def inside_ids(self) -> list[int]:
+        """当前判定为在区域内的 track（2026-10-30 审阅：供空帧批量离场用）。"""
+        return [tid for tid, inside in self._inside.items() if inside]
+
     def update(self, track_id: int, inside: bool):
         """返回 (entered, exited)；无变化返回 None。"""
         was = self._inside.get(track_id, False)

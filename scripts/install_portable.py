@@ -32,19 +32,19 @@ def log(m=""):
 def ps(script: str) -> None:
     exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     r = subprocess.run([exe, "-NoProfile", "-Command", script],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="mbcs", errors="replace")
     if r.returncode != 0:
-        # text=True 在 PYTHONUTF8=1 下遇到 PS 的 GBK 报错输出会解码崩→stdout/stderr 变 None
+        # PS 输出是 GBK：PYTHONUTF8=1 下不指定 mbcs 解码会崩（build_launcher_exe 同款修法）
         err = (r.stderr or "").strip()[:200]
-        raise RuntimeError(f"PowerShell 失败: {err or f'exit {r.returncode}（输出解码失败，多为路径不存在/权限）'}")
+        raise RuntimeError(f"PowerShell 失败: {err or f'exit {r.returncode}（多为路径不存在/权限）'}")
 
 
 def desktop_dir() -> Path:
     exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     r = subprocess.run([exe, "-NoProfile", "-Command",
                         '[Environment]::GetFolderPath("Desktop")'],
-                       capture_output=True, text=True)
-    return Path(r.stdout.strip() or (Path.home() / "Desktop"))
+                       capture_output=True, text=True, encoding="mbcs", errors="replace")
+    return Path((r.stdout or "").strip() or (Path.home() / "Desktop"))
 
 
 def make_shortcuts(install: Path, desktop: Path | None = None,
@@ -79,17 +79,34 @@ def make_shortcuts(install: Path, desktop: Path | None = None,
         lnk(desktop / "LabSentinel.lnk", pythonw, f'"{launcher}"')
         lnk(smenu / "LabSentinel.lnk", pythonw, f'"{launcher}"')
         log("  快捷方式目标：runtime\\pythonw.exe（包内无 LabSentinel.exe，回退）")
-    lnk(smenu / "卸载.lnk",
-        pythonw, f'"{install / "scripts" / "install_portable.py"}" uninstall --purge-data')
+    # 2026-10-30 审阅修复：原硬编码 uninstall --purge-data（点开始菜单卸载=静默删光用户数据，
+    # 与 卸载.bat 的 Y/N 询问语义冲突），且漏 --install-dir（自定义目录安装的包卸不掉）。
+    # 改为指向 卸载.bat（内部带询问 + --install-dir "%HERE%"）。
+    lnk(smenu / "卸载.lnk", install / "卸载.bat", "")
+    # 记录实际快捷方式位置：卸载时按它清理（默认路径之外的覆盖目录否则会残留）
+    import json
+    (install / "shortcuts.json").write_text(
+        json.dumps({"desktop": str(desktop), "start_menu": str(smenu)}, ensure_ascii=False),
+        encoding="utf-8")
     log(f"  快捷方式：桌面 + 开始菜单（{smenu.name}）")
 
 
-def remove_shortcuts() -> None:
+def remove_shortcuts(install: Path | None = None) -> None:
+    import json
     desktop = desktop_dir()
+    smenu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "LabSentinel"
+    if install is not None:
+        marker = install / "shortcuts.json"
+        if marker.exists():
+            try:
+                rec = json.loads(marker.read_text(encoding="utf-8"))
+                desktop = Path(rec.get("desktop", desktop))
+                smenu = Path(rec.get("start_menu", smenu))
+            except (ValueError, OSError):
+                pass
     p = desktop / "LabSentinel.lnk"
     if p.exists():
         p.unlink()
-    smenu = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "LabSentinel"
     if smenu.exists():
         shutil.rmtree(smenu, ignore_errors=True)
     log("  快捷方式已删除")
@@ -162,6 +179,16 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
         log(f"  卸载方式：{install / '卸载.bat'} 或 开始菜单 卸载.lnk")
         return 0
     log(f"[安装] {'覆盖升级' if upgrading else '全新安装'}：{src} -> {install}")
+    # 2026-10-30 审阅修复：覆盖升级前先停运行中的服务（自启/后台很常见）——否则 copytree 覆盖
+    # 被占用的 exe/pyd 半途 PermissionError，安装目录新旧混杂且无回滚（卸载路径本就有停服）
+    stopper = install / "runtime" / "python.exe"
+    stop_script = install / "scripts" / "portable_launcher.py"
+    if upgrading and stopper.exists() and stop_script.exists():
+        try:
+            subprocess.run([str(stopper), str(stop_script), "--stop"], capture_output=True)
+        except OSError:
+            pass  # runtime 损坏/非可执行（如测试假包）：升级按无服务继续
+        time.sleep(1)  # 等句柄释放
     install.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, install, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "data",
@@ -222,11 +249,13 @@ def do_uninstall(install: Path, purge: bool) -> int:
                        capture_output=True)
     trace("stopped")
     time.sleep(1)  # 给刚被 kill 的 uvicorn 句柄释放时间
-    remove_shortcuts()
+    remove_shortcuts(install)  # 按 shortcuts.json 记录清理（自定义目录卸载才不残留）
     set_autostart(install, False)
     trace("shortcuts+autostart done")
     data = Path(os.environ["LOCALAPPDATA"]) / "LabSentinel"
-    trace("hybrid done residue=" + ",".join(sorted(q.name for q in install.iterdir())))
+    # 2026-10-30 审阅：二次卸载/上次 rd 已成功时 install 可能已不存在——防御性容错
+    trace("hybrid done residue=" + (
+        ",".join(sorted(q.name for q in install.iterdir())) if install.exists() else "(目录已不存在)"))
     # 哨兵：卸载器自身运行在 runtime 里（惰性 stdlib 从 python312.zip 加载）——
     # 进程内绝不删 runtime，否则后续 zipimport 即崩（04:33 实测）；整个 runtime 交给分离 rd
     runtime = install / "runtime"

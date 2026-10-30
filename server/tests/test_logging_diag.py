@@ -83,13 +83,19 @@ def test_ring_captures_error(log_env):
 
 
 def test_redaction():
-    assert cd.redact_line("LS_ADMIN_TOKEN", "abc") == "LS_ADMIN_TOKEN=***"
-    assert cd.redact_line("LS_SMTP_PASSWORD", "x") == "LS_SMTP_PASSWORD=***"
-    assert cd.redact_line("LS_API_KEY", "k") == "LS_API_KEY=***"
-    assert cd.redact_line("LS_WEBHOOK_SECRET", "s") == "LS_WEBHOOK_SECRET=***"
+    # 75.4 规格清单：全部 ***
+    for k in ("LS_SMTP_PASS", "LS_ADMIN_TOKEN", "LS_WEBHOOK_SECRET", "LS_QMSG_KEY"):
+        assert cd.redact_line(k, "supersecret") == f"{k}=***", k
+    assert cd.redact_line("smtp_pass", "supersecret") == "smtp_pass=***"
+    # 普通键不误脱敏
+    assert cd.redact_line("LS_SMTP_HOST", "smtp.qq.com") == "LS_SMTP_HOST=smtp.qq.com"
+    assert cd.redact_line("LS_SMTP_USER", "user@qq.com") == "LS_SMTP_USER=user@qq.com"
+    assert cd.redact_line("LS_PPE_CONF", "0.3") == "LS_PPE_CONF=0.3"  # 普通键不受影响
+    # URL 凭证与 query-token
     out = cd.redact_line("LS_RTSP_URL", "rtsp://admin:pass@192.168.1.3:554/ch1")
     assert "admin" not in out and "pass" not in out and "192.168.1.3:554/ch1" in out
-    assert cd.redact_line("LS_PPE_CONF", "0.3") == "LS_PPE_CONF=0.3"  # 普通键不受影响
+    q = cd.redact_value("https://hook.internal/x?token=tok123&x=1")
+    assert "tok123" not in q and "x=1" in q
     assert cd.sanitize_source("rtsp://u:p@1.2.3.4:554/x") == "rtsp://1.2.3.4:554"
     assert cd.sanitize_source("file:///D:/x.mp4") == "***"  # file 无主机 → 只 ***
 

@@ -1,5 +1,6 @@
 """单元测试：任务63 健康探针 + 请求 ID + 统一错误响应。
-运行: pytest tests/test_health_errors.py -q"""
+运行: pytest tests/test_health_errors.py -q
+路径隔离由 tests/conftest.py 的 autouse fixture 统一提供（105 补丁 P1-2）。"""
 import logging
 import os
 import sys

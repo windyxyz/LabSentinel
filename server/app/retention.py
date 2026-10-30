@@ -5,6 +5,7 @@
 - 磁盘低于 LS_DISK_MIN_FREE_GB 时紧急清理：从最旧事件开始逐批删，直至满足空间。
 - 后台线程调度（start/stop_scheduler），不占用 worker 线程；清理用独立短事务，避免与 Store 写锁死锁。
 """
+import os
 import shutil
 import threading
 import time
@@ -22,10 +23,11 @@ _stop = threading.Event()
 
 
 def _safe_within(path: str, parent) -> bool:
-    """路径安全校验：必须在 parent 目录内（防路径穿越）。"""
+    """路径安全校验：必须在 parent 目录内（防路径穿越/兄弟目录绕过，2026-10-30 审阅改 commonpath）。"""
     try:
-        return str(parent) in str(path)
-    except Exception:  # noqa: BLE001
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(parent)]) \
+            == os.path.abspath(parent)
+    except (ValueError, OSError):
         return False
 
 
@@ -37,18 +39,25 @@ def _disk_free_gb() -> float:
 
 
 def preview_cleanup(store) -> dict:
-    """只读预演（任务68）：与 run_cleanup 同一套阈值/路径安全判断，**绝不删除任何东西**。"""
+    """只读预演（任务68）：与 run_cleanup 同一套阈值/路径安全判断，**绝不删除任何东西**。
+
+    2026-10-30 审阅修复：分页改为 `id > last_id` 游标推进——原实现循环内不删行也无游标，
+    过期事件 ≥ _BATCH 条时同查询无限重复，GET /api/maintenance/preview 会拖死 API 线程池。
+    """
     import os
     cutoff = (datetime.now() - timedelta(days=settings.retention_events_days)).isoformat(timespec="seconds")
     ev_count, ev_bytes = 0, 0
+    last_id = 0
     while True:
         with store._conn() as c:
             rows = c.execute(
-                "SELECT id, snapshot, video FROM events WHERE ts < ? LIMIT ?",
-                (cutoff, _BATCH)).fetchall()
+                "SELECT id, snapshot, video FROM events WHERE ts < ? AND id > ? "
+                "ORDER BY id ASC LIMIT ?",
+                (cutoff, last_id, _BATCH)).fetchall()
         if not rows:
             break
         for r in rows:
+            last_id = r["id"]
             ev_count += 1
             for col in ("snapshot", "video"):
                 p = r[col]

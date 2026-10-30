@@ -130,28 +130,27 @@ def _load_and_verify(zp: Path) -> tuple[dict, zipfile.ZipFile]:
     if not zp.exists():
         raise FileNotFoundError(f"zip 不存在: {zp}")
     zf = zipfile.ZipFile(zp)
-    names = zf.namelist()
-    bad = [n for n in names if not _safe_entry(n)]
-    if bad:
-        zf.close()
-        raise ValueError(f"发现不安全条目路径: {bad[:5]}")
-    if "manifest.json" not in names or "labsentinel.db" not in names:
-        zf.close()
-        raise ValueError("缺少 manifest.json 或 labsentinel.db")
-    m = json.loads(zf.read("manifest.json"))
-    for k in ("db_bytes", "db_sha256", "tool_version"):
-        if k not in m:
-            zf.close()
-            raise ValueError(f"manifest 缺字段: {k}")
-    db_bytes = zf.read("labsentinel.db")
-    if len(db_bytes) != m["db_bytes"] or sha256_bytes(db_bytes) != m["db_sha256"]:
-        zf.close()
-        raise ValueError("db 大小/SHA256 与 manifest 不一致（zip 损坏或被篡改）")
-    ok, detail = _check_integrity_bytes(db_bytes)
-    if not ok:
-        zf.close()
-        raise ValueError(f"db integrity_check 失败: {detail}")
-    return m, zf
+    try:
+        names = zf.namelist()
+        bad = [n for n in names if not _safe_entry(n)]
+        if bad:
+            raise ValueError(f"发现不安全条目路径: {bad[:5]}")
+        if "manifest.json" not in names or "labsentinel.db" not in names:
+            raise ValueError("缺少 manifest.json 或 labsentinel.db")
+        m = json.loads(zf.read("manifest.json"))
+        for k in ("db_bytes", "db_sha256", "tool_version"):
+            if k not in m:
+                raise ValueError(f"manifest 缺字段: {k}")
+        db_bytes = zf.read("labsentinel.db")
+        if len(db_bytes) != m["db_bytes"] or sha256_bytes(db_bytes) != m["db_sha256"]:
+            raise ValueError("db 大小/SHA256 与 manifest 不一致（zip 损坏或被篡改）")
+        ok, detail = _check_integrity_bytes(db_bytes)
+        if not ok:
+            raise ValueError(f"db integrity_check 失败: {detail}")
+        return m, zf
+    except Exception:
+        zf.close()  # 2026-10-30 审阅：异常路径不关句柄会让 Windows 下 zip 一直被锁
+        raise
 
 
 def cmd_verify(a) -> int:
@@ -173,6 +172,25 @@ def _prune_baks(db: Path, keep: int = 3) -> None:
         old.unlink(missing_ok=True)
 
 
+def _checkpoint_or_busy(db: Path) -> str | None:
+    """105 补丁 P0-3：对现有库做 TRUNCATE checkpoint——既把 WAL 合并回主库（删除安全），
+    又探测占用。返回错误文本，None=成功。"""
+    try:
+        con = sqlite3.connect(db)
+        try:
+            row = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if row and row[0] != 0:
+                return "数据库被占用（checkpoint busy）——LabSentinel 正在运行？先停止服务再恢复"
+            return None
+        finally:
+            con.close()
+    except sqlite3.DatabaseError as e:
+        # 非 SQLite 文件（垃圾字节/损坏库）：没有可合并的 WAL，直接替换即可，不算占用
+        if "not a database" in str(e).lower() or "encrypted" in str(e).lower():
+            return None
+        return f"数据库被占用/无法打开: {e}——先停止服务再恢复"
+
+
 def cmd_restore(a) -> int:
     try:
         m, zf = _load_and_verify(a.zip)
@@ -181,20 +199,61 @@ def cmd_restore(a) -> int:
         return EXIT_FAIL
     data_dir = a.data_dir
     db = data_dir / "labsentinel.db"
+    wal = db.with_name(db.name + "-wal")
+    shm = db.with_name(db.name + "-shm")
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    # 105 回归补丁 P0-3：顺序重排——原实现"先删 WAL 再判断拒绝覆盖"，拒绝时已把旧库 WAL 删掉
+    # （若随后发生崩溃，最近写入全部丢失）。新顺序：
+    #   1) 拒绝分支最先判定，不碰任何文件；
+    #   2) 需覆盖时先 checkpoint（同时探测占用），成功后旧 WAL 已合并进主库、变为可安全删除；
+    #   3) 转存 .bak → 删已空的 -wal/-shm → 写新库 → 复检 integrity；
+    #   4) 目标本无 db 时，孤儿 -wal/-shm 也在写入前清理。
     if db.exists():
         if not a.force:
-            log(f"[失败] 目标已有数据库 {db}（--force 覆盖，现有 db 会转存 .bak-<时间戳>）")
+            log(f"[失败] 目标已有数据库 {db}（--force 覆盖，现有 db 会转存 .bak-<时间戳>）"
+                "——未修改任何文件")
+            zf.close()
+            return EXIT_FAIL
+        busy = _checkpoint_or_busy(db)
+        if busy:
+            log(f"[失败] {busy}")
             zf.close()
             return EXIT_FAIL
         bak = db.with_name(f"labsentinel.db.bak-{time.strftime('%Y%m%d-%H%M%S')}")
-        db.replace(bak)
+        try:
+            db.replace(bak)
+        except PermissionError:
+            log("[失败] 现有 db 转存失败（被占用/只读）——先停止服务再恢复")
+            zf.close()
+            return EXIT_FAIL
         _prune_baks(db)
-        log(f"  现有 db 已转存 {bak.name}")
-    db.write_bytes(zf.read("labsentinel.db"))
+        log(f"  现有 db 已 checkpoint 并转存 {bak.name}")
+        for side_f in (wal, shm):
+            try:
+                side_f.unlink(missing_ok=True)  # checkpoint(TRUNCATE) 后应为空/不存在
+            except OSError as e:
+                log(f"[警告] {side_f.name} 清理失败（{e}）——若残留请手动删除后再启动服务")
+    else:
+        for side_f in (wal, shm):
+            try:
+                side_f.unlink(missing_ok=True)  # 孤儿 WAL：无主库存在，写入前清掉
+            except PermissionError:
+                log(f"[失败] {side_f} 被占用——LabSentinel 正在运行？先停止服务再恢复")
+                zf.close()
+                return EXIT_FAIL
+    try:
+        db.write_bytes(zf.read("labsentinel.db"))
+    except PermissionError:
+        log("[失败] 无法写入目标 db（被占用/只读）——先停止服务再恢复")
+        zf.close()
+        return EXIT_FAIL
     ok, detail = _check_integrity_bytes(db.read_bytes())
     if not ok:
-        log(f"[失败] 恢复后 integrity_check 失败: {detail}")
+        # 105 补丁：失败时保留 .bak 并给出恢复方法（不再让用户两手空空）
+        baks = sorted(db.parent.glob("labsentinel.db.bak-*"))
+        hint = f"可用 {baks[-1].name} 恢复（重命名回 labsentinel.db）" if baks else "请用更新前的备份"
+        log(f"[失败] 恢复后 integrity_check 失败: {detail}——{hint}")
         zf.close()
         return EXIT_INTEGRITY
     restored_media = 0

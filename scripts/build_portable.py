@@ -72,6 +72,7 @@ def ensure_runtime() -> None:
                 break
             except Exception as e:
                 deploy.log(f"    源失败，换下一个: {e}")
+                zpath.unlink(missing_ok=True)  # 2026-10-30 审阅：残缺包会污染下次 exists() 缓存判断
         else:
             raise SystemExit("[失败] 三个下载源均失败")
     with zipfile.ZipFile(zpath) as z:  # 完整性校验（CRC 全量）
@@ -127,7 +128,11 @@ def copy_assets() -> None:
     # 二进制
     tools = DIST / "tools"
     tools.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ROOT / "tools" / "go2rtc.exe", tools / "go2rtc.exe")
+    go2rtc = ROOT / "tools" / "go2rtc.exe"
+    if go2rtc.exists():
+        shutil.copy2(go2rtc, tools / "go2rtc.exe")
+    else:
+        deploy.log("  [警告] tools/go2rtc.exe 不存在，便携包将没有实时画面（WebRTC）")
     ffmpeg = ROOT / "tools" / "ffmpeg" / "ffmpeg.exe"
     if ffmpeg.exists():
         shutil.copy2(ffmpeg, tools / "ffmpeg.exe")
@@ -154,6 +159,9 @@ def copy_assets() -> None:
     shutil.copy2(here / "install_portable.py", DIST / "scripts" / "install_portable.py")
     shutil.copy2(here / "seed_demo.py", DIST / "scripts" / "seed_demo.py")  # 播种单源（任务51）
     shutil.copy2(here / "doctor.py", DIST / "scripts" / "doctor.py")  # 自检工具（任务70）
+    # 任务75：运维手册让用户在包内跑备份/诊断——这两个脚本必须随包
+    shutil.copy2(here / "backup_data.py", DIST / "scripts" / "backup_data.py")
+    shutil.copy2(here / "collect_diagnostics.py", DIST / "scripts" / "collect_diagnostics.py")
     # C# 启动 EXE（任务55）：csc 缺失/编译失败只警告，包仍可用 启动.bat
     import build_launcher_exe
     exe = build_launcher_exe.compile_exe(DIST)
@@ -218,6 +226,11 @@ def main() -> int:
     a = ap.parse_args()
     deploy.log("[便携构建] 目标 " + str(DIST))
     DIST.mkdir(parents=True, exist_ok=True)
+    if a.smoke_only:  # 2026-10-30 审阅：参数原先从未被使用（定义后死参）
+        smoke()
+        report()
+        deploy.log("[便携构建] --smoke-only 完成")
+        return 0
     ensure_runtime()
     ensure_deps()
     copy_assets()

@@ -87,8 +87,9 @@ async def request_id_middleware(request: Request, call_next):
     except Exception:  # noqa: BLE001  某些中间件层异常不走 exception_handler，也兜住
         logging.getLogger("app.errors").exception(
             "[req=%s] %s %s 未捕获异常（中间件层）", rid, request.method, request.url.path)
+        # 75 修复：错误体带 request_id，响应头也要带（原实现漏了头，前端拿不到关联 ID）
         return JSONResponse({"detail": "服务器内部错误", "request_id": rid, "code": "internal_error"},
-                            status_code=500)
+                            status_code=500, headers={"X-Request-ID": rid})
     response.headers["X-Request-ID"] = rid
     return response
 
@@ -169,6 +170,8 @@ async def selective_gzip_middleware(request: Request, call_next):
     ct = resp.headers.get("content-type", "").split(";")[0].strip().lower()
     if not ct.startswith(GZIP_TYPE_PREFIXES) or resp.headers.get("content-encoding"):
         return resp
+    if resp.headers.get("content-disposition", "").lower().startswith("attachment"):
+        return resp  # 2026-10-30 审阅：CSV 等下载是流式生成，整体缓冲进内存会击穿流式设计
     if resp.status_code == 304:
         resp.headers.setdefault("Vary", "Accept-Encoding")
         return resp

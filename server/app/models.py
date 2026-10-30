@@ -49,11 +49,11 @@ class RuleCreate(BaseModel):
     camera_id: int
     zone_id: int | None = None
     behavior: str
-    level: int = 2
-    cooldown_s: int = 60
+    level: int = Field(2, ge=1, le=3)  # 2026-10-30 审阅：入库即校验（原 level=99 也能入库）
+    cooldown_s: int = Field(60, ge=0)
     time_start: str = "00:00"
     time_end: str = "23:59"
-    threshold: int = 0
+    threshold: int = Field(0, ge=0)  # occupancy_over 用：人数上限
     enabled: bool = True
 
 

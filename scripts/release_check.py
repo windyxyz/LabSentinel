@@ -1,10 +1,12 @@
-"""发布前终检（任务74）：文档-仓库一致性，只读不改文件。
+"""发布前终检（任务74）：文档-仓库一致性检查。
+
+链接/敏感信息/TODO/必需文件为**纯只读**；`--zip` 存在时会刷新 dist/ 下它自己的输出产物
+（SHA256SUMS.txt / RELEASE-MANIFEST.json，均为本工具链的生成物，不触碰源码）。
 
 用法（标准库）:
     python scripts/release_check.py                # 全仓检查（无 zip 则跳过该项）
     python scripts/release_check.py --zip dist/LabSentinel-portable-20261029.zip --json
 
-检查：相对链接 / 版本一致性 / 敏感信息 / TODO 清单 / 必需文件 / 便携包 manifest。
 退出码：有 FAIL → 2；只有 WARN → 0。
 """
 import argparse
@@ -155,6 +157,10 @@ def check_versions(res) -> None:
 def check_secrets(res) -> None:
     hits = []
     for p in iter_text_files(ROOT):
+        # 105 补丁 P1-3：本用例的假 sk- 串是测试夹具（"真密钥→FAIL"测试数据），豁免扫描；
+        # 文件级豁免而非行级 allowlist，防止未来有人在测试里塞真密钥后绕过
+        if p.name == "test_release_check.py":
+            continue
         try:
             for i, ln in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 if ALLOWLIST_LINE.search(ln):

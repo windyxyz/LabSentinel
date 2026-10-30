@@ -21,6 +21,12 @@
   - `error` 文案同时列出尝试过的路径（最多 3 条）。
   - 测试：源码布局、便携布局（`tmp/runtime/python.exe` + `tmp/tools/ffmpeg.exe`）、`LS_FFMPEG` 覆盖、
     全缺失时 error 含路径；更新 `test_usb_devices.py` 的 monkeypatch 方式。
+  - **105 后复核实测补充（必须修）**：`detect_root()` 当前 `(p/"server").exists()` 会在便携包
+    `LabSentinel/app` 处提前命中（`app/server`），永远到不了含 `runtime/python.exe`/`tools` 的包根，
+    `resolve_ffmpeg()` 仍找不到 `LabSentinel/tools/ffmpeg.exe`。修复：**先**找 `runtime/python.exe`
+    的父目录为包根，找不到再找 `server/app/main.py`（源码根），最后才 fallback；补
+    `test_detect_root_portable`（fake 包树）与 `test_detect_root_source` 两个用例，并在解压 zip 后
+    实跑 `/api/cameras/usb-devices` 确认 `ffmpeg` 字段指向包内扁平 exe。
 
 ### 75.2 便携包缺少备份/诊断脚本
 

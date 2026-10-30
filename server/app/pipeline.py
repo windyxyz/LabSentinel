@@ -121,8 +121,12 @@ class CameraWorker(threading.Thread):
         self.ppe = get_ppe_engine()  # 可能为 None（未配置实验服模型）
         interval = 1.0 / settings.analysis_fps
         # USB 摄像头常返回 fps=-1；为录像 writer/环形缓冲兜底到 30
-        file_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        if not isinstance(file_fps, (int, float)) or file_fps <= 0 or file_fps > 240:
+        # 2026-10-30 审阅：CAP_PROP_FPS 可能返回 NaN（`or 30` 挡不住），NaN 会让 int() 抛错
+        # 且此时还没进 try——状态卡 running、cap 泄漏，故用 isfinite 严格护栏
+        import math
+        file_fps = cap.get(cv2.CAP_PROP_FPS)
+        if not isinstance(file_fps, (int, float)) or not math.isfinite(file_fps) \
+                or file_fps <= 0 or file_fps > 240:
             file_fps = 30.0
         self._rec_fps = file_fps
         self._init_ring(file_fps)
@@ -251,57 +255,72 @@ class CameraWorker(threading.Thread):
     # ---- 单帧分析 ----
     def _analyze(self, engine, frame):
         dets = engine.detect_persons(frame)
+        zones = self.store.zones(self.camera["id"])
+        zone_polys = {z["id"]: parse_polygon(z["polygon"]) for z in zones}
+        for z in zones:
+            self._zone_states.setdefault(z["id"], ZoneState())
+
         if not dets:
+            # 本帧无检出（2026-10-30 审阅修复）：所有在场 track 视为已离开。
+            # 105 回归补丁 P0-1：必须调 update(tid, False) 清状态——原补丁只发 exit 不更新，
+            # 空帧重复发 exit（靠冷却压制）、人再进入时 was=True 永不再触发 enter（事件丢失）。
+            for zid, st in self._zone_states.items():
+                for tid in list(st.inside_ids):
+                    change = st.update(tid, False)
+                    if change and change[1]:
+                        self._fire_event(zid, "exit", tid, f"离开安全区「{self._zone_name(zid)}」")
             return
+
         # supervision Detections + ByteTrack
         xyxy = np.array([d.xyxy for d in dets], dtype=np.float32)
         conf = np.array([d.conf for d in dets], dtype=np.float32)
         cls = np.zeros(len(dets), dtype=int)
         sdets = sv.Detections(xyxy=xyxy, confidence=conf, class_id=cls)
         sdets = self._byteTrack.update_with_detections(sdets)
+        active_tids = {int(sdets.tracker_id[i]) for i in range(len(sdets))}
 
-        zones = self.store.zones(self.camera["id"])
-        zone_polys = {z["id"]: parse_polygon(z["polygon"]) for z in zones}
-        for z in zones:
-            self._zone_states.setdefault(z["id"], ZoneState())
+        # 105 回归补丁 P0-1（部分消失）：画面里还有别人、但某个 track 已从检出中消失——
+        # 该 track 在各区的 inside 状态永真，exit 永不触发。对 inside_ids - active_tids 补离场。
+        for zid, st in self._zone_states.items():
+            for tid in set(st.inside_ids) - active_tids:
+                change = st.update(tid, False)
+                if change and change[1]:
+                    self._fire_event(zid, "exit", tid, f"离开安全区「{self._zone_name(zid)}」")
 
         occupancy = 0
         for i in range(len(sdets)):
             tid = int(sdets.tracker_id[i])
             x1, y1, x2, y2 = sdets.xyxy[i].tolist()
             anchor = (int((x1 + x2) / 2), int(y2))
-            in_any = False
-            for zid, poly in zone_polys.items():
-                if not point_inside(poly, anchor):
+            inside_zones = {zid for zid, poly in zone_polys.items() if point_inside(poly, anchor)}
+            occupancy += len(inside_zones)
+            # 每帧对每个 zone 更新 inside 状态（2026-10-30 审阅修复：原实现只在"不在任何区域"
+            # 时才补 exit——A→B 直移会漏掉 A 的 exit，且离开重叠区时产生滞后重复 exit）
+            for zid in zone_polys:
+                change = self._zone_states[zid].update(tid, zid in inside_zones)
+                if not change:
                     continue
-                in_any = True
-                occupancy += 1
-                change = self._zone_states[zid].update(tid, True)
-                if change:
-                    entered, exited = change
-                    if entered:
-                        zname = self._zone_name(zid)
-                        ppe = self._ppe_status(frame, (x1, y1, x2, y2))
-                        # 人脸识别（默认关闭；每 track 冷却期内不重复调 API）
-                        face = self._face.check(self.camera["id"], tid, frame, (x1, y1, x2, y2))
-                        face_txt = f"，人员：{face[6:]}" if face and face.startswith("known:") else ""
-                        if ppe == "wearing":
-                            self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」（已穿实验服{face_txt}）")
-                        elif ppe == "no":
-                            self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」（未穿实验服{face_txt}）")
-                            self._fire_event(zid, "enter_no_ppe", tid, f"进入安全区「{zname}」未穿实验服{face_txt}")
-                        else:
-                            note = "实验服检测未启用" if self.ppe is None else "实验服状态不确定"
-                            self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」{face_txt}")
-                            self._fire_event(zid, "enter_no_ppe", tid,
-                                             f"进入安全区「{zname}」（{note}）", quiet=True)
-                        if face == "unknown":
-                            self._fire_stranger(tid, zname)
-            if not in_any:
-                for zid in zone_polys:
-                    change = self._zone_states[zid].update(tid, False)
-                    if change and change[1]:
-                        self._fire_event(zid, "exit", tid, f"离开安全区「{self._zone_name(zid)}」")
+                entered, exited = change
+                if entered:
+                    zname = self._zone_name(zid)
+                    ppe = self._ppe_status(frame, (x1, y1, x2, y2))
+                    # 人脸识别（默认关闭；每 track 冷却期内不重复调 API）
+                    face = self._face.check(self.camera["id"], tid, frame, (x1, y1, x2, y2))
+                    face_txt = f"，人员：{face[6:]}" if face and face.startswith("known:") else ""
+                    if ppe == "wearing":
+                        self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」（已穿实验服{face_txt}）")
+                    elif ppe == "no":
+                        self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」（未穿实验服{face_txt}）")
+                        self._fire_event(zid, "enter_no_ppe", tid, f"进入安全区「{zname}」未穿实验服{face_txt}")
+                    else:
+                        note = "实验服检测未启用" if self.ppe is None else "实验服状态不确定"
+                        self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」{face_txt}")
+                        self._fire_event(zid, "enter_no_ppe", tid,
+                                         f"进入安全区「{zname}」（{note}）", quiet=True)
+                    if face == "unknown":
+                        self._fire_stranger(tid, zname)
+                if exited:
+                    self._fire_event(zid, "exit", tid, f"离开安全区「{self._zone_name(zid)}」")
 
         # 在场人数超限（规则级冷却统一由 RuleEngine 管，track 记 0）
         for rule in self.rules.occupancy_rules(self.camera["id"]):
@@ -347,7 +366,14 @@ class CameraWorker(threading.Thread):
             return str(path)
 
     def _dispatch_row(self, eid, behavior, level, track_id, detail, snapshot):
-        row = self.store.events(limit=1)[0]
+        # 2026-10-30 审阅修复：原实现用 events(limit=1) 取"最新一行当刚插入的事件"——
+        # 多摄像头并发插入时 A 会错拿 B 的事件行（A 告警静默丢失、B 收到两条），必须按 id 单查。
+        row = self.store.event_by_id(eid)
+        if row is None:  # 行刚被保留清理删掉等极端情况：跳过推送，不阻塞分析线程
+            print(f"[cam-{self.camera['id']}] event#{eid} 行缺失，跳过告警派发")
+            return
+        row.pop("snapshot", None)  # 服务器绝对路径不外泄（WS 广播/推送渠道只给布尔）
+        row.pop("video", None)
         row["has_snapshot"] = bool(snapshot)
         row["has_video"] = False  # 视频异步写盘，事件推送时还未生成
         dispatcher.dispatch(row)
@@ -388,17 +414,25 @@ class CameraManager:
         self.store = store
         self.rules = RuleEngine(store)
         self.workers: dict[int, CameraWorker] = {}
+        self._mgmt_lock = threading.Lock()  # 2026-10-30 审阅：start/stop/status 与 API 线程互斥
 
     def start_camera(self, camera: dict):
         cid = camera["id"]
-        if cid in self.workers and self.workers[cid].is_alive():
-            return
-        w = CameraWorker(camera, self.store, self.rules)
-        self.workers[cid] = w
-        w.start()
+        with self._mgmt_lock:
+            old = self.workers.get(cid)
+            if old is not None and old.is_alive():
+                return
+            if old is not None:
+                # 2026-10-30 审阅：旧线程刚 stop 尚未退出时，USB/RTSP 独占设备还没释放——
+                # 只在"重启同一路"这个真正需要句柄释放的场景同步等待（stop 本身保持异步不拖关停）
+                old.join(timeout=3.0)
+            w = CameraWorker(camera, self.store, self.rules)
+            self.workers[cid] = w
+            w.start()
 
     def stop_camera(self, cid):
-        w = self.workers.pop(cid, None)
+        with self._mgmt_lock:
+            w = self.workers.pop(cid, None)
         if w:
             w.stop()
 
@@ -421,7 +455,9 @@ class CameraManager:
     def status(self):
         now = time.time()
         cams = []
-        for cid, w in self.workers.items():
+        with self._mgmt_lock:  # 2026-10-30 审阅：API 线程遍历时 stop_camera 可能 pop，先快照
+            items = list(self.workers.items())
+        for cid, w in items:
             lfw = w.last_frame_ts
             cams.append({
                 "id": cid, "fps": round(w.analysis_fps_now, 1),

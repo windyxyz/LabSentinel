@@ -2,7 +2,7 @@
 // 统计报表：按天折线图 + 按小时柱状图 + 每日明细表。
 // 图表用原生 SVG（体积敏感，不引 ECharts）。
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, TYPE_TEXT } from '../api'
+import { api, TYPE_TEXT, mediaUrl } from '../api'
 import AsyncState from '../components/AsyncState.vue'
 
 const days = ref(7)
@@ -10,7 +10,12 @@ const camId = ref('')
 const cams = ref([])
 const daily = ref([])
 const hourly = ref([])
-const hourDate = ref(new Date().toISOString().slice(0, 10))
+// 2026-10-30 审阅修复：toISOString() 是 UTC 日期，东八区早 8 点前"今日"实为昨天——改本地日期
+function localToday() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+const hourDate = ref(localToday())
 // 任务21：周视图 / 汇总卡片 / 自定义日期范围
 const viewMode = ref('day')            // 'day' | 'week'
 const weekCount = ref(4)               // 周视图周数（4/12）
@@ -21,27 +26,37 @@ const rangeEnd = ref('')
 
 // 任务66：三态
 const loading = ref(true)
+const stale = ref(false)  // 有旧图表时的刷新失败（只提示，不进错误分支）
 const error = ref('')
+let loadSeq = 0           // 2026-10-30 审阅：请求序号（watch 六个值连续触发时防旧响应覆盖）
 
 async function load() {
+  const seq = ++loadSeq
   const base = camId.value ? { camera_id: camId.value } : {}
   try {
-    summary.value = await api.statsSummary({ days: 30, ...base })
-    hourly.value = (await api.statsHourly({ date: hourDate.value, ...base })).hours
+    const s = await api.statsSummary({ days: 30, ...base })
+    const h = (await api.statsHourly({ date: hourDate.value, ...base })).hours
+    let d
     if (viewMode.value === 'week') {
-      weekly.value = (await api.statsWeekly({ weeks: weekCount.value, ...base })).weeks
+      d = (await api.statsWeekly({ weeks: weekCount.value, ...base })).weeks
     } else if (rangeStart.value && rangeEnd.value) {
-      daily.value = (await api.statsDaily({
+      d = (await api.statsDaily({
         start_ts: rangeStart.value, end_ts: rangeEnd.value, ...base })).days
     } else {
-      daily.value = (await api.statsDaily({ days: days.value, ...base })).days
+      d = (await api.statsDaily({ days: days.value, ...base })).days
     }
+    if (seq !== loadSeq) return  // 已有更新请求在途，丢弃旧结果
+    summary.value = s
+    hourly.value = h
+    daily.value = d
     error.value = ''
+    stale.value = false
   } catch (e) {
-    // 失败保留旧图表数据，只提示
-    error.value = String(e.message || e)
+    if (seq !== loadSeq) return
+    if (summary.value) stale.value = true  // 失败保留旧图表数据，只提示
+    else error.value = String(e.message || e)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 function setView(m) {
@@ -50,9 +65,10 @@ function setView(m) {
   if (m === 'week') weekCount.value = 4
   load()
 }
-onMounted(async () => {
-  cams.value = await api.cameras()
+onMounted(() => {
+  // 2026-10-30 审阅修复：原 await api.cameras() 失败会跳过 load()，页面永久卡加载中
   load()
+  api.cameras().then(list => { cams.value = list }).catch(() => { /* 摄像头筛选留空 */ })
 })
 watch([days, camId, hourDate, weekCount, rangeStart, rangeEnd], load)
 
@@ -92,7 +108,7 @@ const evidenceZipUrl = computed(() => {
     p.set('start_ts', st.toISOString().slice(0, 10))
     p.set('end_ts', new Date().toISOString().slice(0, 10))
   }
-  return '/api/export/evidence.zip?' + p
+  return mediaUrl('/api/export/evidence.zip?' + p)
 })
 
 // ---- 柱状图几何 ----
@@ -134,13 +150,13 @@ function barGeom(h) {
       </select>
       <input type="date" v-model="hourDate" />
       <button class="ghost" @click="load">刷新</button>
-      <a :href="`/api/export/events.csv?days=${days}${camId ? '&camera_id=' + camId : ''}`" download>
+      <a :href="mediaUrl(`/api/export/events.csv?days=${days}${camId ? '&camera_id=' + camId : ''}`)" download>
         <button class="ghost">导出事件 CSV</button>
       </a>
-      <a :href="`/api/export/stats.csv?days=${days}`" download>
+      <a :href="mediaUrl(`/api/export/stats.csv?days=${days}`)" download>
         <button class="ghost">导出统计 CSV</button>
       </a>
-      <a :href="`/api/export/monthly.pdf?month=${hourDate.slice(0, 7)}`" download>
+      <a :href="mediaUrl(`/api/export/monthly.pdf?month=${hourDate.slice(0, 7)}`)" download>
         <button class="ghost">月报 PDF</button>
       </a>
       <a :href="evidenceZipUrl" download>
@@ -149,7 +165,7 @@ function barGeom(h) {
     </div>
   </div>
 
-  <AsyncState :loading="loading" :error="error" :notice="summary ? '刷新失败，仍显示上一次数据' : ''"
+  <AsyncState :loading="loading" :error="error" :notice="stale ? '刷新失败，仍显示上一次数据' : ''"
               :empty="summary && summary.total === 0"
               empty-text="所选区间没有事件数据 —— 试试更换日期范围、选择全部摄像头，或先去摄像头页启动采集"
               @retry="load">
