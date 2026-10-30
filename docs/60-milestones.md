@@ -1,5 +1,8 @@
 # 60 · 里程碑详细规划（M1 收尾 → M4）
 
+> **2026-10-31 平台决策**：先把 Windows 版本完成并发布；WSL Fedora 仅作开发调试；
+> **Docker 暂不考虑**；Android/iOS 后续。平台顺序与启动条件见 [67-platform-roadmap.md](./67-platform-roadmap.md)。
+
 > v0.1（2026-10-26）· 本文是执行级规划：每个里程碑给出任务分解、验收标准、依赖与风险。
 > 配套：任务包 [50-tasks/](./50-tasks/README.md)（可派发规格）、路线图 [40-roadmap.md](./40-roadmap.md)（实施记录）、ADR 在 [adr/](./adr/)。
 

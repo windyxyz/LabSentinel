@@ -94,4 +94,79 @@
 
 ## 执行报告
 
-（待填：4 回归修复 / 测试 / 耗时 / release_check / 遗留）
+**flash 2026-10-31 完成（pytest 175 passed，release_check FAIL 0，8001 双路径实测过）**
+
+### P0-1 空帧离场不清状态（事件丢失）——已修
+
+- **修复前现象**：空帧分支只 `_fire_event(exit)` 不调 `update(tid, False)` → 空帧重复发 exit
+  （靠冷却压制）、人再进入时 `was=True` **永不触发 enter（事件丢失）**。
+- **修复**（pipeline.py `_analyze`）：空帧分支对每个 `(zid, tid)` 调 `update(tid, False)` 仅在
+  `exited=True` 发一次；**部分消失**（画面里还有别人、某 track 从检出中消失）新增
+  `inside_ids - active_tids` 补离场（原实现该场景状态永真、exit 永不触发）。
+- **测试**（新增 `tests/test_zone_exit_state.py` 4 用例，假 engine 驱动真实 `_analyze`，
+  不加载 ONNX）：ZoneState 语义（进→离→再进第二次必须 entered）；空帧 exit 一次+再进入重新
+  enter；部分消失者 exit 一次、在场者不受影响；A→B 连续步行 A exit + B enter 各一次。
+- **测试过程中的重要发现（非代码缺陷，记录给后续）**：supervision ByteTrack 对**异位新检出**
+  要等一帧激活（f2 输出 0 个）、帧间匹配要求 IoU≥0.8——瞬移式测试数据会"静默丢一帧"，
+  必须用小步长连续框模拟真实步行（初版 700px 瞬移与 50px 步长均失败，20px 步长通过）。
+
+### P0-2 读保护后媒体/导出全 401——已修（方案 A）
+
+- **修复前现象**：`<img>/<video>/<a download>` 裸 URL 不带请求头，读保护开启后截图/视频/导出全坏。
+- **修复**：`require_read` 接受 `?token=` 查询参数回退（header 优先，同用 `hmac.compare_digest`）；
+  `api.js` 新增 `mediaUrl(path)`（有令牌时追加 token）；**7 处**媒体/下载 URL 全部改走它
+  （Cameras 快照、Zones 画面、Events 缩略图/大图/视频×3/zoom×2、Reports 证据包/CSV×2/PDF）。
+- **文档口径**：URL token 仅用于媒体/下载，会进浏览器历史/代理日志——建议配置独立令牌并配合
+  Referrer-Policy（任务 89 落地）。
+- **8001 实测**：快照 header=query=token → 404（无帧属正确）/无 token → 401；
+  CSV `?token=` → 200/无 → 401。npm build 通过。
+
+### P0-3 restore 拒绝覆盖前就删 WAL——已修
+
+- **修复前现象**：先删 `-wal/-shm` 再判断拒绝 → 拒绝时已毁旧库 WAL；占用检查在删除之后。
+- **修复**（backup_data.py `cmd_restore` 重排 + 新增 `_checkpoint_or_busy`）：
+  ①拒绝分支最先判定不碰任何文件；②需覆盖先 `PRAGMA wal_checkpoint(TRUNCATE)`（合并 WAL 同时
+  探测占用；非 SQLite 垃圾文件视为无可合并直接放行替换）；③checkpoint 成功后才转存 `.bak` →
+  删已空的 WAL/SHM；④写新库复检 integrity，失败保留 .bak 并给出恢复命令；⑤无 db 时的孤儿
+  WAL 在写入前清理。
+- **测试**（新增 3 用例）：拒绝时 WAL 字节原样保留；--force 后 .bak 生成+`-wal/-shm` 清零+
+  新库 integrity ok；孤儿 WAL 恢复前清理。既有 8 个 backup 用例不回归。
+
+### P1-1 跨摄像头区域规则——已修
+
+- `add_rule`：`zone.camera_id != body.camera_id` → 400「区域 N 属于摄像头 #M，不能挂到摄像头 #K」。
+- 测试：camera2 + camera1 的 zone → 400；同摄像头 → 200（test_review_105.py）。
+
+### P1-2 测试隔离与耗时——部分达标（如实说明）
+
+- **修复**：`tests/conftest.py` 新增 autouse fixture——`db_path/data_dir/snapshot_dir/video_dir/
+  annotation_pool_dir` 默认指向本用例 `tmp_path`，任何 TestClient 完整 lifespan 都落临时目录，
+  **真实 server/data 零触碰**；`test_health_errors` 的 `tempfile.mkdtemp()`（从不清理）删除，改由
+  conftest 统一。
+- **耗时**：修复前 95–136s → 修后 **86.6s**，未达 <30s 目标。**根因**（不强改业务）：约 40 个
+  TestClient 用例各跑完整 lifespan（Store 迁移/调度器启动/FaceClient/单实例组件），单次 0.5–6s
+  是固定成本；首跑另有 onnxruntime+supervision 模块导入 ~8s 一次性成本。要压到 30s 需引入
+  lifespan 复用/session 级 app fixture，属结构性改动，建议单独立任务。
+- 连带修：conftest 预建目录与 test_backup_restore/test_retention/test_evidence_zip 自建目录相撞
+  （mkdir 加 exist_ok）；test_restore_refuses 用例的假 db 字节在 checkpoint 时按"非 SQLite 文件"
+  容错放行。
+
+### P1-3 release_check 误报——已修
+
+- `check_secrets` 文件级豁免 `test_release_check.py`（其 `sk-` 串是"真密钥→FAIL"测试的夹具数据；
+  文件级豁免防止未来在测试里塞真密钥绕过）。**仓库复跑 FAIL 0、退出码 0**。
+
+### 验收对照
+
+| 项 | 结果 |
+|---|---|
+| pytest | **175 passed**（165 + 10 新增：zone×4/restore×3/review_105×3） |
+| npm build | 通过，gzip 45.48KB |
+| 8001 双路径 | header/query 均 200、无 token 401（快照 404=无帧正确） |
+| release_check | FAIL 0，退出码 0 |
+| 耗时 | 86.6s（未达 30s，根因如上，建议单独立任务做 lifespan 复用） |
+
+### 遗留
+
+- 耗时优化（lifespan 复用）建议单独立任务；
+- URL token 的 Referrer-Policy 依赖任务 89 的安全响应头。
