@@ -17,7 +17,12 @@
   sudo.exe -N powershell.exe -NoProfile -Command "Checkpoint-VM -Name 'Win10 测试环境' -SnapshotName 'ls-test-<ts>'"
   sudo.exe -N powershell.exe -NoProfile -Command "Restore-VMSnapshot -VMName 'Win10 测试环境' -Name '安装完毕' -Confirm:$false"
   ```
-- 访客账号/密码：**必须由用户提供**；不得猜测/爆破。没有凭据就在报告写 `⏳ BLOCKED: 需要 VM 登录凭据`。
+- 访客账号/密码：用户已确认 **VM/WSL 都没有设置密码**。优先用以下无凭据路径：
+  1. `Copy-VMFile`（Guest Service Interface，宿主→客机，不需要客机密码）；
+  2. 若 VM 配置了自动登录，`vmconnect` 打开控制台直接操作（人工步骤由用户协助）；
+  3. PowerShell Direct 若必须凭据：可尝试空密码 `PSCredential`（`New-Object SecureString` 空串），
+     失败就**不要猜/爆破**，写 `⏳ BLOCKED: PowerShell Direct 需要可登录会话` 并跳下一项。
+- **不要**修改 VM 的密码/账户策略；无密码不等于可以重置。
 - 文件进 VM（按可用性二选一）：
   1. `Copy-VMFile`（需 Guest Service Interface/集成服务；失败则换 2）；
   2. 宿主机 `python -m http.server` + VM 浏览器下载（Default Switch NAT 通常可访问宿主 IP；
