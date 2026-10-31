@@ -34,9 +34,14 @@ def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def _ro_uri(path) -> str:
+    """与 server/app/store.ro_uri 保持一致（任务76）：as_uri 正确编码空格/中文/# 等特殊字符。"""
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 def _snapshot_db(src: Path, dst: Path) -> tuple[bool, str]:
     """热备份 src → dst 并做 integrity_check，返回 (ok, 文本)。"""
-    src_con = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    src_con = sqlite3.connect(_ro_uri(src), uri=True)
     try:
         dst_con = sqlite3.connect(dst)
         try:

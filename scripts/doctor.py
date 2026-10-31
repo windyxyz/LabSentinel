@@ -36,6 +36,11 @@ def check(name, ok, detail="", advice="", level=None):
     return {"name": name, "status": status, "detail": detail, "advice": advice}
 
 
+def _ro_uri(path) -> str:
+    """与 server/app/store.ro_uri 保持一致（任务76）：as_uri 编码空格/中文/# 等特殊字符。"""
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 def run_checks(root: Path, port: int) -> list[dict]:
     mode = detect_mode(root)
     results = []
@@ -119,7 +124,7 @@ def run_checks(root: Path, port: int) -> list[dict]:
         results.append(check("数据库", True, "尚无数据库（首次启动自动创建）", "", level="PASS"))
     else:
         try:
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            con = sqlite3.connect(_ro_uri(db), uri=True)
             integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
             cams = con.execute("select count(*) from cameras").fetchone()[0]
             evs = con.execute("select count(*) from events").fetchone()[0]

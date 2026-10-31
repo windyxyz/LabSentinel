@@ -218,6 +218,43 @@ body `errcode≠0` 也判失败（`_is_ok`）。失败会重试（1s/4s/15s 三�
 → 服务端启用了管理鉴权（LS_ADMIN_TOKEN）。「摄像头」页顶部填写令牌（存浏览器 localStorage），
 所有 POST/DELETE 自动携带。
 
+**Q：能嵌到别的系统里吗（iframe）？CSP 怎么开？**
+→ 默认 `X-Frame-Options: DENY`（任务89）——嵌入大屏改 `LS_FRAME_OPTIONS=SAMEORIGIN`。
+CSP 默认不发送（避免页面白屏难排查）；配置 `LS_CSP=default-src 'self'; connect-src 'self' ws: wss:`
+后发送，首次建议 `LS_CSP_REPORT_ONLY=1`（只报告不阻断，观察控制台无违例后再去掉）。
+
+**Q：怎么查谁删了摄像头/改了规则？**
+→ 报表页 →「操作审计」折叠区（或 `GET /api/audit`，仅管理员）：所有 `/api/*` 写操作自动记录
+操作者（admin/anonymous）、动作、路径目标、状态码与 request_id（可据此查 server.log 完整上下文）。
+审计不记录请求体（防密码/令牌入日志）；审计行按 `LS_RETENTION_EVENTS_DAYS` 同口径自动清理。
+
+**Q：怎么让某渠道只收 L3？群机器人只想收"未穿实验服"？**
+→ `LS_ALERT_FILTERS`（任务86，JSON）：`{"email":{"min_level":3},"wecom":{"types":["enter_no_ppe"]}}`。
+`min_level` 1–3；`types` 留空/缺省=不限制。被过滤的事件不建投递行；`/api/alerts/status` 每渠道
+回显 filters 便于核对；`alert-test` 不受过滤（确认连通性用）。
+
+**Q：怎么改告警文案？支持哪些占位符？**
+→ `.env`/`config.env` 的 `LS_ALERT_TEMPLATE_TITLE` / `LS_ALERT_TEMPLATE_TEXT`（任务85），
+改后重启生效。占位符：`{icon} {level} {type} {type_text} {ts} {camera_id} {track_id} {detail}
+{track_part}`（track_part 为" · track N"或空）；未知占位符原样保留；`detail` 里的花括号不会被
+二次解析。改前可在「摄像头」页 → 告警文案模板 → 预览确认效果。
+
+**Q：严重事件没人处理会怎样？怎么调提醒间隔？**
+→ 未处置升级提醒（任务82）：L3（默认）事件超过 `LS_ESCALATE_AFTER_MIN`（默认 15 分钟）仍为
+new 状态 → 通过现有渠道**再提醒一次**（文案带 ⏰ 前缀），每事件只提醒一次（不刷屏）；
+`LS_ESCALATE_AFTER_MIN=0` 关闭；`LS_ESCALATE_MIN_LEVEL` 可设 2 连 L2 一起提醒。
+事件记录/截图照常，提醒不等于处置。
+
+**Q：维护/清洁时怎么临时不告警？事件还会记录吗？**
+→ 「摄像头」页告警面板 → 告警静默（任务81）：可全局/按摄像头/按级别/按类型静默 1h–7d，
+到期自动恢复，重启不丢。**事件照常入库、截图照常、WS 实时流照常**——只是不推送外部渠道
+（不建投递行、不计失败）。维护完在列表点「解除」立即恢复。别用停摄像头代替静默：那会丢检测。
+
+**Q：多路摄像头怎么快速套用同一套区域/规则？**
+→ 「安全区配置」页 →「复制到其他摄像头」（任务80）：勾选目标摄像头 → 复制区域/规则 →
+规则按区域名映射到各目标（不会指向源摄像头的区域），同名区域跳过。批量部署的另一种方式是
+配置导出/导入（上一条）。
+
 **Q：如何批量部署多路摄像头？换机怎么迁移配置？导入会覆盖事件吗？**
 → 「摄像头」页 → 配置导入导出（任务79）：先在一路上调好区域/规则 → 导出 JSON（默认脱敏
 RTSP 密码）→ 改文件里的摄像头名/地址 → 导入（merge 跳过同名，replace 需勾选确认）。

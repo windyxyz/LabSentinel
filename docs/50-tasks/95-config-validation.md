@@ -65,4 +65,17 @@
 
 ## 执行报告
 
-（待填：改动文件 / 校验输出 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 286 passed、5 用例）**
+
+- **改动**：新增 `server/app/validate.py`（`validate_settings()` 纯函数——目录可写探针/模型
+  存在+>1MB/classes 词表/web_dist/go2rtc/令牌安全（短/相同/仅read）/磁盘/DB quick_check，
+  共 12 检查项）；`main.py` lifespan 前调 validate_settings，FAIL 写 ERROR 日志，
+  `LS_STRICT_CONFIG=1` 时 FAIL 拒绝启动；`api.py` 加 `GET /api/config/validate`
+  （require_admin）+ `/api/system` 追加 `config_issues: {fail,warn}` 计数（不泄露路径）；
+  `config.py` 加 `strict_config: bool = False`；`.env.example` 加 LS_STRICT_CONFIG。
+- **测试**（test_config_validation.py 5 用例）：全 OK（模型+classes 就位）/删模型 FAIL/
+  令牌短+相同 WARN/config validate 端点/system config_issues 计数。全量
+  **pytest 286 passed**（281 + 5）；build 50.49KB。
+- **文档**：.env.example 加 LS_STRICT_CONFIG；部署FAQ「启动时提示配置问题怎么办/严格模式」；
+  运维手册启动排障一节。
+- **遗留**：Dashboard 红黄条（与 104 终检一起收尾——API/validate 已就绪）。

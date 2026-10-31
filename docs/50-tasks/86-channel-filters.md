@@ -56,4 +56,15 @@
 
 ## 执行报告
 
-（待填：改动文件 / 过滤证据 / 测试 / 遗留）
+**flash 2026-10-31 完成（pytest 235 passed、过滤零投递行断言、status 回显）**
+
+- **改动**：`config.py` 加 `alert_filters: str = ""`；`alerts.py` 加 `alert_filters()` 解析
+  （非法 JSON/未知渠道/非法级别/字段类型错 → WARNING 忽略该条/字段，不崩）与纯函数
+  `channel_filtered(name, event_row, filters)`；`dispatch` 在派发前按渠道检查——过滤即
+  **不建投递行/不重试/不产死信**，打印含原因的日志（与"未配置"语义一致）；`/api/alerts/status`
+  每渠道回显 `filters`；`.env.example` 示例；部署指南告警章节/部署FAQ 示例与口径。
+- **测试**（test_channel_filters.py 5 用例）：解析（合法/非法 JSON/未知渠道/级别越界/类型错）；
+  纯函数（min_level/types/未配置渠道不拦）；**dispatch 过滤：L2 零调用零投递行、L3 正常发送**；
+  status 回显 filters；**alert-test 不受过滤**（min_level=3 下测试消息照发）。既有用例不回归。
+  全量 **pytest 235 passed**（230 + 5）。
+- **遗留**：无。

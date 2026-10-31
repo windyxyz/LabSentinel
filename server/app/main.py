@@ -3,9 +3,14 @@
 运行: uvicorn app.main:app --port 8000
 """
 import asyncio
+import datetime
 import gzip
 import logging
+import re
+import threading
+import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -20,12 +25,29 @@ from .alerts import dispatcher
 from .api import init, router, ws_events
 from . import go2rtc
 from . import retention
+from . import backups
+from . import escalation
 from .config import settings
 from .logging_setup import setup_file_logging  # 任务61：导入阶段挂文件日志（尽早捕获启动错误）
 from .pipeline import CameraManager
 from .store import Store
 
 setup_file_logging()  # LS_LOG_FILE=0 关闭；失败静默（console 照常）
+
+# 任务95：启动配置校验（默认只告警；LS_STRICT_CONFIG=1 时 FAIL 拒绝启动）
+from .validate import validate_settings, fail_count as _vc_fail, warn_count as _vc_warn
+_v_results = validate_settings()
+for _v in _v_results:
+    _lg = logging.getLogger("app.validate")
+    if _v["level"] == "FAIL":
+        _lg.error("配置校验 FAIL: %s %s（hint: %s）", _v["key"], _v["message"], _v["hint"])
+    elif _v["level"] == "WARN":
+        _lg.warning("配置校验 WARN: %s %s", _v["key"], _v["message"])
+if settings.strict_config and _vc_fail(_v_results) > 0:
+    _fails = [v for v in _v_results if v["level"] == "FAIL"]
+    raise RuntimeError(
+        f"配置校验 FAIL {_vc_fail(_v_results)} 项（LS_STRICT_CONFIG=1 拒绝启动）: "
+        + "; ".join(f"{v['key']}: {v['message']}" for v in _fails))
 
 # 请求 ID（任务63）：中间件写入，日志过滤器读取（见 logging_setup 的格式 [req=...]）
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
@@ -65,23 +87,68 @@ async def lifespan(app: FastAPI):
     manager.start_all()  # 启动已登记摄像头（文件源用于开发演示）
     go2rtc.sync_streams(store)  # 实时画面：按当前摄像头生成 go2rtc 配置并热重载
     retention.start_scheduler(store)  # 任务14：数据保留后台清理
+    escalation.start_scheduler(store)  # 任务82：未处置事件升级提醒
+    backups.start_scheduler()  # 任务92：定时自动备份
     try:
         yield
     finally:
         manager.stop_all()
         retention.stop_scheduler()
+        escalation.stop_scheduler()
+        backups.stop_scheduler()
 
 
 app = FastAPI(title="LabSentinel", version="0.1.0-m1", lifespan=lifespan)
 app.include_router(router)
 
+# ---- 写接口限流（任务90）：滑动窗口，内存实现，单进程 ----
+_rate_lock = threading.Lock()
+_rate_windows: dict[str, deque] = {}  # client_ip → [timestamps]
+
+
+def _client_ip(request: Request) -> str:
+    """任务90：trust_proxy 开启时取 X-Forwarded-For 第一跳；否则直连地址。"""
+    if settings.trust_proxy:
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    """任务63：响应头始终带 X-Request-ID（客户端合法传入则回显，否则生成 uuid4）。"""
+    """任务63：响应头始终带 X-Request-ID（客户端合法传入则回显，否则生成 uuid4）。
+    任务87：写请求（/api/* 非 GET）完成后落审计行（不含 body/headers/query）。
+    任务90：/api/* 写接口滑动窗口限流（GET/WS/健康探针不受影响）。"""
     rid = _client_request_id(request)
     request.state.request_id = rid
     request_id_var.set(rid)
+    # 任务90：写接口限流（在 request_id 之后、业务之前；429 直接返回）
+    if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+            and request.url.path.startswith("/api/")
+            and settings.write_rate_limit > 0):
+        ip = _client_ip(request)
+        now = time.monotonic()
+        window = settings.write_rate_window_s
+        with _rate_lock:
+            dq = _rate_windows.setdefault(ip, deque())
+            while dq and dq[0] < now - window:
+                dq.popleft()
+            if len(dq) >= settings.write_rate_limit:
+                retry_after = max(1, window - int(now - dq[0]))
+                logging.getLogger("app.errors").warning(
+                    "[rate-limit] %s %s %s 超限（%d/%d per %ds）", ip,
+                    request.method, request.url.path, len(dq), settings.write_rate_limit, window)
+                return JSONResponse(
+                    {"detail": "写操作过于频繁，请稍后重试", "request_id": rid,
+                     "code": "rate_limited"},
+                    status_code=429,
+                    headers={"X-Request-ID": rid, "Retry-After": str(retry_after)})
+            dq.append(now)
+            if len(_rate_windows) > 1000:
+                cutoff = now - window
+                for k in [k for k, v in _rate_windows.items() if not v or v[-1] < cutoff]:
+                    del _rate_windows[k]
     try:
         response = await call_next(request)
     except Exception:  # noqa: BLE001  某些中间件层异常不走 exception_handler，也兜住
@@ -91,7 +158,54 @@ async def request_id_middleware(request: Request, call_next):
         return JSONResponse({"detail": "服务器内部错误", "request_id": rid, "code": "internal_error"},
                             status_code=500, headers={"X-Request-ID": rid})
     response.headers["X-Request-ID"] = rid
+    # 任务87：审计（/api/* 写操作；写失败只 WARNING 不影响响应；不含 body/headers/query）
+    if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+            and request.url.path.startswith("/api/")):
+        try:
+            actor = "admin" if request.headers.get("X-Admin-Token") else "anonymous"
+            _audit_write(datetime.datetime.now().isoformat(timespec="seconds"), rid, actor,
+                         f"{request.method} {request.url.path}", response.status_code)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("app.errors").warning("[audit] 写审计失败: %s", e)
+    # 任务89：安全响应头（不覆盖已有同名头；CSP 默认不发送）
+    if settings.security_headers:
+        _add_header_once = lambda h, k, v: h.setdefault(k, v)  # noqa: E731
+        _add_header_once(response.headers, "X-Content-Type-Options", "nosniff")
+        _add_header_once(response.headers, "X-Frame-Options", settings.frame_options)
+        _add_header_once(response.headers, "Referrer-Policy", "no-referrer")
+        _add_header_once(response.headers, "Permissions-Policy",
+                         "camera=(), microphone=(), geolocation=()")
+        _add_header_once(response.headers, "Cross-Origin-Resource-Policy", "same-site")
+        if settings.csp:
+            name = "Content-Security-Policy-Report-Only" if settings.csp_report_only \
+                else "Content-Security-Policy"
+            _add_header_once(response.headers, name, settings.csp)
     return response
+
+
+def _audit_write(ts: str, rid: str, actor: str, action: str, status_code: int) -> None:
+    from .store import connect
+    m = re.search(r"/(\d+)(?:/|$)", action)
+    target = None
+    if m:
+        kind = ("camera" if "/cameras/" in action else
+                "event" if "/events/" in action else
+                "zone" if "/zones/" in action else
+                "rule" if "/rules/" in action else
+                "silence" if "/alert-silences/" in action else "id")
+        target = f"{kind}:{m.group(1)}"
+    c = connect(_audit_db_path())
+    try:
+        c.execute("INSERT INTO audit_log(ts,request_id,actor,action,target,status_code) "
+                  "VALUES(?,?,?,?,?,?)", (ts, rid, actor, action, target, status_code))
+        c.commit()
+    finally:
+        c.close()
+
+
+def _audit_db_path() -> str:
+    from .config import settings
+    return str(settings.db_path)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -172,6 +286,15 @@ async def selective_gzip_middleware(request: Request, call_next):
         return resp
     if resp.headers.get("content-disposition", "").lower().startswith("attachment"):
         return resp  # 2026-10-30 审阅：CSV 等下载是流式生成，整体缓冲进内存会击穿流式设计
+    # 任务77：大响应/未知大小（流式）保护——只压 Content-Length 已知且 ≤ 阈值的响应
+    cl = resp.headers.get("content-length")
+    if cl is None:
+        return resp  # chunked/streaming：避免缓冲未知大小流
+    try:
+        if int(cl) > settings.gzip_max_bytes:
+            return resp
+    except ValueError:
+        return resp
     if resp.status_code == 304:
         resp.headers.setdefault("Vary", "Accept-Encoding")
         return resp

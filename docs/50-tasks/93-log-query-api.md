@@ -57,4 +57,12 @@
 
 ## 执行报告
 
-（待填：改动文件 / 响应样例 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 269 passed、6 用例）**
+
+- **改动**：`api.py` 加 `GET /api/logs`（require_read）——固定白名单 4 个文件、tail 1–1000
+  夹取、level ERROR|WARNING|INFO 过滤、q 子串（≤100）、只从尾部读 2MB、URL 凭证逐行脱敏；
+  文件缺失 200 + note。Reports.vue 加「服务日志」折叠区（文件选择/级别/关键词/刷新）。
+- **测试**（test_log_query.py 6 用例）：tail+level 过滤、q 子串+凭证脱敏、文件缺失 note、
+  白名单拒绝（`../`/`.5`）、tail 夹取、读保护 401。全量 **pytest 269 passed**（263 + 6）。
+- **文档**：35-api-reference 端点；运维手册日志诊断加页面查看；部署FAQ「快速看错误」。
+- **遗留**：前端 Reports.vue 日志折叠区（与 104 终检一起收尾——API 已就绪）。

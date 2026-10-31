@@ -63,4 +63,19 @@ body：
 
 ## 执行报告
 
-（待填：改动文件 / 复制映射证据 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 204 passed、build 47.35KB、名称映射零指向源区域断言）**
+
+- **改动**：`api.py` 加 `POST /api/cameras/{cid}/copy-config`（require_admin）：先全量校验
+  （源存在/目标非空去重/排除自身/目标存在→404）再写库；区域按 `name_suffix` 命名复制（同名跳过
+  并把 zone_map 指向既有区域）；规则 zone_id 按**区域名+suffix** 映射到目标（全画幅规则
+  zone_id=None 照常复制；目标无同名区域 → 跳过+warning，绝不指向源区域）；行为+zone+时段重复
+  跳过。`api.js` 加 `copyConfig`；Zones.vue 加「复制到其他摄像头」区（目标 checkbox 多选、
+  复制区域/规则勾选、confirm、结果摘要、单摄像头提示）。
+- **测试**：`test_copy_config.py` 6 用例——双目标复制且**目标规则 zone_id 全部指向目标区域**
+  （绝不指向源区域）/同名区域与重复规则 skipped 且 zone_map 映射到既有区域/copy_zones=false 时
+  规则跳过+warning/全画幅规则 zone_id=None 复制/空目标·含源·不存在 id → 400/404 且零写入/
+  鉴权 401。修一处计数 bug（跳过数加局部变量未汇入全局）。全量 **pytest 204 passed**；
+  build gzip **47.35KB**。
+- **文档**：35-api-reference 补端点；部署FAQ「多路怎么快速套用同一套区域/规则」；运维手册 §7
+  加多路快速套用。
+- **遗留**：无。

@@ -78,6 +78,22 @@ def test_resolve_ffmpeg_layouts(tmp_path, monkeypatch):
     assert not hit.exists() and len(tried) >= 3
 
 
+def test_detect_root_portable_layout(tmp_path):
+    """75 复验抓到的 bug：便携布局 pkg/app/server/app/usb_devices.py 向上推导必须命中 pkg，
+    不能误停在 pkg/app（它下面有 server/ 子目录）。"""
+    import importlib.util
+    app_dir = tmp_path / "pkg" / "app" / "server" / "app"
+    app_dir.mkdir(parents=True)
+    (tmp_path / "pkg" / "runtime").mkdir()
+    (tmp_path / "pkg" / "runtime" / "python.exe").write_bytes(b"x")
+    (app_dir / "usb_devices.py").write_bytes(
+        (Path(__file__).resolve().parents[1] / "app" / "usb_devices.py").read_bytes())
+    spec = importlib.util.spec_from_file_location("usb_pkg_probe", app_dir / "usb_devices.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    assert m.detect_root() == tmp_path / "pkg"
+
+
 def test_missing_ffmpeg_degrades(tmp_path, monkeypatch, fresh_cache):
     empty = tmp_path / "no-tools"
     empty.mkdir()

@@ -25,4 +25,6 @@ def isolate_settings_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "snapshot_dir", data / "snapshots")
     monkeypatch.setattr(settings, "video_dir", data / "videos")
     monkeypatch.setattr(settings, "annotation_pool_dir", data / "annotation_pool")
+    # lifespan 会重写 tools/go2rtc.yaml（真实文件！测试期间指到 tmp）
+    monkeypatch.setattr(settings, "go2rtc_yaml", tmp_path / "go2rtc.yaml")
     yield

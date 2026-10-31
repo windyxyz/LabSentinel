@@ -2,6 +2,7 @@
 import csv
 import io
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -23,7 +24,8 @@ from .stats import daily as stats_daily_query
 from .stats import hourly as stats_hourly_query
 from .stats import summary as stats_summary_query
 from .stats import weekly as stats_weekly_query
-from .store import EVENT_STATUSES, Store
+from .store import EVENT_STATUSES, Store, ro_uri
+from .constants import TYPE_TEXT
 
 router = APIRouter(prefix="/api")
 
@@ -36,6 +38,7 @@ WS_AUTH_CODE = 4401
 
 
 def _token_ok(provided: str | None) -> bool:
+    """管理令牌校验（写操作专用，任务88 语义收紧）。"""
     if not settings.admin_token:
         return True  # 未启用鉴权
     if not provided:
@@ -44,9 +47,34 @@ def _token_ok(provided: str | None) -> bool:
     return hmac.compare_digest(provided, settings.admin_token)
 
 
+def _read_token_ok(provided: str | None) -> bool:
+    """读令牌校验（任务88）：admin_token 或 read_token 均可（hmac.compare_digest）。"""
+    if not settings.admin_token:
+        return True  # 未启用鉴权
+    if not provided:
+        return False
+    import hmac
+    if hmac.compare_digest(provided, settings.admin_token):
+        return True
+    return bool(settings.read_token) and hmac.compare_digest(provided, settings.read_token)
+
+
+def _warn_same_token():
+    """任务88：read_token 与 admin_token 相同 → 弱隔离 WARNING（允许运行）。"""
+    if settings.admin_token and settings.read_token and \
+            settings.admin_token == settings.read_token:
+        print("[auth] ⚠ LS_READ_TOKEN 与 LS_ADMIN_TOKEN 相同——只读令牌形同虚设（弱隔离）")
+
+
+_warn_same_token()
+
+
 def require_admin(request: Request):
-    """写操作守卫：Depends(require_admin) 挂在 POST/PUT/DELETE 路由上。"""
+    """写操作守卫：只接受管理令牌（任务88：只读令牌写永拒）。"""
+    """写操作守卫：只接受管理令牌（任务88：只读令牌写永拒）。"""
     if not _token_ok(request.headers.get("X-Admin-Token")):
+        if settings.admin_token and settings.read_token and                 request.headers.get("X-Admin-Token") and                 request.headers.get("X-Admin-Token") == settings.read_token:
+            raise HTTPException(401, "当前令牌无写权限（只读令牌）——请使用管理令牌")
         raise HTTPException(401, "需要管理令牌（X-Admin-Token）")
 
 
@@ -55,12 +83,13 @@ def require_read(request: Request):
 
     105 回归补丁 P0-2：`<img>/<video>/<a download>` 裸 URL 不带 X-Admin-Token 头，读保护开启后
     截图/视频/导出全 401——接受 `?token=` 查询参数作为回退（与 header 同用 hmac.compare_digest）。
-    URL token 会进浏览器历史/代理日志，文档建议配合独立令牌与 Referrer-Policy（任务 89）。
+    任务88：admin_token 或 read_token 均可通过；URL token 会进浏览器历史/代理日志，
+    文档建议配合独立只读令牌与 Referrer-Policy（任务 89）。
     """
     if not settings.auth_read_protected:
         return
     provided = request.headers.get("X-Admin-Token") or request.query_params.get("token")
-    if not provided or not _token_ok(provided):
+    if not _read_token_ok(provided):  # admin_token 空时恒 True（鉴权未启用）
         raise HTTPException(401, "需要管理令牌（X-Admin-Token 头或 ?token= 查询参数）")
 
 
@@ -91,7 +120,7 @@ def health_ready():
     checks = {}
 
     try:
-        con = sqlite3.connect(f"file:{store.path}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store.path), uri=True)  # 任务76：URI 编码安全
         con.execute(f"PRAGMA busy_timeout={int(settings.sqlite_busy_timeout_ms)}")
         try:
             con.execute("SELECT 1").fetchone()
@@ -126,6 +155,13 @@ def health_ready():
 
 
 # ---- system ----
+def _config_issue_counts() -> dict:
+    """任务95：启动校验 FAIL/WARN 计数（不泄露路径）。"""
+    from .validate import fail_count, warn_count, validate_settings
+    r = validate_settings()
+    return {"fail": fail_count(r), "warn": warn_count(r)}
+
+
 def _system_version() -> str:
     return "0.1.0-m1"
 
@@ -142,7 +178,293 @@ def system():
         "today_counts": today,
         "unhandled_today": max(0, unhandled),  # 今日未处置（任务12）
         "alerts": dispatcher.store.delivery_counts() if dispatcher.store else {"pending": 0, "failed": 0, "ok": 0},
+        "config_issues": _config_issue_counts(),
     }
+
+
+# ---- 模型/配置状态（任务91，只读）----
+@router.get("/model/status", dependencies=[Depends(require_read)])
+def model_status():
+    """模型与推理配置只读状态（不加载 ONNX、不触发推理）。"""
+    from . import engine as _eng_mod
+    backend = _eng_mod._engine.backend if _eng_mod._engine is not None         else settings.backend_order.split(",")[0].strip()
+
+    def _file_info(p):
+        from pathlib import Path as _P
+        fp = _P(str(p))
+        if not fp.exists():
+            return {"path": str(p), "exists": False, "size_bytes": None, "mtime": None}
+        import os as _os
+        return {"path": str(p), "exists": True,
+                "size_bytes": fp.stat().st_size,
+                "mtime": datetime.fromtimestamp(fp.stat().st_mtime).isoformat(timespec="seconds")}
+
+    models = {"ppe": _file_info(settings.ppe_model or settings.model_fp32),
+              "fp32": _file_info(settings.model_fp32)}
+    if settings.ppe_model:
+        models["int8"] = _file_info(settings.model_fp32)
+
+    # classes 文件（与 PpeEngine 一致：模型同目录 <stem>.classes.txt）
+    classes_file = None
+    ppe_p = settings.ppe_model or settings.model_fp32
+    if ppe_p:
+        stem = Path(str(ppe_p)).with_suffix("")
+        cand = stem.with_suffix(".classes.txt")
+        if not cand.exists():
+            cand = stem.parent / "yolo11n_ppe.classes.txt"
+        if cand.exists():
+            classes_file = str(cand)
+    class_names, class_count = [], 0
+    if classes_file and Path(classes_file).exists():
+        names_raw = Path(classes_file).read_text(encoding="utf-8", errors="replace").splitlines()
+        class_names = [n.strip() for n in names_raw[:50] if n.strip()]
+        class_count = len([n for n in names_raw if n.strip()])
+
+    return {"backend": backend, "imgsz": settings.imgsz, "conf": settings.conf_thres,
+            "analysis_fps": settings.analysis_fps,
+            "models": models,
+            "classes": {"file": classes_file, "exists": classes_file is not None,
+                        "count": class_count, "names": class_names},
+            "ppe": {"class_names": settings.ppe_class_names,
+                    "violation_class": settings.ppe_violation_class,
+                    "conf": settings.ppe_conf, "wearing_conf": settings.ppe_wearing_conf},
+            "face_enabled": settings.face_enabled}
+
+
+@router.get("/config/summary", dependencies=[Depends(require_admin)])
+def config_summary():
+    """当前生效配置脱敏摘要（任务91）：TOKEN/PASSWORD/SECRET/KEY/PASS/CREDENTIAL 全 ***。"""
+    from .redact import redact_line
+    out = []
+    for k, v in settings.model_dump().items():
+        out.append(redact_line(f"LS_{k.upper()}", str(v)))
+    return {"keys": out}
+
+
+# ---- 自动备份（任务92）----
+@router.get("/backups/status", dependencies=[Depends(require_read)])
+def backups_status():
+    from . import backups
+    return backups.status()
+
+
+@router.post("/backups/run", dependencies=[Depends(require_admin)])
+def backups_run():
+    from . import backups
+    if backups._running.is_set():
+        raise HTTPException(409, "备份正在进行中")
+    import threading
+    threading.Thread(target=backups.run_backup, daemon=True).start()
+    return {"started": True}
+
+
+# ---- 操作审计（任务87，仅管理员）----
+@router.get("/audit", dependencies=[Depends(require_admin)])
+def audit_query(limit: int = 50, offset: int = 0, action: str | None = None,
+                actor: str | None = None, start_ts: str | None = None,
+                end_ts: str | None = None):
+    items, total = store.audit(limit=limit, offset=offset, action=action,
+                               actor=actor, start_ts=start_ts, end_ts=end_ts)
+    return {"items": items, "total": total}
+
+
+# ---- 日志查询（任务93，读保护口径；只尾部/固定白名单/脱敏）----
+_LOG_FILES = {"server.log", "server.log.1", "server.log.2", "server.log.3"}
+
+
+@router.get("/logs", dependencies=[Depends(require_read)])
+def query_logs(tail: int = 200, level: str | None = None, q: str | None = None,
+               file: str = "server.log"):
+    """只读日志尾部查询（最多 1000 行，脱敏 URL 凭证，固定白名单）。"""
+    from .redact import redact_value
+    if file not in _LOG_FILES:
+        raise HTTPException(400, f"file 只允许: {'|'.join(sorted(_LOG_FILES))}")
+    tail = max(1, min(tail, 1000))
+    level_upper = level.upper() if level else None
+    if level_upper and level_upper not in ("ERROR", "WARNING", "INFO"):
+        raise HTTPException(400, "level 只允许 ERROR|WARNING|INFO")
+    q_clean = (q or "").strip()[:100]
+    log_path = settings.data_dir / "logs" / file
+    if not log_path.exists():
+        return {"file": file, "lines": [], "matched": 0, "scanned": 0,
+                "note": "日志文件不存在（可能 LS_LOG_FILE=0）"}
+    # 只从尾部读最多 2MB
+    fsize = log_path.stat().st_size
+    read_bytes = min(fsize, 2 * 1024 * 1024)
+    with open(log_path, "rb") as f:
+        if read_bytes < fsize:
+            f.seek(fsize - read_bytes)
+        raw = f.read()
+    all_lines = raw.decode("utf-8", errors="replace").splitlines()
+    scanned = len(all_lines)
+    out, matched = [], 0
+    for ln in reversed(all_lines):
+        red = redact_value(ln)
+        if level_upper and f" {level_upper} " not in f" {red} ":
+            continue
+        if q_clean and q_clean.lower() not in red.lower():
+            continue
+        matched += 1
+        if matched <= tail:
+            out.append(red)
+    out.reverse()  # 正序返回最近 tail 条
+    return {"file": file, "lines": out, "matched": matched, "scanned": scanned,
+            "truncated": read_bytes < fsize}
+
+
+# ---- Prometheus 指标（任务94，读保护口径；text/plain）----
+@router.get("/metrics", dependencies=[Depends(require_read)])
+def prometheus_metrics():
+    """Prometheus 文本指标（无敏感标签：只 camera_id/level/status）。"""
+    from . import logging_setup as ls
+    lines = []
+    try:
+        lines += ["# HELP labsentinel_up 1=alive", "# TYPE labsentinel_up gauge",
+                  "labsentinel_up 1"]
+        lines.append(f"labsentinel_uptime_seconds {ls.uptime_s()}")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cams = store.cameras()
+        lines.append(f"labsentinel_cameras_total {len(cams)}")
+        running = 0
+        st = manager.status() if manager else {"cameras": []}
+        st_by_id = {c["id"]: c for c in st.get("cameras", [])}
+        for c in cams:
+            s = st_by_id.get(c["id"], {})
+            if s.get("status") == "running":
+                running += 1
+            cid = c["id"]
+            if "fps" in s:
+                lines.append(f'labsentinel_camera_fps{{camera_id="{cid}"}} {s["fps"]}')
+            if s.get("frame_age_s") is not None:
+                lines.append(f'labsentinel_camera_frame_age_seconds{{camera_id="{cid}"}} {s["frame_age_s"]}')
+        lines.append(f"labsentinel_cameras_running {running}")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for lv, n in (store.today_event_counts() or {}).items():
+            lines.append(f'labsentinel_events_today{{level="{lv}"}} {n}')
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for status_key, n in (dispatcher.store.delivery_counts() if dispatcher.store else {}).items():
+            lines.append(f'labsentinel_alert_deliveries{{status="{status_key}"}} {n}')
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import shutil
+        free = shutil.disk_usage(str(settings.data_dir)).free
+        lines.append(f"labsentinel_disk_free_bytes {free}")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        db = settings.db_path
+        if Path(str(db)).exists():
+            lines.append(f"labsentinel_db_size_bytes {Path(str(db)).stat().st_size}")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        lines.append(f"labsentinel_schema_version {store.schema_version()}")
+    except Exception:  # noqa: BLE001
+        pass
+    from fastapi.responses import Response
+    return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+# ---- 未处置升级提醒（任务82）----
+@router.get("/escalation/status", dependencies=[Depends(require_read)])
+def escalation_status():
+    from . import escalation
+    return escalation.status(store)
+
+
+# ---- 配置校验（任务95，仅管理员）----
+@router.get("/config/validate", dependencies=[Depends(require_admin)])
+def config_validate():
+    from .validate import validate_settings
+    return {"items": validate_settings(),
+            "fail": sum(1 for r in validate_settings() if r["level"] == "FAIL"),
+            "warn": sum(1 for r in validate_settings() if r["level"] == "WARN")}
+
+
+# ---- 告警文案模板（任务85）：预览不发送不写库 ----
+@router.get("/alert-template", dependencies=[Depends(require_read)])
+def alert_template_get():
+    return {
+        "title": settings.alert_template_title,
+        "text": settings.alert_template_text,
+        "placeholders": {
+            "icon": "级别图标（ℹ️/⚠️/🔴）", "level": "级别数字 1-3",
+            "type": "事件类型标识", "type_text": "事件类型中文名",
+            "ts": "事件时间", "camera_id": "摄像头 ID",
+            "track_id": "跟踪 ID（occupancy 为 0）", "detail": "事件详情",
+            "track_part": "「 · track N」或空串（occupancy 时为空）",
+        },
+    }
+
+
+@router.post("/alert-template/preview", dependencies=[Depends(require_admin)])
+def alert_template_preview(body: dict):
+    from .alerts import render_alert, alert_title
+    row = {"ts": body.get("ts") or datetime.now().isoformat(timespec="seconds"),
+           "camera_id": int(body.get("camera_id", 1)),
+           "type": body.get("type", "enter"),
+           "level": int(body.get("level", 2)),
+           "track_id": int(body.get("track_id", 1)),
+           "detail": body.get("detail", "（示例事件详情）")}
+    return {"title": alert_title(row["level"]), "text": render_alert(row)}
+
+
+# ---- 告警静默（任务81）：检测/事件照常，只抑制外部渠道；到期自动恢复 ----
+_ALLOWED_SILENCE_SCOPES = ("global", "camera", "level", "type")
+
+
+@router.get("/alert-silences", dependencies=[Depends(require_read)])
+def list_alert_silences(active: int = 1):
+    out = []
+    for s in store.silences(active_only=bool(active)):
+        try:
+            remain = int((datetime.fromisoformat(s["until_ts"])
+                          - datetime.now()).total_seconds())
+        except ValueError:
+            remain = None
+        out.append({**s, "remaining_s": max(0, remain) if remain is not None else None})
+    return out
+
+
+@router.post("/alert-silences", dependencies=[Depends(require_admin)])
+def add_alert_silence(body: dict):
+    # TODO(任务87)：写操作进审计日志
+    scope = body.get("scope", "global")
+    if scope not in _ALLOWED_SILENCE_SCOPES:
+        raise HTTPException(400, f"scope 必须为 {'|'.join(_ALLOWED_SILENCE_SCOPES)}")
+    target = body.get("target")
+    if scope == "global":
+        target = None
+    else:
+        if target is None or str(target) == "":
+            raise HTTPException(400, f"scope={scope} 需要 target")
+        if scope == "camera" and store.camera(int(target)) is None:
+            raise HTTPException(404, "camera not found")
+        if scope == "level" and int(target) not in (1, 2, 3):
+            raise HTTPException(400, "level 必须为 1|2|3")
+        if scope == "type" and target not in TYPE_TEXT:
+            raise HTTPException(400, f"type 必须为 {'|'.join(TYPE_TEXT)}")
+    duration = int(body.get("duration_s", 3600))
+    if not (60 <= duration <= 7 * 86400):
+        raise HTTPException(400, "duration_s 必须 60–604800（1 分钟 ~ 7 天）")
+    rec = store.add_silence(scope, str(target) if target is not None else None,
+                            body.get("reason"), created_by="admin", duration_s=duration)
+    return rec
+
+
+@router.delete("/alert-silences/{sid}", dependencies=[Depends(require_admin)])
+def delete_alert_silence(sid: int):
+    # TODO(任务87)：写操作进审计日志
+    if not store.delete_silence(sid):
+        raise HTTPException(404, "silence not found")
+    return {"ok": True}
 
 
 # ---- cameras ----
@@ -202,6 +524,86 @@ def camera_webrtc(cid: int, request: Request):
     return {"camera_id": cid, "ws_url": f"ws://{host}:1984/api/ws?src={cid}"}
 
 
+@router.post("/cameras/{cid}/copy-config", dependencies=[Depends(require_admin)])
+def copy_camera_config(cid: int, body: dict):
+    """把源摄像头的区域/规则批量复制到多路目标（任务80）。
+
+    先全量校验（源/目标存在、排除自身、目标去重）再写库；规则 zone_id 按**区域名**映射到
+    目标（name_suffix 参与命名）；copy_zones=False 时规则若无同名目标区域则跳过并 warning
+    （绝不指向源摄像头的区域）。不启动摄像头、不复制事件。
+    """
+    src = store.camera(cid)
+    if src is None:
+        raise HTTPException(404, "camera not found")
+    targets = body.get("target_ids") or []
+    if not targets:
+        raise HTTPException(400, "target_ids 不能为空")
+    targets = sorted(set(int(t) for t in targets))
+    if cid in targets:
+        raise HTTPException(400, "target_ids 不能包含源摄像头自身")
+    missing = [t for t in targets if store.camera(t) is None]
+    if missing:
+        raise HTTPException(404, f"目标摄像头不存在: {missing}")
+    copy_zones = bool(body.get("copy_zones", True))
+    copy_rules = bool(body.get("copy_rules", True))
+    suffix = str(body.get("name_suffix", "") or "")
+    src_zones = store.zones(cid)
+    src_rules = store.rules(cid)
+    warnings: list[str] = []
+    zones_created = zones_skipped = rules_created = rules_skipped = 0
+    targets_out = []
+    for tid in targets:
+        zone_map: dict[str, int] = {}
+        z0, r0 = zones_skipped, rules_skipped  # 每目标跳过数 = 前后差值
+        tgt_zone_names = {z["name"]: z["id"] for z in store.zones(tid)}
+        if copy_zones:
+            for z in src_zones:
+                new_name = z["name"] + suffix
+                if new_name in tgt_zone_names:
+                    zone_map[z["name"]] = tgt_zone_names[new_name]  # 已有同名：映射给规则用
+                    zones_skipped += 1
+                    continue
+                zid = store.add_zone(tid, new_name, z["polygon"])
+                tgt_zone_names[new_name] = zid
+                zone_map[z["name"]] = zid
+                zones_created += 1
+        else:
+            zones_skipped += len(src_zones)
+        if copy_rules:
+            for r in src_rules:
+                if r["zone_id"] is not None:
+                    src_zname = next((z["name"] for z in src_zones
+                                      if z["id"] == r["zone_id"]), None)
+                    zid = tgt_zone_names.get((src_zname + suffix) if src_zname else None)
+                    if zid is None:
+                        rules_skipped += 1
+                        warnings.append(
+                            f"目标 #{tid}：规则 {r['behavior']} 的源区域「{src_zname}」"
+                            "在目标上不存在（未复制区域或同名缺失）——已跳过，不指向错误区域")
+                        continue
+                else:
+                    zid = None  # 全画幅规则：目标同样 zone_id=None
+                dup = any(x["behavior"] == r["behavior"] and x["zone_id"] == zid
+                          and x["time_start"] == r["time_start"]
+                          and x["time_end"] == r["time_end"] for x in store.rules(tid))
+                if dup:
+                    rules_skipped += 1
+                    continue
+                store.add_rule({"camera_id": tid, "zone_id": zid, "behavior": r["behavior"],
+                                "level": r["level"], "cooldown_s": r["cooldown_s"],
+                                "time_start": r["time_start"], "time_end": r["time_end"],
+                                "threshold": r["threshold"], "enabled": bool(r["enabled"])})
+                rules_created += 1
+        else:
+            rules_skipped += len(src_rules)
+        targets_out.append({"camera_id": tid, "zone_map": zone_map,
+                            "zones_skipped": zones_skipped - z0,
+                            "rules_skipped": rules_skipped - r0})
+    return {"zones_created": zones_created, "zones_skipped": zones_skipped,
+            "rules_created": rules_created, "rules_skipped": rules_skipped,
+            "targets": targets_out, "warnings": warnings}
+
+
 @router.get("/cameras/{cid}/status", dependencies=[Depends(require_read)])
 def camera_status(cid: int):
     """单路运行指标（任务65）：帧龄/最近错误（已脱敏）/重连次数/累计帧数。"""
@@ -225,6 +627,159 @@ def camera_status(cid: int):
             "frames_total": w.frames_total,
         })
     return out
+
+
+# ---- 配置导入导出（任务79）：名称关联、默认脱敏、仅管理员 ----
+_CONFIG_FORMAT = "labsentinel-config"
+_RTSP_CRED = re.compile(r"(//)([^/@\s:]+):([^@\s]+)@")
+
+
+@router.get("/config/export", dependencies=[Depends(require_admin)])
+def config_export(with_secrets: int = 0):
+    """配置级导出（不含事件/截图/人脸）。默认把 RTSP 凭证脱敏为 ***:***@；
+    with_secrets=1 返回真实 source（require_admin 已要求令牌；响应 no-store）。"""
+    cams = store.cameras()
+    cname = {c["id"]: c["name"] for c in cams}
+    zname = {z["id"]: z["name"] for z in store.zones()}
+    cameras = []
+    for c in cams:
+        src = c["source"] or ""
+        if not with_secrets:
+            src = _RTSP_CRED.sub(r"\1***:***@", src)
+        cameras.append({"name": c["name"], "source": src, "type": c["type"]})
+    zones = [{"camera_name": cname.get(z["camera_id"], f"#{z['camera_id']}"),
+              "name": z["name"], "polygon": z["polygon"]} for z in store.zones()]
+    rules = [{"camera_name": cname.get(r["camera_id"], f"#{r['camera_id']}"),
+              "zone_name": zname.get(r["zone_id"]) if r["zone_id"] else None,
+              "behavior": r["behavior"], "level": r["level"], "cooldown_s": r["cooldown_s"],
+              "time_start": r["time_start"], "time_end": r["time_end"],
+              "threshold": r["threshold"], "enabled": bool(r["enabled"])} for r in store.rules()]
+    payload = {"format": _CONFIG_FORMAT, "version": 1,
+               "schema_version": store.schema_version(),
+               "exported_at": datetime.now().isoformat(timespec="seconds"),
+               "cameras": cameras, "zones": zones, "rules": rules}
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+def _validate_config_import(data: dict):
+    """全量校验（先校验后写库）：返回 (cameras, zones, rules)。失败抛 400，不产生部分写入。"""
+    if not isinstance(data, dict) or data.get("format") != _CONFIG_FORMAT:
+        raise HTTPException(400, f"format 必须为 {_CONFIG_FORMAT}")
+    if int(data.get("version", 0)) != 1:
+        raise HTTPException(400, "version 必须为 1")
+    errs: list[str] = []
+    cams, zones_in, rules_in = [], data.get("zones") or [], data.get("rules") or []
+    seen = set()
+    for c in (data.get("cameras") or []):
+        name = (c.get("name") or "").strip()
+        if not name or name in seen:
+            errs.append(f"摄像头 name 空/重名: {name!r}")
+            continue
+        if c.get("type") not in ("rtsp", "file", "usb"):
+            errs.append(f"摄像头 {name} type 非法: {c.get('type')}")
+            continue
+        if not (c.get("source") or "").strip():
+            errs.append(f"摄像头 {name} source 为空")
+            continue
+        seen.add(name)
+        cams.append({"name": name, "source": c["source"], "type": c["type"]})
+    for z in zones_in:
+        cname, zname = z.get("camera_name"), (z.get("name") or "").strip()
+        poly = z.get("polygon")
+        if cname not in seen:
+            errs.append(f"区域 {zname!r} 引用未知摄像头: {cname!r}")
+        elif (not isinstance(poly, list) or len(poly) < 3
+              or any(not isinstance(pt, list) or len(pt) != 2
+                     or not all(isinstance(v, int) for v in pt) for pt in poly)):
+            errs.append(f"区域 {zname!r} polygon 至少 3 个整数 [x,y]")
+        elif any(not (0 <= pt[0] <= 1280) or not (0 <= pt[1] <= 720) for pt in poly):
+            errs.append(f"区域 {zname!r} 坐标越界（0≤x≤1280、0≤y≤720）")
+        else:
+            zones_in[zones_in.index(z)] = {"camera_name": cname, "name": zname, "polygon": poly}
+    for r in rules_in:
+        cname = r.get("camera_name")
+        if cname not in seen:
+            errs.append(f"规则引用未知摄像头: {cname!r}")
+            continue
+        if r.get("behavior") not in ("enter_no_ppe", "enter", "exit", "occupancy_over"):
+            errs.append(f"规则 behavior 非法: {r.get('behavior')}")
+            continue
+        if not (1 <= int(r.get("level", 2)) <= 3):
+            errs.append(f"规则 level 非法: {r.get('level')}")
+            continue
+        if r.get("behavior") != "occupancy_over" and not r.get("zone_name"):
+            errs.append(f"规则（{cname}/{r.get('behavior')}）缺 zone_name")
+    errs = [e for e in errs if e]
+    if errs:
+        raise HTTPException(400, "导入校验失败（未写入任何数据）: " + "；".join(errs[:8]))
+    return cams, zones_in, rules_in
+
+
+@router.post("/config/import", dependencies=[Depends(require_admin)])
+def config_import(body: dict):
+    """配置级导入（任务79）：merge 按名称去重；replace 需 confirm_replace=true
+    （事件保留，但其 camera_id 将失去对应摄像头）。不自动启动摄像头。"""
+    mode = body.get("mode", "merge")
+    if mode not in ("merge", "replace"):
+        raise HTTPException(400, "mode 必须为 merge|replace")
+    cams, zones, rules = _validate_config_import(body.get("data"))
+    if mode == "replace":
+        if not body.get("confirm_replace"):
+            raise HTTPException(400, "replace 模式必须 confirm_replace=true"
+                                     "（将清空现有摄像头/区域/规则；事件保留但失去对应摄像头）")
+        if manager is not None:
+            manager.stop_all()  # 引用现有摄像头的 worker 先停
+        store.clear_config()
+    created = {"cameras": 0, "zones": 0, "rules": 0}
+    skipped = {"cameras": [], "zones": [], "rules": []}
+    warns: list[str] = []
+    cam_id_by_name = {c["name"]: c["id"] for c in store.cameras()}
+    existing_zones = {(z["camera_id"], z["name"]) for z in store.zones()}
+    for c in cams:
+        if c["name"] in cam_id_by_name:
+            skipped["cameras"].append(c["name"])
+            continue
+        cam_id_by_name[c["name"]] = store.add_camera(c["name"], c["source"], c["type"])
+        created["cameras"] += 1
+    for z in zones:
+        cid = cam_id_by_name[z["camera_name"]]
+        if (cid, z["name"]) in existing_zones:
+            skipped["zones"].append(z["name"])
+            continue
+        zid = store.add_zone(cid, z["name"], z["polygon"])
+        existing_zones.add((cid, z["name"]))
+        created["zones"] += 1
+    # 重建 zone_name → (camera_name, zid) 映射（含 merge 已有区域）
+    zkey_to_zid = {}
+    zname_by_id = {z["id"]: z["name"] for z in store.zones()}
+    cam_name_by_id = {c["id"]: c["name"] for c in store.cameras()}
+    for z in store.zones():
+        zkey_to_zid[(cam_name_by_id.get(z["camera_id"]), z["name"])] = z["id"]
+    existing_rules = {(cam_name_by_id.get(r["camera_id"]), r["behavior"],
+                       zname_by_id.get(r["zone_id"]), r["time_start"], r["time_end"])
+                      for r in store.rules()}
+    for r in rules:
+        cid = cam_id_by_name[r["camera_name"]]
+        zid = zkey_to_zid.get((r["camera_name"], r["zone_name"])) if r["zone_name"] else None
+        key = (r["camera_name"], r["behavior"], r["zone_name"], r["time_start"], r["time_end"])
+        if r["zone_name"] and zid is None:
+            skipped["rules"].append(f"{r['camera_name']}/{r['behavior']}（区域未创建）")
+            continue
+        if key in existing_rules:
+            skipped["rules"].append(f"{r['camera_name']}/{r['behavior']}")
+            continue
+        store.add_rule({"camera_id": cid, "zone_id": zid, "behavior": r["behavior"],
+                        "level": r["level"], "cooldown_s": r["cooldown_s"],
+                        "time_start": r["time_start"], "time_end": r["time_end"],
+                        "threshold": r["threshold"], "enabled": bool(r["enabled"])})
+        existing_rules.add(key)
+        created["rules"] += 1
+    if any(skipped.values()):
+        warns.append(f"跳过已存在条目：cameras={skipped['cameras']} zones={skipped['zones']} "
+                     f"rules={skipped['rules']}")
+    if mode == "replace":
+        warns.append("事件保留，但事件中的 camera_id 已失去对应摄像头（重新导入同名摄像头可恢复关联）")
+    return {"created": created, "skipped": skipped, "warnings": warns}
 
 
 @router.get("/cameras/{cid}/snapshot", dependencies=[Depends(require_read)])
@@ -302,22 +857,28 @@ def delete_rule(rid: int):
 @router.get("/events", dependencies=[Depends(require_read)])
 def events(limit: int = 50, camera_id: int | None = None, level: int | None = None,
            status: str | None = None, offset: int = 0,
-           start_ts: str | None = None, end_ts: str | None = None):
+           start_ts: str | None = None, end_ts: str | None = None,
+           q: str | None = None):
+    if q is not None and len(q.strip()) > 100:  # 任务84：>100 字符拒绝；空白=不过滤
+        raise HTTPException(400, "q 长度须 ≤ 100 字符")
     limit = max(1, min(limit, 200))  # 任务19：上限钳制
     start_ts, end_ts = _normalize_ts_range(start_ts, end_ts)
     return [_event_row(r) for r in
             store.events(limit=limit, camera_id=camera_id, level=level, status=status,
-                         offset=offset, start_ts=start_ts, end_ts=end_ts)]
+                         offset=offset, start_ts=start_ts, end_ts=end_ts, q=q)]
 
 
 @router.get("/events/count", dependencies=[Depends(require_read)])
 def events_count(camera_id: int | None = None, level: int | None = None,
                  status: str | None = None,
-                 start_ts: str | None = None, end_ts: str | None = None):
-    """与 events 相同过滤条件的总数（任务19；分页用）。"""
+                 start_ts: str | None = None, end_ts: str | None = None,
+                 q: str | None = None):
+    """与 events 相同过滤条件的总数（任务19；分页用；任务84 q 关键词）。"""
+    if q is not None and len(q.strip()) > 100:
+        raise HTTPException(400, "q 长度须 ≤ 100 字符")
     start_ts, end_ts = _normalize_ts_range(start_ts, end_ts)
     return {"count": store.count_events(camera_id=camera_id, level=level, status=status,
-                                        start_ts=start_ts, end_ts=end_ts)}
+                                        start_ts=start_ts, end_ts=end_ts, q=q)}
 
 
 def _normalize_ts_range(start_ts: str | None, end_ts: str | None):
@@ -329,21 +890,18 @@ def _normalize_ts_range(start_ts: str | None, end_ts: str | None):
     return start_ts, end_ts
 
 
-@router.post("/events/{eid}/status", dependencies=[Depends(require_admin)])
-def set_event_status(eid: int, body: dict):
-    """事件处置（任务12）：status ∈ acked|false_positive|ignored。
+def _triage_one(eid: int, status: str, handled_by: str) -> str:
+    """单条处置核心（任务83 抽出供批量复用，与单条端点同一套状态规则）。
 
-    标记误报时把截图**复制**到 server/data/annotation_pool/（不删原事件）——
-    数据飞轮的误报样本池，供 preannotate.py 直接喂给 Roboflow。
+    返回 "updated"（含 false_positive 截图入池）或 "skipped"（已是目标状态/不存在）。
     """
-    status = (body or {}).get("status", "")
-    if status not in EVENT_STATUSES or status == "new":
-        raise HTTPException(400, f"status 必须是 {'|'.join(EVENT_STATUSES[1:])}")
-    row = store.event_by_id(eid)  # 2026-10-30 审阅：不再全表拉取
+    row = store.event_by_id(eid)
     if row is None:
-        raise HTTPException(404, "event not found")
-    if not store.set_event_status(eid, status, handled_by=(body or {}).get("handled_by", "admin")):
-        raise HTTPException(404, "event not found")
+        return "missing"
+    if row["status"] == status:
+        return "skipped"
+    if not store.set_event_status(eid, status, handled_by=handled_by):
+        return "missing"
     if status == "false_positive" and row.get("snapshot") and os.path.exists(row["snapshot"]):
         pool = settings.annotation_pool_dir
         pool.mkdir(parents=True, exist_ok=True)
@@ -353,7 +911,53 @@ def set_event_status(eid: int, body: dict):
             shutil.copy2(row["snapshot"], dst)  # 复制不移动：原事件截图保留
         except OSError as e:
             print(f"[annotation-pool] 复制失败 ev#{eid}: {e}")
+    return "updated"
+
+
+@router.post("/events/{eid}/status", dependencies=[Depends(require_admin)])
+def set_event_status(eid: int, body: dict):
+    """事件处置（任务12）：status ∈ acked|false_positive|ignored。
+
+    标记误报时把截图**复制**到 annotation_pool/（不删原事件）——数据飞轮误报样本池。
+    """
+    status = (body or {}).get("status", "")
+    if status not in EVENT_STATUSES or status == "new":
+        raise HTTPException(400, f"status 必须是 {'|'.join(EVENT_STATUSES[1:])}")
+    r = _triage_one(eid, status, (body or {}).get("handled_by", "admin"))
+    if r == "missing":
+        raise HTTPException(404, "event not found")
     return {"ok": True, "status": status}
+
+
+@router.post("/events/bulk-status", dependencies=[Depends(require_admin)])
+def bulk_event_status(body: dict):
+    """批量处置（任务83）：逐条短事务复用单条逻辑；missing 容错；单条失败不中断整批。"""
+    status = (body or {}).get("status", "")
+    if status not in EVENT_STATUSES or status == "new":
+        raise HTTPException(400, f"status 必须是 {'|'.join(EVENT_STATUSES[1:])}")
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, "ids 不能为空")
+    ids = sorted({int(x) for x in ids})
+    if len(ids) > 200:
+        raise HTTPException(400, "ids 一次最多 200 条")
+    handled_by = (body or {}).get("handled_by", "admin")
+    updated = skipped = 0
+    missing, failed = [], []
+    for eid in ids:
+        try:
+            r = _triage_one(eid, status, handled_by)
+            if r == "updated":
+                updated += 1
+            elif r == "skipped":
+                skipped += 1
+            else:
+                missing.append(eid)
+        except Exception as e:  # noqa: BLE001  单条失败不中断整批
+            failed.append({"id": eid, "error": str(e)[:120]})
+    return {"updated": updated, "skipped": skipped, "missing": missing, "failed": failed}
+
+  # 单条/批量共用 _triage_one（防规则漂移）
 
 
 @router.get("/events/{eid}/snapshot", dependencies=[Depends(require_read)])
@@ -467,6 +1071,9 @@ def alerts_status():
         channels.append({"name": name,
                          "configured": configured_map.get(name, False),
                          "deliveries": by_ch.get(name, {"ok": 0, "failed": 0, "pending": 0})})
+    from .alerts import alert_filters
+    filters = alert_filters()
+    channels = [{**c, "filters": filters.get(c["name"], {})} for c in channels]
     return {"channels": channels, "test_supported": True}
 
 
@@ -610,13 +1217,16 @@ def maintenance_status():
 
 # ---- export（任务15：报表导出）----
 @router.get("/export/events.csv", dependencies=[Depends(require_read)])
-def export_events_csv(days: int = 30, camera_id: int | None = None, status: str | None = None):
+def export_events_csv(days: int = 30, camera_id: int | None = None, status: str | None = None,
+                      q: str | None = None, level: int | None = None,
+                      start_ts: str | None = None, end_ts: str | None = None):
     """事件 CSV（UTF-8 带 BOM，Excel 中文不乱码；生成器流式返回）。"""
     from .export import iter_events_csv
 
     def gen():
         yield "\ufeff"  # UTF-8 BOM
-        for row in iter_events_csv(store, days=days, camera_id=camera_id, status=status):
+        for row in iter_events_csv(store, days=days, camera_id=camera_id, status=status,
+                                   q=q, level=level, start_ts=start_ts, end_ts=end_ts):
             buf = io.StringIO()
             csv.writer(buf).writerow(row)
             yield buf.getvalue()
@@ -709,7 +1319,7 @@ def stats_hourly(date: str, camera_id: int | None = None):
 # ---- websocket ----
 async def ws_events(ws: WebSocket):
     # 任务16：启用鉴权时 WS 用 query ?token=（URL 传 token 有日志泄漏风险，文档已注明）
-    if not _token_ok(ws.query_params.get("token")):
+    if not _read_token_ok(ws.query_params.get("token")):  # 任务88：读事件流属只读
         await ws.close(code=WS_AUTH_CODE)
         return
     await dispatcher.hub.connect(ws)

@@ -72,4 +72,22 @@ CREATE INDEX idx_silence_until ON alert_silences(until_ts);
 
 ## 执行报告
 
-（待填：改动文件 / 静默前后证据 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 210 passed、build 48.21KB、迁移 v2 全新/旧库双实测）**
+
+- **改动**：
+  - 迁移 v2（store.py `_mig_002`：alert_silences 表+until 索引）；Store 加
+    `add_silence/silence/silences(active_only)/delete_silence`；
+  - `alerts.py` 加纯函数 `match_silence(silences, event, now)`（scope 四规则+过期过滤）；
+    `dispatch` 在投递前查活动静默，**命中即不建投递行/不重试/零渠道发送**，打印含 silence id
+    与事件 id 的 INFO；事件入库与 WS 广播照常（spec 默认口径）；
+  - API：GET/POST/DELETE `/api/alert-silences*`（写 require_admin；读按现有口径）——
+    scope 白名单、camera 存在性、level 1-3、type ∈ TYPE_TEXT、duration 60–604800；
+    审计 TODO 注释（87 就绪后接入）；
+  - 前端 Cameras.vue 告警面板：当前静默表（范围/目标/剩余分钟/原因/解除）+ 快捷
+    「全局 1h」「本摄像头 1h/4h/24h」+ 自定义（scope/target/时长/原因）；api.js 三 helper。
+- **测试**（test_alert_silence.py 6 用例）：match_silence 四 scope 命中/不命中/过期/多条任一；
+  **dispatcher 静默零发送+零投递行、解除后恢复**（假渠道计数+deliveries 断言）；迁移 v2 旧库
+  （v1 schema_version+旧形状 events）升级后表存在且 version=2；API CRUD+全部校验 400/404；
+  鉴权（默认 200 / 令牌下写 401）。全量 **pytest 210 passed**；build gzip **48.21KB**。
+- **文档**：35-api-reference/部署FAQ/运维手册 三处。
+- **遗留**：写操作审计 TODO（87 接入）；WS 是否随静默默认不做（spec 口径）。

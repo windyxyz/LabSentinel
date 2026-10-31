@@ -159,6 +159,12 @@
 - 无。`docs/发布核对报告.md` 已更新为 20261031 包数字；`docs/59` 路径无变化（ffmpeg 双布局
   解析对用户透明）。
 
-## 执行报告
+## 主线复验补充（2026-10-31）
 
-（待填：修复项 / 新 zip 数字 / smoke/doctor/diagnostics 证据 / pytest / release_check / 遗留）
+- 75 六项修复已由主线复核通过：USB 双布局解析、包内 backup/diagnostics 脚本、诊断脱敏、
+  release_check、X-Request-ID、新 zip 278.1MB/manifest 通过。
+- **但冷启动存在偶发超时**：主线用新 zip 实跑 smoke 时，服务约 29s 才首次响应 `/api/system`，
+  启动器 30s 到点弹窗并判负（服务其实已启动）。这不是安装失败，但用户体验/自动化都不可接受。
+- 另两处遗留：便携包 `go2rtc.yaml` 写到 `app/tools/`（应在包根 `tools/`）；
+  `doctor.py` 源模式误读 `%LOCALAPPDATA%` 的便携 `config.env`，导致 `rc_regression --fast` 假 FAIL。
+- 上述 3 项转入 **任务 119**（P1），修完重建 zip 后再做 118 VM 验收。

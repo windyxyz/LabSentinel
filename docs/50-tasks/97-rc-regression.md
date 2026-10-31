@@ -53,4 +53,16 @@ python scripts/rc_regression.py [--fast] [--smoke] [--zip <path>] [--python <exe
 
 ## 执行报告
 
-（待填：改动文件 / 实跑表格 / 测试 / 遗留）
+**flash 2026-10-31 完成（pytest 286 passed→rc_regression 实跑）**
+
+- **改动**：新增 `scripts/rc_regression.py`（标准库）——统一编排 pytest/npm build/
+  release_check/doctor/manifest/smoke 七步，输出 PASS/FAIL 表与 `--json`；任一 FAIL → exit 2。
+  `--fast` 跳过 smoke/manifest；`--smoke` 含便携冒烟；`--python` 指定 pytest 解释器
+  （默认自动探测 m0-venv）；doctor 用 `--port 8190` 避开 8000。
+- **实跑**（`--fast`）：pytest **286 passed** ✓ / npm build ✓（1.5s）/ release_check ✓（0.7s）/
+  doctor FAIL 1（`LS_WEB_DIST` 路径检查——**非回归**，为便携 .env 路径误配的既有状态）。
+  npm 需 `shell=True`（Windows .cmd 文件 subprocess 直调不可达）。
+- **测试**：新增 test_rc_regression.py 用假命令/`--list` 测试编排逻辑（不递归跑全量）。
+- **文档**：发布核对报告/运维手册/scripts/README 更新引用。
+- **遗留**：doctor 的配置 FAIL 为**便携包 .env 路径误配**的既有状态（75 重建后路径变化），
+  非 rc_regression 回归；需用户或主线修正 .env 后复跑。

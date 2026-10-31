@@ -43,6 +43,7 @@ export const api = {
   zones: (cid) => req('GET', `/api/zones?camera_id=${cid}`),
   addZone: (d) => req('POST', '/api/zones', d),
   delZone: (id) => req('DELETE', `/api/zones/${id}`),
+  copyConfig: (cid, payload) => req('POST', `/api/cameras/${cid}/copy-config`, payload),
   rules: (cid) => req('GET', `/api/rules?camera_id=${cid}`),
   addRule: (d) => req('POST', '/api/rules', d),
   delRule: (id) => req('DELETE', `/api/rules/${id}`),
@@ -52,10 +53,39 @@ export const api = {
   alertTest: () => req('POST', '/api/alert-test'),
   alertDeliveries: (params = {}) => req('GET', '/api/alert-deliveries?' + new URLSearchParams(params)),
   alertDeliveryRetry: (id) => req('POST', `/api/alert-deliveries/${id}/retry`),
+  alertSilences: (active = 1) => req('GET', '/api/alert-silences' + (active ? '?active=1' : '')),
+  addAlertSilence: (d) => req('POST', '/api/alert-silences', d),
+  deleteAlertSilence: (id) => req('DELETE', `/api/alert-silences/${id}`),
+  alertTemplate: () => req('GET', '/api/alert-template'),
+  audit: (params = {}) => req('GET', '/api/audit?' + new URLSearchParams(params)),
+  alertTemplatePreview: (d) => req('POST', '/api/alert-template/preview', d),
   setEventStatus: (id, status) => req('POST', `/api/events/${id}/status`, { status }),
+  bulkStatus: (payload) => req('POST', '/api/events/bulk-status', payload),
   cameraWebrtc: (id) => req('GET', `/api/cameras/${id}/webrtc`),
   maintenanceStatus: () => req('GET', '/api/maintenance/status'),
   maintenancePreview: () => req('GET', '/api/maintenance/preview'),
+  // 任务79：配置导入导出（导出走 fetch+blob，令牌经请求头传递；<a> 裸链接带不了）
+  async configExportDownload() {
+    const headers = {}
+    const token = adminToken.get()
+    if (token) headers['X-Admin-Token'] = token
+    const r = await fetch('/api/config/export', { headers })
+    if (!r.ok) {
+      let msg = `GET /api/config/export -> ${r.status}`
+      try { msg = (await r.json()).detail || msg } catch {}
+      if (r.status === 401) msg = '需要管理令牌：请在「摄像头」页顶部填写管理令牌后重试。' + msg
+      throw new Error(msg)
+    }
+    const blob = await r.blob()
+    const d = new Date()
+    const name = `labsentinel-config-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = name; a.click()
+    URL.revokeObjectURL(url)
+    return JSON.parse(await blob.text())
+  },
+  configImport: (payload) => req('POST', '/api/config/import', payload),
   faceStatus: () => req('GET', '/api/face/status'),
   facePersons: () => req('GET', '/api/face/persons'),
   faceRegister: (formData) => req('POST', '/api/face/persons', formData),

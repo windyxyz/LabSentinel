@@ -60,4 +60,31 @@
 
 ## 执行报告
 
-（待填：改动文件 / 权限矩阵 / 测试 / 遗留）
+**flash 2026-10-31 完成（pytest 248 passed、build 50.49KB、权限矩阵 7 用例全过）**
+
+- **改动**：
+  - `config.py` 加 `read_token: str = ""`（LS_READ_TOKEN）；
+  - `api.py`：新增 `_read_token_ok()`（admin_token 空→恒 True；否则 admin 或 read 令牌均可，
+    hmac.compare_digest）；`require_read` 改用 `_read_token_ok`（admin/read 均可读）；
+    `require_admin` 保持只认 admin_token——**只读令牌写操作 → 401 "当前令牌无写权限"**（可区分
+    于普通 401）；WS `ws_events` 改 `_read_token_ok`（读事件流属只读，read 令牌可连）；
+    `_warn_same_token()`（read==admin 时启动 WARNING 弱隔离提示）。
+- **权限矩阵（测试实测）**：
+
+| | 匿名读 | read 读 | admin 读 | read 写 | admin 写 |
+|---|---|---|---|---|---|
+| admin=""（不启用） | 200 | 200 | 200 | 200 | 200 |
+| admin 设 + read="" + 读保护 | 401 | 401 | 200 | 401 | 200 |
+| admin+read 均设 + 读保护 | 401 | **200** | 200 | **401** | 200 |
+| admin+read 均设 + 读保护关 | 200 | 200 | 200 | 401 | 200 |
+
+- **测试**（test_readonly_token.py 7 用例）：上述矩阵全覆盖 + WS read 可连/错误令牌拒绝 +
+  read==admin WARNING（capsys）+ **auth_read_protected=false 时设了 read_token GET 仍公开**
+  （文档口径）。既有 test_auth.py 全部不回归。全量 **pytest 248 passed**（241 + 7）；
+  build gzip **50.49KB**。
+- **实施中修复的 2 个 bug**：①`require_read` 的 `if not provided or not _read_token_ok(provided)`
+  在 provided=None 时短路——admin_token="" 时匿名读被误 401（改为先调 _read_token_ok）；
+  ②`_read_token_ok` 在 admin_token="" 时须恒 True（与"鉴权整体不启用"语义一致）。
+- **文档**：部署指南 §3.5 权限矩阵；部署FAQ「大屏/值班只读怎么配」；.env.example 加 LS_READ_TOKEN。
+- **遗留**：无。前端 api.js 仍发同一个 X-Admin-Token 头（用户填哪个就用哪个）——不做双令牌
+  存储（刻意取舍，避免复杂）；写 401 detail 已含"无写权限"提示。

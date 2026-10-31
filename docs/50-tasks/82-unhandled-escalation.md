@@ -59,4 +59,20 @@
 
 ## 执行报告
 
-（待填：改动文件 / 提醒证据 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 215 passed、build 48.27KB、注入式发送实测）**
+
+- **改动**：
+  - 迁移 v3（events.escalated_ts + idx_events_status_ts）；新增 `server/app/escalation.py`
+    （60s 线程/与 retention 同模式；`find_unhandled` 纯查询函数；`escalate_once` 支持 send 注入；
+    提醒后写 escalated_ts 即使发送失败——防每分钟重试风暴；batch 防洪峰；
+    `_dispatch_reminder` 复用渠道、未配置跳过不建投递行；异常全捕获）；main lifespan 启停；
+    config 三项（after_min=15/min_level=3/batch=20）+.env.example；
+  - API `GET /api/escalation/status`（require_read）；Events.vue 状态列 ⏰ 徽章
+    （escalated_ts 非空，tooltip 时间）。
+- **测试**（test_escalation.py 5 用例）：选行只含 L3 超时未处置未提醒（L2/已处置/新事件排除）；
+  send 注入——一次调用+escalated_ts 写入+再跑 checked=0（105 空帧教训：状态必须清）；
+  after_min=0 关闭、batch=1 生效；渠道未配置仍标记（防风暴语义）+不建投递行；status 端点字段。
+  全量 **pytest 215 passed**；build gzip **48.27KB**。
+- **文档**：部署FAQ「严重事件没人处理会怎样/怎么调提醒间隔」；35-api-reference status 端点；
+  运维手册 §12 巡检项。
+- **遗留**：无。

@@ -58,4 +58,19 @@ body：
 
 ## 执行报告
 
-（待填：改动文件 / 批量证据 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 220 passed、build 48.99KB、单条/批量共用 _triage_one）**
+
+- **改动**：`api.py`——处置核心抽 `_triage_one(eid, status, handled_by)`（"missing/skipped/updated"
+  三态；误报截图入池逻辑在同一函数），**单条端点与批量端点共用**（防两套状态规则漂移）；
+  `POST /api/events/bulk-status`（require_admin）：ids 1–200 去重、空/超限/非法 status 400、
+  missing 容错、逐条短事务单条失败不中断、返回 updated/skipped/missing/failed。
+  Events.vue：首列 checkbox（仅 new 行）+ 表头全选当前页 new 事件 + 批量操作条（已选 N 条/
+  确认/误报/忽略/清除选择，误报 confirm 说明入池），请求期 disabled，完成后清选+刷新；
+  api.js 加 `bulkStatus`。
+- **语义说明（规格遗留点）**：单条端点现状允许处置状态间再流转（acked→ignored 也会更新），
+  批量与之**保持一致**（任务 12 状态机未变，"提醒不等于处置"原则不变）；已写入测试注释。
+- **测试**（test_bulk_triage.py 5 用例 + test_triage 回归）：全量 acked 状态/时间戳正确；
+  混合 updated=2+missing 含不存在 id；误报截图入池一次、重复调用 skipped 不重复复制；
+  ids 空/201 个/非法 status → 400；鉴权 401。全量 **pytest 220 passed**；build gzip **48.99KB**。
+- **文档**：35-api-reference/运维手册/部署FAQ 三处（与 79/81 同批更新时一并对齐）。
+- **遗留**：无。

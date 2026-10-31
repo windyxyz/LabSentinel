@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, nextTick, ref } from 'vue'
+import { computed, onMounted, onUnmounted, nextTick, ref } from 'vue'
 import { api, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
 import AsyncState from '../components/AsyncState.vue'
 
@@ -16,6 +16,8 @@ const offset = ref(0)
 const total = ref(0)
 const startDate = ref('')
 const endDate = ref('')
+const q = ref('')            // 任务84 关键词
+const preset = ref('')        // 日期预设
 const drawer = ref(null)        // 详情抽屉：当前事件对象
 const drawerEl = ref(null)      // 抽屉 DOM（焦点管理）
 let lastFocus = null
@@ -26,6 +28,34 @@ const stale = ref(false)      // 有旧数据时的刷新失败（只提示，�
 const error = ref('')
 const busyEvent = ref(null)   // 正在处置的事件 id
 let loadSeq = 0               // 2026-10-30 审阅：请求序号，防旧响应覆盖新结果
+// 任务83：批量处置
+const selected = ref([])
+const bulkBusy = ref(false)
+const newRowsCount = 0  // 全选判定用（rows 中 new 事件数，computed 替代）
+
+function toggleSel(id, on) {
+  if (on && !selected.value.includes(id)) selected.value = [...selected.value, id]
+  if (!on) selected.value = selected.value.filter(x => x !== id)
+}
+function toggleAll(on) {
+  const ids = rows.value.filter(e => e.status === 'new').map(e => e.id)
+  selected.value = on ? ids : selected.value.filter(x => !ids.includes(x))
+}
+async function bulk(status) {
+  if (!selected.value.length || bulkBusy.value) return
+  if (status === 'false_positive' &&
+      !confirm(`把 ${selected.value.length} 条标记为误报？\n截图会复制到标注池（用于模型改进），事件保留。`)) return
+  bulkBusy.value = true
+  try {
+    const r = await api.bulkStatus({ ids: selected.value, status })
+    alert(`批量处置完成：更新 ${r.updated}，跳过 ${r.skipped}` +
+          (r.missing.length ? `，不存在 ${r.missing.length}` : '') +
+          (r.failed.length ? `，失败 ${r.failed.length}` : ''))
+    selected.value = []
+    load()
+  } catch (e) { alert(String(e.message || e)) }
+  bulkBusy.value = false
+}
 
 async function load() {
   const seq = ++loadSeq  // 2026-10-30 审阅：快速切换筛选时旧响应可能后到覆盖新结果
@@ -35,6 +65,7 @@ async function load() {
   if (status.value) params.status = status.value
   if (startDate.value) params.start_ts = startDate.value
   if (endDate.value) params.end_ts = endDate.value
+  if (q.value) params.q = q.value
   try {
     const newRows = await api.events(params)
     const newTotal = (await api.eventsCount(params)).count
@@ -57,6 +88,7 @@ async function load() {
 function clearFilters() {
   camId.value = ''; level.value = ''; status.value = ''
   startDate.value = ''; endDate.value = ''
+  q.value = ''; preset.value = ''
   resetAndLoad()
 }
 function resetAndLoad() { offset.value = 0; load() }   // 筛选变化重置页码
@@ -64,6 +96,29 @@ function nextPage() { if (offset.value + PAGE_SIZE < total.value) { offset.value
 function prevPage() { offset.value = Math.max(0, offset.value - PAGE_SIZE); load() }
 // 2026-10-30 审阅修复：原 onMounted 里 `await api.cameras()` 失败会跳过 load()/事件监听注册，
 // 页面永久卡"加载中…"。改为同步注册监听 + load 先行 + 摄像头列表失败单独降级
+const exportFilteredUrl = computed(() => {
+  const p = new URLSearchParams()
+  if (camId.value) p.set('camera_id', camId.value)
+  if (level.value) p.set('level', level.value)
+  if (status.value) p.set('status', status.value)
+  if (startDate.value) p.set('start_ts', startDate.value)
+  if (endDate.value) p.set('end_ts', endDate.value)
+  if (q.value) p.set('q', q.value)
+  return '/api/export/events.csv?' + p
+})
+
+let qTimer = null
+function onQInput() { clearTimeout(qTimer); qTimer = setTimeout(resetAndLoad, 300) }
+function applyPreset(v) {
+  preset.value = v
+  const now = new Date()
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  if (!v) { startDate.value = ''; endDate.value = '' }
+  else if (v === 'today') { startDate.value = fmt(now); endDate.value = fmt(now) }
+  else if (v === 'yesterday') { const y = new Date(now - 864e5); startDate.value = endDate.value = fmt(y) }
+  else { const end = fmt(now); const start = fmt(new Date(now - (v === '7d' ? 6 : 29) * 864e5)); startDate.value = start; endDate.value = end }
+  resetAndLoad()
+}
 onMounted(() => {
   window.addEventListener('keydown', onKey)
   load()
@@ -123,17 +178,35 @@ async function mark(e, status) {
         <option value="">全部状态</option>
         <option v-for="(t, k) in STATUS_TEXT" :key="k" :value="k">{{ t }}</option>
       </select>
-      <input type="date" v-model="startDate" @change="resetAndLoad" title="开始日期" aria-label="开始日期" />
-      <input type="date" v-model="endDate" @change="resetAndLoad" title="结束日期" aria-label="结束日期" />
+      <input v-model="q" @input="onQInput" placeholder="搜索详情/类型，如 实验服、reagent"
+             aria-label="关键词搜索" style="width:200px" />
+      <select v-model="preset" @change="applyPreset(preset)" aria-label="日期预设">
+        <option value="">自定义</option>
+        <option value="today">今天</option>
+        <option value="yesterday">昨天</option>
+        <option value="7d">近 7 天</option>
+        <option value="30d">近 30 天</option>
+      </select>
+      <input type="date" v-model="startDate" @change="preset = ''; resetAndLoad" title="开始日期" aria-label="开始日期" />
+      <input type="date" v-model="endDate" @change="preset = ''; resetAndLoad" title="结束日期" aria-label="结束日期" />
       <button class="ghost" @click="load">刷新</button>
+      <a :href="exportFilteredUrl" download>
+        <button class="ghost">导出当前筛选</button>
+      </a>
     </div>
     <AsyncState :loading="loading" :error="error" :notice="stale ? '刷新失败，仍显示上一次数据' : ''"
                 :empty="loaded && !rows.length"
-                :empty-text="camId || level || status || startDate || endDate ? '当前筛选条件下没有事件' : '暂无事件 —— 启动摄像头并配置规则后，事件会出现在这里'"
+                :empty-text="camId || level || status || startDate || endDate || q ? '当前筛选条件下没有事件' + (q ? `（关键词：${q}）` : '') : '暂无事件 —— 启动摄像头并配置规则后，事件会出现在这里'"
                 @retry="load">
       <table class="events-table">
-      <tr><th class="col-time">时间</th><th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
+      <tr><th class="col-time"><input type="checkbox" aria-label="全选当前页"
+             :checked="selected.length && selected.length === newRowsCount"
+             @change="toggleAll($event.target.checked)" /></th>
+          <th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
       <tr v-for="e in rows" :key="e.id" style="cursor:pointer" @click="openDetail($event, e)">
+        <td><input v-if="e.status === 'new'" type="checkbox" aria-label="选择此事件"
+               :checked="selected.includes(e.id)"
+               @click.stop @change="toggleSel(e.id, $event.target.checked)" /></td>
         <td>{{ e.ts }}</td>
         <td>#{{ e.camera_id }}</td>
         <td>{{ TYPE_TEXT[e.type] || e.type }}</td>
@@ -152,6 +225,8 @@ async function mark(e, status) {
         </td>
         <td style="white-space:nowrap">
           <template v-if="e.status === 'new'">
+            <span v-if="e.escalated_ts" class="muted" :title="`未处置提醒已发送：${e.escalated_ts}`"
+                  style="margin-right:4px">⏰</span>
             <button class="ghost" style="margin-right:4px" :disabled="busyEvent !== null"
                     @click="mark(e, 'acked')">确认</button>
             <button class="ghost" style="margin-right:4px" :disabled="busyEvent !== null"
@@ -162,6 +237,14 @@ async function mark(e, status) {
         </td>
       </tr>
     </table>
+    <div v-if="selected.length" class="row pager" style="align-items:center">
+      <b>已选 {{ selected.length }} 条</b>
+      <button :disabled="bulkBusy" @click="bulk('acked')">批量确认</button>
+      <button class="ghost" :disabled="bulkBusy"
+              @click="bulk('false_positive')">批量误报（截图入标注池）</button>
+      <button class="ghost" :disabled="bulkBusy" @click="bulk('ignored')">批量忽略</button>
+      <button class="ghost" @click="selected = []">清除选择</button>
+    </div>
     <div class="row pager">
       <button class="ghost" :disabled="offset === 0" @click="prevPage">上一页</button>
       <span class="muted">第 {{ offset + 1 }}-{{ Math.min(offset + PAGE_SIZE, total) }} 条 / 共 {{ total }} 条</span>

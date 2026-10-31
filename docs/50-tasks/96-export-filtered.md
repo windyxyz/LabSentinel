@@ -53,4 +53,10 @@
 
 ## 执行报告
 
-（待填：改动文件 / 导出行数对照 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 286 passed、build 50.55KB）**
+
+- **改动**：`export.py` `iter_events_csv` 加 `q/level/start_ts/end_ts` 参数（start_ts 优先于 days；
+  q/level/end_ts 为生成器后过滤，不破坏流式）；`api.py` export_events_csv 签名加参数；
+  Events.vue 加「导出当前筛选 CSV」按钮（computed 拼 URL 带全部筛选条件）。
+- **文档**：35-api-reference 导出参数表。
+- **遗留**：无。

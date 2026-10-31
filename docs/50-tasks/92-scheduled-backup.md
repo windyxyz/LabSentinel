@@ -61,4 +61,15 @@
 
 ## 执行报告
 
-（待填：改动文件 / 实跑证据 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 270 passed、build 50.49KB、7 用例）**
+
+- **改动**：新增 `server/app/backups.py`（`_needs_backup/_prune` 纯函数 + `run_backup`
+  subprocess 复用 backup_data.py + 线程调度 start/stop）；`config.py` 加
+  `backup_interval_h=24/backup_keep=7/backup_include_media=False`；main lifespan 启停；
+  `api.py` 加 `GET /api/backups/status` + `POST /api/backups/run`（409 并发保护）；
+  `.env.example` 三项；前端（后续任务加 Dashboard 卡片，本轮先出 API）。
+- **测试**（test_scheduled_backup.py 7 用例）：needs_backup（无文件/新鲜/超期）；prune keep=2
+  只留最新 2 份且不动手动 zip；run_backup 生成 zip（db 可打开、事件数一致）；status 端点字段；
+  run 端点 started；409 并发保护。全量 **pytest 270 passed**（263 + 7）；build 50.49KB。
+- **文档**：.env.example 三项注释。
+- **遗留**：Dashboard 磁盘卡旁备份状态行 + 触发按钮（前端部分），与 104 终检一起做。

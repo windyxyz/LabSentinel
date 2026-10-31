@@ -50,7 +50,31 @@ async function loadAlerts() {
   try {
     alertChannels.value = (await api.alertsStatus()).channels
     failedDeliveries.value = await api.alertDeliveries({ status: 'failed', limit: 10 })
+    silences.value = await api.alertSilences()  // 任务81
   } catch { /* 服务未就绪时静默 */ }
+}
+
+// 任务81：告警静默
+const silences = ref([])
+const silenceMsg = ref('')
+const silenceScope = ref('global')
+const silenceTarget = ref('')
+const silenceDuration = ref(3600)
+const silenceReason = ref('')
+
+async function addSilence(scope, target = silenceTarget.value, duration_s = silenceDuration.value) {
+  silenceMsg.value = ''
+  try {
+    await api.addAlertSilence({ scope, target: target || null, duration_s,
+                                reason: silenceReason.value || null })
+    silenceReason.value = ''
+    loadAlerts()
+  } catch (e) { silenceMsg.value = String(e.message || e) }
+}
+
+async function removeSilence(id) {
+  try { await api.deleteAlertSilence(id); loadAlerts() }
+  catch (e) { silenceMsg.value = String(e.message || e) }
 }
 
 async function runAlertTest() {
@@ -102,6 +126,78 @@ function viewFor(c) {
   return { ...c, ...m }
 }
 onMounted(() => { refresh(); loadAlerts() })
+
+// 任务79：配置导入导出
+const cfgBusy = ref(false)
+const cfgMsg = ref('')
+const importMode = ref('merge')
+const confirmReplace = ref(false)
+const importFile = ref(null)
+
+async function exportConfig() {
+  cfgBusy.value = true
+  cfgMsg.value = ''
+  try {
+    const data = await api.configExportDownload()
+    cfgMsg.value = `已导出 ${data.cameras.length} 摄像头 / ${data.zones.length} 区域 / ` +
+      `${data.rules.length} 规则（已下载到浏览器下载目录）`
+  } catch (e) { cfgMsg.value = String(e.message || e) }
+  cfgBusy.value = false
+}
+
+function onImportFile(ev) {
+  importFile.value = ev.target.files?.[0] || null
+  cfgMsg.value = ''
+}
+
+async function importConfig() {
+  if (!importFile.value || cfgBusy.value) return
+  if (importMode.value === 'replace' && !confirmReplace.value) {
+    cfgMsg.value = 'replace 模式需先勾选确认（将清空现有摄像头/区域/规则）'
+    return
+  }
+  cfgBusy.value = true
+  cfgMsg.value = '解析中…'
+  try {
+    const text = await importFile.value.text()
+    let data
+    try { data = JSON.parse(text) } catch { throw new Error('不是合法 JSON 文件') }
+    cfgMsg.value = '导入中…'
+    const r = await api.configImport({ mode: importMode.value,
+                                       confirm_replace: confirmReplace.value, data })
+    cfgMsg.value = `导入完成：新建 ${r.created.cameras} 摄像头 / ${r.created.zones} 区域 / ` +
+      `${r.created.rules} 规则；跳过 ${r.skipped.cameras.length}/${r.skipped.zones.length}/` +
+      `${r.skipped.rules.length}` + (r.warnings.length ? `\n${r.warnings.join('\n')}` : '')
+    refresh()
+  } catch (e) { cfgMsg.value = String(e.message || e) }
+  cfgBusy.value = false
+  importFile.value = null
+}
+
+// 任务85：告警文案模板（只读展示 + 预览）
+const tpl = ref({ text: '', title: '', placeholders: {} })
+const tplPreview = ref('')
+const tplBusy = ref(false)
+const tplSample = ref({ level: 3, type: 'enter_no_ppe', camera_id: 1, track_id: 7,
+                        detail: '示例：有人未穿实验服进入试剂区' })
+
+async function loadTemplate() {
+  tplBusy.value = true
+  try {
+    tpl.value = await api.alertTemplate()
+    tplPreview.value = ''
+  } catch (e) { tplPreview.value = String(e.message || e) }
+  tplBusy.value = false
+}
+
+async function previewTemplate() {
+  tplBusy.value = true
+  try {
+    const r = await api.alertTemplatePreview(tplSample.value)
+    tplPreview.value = `标题：${r.title}\n正文：${r.text}`
+  } catch (e) { tplPreview.value = String(e.message || e) }
+  tplBusy.value = false
+}
 
 async function add() {
   if (!form.value.name || !form.value.source || adding.value) return
@@ -180,6 +276,83 @@ async function watchLive(cam) {
       </tr>
     </table>
     <p v-else class="muted">无失败投递 ✓</p>
+
+    <h3 style="margin:14px 0 10px">告警静默（维护窗口）</h3>
+    <div class="row" style="align-items:center">
+      <button class="ghost" :disabled="cfgBusy" @click="addSilence('global', null, 3600)">
+        全局静默 1h</button>
+      <select v-model="silenceTarget" aria-label="摄像头" style="max-width:160px">
+        <option value="">选摄像头…</option>
+        <option v-for="c in cams" :key="c.id" :value="String(c.id)">{{ c.name }}</option>
+      </select>
+      <button class="ghost" :disabled="cfgBusy || !silenceTarget"
+              @click="addSilence('camera', silenceTarget, 3600)">本摄像头静默 1h</button>
+      <button class="ghost" :disabled="cfgBusy || !silenceTarget"
+              @click="addSilence('camera', silenceTarget, 14400)">4h</button>
+      <button class="ghost" :disabled="cfgBusy || !silenceTarget"
+              @click="addSilence('camera', silenceTarget, 86400)">24h</button>
+    </div>
+    <div class="row" style="margin-top:6px; align-items:center">
+      <select v-model="silenceScope" aria-label="静默范围">
+        <option value="global">全局</option>
+        <option value="camera">摄像头（填 ID）</option>
+        <option value="level">级别（1/2/3）</option>
+        <option value="type">类型</option>
+      </select>
+      <input v-model="silenceTarget" placeholder="target（ID/级别/类型）" style="width:140px" />
+      <select v-model.number="silenceDuration" aria-label="时长">
+        <option :value="3600">1 小时</option><option :value="14400">4 小时</option>
+        <option :value="86400">24 小时</option><option :value="604800">7 天</option>
+      </select>
+      <input v-model="silenceReason" placeholder="原因（可选）" style="width:160px" />
+      <button class="ghost" @click="addSilence()">添加</button>
+    </div>
+    <table v-if="silences.length" style="margin-top:8px">
+      <tr><th>ID</th><th>范围</th><th>目标</th><th>剩余</th><th>原因</th><th></th></tr>
+      <tr v-for="s in silences" :key="s.id">
+        <td>#{{ s.id }}</td><td>{{ s.scope }}</td><td>{{ s.target ?? '—' }}</td>
+        <td class="muted">{{ Math.ceil(s.remaining_s / 60) }} 分钟</td>
+        <td class="muted">{{ s.reason || '—' }}</td>
+        <td><button class="ghost" @click="removeSilence(s.id)">解除</button></td>
+      </tr>
+    </table>
+    <p v-else class="muted">无静默（事件照常推送）</p>
+    <p v-if="silenceMsg" class="muted" style="margin-top:4px">{{ silenceMsg }}</p>
+
+    <h3 style="margin:14px 0 10px">配置导入导出（任务79）</h3>
+    <div class="row" style="align-items:center">
+      <button class="ghost" :disabled="cfgBusy" @click="exportConfig">
+        {{ cfgBusy ? '导出中…' : '导出配置 JSON' }}</button>
+      <input type="file" accept=".json,application/json" style="max-width:220px"
+             aria-label="选择配置 JSON 文件" @change="onImportFile" />
+      <select v-model="importMode" aria-label="导入模式">
+        <option value="merge">合并（跳过同名）</option>
+        <option value="replace">替换（清空现有配置）</option>
+      </select>
+      <label v-if="importMode === 'replace'" class="muted">
+        <input type="checkbox" v-model="confirmReplace" style="margin:0 4px 0 0" />
+        确认清空现有摄像头/区域/规则（事件保留但失去关联）
+      </label>
+      <button :disabled="cfgBusy || !importFile" @click="importConfig">
+        {{ cfgBusy ? '导入中…' : '导入' }}</button>
+    </div>
+    <p v-if="cfgMsg" class="muted" style="margin-top:6px; white-space:pre-wrap">{{ cfgMsg }}</p>
+    <p class="muted" style="margin-top:4px">
+      导出默认脱敏 RTSP 密码（***:***@）；含密码版本需另行处理。导入不自动启动摄像头。</p>
+
+    <h3 style="margin:14px 0 10px">告警文案模板（任务85）</h3>
+    <div class="row" style="align-items:center">
+      <button class="ghost" :disabled="tplBusy" @click="loadTemplate">
+        {{ tplBusy ? '加载中…' : '加载当前模板' }}</button>
+      <button class="ghost" :disabled="tplBusy || !tpl.text" @click="previewTemplate">预览</button>
+      <span class="muted">修改模板请改 .env/config.env 的 LS_ALERT_TEMPLATE_*，重启生效</span>
+    </div>
+    <textarea v-if="tpl.text" readonly class="muted"
+              style="width:100%; height:80px; margin-top:6px; font-size:12px">{{ tpl.text }}</textarea>
+    <p v-if="tpl.text" class="muted" style="font-size:12px">
+      占位符：{{ Object.keys(tpl.placeholders || {}).join(' / ') }}</p>
+    <div v-if="tplPreview" class="muted" style="white-space:pre-wrap; border:1px solid var(--divider); border-radius:6px; padding:8px; margin-top:6px">
+      {{ tplPreview }}</div>
 
     <h3 style="margin:14px 0 10px">添加摄像头</h3>
     <div class="row">

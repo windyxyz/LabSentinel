@@ -3,11 +3,18 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from .config import settings
 
 log = logging.getLogger("app.store")
+
+
+def ro_uri(path) -> str:
+    """只读 SQLite URI（任务76）：Path.as_uri() 正确百分号编码空格/中文/#/? 等，
+    避免 f"file:{path}?mode=ro" 在特殊字符路径下解析失败。"""
+    return Path(path).resolve().as_uri() + "?mode=ro"
 
 
 def connect(path, *, readonly: bool = False) -> sqlite3.Connection:
@@ -16,7 +23,7 @@ def connect(path, *, readonly: bool = False) -> sqlite3.Connection:
     WAL 模式下锁竞争会返回 busy 而非立即抛错，等 busy_timeout 毫秒后再报。
     """
     if readonly:
-        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        c = sqlite3.connect(ro_uri(path), uri=True)
     else:
         c = sqlite3.connect(path)
     c.row_factory = sqlite3.Row
@@ -64,9 +71,47 @@ def _mig_001(c: sqlite3.Connection):
         c.execute("ALTER TABLE events ADD COLUMN handled_ts TEXT")
 
 
+def _mig_002(c: sqlite3.Connection):
+    """v2：alert_silences 表（任务81 告警静默，持久化重启不丢）。"""
+    c.execute("""CREATE TABLE IF NOT EXISTS alert_silences(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      target TEXT,
+      reason TEXT,
+      created_ts TEXT NOT NULL,
+      until_ts TEXT NOT NULL,
+      created_by TEXT)""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_silence_until ON alert_silences(until_ts)")
+
+
+def _mig_003(c: sqlite3.Connection):
+    """v3：events 加 escalated_ts（任务82 未处置升级提醒）+ 状态/时间索引。"""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
+    if "escalated_ts" not in cols:
+        c.execute("ALTER TABLE events ADD COLUMN escalated_ts TEXT")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_events_status_ts ON events(status, ts)")
+
+
+def _mig_004(c: sqlite3.Connection):
+    """v4：audit_log（任务87 操作审计）。"""
+    c.execute("""CREATE TABLE IF NOT EXISTS audit_log(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      request_id TEXT,
+      actor TEXT,
+      action TEXT NOT NULL,
+      target TEXT,
+      status_code INTEGER,
+      detail TEXT)""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
+
+
 # 版本化迁移（任务69）：只做加列/加表/索引，不做破坏性变更；每个迁移幂等、在事务内执行
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "events 增加 video/status/handled_by/handled_ts", _mig_001),
+    (2, "新增 alert_silences 表（任务81 告警静默）", _mig_002),
+    (3, "events 增加 escalated_ts（任务82 未处置升级提醒）", _mig_003),
+    (4, "新增 audit_log 表（任务87 操作审计）", _mig_004),
 ]
 SCHEMA_VERSION_LATEST = max(v for v, _d, _f in MIGRATIONS)
 
@@ -89,19 +134,21 @@ class Store:
 
     @staticmethod
     def _migrate(c: sqlite3.Connection) -> None:
-        """执行未应用的迁移（任务69）。旧库兼容：无版本记录但结构已最新 → 直接标记为最新。"""
+        """执行未应用的迁移（任务69/81）。旧库兼容：无版本记录但 events 已含 v1 目标列
+        （前框架时代手工补列的库）→ 仅标记 v1 已应用，**后续迁移照常执行**。"""
         current = c.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()[0]
         if current == 0:
-            # 探测：无版本记录的旧库，若最新迁移的目标结构已齐（events 全部目标列存在），
-            # 视为"已迁移过"直接标记最新；部分缺列则从 v1 逐个跑（迁移函数幂等补列）
             cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
             need_cols = {"video", "status", "handled_by", "handled_ts"}
             if need_cols <= cols:
+                # 81 修复：只标 v1。曾误标全部版本 → 全新库/旧库都跳过 v2+（alert_silences
+                # 等新表缺失，单测抓到）。v1 在全新库上幂等无操作，标它只为旧库免重复 ALTER。
                 now = datetime.now().isoformat(timespec="seconds")
-                for v, _d, _fn in MIGRATIONS:
+                if MIGRATIONS:
                     c.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) "
-                              "VALUES(?,?)", (v, now))
-                current = SCHEMA_VERSION_LATEST
+                              "VALUES(?,?)", (MIGRATIONS[0][0], now))
+                current = MIGRATIONS[0][0] if MIGRATIONS else 0
+                c.commit()  # 探测的 INSERT 有隐式事务，不提交会让下面 v2 的 BEGIN 撞车
         for ver, desc, fn in MIGRATIONS:
             if ver <= current:
                 continue
@@ -153,6 +200,13 @@ class Store:
             c.execute("DELETE FROM cameras WHERE id=?", (cid,))
             c.execute("DELETE FROM zones WHERE camera_id=?", (cid,))
             c.execute("DELETE FROM rules WHERE camera_id=?", (cid,))
+
+    def clear_config(self):
+        """清空 cameras/zones/rules（任务79 replace 导入用）；events 等用户数据不动。"""
+        with self._lock, self._conn() as c:
+            c.execute("DELETE FROM cameras")
+            c.execute("DELETE FROM zones")
+            c.execute("DELETE FROM rules")
 
     def set_camera_status(self, cid, status):
         with self._lock, self._conn() as c:
@@ -238,9 +292,91 @@ class Store:
             r = c.execute("SELECT * FROM alert_deliveries WHERE id=?", (did,)).fetchone()
             return dict(r) if r else None
 
+    # ---- 告警静默（任务81）----
+    def add_silence(self, scope: str, target: str | None, reason: str | None,
+                    created_by: str | None = None, duration_s: int = 3600) -> dict:
+        now = datetime.now()
+        with self._lock, self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO alert_silences(scope,target,reason,created_ts,until_ts,created_by) "
+                "VALUES(?,?,?,?,?,?)",
+                (scope, target, reason, now.isoformat(timespec="seconds"),
+                 (now + timedelta(seconds=duration_s)).isoformat(timespec="seconds"), created_by))
+            sid = cur.lastrowid
+        return self.silence(sid)
+
+    def silence(self, sid: int) -> dict | None:
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM alert_silences WHERE id=?", (sid,)).fetchone()
+            return dict(r) if r else None
+
+    def silences(self, active_only: bool = True) -> list[dict]:
+        now = datetime.now().isoformat(timespec="seconds")
+        sql = "SELECT * FROM alert_silences"
+        if active_only:
+            sql += " WHERE until_ts > ?"
+        rows = self._conn().execute(sql, (now,) if active_only else ()).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_silence(self, sid: int) -> bool:
+        with self._lock, self._conn() as c:
+            n = c.execute("DELETE FROM alert_silences WHERE id=?", (sid,)).rowcount
+        return n > 0
+
+    # ---- 操作审计（任务87）----
+    def add_audit(self, ts: str, request_id: str | None, actor: str, action: str,
+                  target: str | None, status_code: int) -> None:
+        """写审计行（失败由调用方兜底 WARNING，不影响业务响应）。"""
+        with self._lock, self._conn() as c:
+            c.execute("INSERT INTO audit_log(ts,request_id,actor,action,target,status_code) "
+                      "VALUES(?,?,?,?,?,?)",
+                      (ts, request_id, actor, action, target, status_code))
+
+    def audit(self, limit=50, offset=0, action: str | None = None,
+              actor: str | None = None, start_ts: str | None = None,
+              end_ts: str | None = None) -> tuple[list[dict], int]:
+        """审计查询（新→旧），返回 (items, total)。"""
+        where, args = [], []
+        if action:
+            where.append("action LIKE ?")
+            args.append(action + "%")  # 前缀匹配（如 action=POST /api/cameras）
+        if actor:
+            where.append("actor=?")
+            args.append(actor)
+        if start_ts:
+            where.append("ts >= ?")
+            args.append(start_ts)
+        if end_ts:
+            where.append("ts <= ?")
+            args.append(end_ts)
+        cond = " WHERE " + " AND ".join(where) if where else ""
+        with self._conn() as c:
+            total = c.execute("SELECT COUNT(*) FROM audit_log" + cond, args).fetchone()[0]
+            rows = c.execute("SELECT * FROM audit_log" + cond +
+                             " ORDER BY id DESC LIMIT ? OFFSET ?",
+                             [*args, max(1, min(limit, 200)), max(0, offset)]).fetchall()
+        return [dict(r) for r in rows], total
+
+    @staticmethod
+    def _like_escape(q: str) -> str:
+        """任务84：LIKE 通配符转义（配合 ESCAPE '\\'），用户输入的 %/_ 按字面匹配。"""
+        return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
+    def _q_clause(q: str | None, where: list, args: list) -> None:
+        """q 关键词过滤：对 detail/type 做安全 LIKE（1–100 字符，去空白，空则不过滤）。"""
+        if q is None:
+            return
+        q = q.strip()[:100]
+        if not q:
+            return
+        where.append("(detail LIKE '%'||?||'%' ESCAPE '\\' OR type LIKE '%'||?||'%' ESCAPE '\\')")
+        args.extend([Store._like_escape(q), Store._like_escape(q)])
+
     def events(self, limit=50, camera_id=None, level=None, status=None,
-               offset=0, start_ts=None, end_ts=None):
-        """事件查询；status 过滤（'unhandled'='new'）；offset 分页；start_ts/end_ts 时间范围（含边界）。"""
+               offset=0, start_ts=None, end_ts=None, q: str | None = None):
+        """事件查询；status 过滤（'unhandled'='new'）；offset 分页；start_ts/end_ts 时间范围（含边界）；
+        q 关键词（任务84，detail/type LIKE，通配符转义）。"""
         where, args = [], []
         if camera_id is not None:
             where.append("camera_id=?")
@@ -257,6 +393,7 @@ class Store:
         if end_ts:
             where.append("ts <= ?")
             args.append(end_ts)
+        self._q_clause(q, where, args)
         sql = "SELECT * FROM events"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -266,8 +403,8 @@ class Store:
             return [dict(r) for r in c.execute(sql, args)]
 
     def count_events(self, camera_id=None, level=None, status=None,
-                     start_ts=None, end_ts=None) -> int:
-        """与 events 相同过滤条件的总数（任务19 count 端点）。"""
+                     start_ts=None, end_ts=None, q: str | None = None) -> int:
+        """与 events 相同过滤条件的总数（任务19 count 端点；任务84 q 关键词）。"""
         where, args = [], []
         if camera_id is not None:
             where.append("camera_id=?")
@@ -284,6 +421,7 @@ class Store:
         if end_ts:
             where.append("ts <= ?")
             args.append(end_ts)
+        self._q_clause(q, where, args)
         sql = "SELECT COUNT(*) n FROM events"
         if where:
             sql += " WHERE " + " AND ".join(where)

@@ -8,6 +8,7 @@ import concurrent.futures
 import json
 import smtplib
 import time
+from datetime import datetime
 from email.mime.text import MIMEText
 from urllib.parse import quote, urlparse
 
@@ -27,21 +28,41 @@ QMSG_ALLOWED_HOSTS = {"qmsg.zendee.cn"}              # Qmsg酱 → QQ
 
 
 def render_alert(row: dict) -> str:
-    """各推送渠道共用的告警文案模板：级别图标 + 级别 + 类型 + 时间 + 摄像头 + 详情。
+    """各推送渠道共用的告警文案（任务85：可经 LS_ALERT_TEMPLATE_TEXT 自定义模板）。
 
-    occupancy_over 是无具体跟踪目标的规则事件，不输出 track 行。
+    占位符：icon/level/type/type_text/ts/camera_id/track_id/detail/track_part（track_part 为
+    " · track N" 或空串，用于默认模板下 occupancy_over 不含 track 段——超出规格白名单的
+    补充占位符，保证默认输出与历史版本逐字一致）。未知占位符原样保留并告警一次；
+    detail 中的花括号不会被二次格式化（format_map 单次替换）。
     """
-    icon = LEVEL_ICON.get(row["level"], "ℹ️")
-    type_text = TYPE_TEXT.get(row["type"], row["type"])
-    head = (f"{icon} L{row['level']} {type_text} · {row['ts']}\n"
-            f"摄像头 #{row['camera_id']}")
-    if row["type"] != "occupancy_over":
-        head += f" · track {row.get('track_id', 0)}"
-    return f"{head}\n{row['detail']}"
+    level = row["level"]
+    icon = LEVEL_ICON.get(level, "ℹ️")
+    type_ = row["type"]
+    type_text = TYPE_TEXT.get(type_, type_)
+    track_id = row.get("track_id", 0)
+    track_part = "" if type_ == "occupancy_over" else f" · track {track_id}"
+    vals = {"icon": icon, "level": level, "type": type_, "type_text": type_text,
+            "ts": row["ts"], "camera_id": row["camera_id"], "track_id": track_id,
+            "track_part": track_part, "detail": row["detail"]}
+    return settings.alert_template_text.format_map(_SafeDict(vals))
 
 
 def alert_title(level: int) -> str:
-    return f"LabSentinel 级别{level}告警"
+    return settings.alert_template_title.format_map(_SafeDict({"level": level}))
+
+
+class _SafeDict(dict):
+    """format_map 用：未知占位符原样保留并告警一次（不抛异常）。"""
+
+    def __missing__(self, key):
+        if key not in _warned_placeholders:
+            _warned_placeholders.add(key)
+            print(f"[alert-template] 模板含未知占位符 {{{key}}}（原样保留；"
+                  f"可用：icon/level/type/type_text/ts/camera_id/track_id/detail/track_part）")
+        return "{" + key + "}"
+
+
+_warned_placeholders: set = set()
 
 
 class WebSocketHub:
@@ -256,6 +277,31 @@ class EmailChannel:
             return False
 
 
+def match_silence(silences: list[dict], event: dict, now: datetime | None = None) -> dict | None:
+    """静默匹配（任务81，纯函数）：命中返回该静默记录，未命中 None。
+
+    scope 规则：global 全匹配；camera 匹配 str(event.camera_id)；level 匹配 str(event.level)；
+    type 匹配 event.type。until_ts <= now 的已过期静默不命中。
+    """
+    now = now or datetime.now()
+    for s in silences:
+        try:
+            if datetime.fromisoformat(s["until_ts"]) <= now:
+                continue  # 已过期
+        except (ValueError, TypeError, KeyError):
+            continue
+        scope, target = s.get("scope"), s.get("target")
+        if scope == "global":
+            return s
+        if scope == "camera" and target == str(event.get("camera_id")):
+            return s
+        if scope == "level" and target == str(event.get("level")):
+            return s
+        if scope == "type" and target == event.get("type"):
+            return s
+    return None
+
+
 class GenericWebhookChannel(_HttpPushChannel):
     """通用 Webhook（任务67）：推给任意自建服务（n8n/自研平台/局域网网关）。
 
@@ -336,6 +382,67 @@ def redact_url(url: str) -> str:
 # 重试退避（秒）：三次指数退避 1s/4s/15s（任务13）
 RETRY_BACKOFF = (1.0, 4.0, 15.0)
 
+_KNOWN_CHANNELS = ("wecom", "dingtalk", "feishu", "serverchan", "pushplus",
+                   "qmsg", "email", "webhook")
+
+
+def alert_filters() -> dict:
+    """解析 LS_ALERT_FILTERS（任务86）：{渠道名: {min_level:1-3, types:[..]}}。
+
+    非法 JSON/未知渠道/非法级别 → WARNING 并忽略该条（不崩）；默认 {} = 不过滤。
+    """
+    raw = (settings.alert_filters or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("顶层必须是对象")
+    except ValueError as e:
+        print(f"[alert-filters] 配置非法（忽略全部）: {e}")
+        return {}
+    out: dict = {}
+    for name, f in data.items():
+        if name not in _KNOWN_CHANNELS:
+            print(f"[alert-filters] 未知渠道 {name!r}（忽略该条）")
+            continue
+        if not isinstance(f, dict):
+            print(f"[alert-filters] {name} 配置必须是对象（忽略该条）")
+            continue
+        entry: dict = {}
+        ml = f.get("min_level")
+        if ml is not None:
+            if isinstance(ml, int) and 1 <= ml <= 3:
+                entry["min_level"] = ml
+            else:
+                print(f"[alert-filters] {name} min_level 非法（忽略该字段）: {ml}")
+        types = f.get("types")
+        if types is not None:
+            if isinstance(types, list) and all(isinstance(x, str) for x in types):
+                entry["types"] = types
+            else:
+                print(f"[alert-filters] {name} types 必须为字符串数组（忽略该字段）")
+        if entry:
+            out[name] = entry
+    return out
+
+
+def channel_filtered(name: str, event_row: dict, filters: dict | None = None) -> str | None:
+    """按渠道过滤（任务86，纯函数）：返回原因文本或 None（不过滤）。
+
+    min_level：event.level < min_level → 过滤；types 非空且 event.type 不在 → 过滤。
+    """
+    f = (filters or {}).get(name)
+    if not f:
+        return None
+    ml = f.get("min_level")
+    if ml is not None and event_row.get("level", 0) < ml:
+        return f"L{event_row.get('level')} < min_level {ml}"
+    types = f.get("types")
+    if types and event_row.get("type") not in types:
+        return f"type {event_row.get('type')} 不在白名单"
+    return None
+
 
 def _send_accepts_event(ch) -> bool:
     """渠道 send 是否支持 event 关键字参数（任务67：只有通用 Webhook 支持）。"""
@@ -372,10 +479,25 @@ class AlertDispatcher:
         self.hub.broadcast_sync(event_row)
         text = render_alert(event_row)
         event_id = event_row.get("id", 0)
+        # 任务81：静默命中 → 不建投递行、不重试、不发任何外部渠道；事件/WS 照常
+        if self.store is not None:
+            sil = match_silence(self.store.silences(active_only=True), event_row)
+            if sil is not None:
+                print(f"[alert] event#{event_id} 命中静默 #{sil['id']}（{sil['scope']}"
+                      f"{':' + str(sil['target']) if sil.get('target') else ''}，"
+                      f"至 {sil['until_ts']}）——外部渠道不推送（事件已入库/WS 照常）")
+                return
+        filters = alert_filters()  # 任务86：每渠道级别/类型过滤（默认 {} 不过滤）
         for ch in self.channels:
             cfg = getattr(ch, "configured", None)  # 测试替身可能没有该方法，默认视为已配置
             if callable(cfg) and not cfg():
                 continue  # 未配置渠道整条跳过：不排队、不建投递记录、不产假死信
+            ch_name = getattr(ch, "name", type(ch).__name__)
+            reason = channel_filtered(ch_name, event_row, filters)
+            if reason:
+                print(f"[alert] event#{event_id} 渠道 {ch_name} 被过滤（{reason}）——"
+                      "不建投递行（事件已入库/WS 照常）")
+                continue
             # 任务67：send 支持 event 参数的渠道（通用 Webhook）附带完整事件行，其余渠道签名不变
             extra = event_row if _send_accepts_event(ch) else None
             self._pool.submit(self._deliver_with_retry, ch, event_id,
@@ -416,7 +538,10 @@ class AlertDispatcher:
                 continue
             did = self.store.add_delivery(0, name) if self.store else None
             try:
-                ok = bool(ch.send(1, "【测试】LabSentinel 渠道自检消息，收到即表示该渠道配置正常。"))
+                ok = bool(ch.send(1, render_alert({
+                    "ts": datetime.now().isoformat(timespec="seconds"), "camera_id": 0,
+                    "type": "alert_test", "level": 1, "track_id": 0,
+                    "detail": "渠道自检消息，收到即表示该渠道配置正常。"})))
                 err = None if ok else "发送失败"
             except Exception as e:  # noqa: BLE001
                 ok, err = False, f"{type(e).__name__}: {e}"

@@ -206,6 +206,36 @@ date 格式错误 → 400。
   "zones":[{camera_name,name,polygon}],"rules":[{camera_name,zone_name,behavior,level,...}}`。
   默认把 RTSP 凭证脱敏为 `***:***@`；`with_secrets=1` 返回真实 source（响应 no-store）。
   不含事件/截图/人脸数据。
+- `GET /api/events` / `GET /api/events/count` 增加 `q`（任务84）：对 detail/type 做
+  LIKE 子串匹配（ASCII 不分大小写，中文原样）；`%`/`_` 按字面（服务端自动 ESCAPE）；
+  1–100 字符（>100 → 400），空白=不过滤；可与 camera/level/status/日期/分页组合。
+- `POST /api/events/bulk-status`（任务83，仅管理员）body
+  `{"ids":[..≤200..],"status":"acked|false_positive|ignored","handled_by":"admin"}` →
+  `{"updated","skipped","missing":[..],"failed":[..]}`。与单条端点同一套状态规则
+  （false_positive 同样截图入标注池）；missing 容错；单条失败不中断整批。
+
+### 操作审计（任务87，仅管理员）
+
+- `GET /api/audit?limit=50&offset=0&actor=&action=&start_ts=&end_ts=` →
+  `{"items":[{ts,request_id,actor,action,target,status_code}],"total"}`。
+  自动记录所有 `/api/*` 写操作（POST/PUT/PATCH/DELETE；不含 body/headers/query）；
+  `actor` 为 admin/anonymous；`target` 从路径提取（如 `camera:3`）；action 前缀匹配筛选。
+  `request_id` 与响应头一致，可据此检索 server.log 完整上下文。
+
+### 告警静默（任务81，写仅管理员；检测/事件/WS 照常，只抑制外部渠道）
+
+- `GET /api/alert-silences?active=1` → 生效静默列表（含 `remaining_s`）；
+- `POST /api/alert-silences` body `{"scope":"global|camera|level|type","target":"…","duration_s":3600,"reason":"…"}`
+  （duration 60–604800；camera 目标须存在、level∈1..3、type∈事件类型白名单）→ 返回记录；
+- `DELETE /api/alert-silences/{id}` 提前解除。命中静默的事件：**不建投递行、不重试、零渠道发送**；
+  过期自动恢复（记录保留，列表默认只显示 active）。
+
+- `POST /api/cameras/{cid}/copy-config`（任务80，仅管理员）body
+  `{"target_ids":[2,3],"copy_zones":true,"copy_rules":true,"name_suffix":""}`：
+  把源摄像头的区域/规则批量复制到多路目标；规则 zone_id 按**区域名**映射到目标（绝不指向源区域，
+  目标无同名区域时跳过并 warning）；同名区域跳过；返回
+  `{"zones_created","zones_skipped","rules_created","rules_skipped","targets":[{camera_id,zone_map}],"warnings"}`。
+  先全量校验后写库（源/目标存在、排除自身）；不启动摄像头、不复制事件。
 - `POST /api/config/import` body `{"mode":"merge|replace","confirm_replace":false,"data":{导出JSON}}`：
   merge 按名称去重（同名摄像头/区域/规则跳过）；replace 需 `confirm_replace=true`
   （清空现有摄像头/区域/规则，**事件保留但失去对应摄像头**，重新导入同名可恢复关联）。

@@ -51,4 +51,21 @@
 
 ## 执行报告
 
-（待填：改动文件 / 响应头证据 / 测试 / 遗留）
+**flash 2026-10-31 完成（pytest 253 passed、5 用例、响应头双向实测）**
+
+- **改动**：`main.py` request_id_middleware 内追加安全头（setdefault 不覆盖已有头）：
+  X-Content-Type-Options: nosniff / X-Frame-Options: DENY（可配 SAMEORIGIN）/
+  Referrer-Policy: no-referrer / Permissions-Policy: camera=(), microphone=(), geolocation=() /
+  Cross-Origin-Resource-Policy: same-site（选 same-site 而非 same-origin——WebRTC/go2rtc
+  跨端口资源需要）；CSP 可选（LS_CSP 配置后发送，Report-Only 开关）；`LS_SECURITY_HEADERS=0`
+  全关。config.py 加 4 项。
+- **测试**（test_security_headers.py 5 用例）：默认 4 头 + 无 CSP（/、/api/system、404 全覆盖）/
+  关闭时无 / SAMEORIGIN / CSP+Report-Only / setdefault 不覆盖已有头。全量 **pytest 253 passed**
+  （248 + 5）。
+- **Cross-Origin-Resource-Policy 适配说明**：WebRTC/实时画面从浏览器直连 go2rtc :1984（跨端口
+  同主机），`same-origin` 会阻断——选 `same-site`（同主机跨端口放行）。如仍影响，可
+  `LS_SECURITY_HEADERS=0` 临时关闭并在反代加头。
+- **文档**：.env.example 4 项注释；部署指南加「反向代理/HTTPS 与安全头」段；部署FAQ
+  「能嵌到别的系统里吗（X-Frame-Options）」「CSP 怎么开」。
+- **遗留**：CSP 默认不发送——首次启用建议 Report-Only 验证（配置项已备）；
+  Cross-Origin-Resource-Policy 对真实 WebRTC 的影响待真机确认。

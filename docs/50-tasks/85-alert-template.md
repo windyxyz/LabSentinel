@@ -58,4 +58,20 @@
 
 ## 执行报告
 
-（待填：改动文件 / 默认兼容证据 / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 230 passed、build 49.93KB、默认输出逐字兼容断言）**
+
+- **改动**：`config.py` 加 `alert_template_title/text`（默认与历史文案逐字一致；text 默认值含
+  `{track_part}`——occupancy 时为空串，保证无 track 段与旧输出完全相同，超出规格白名单的补充
+  占位符已在报告与注释说明）；`alerts.py` `render_alert/alert_title` 改 `format_map(_SafeDict)`
+  ——未知占位符原样保留+告警一次；detail 花括号不二次替换（单测断言）；
+  `api.py` 加 `GET /api/alert-template`（模板+占位符说明）与 `POST /api/alert-template/preview`
+  （require_admin，不发送不写库）；`send_test` 文案走模板（任务85 要求 alert-test 用当前模板）；
+  `.env.example` 两项+占位符表；Cameras.vue「告警文案模板」区（只读 textarea+占位符说明+预览）。
+- **测试**（test_alert_template.py 5 用例）：默认输出对旧实现逐字一致（普通/occupancy/exit 三形态
+  快照断言——**现有 test_push/test_alerts_page 未改任何断言**）；自定义模板+未知占位符原样保留；
+  detail 花括号字面量；preview 端点+鉴权；alert-test 经模板（假渠道捕获 TPL: 文本）。
+  全量 **pytest 230 passed**；build gzip **49.93KB**。
+- **刻意取舍**：不做在线保存模板（避免配置写入权限/并发问题）——模板经 .env/config.env 修改，
+  重启生效（UI 注明）。
+- **文档**：.env.example；部署FAQ「怎么改告警文案/支持哪些占位符」；运维手册告警配置段。
+- **遗留**：无。

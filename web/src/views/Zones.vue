@@ -14,11 +14,37 @@ const drawing = ref([])      // 正在绘制的顶点（显示坐标）
 const snapT = ref(0)
 const zname = ref('')
 const newRule = ref({ behavior: 'enter', level: 2, cooldown_s: 60, time_start: '00:00', time_end: '23:59', threshold: 0 })
+// 任务80：复制区域/规则到其他摄像头
+const copyTargets = ref([])          // 选中的目标摄像头 id
+const copyZones = ref(true)
+const copyRules = ref(true)
+const copyMsg = ref('')
+const copyBusy = ref(false)
 
 onMounted(async () => {
-  cams.value = await api.cameras()
+  try {
+    cams.value = await api.cameras()
+  } catch { /* 服务未就绪时留空，可刷新重试 */ }
   if (cams.value.length) camId.value = cams.value[0].id
 })
+
+async function doCopy() {
+  if (!camId.value || !copyTargets.value.length || copyBusy.value) return
+  if (!confirm(`把「${cams.value.find(c => c.id === camId.value)?.name}」的区域/规则复制到 ` +
+      `${copyTargets.value.length} 路？同名区域跳过；规则按区域名映射（不会指向源摄像头的区域）。`)) return
+  copyBusy.value = true
+  copyMsg.value = '复制中…'
+  try {
+    const r = await api.copyConfig(camId.value, {
+      target_ids: copyTargets.value, copy_zones: copyZones.value,
+      copy_rules: copyRules.value, name_suffix: '' })
+    copyMsg.value = `复制完成：区域 新建${r.zones_created}/跳过${r.zones_skipped}；` +
+      `规则 新建${r.rules_created}/跳过${r.rules_skipped}` +
+      (r.warnings.length ? `\n${r.warnings.join('\n')}` : '')
+    load()
+  } catch (e) { copyMsg.value = String(e.message || e) }
+  copyBusy.value = false
+}
 
 watch(camId, load, { immediate: true })
 async function load() {
@@ -123,6 +149,27 @@ async function addRule(zoneId) {
       <button v-for="z in zones" :key="'a' + z.id" class="ghost" @click="addRule(z.id)">给「{{ z.name }}」加此规则</button>
       <button class="ghost" @click="addRule(null)">加为全局规则（人数超限用）</button>
     </div>
+
+    <h3 style="margin:14px 0 10px">复制到其他摄像头（任务80）</h3>
+    <div v-if="cams.length <= 1" class="muted">只有一路摄像头——先在「摄像头」页添加更多，再来复制配置。</div>
+    <template v-else>
+      <div class="row" style="align-items:flex-start">
+        <b>复制到：</b>
+        <span style="display:flex; flex-direction:column; gap:2px">
+          <label v-for="c in cams.filter(c => c.id !== camId)" :key="c.id" class="muted">
+            <input type="checkbox" :value="c.id" v-model="copyTargets" style="margin:0 4px 0 0" />
+            {{ c.name }}
+          </label>
+        </span>
+        <label class="muted"><input type="checkbox" v-model="copyZones" />复制区域</label>
+        <label class="muted"><input type="checkbox" v-model="copyRules" />复制规则</label>
+        <button :disabled="copyBusy || !copyTargets.length" @click="doCopy">
+          {{ copyBusy ? '复制中…' : `复制到 ${copyTargets.length} 路` }}</button>
+      </div>
+      <p v-if="copyMsg" class="muted" style="margin-top:6px; white-space:pre-wrap">{{ copyMsg }}</p>
+      <p class="muted" style="margin-top:4px">
+        规则按区域名映射到目标摄像头（不会指向源摄像头的区域）；同名区域跳过。</p>
+    </template>
   </div>
 </template>
 

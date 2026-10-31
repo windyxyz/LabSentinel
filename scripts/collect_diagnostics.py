@@ -21,6 +21,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _ro_uri(path) -> str:
+    """与 server/app/store.ro_uri 保持一致（任务76）：as_uri 编码空格/中文/# 等特殊字符。"""
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 def detect_server_dir(root: Path) -> Path:
     """75 修复：便携包（root/runtime/python.exe）→ root/app/server；源码 → root/server。"""
     return root / "app" / "server" if (root / "runtime" / "python.exe").exists() else root / "server"
@@ -34,10 +39,18 @@ def default_data_dir(root: Path) -> Path:
 # 2026-10-30 审阅修复：原正则只认 PASSWORD，匹配不到 LS_SMTP_PASS（明文密码进"可公开"包）——
 # 补 PASS\b/CREDENTIAL；webhook_url 这类 query-token 凭证由 URL 抹除规则覆盖 user:pass@，query 型
 # 见 redact_value 的 query 参数掩码。
-_SENSITIVE = re.compile(r"TOKEN|PASSWORD|SECRET|KEY|PASS\b|CREDENTIAL", re.IGNORECASE)
-_URL_CRED = re.compile(r"(?i)(\w[\w+.-]*://)([^/@\s:]+):([^@\s]+)@")
-_URL_QUERY_TOKEN = re.compile(
-    r"(?i)([?&](?:token|key|access_token|sign|signature|secret)=)[^&\s]+")
+# 任务91：脱敏逻辑抽到 server/app/redact.py 共用（脚本 import 失败时用本地 fallback）
+try:
+    _sys_path_saved = sys.path[:]
+    sys.path.insert(0, str(ROOT / "server"))
+    from app.redact import SENSITIVE as _SENSITIVE, URL_CRED as _URL_CRED, \
+        URL_QUERY_TOKEN as _URL_QUERY_TOKEN
+    sys.path = _sys_path_saved
+except ImportError:
+    _SENSITIVE = re.compile(r"TOKEN|PASSWORD|SECRET|KEY|PASS\b|CREDENTIAL", re.IGNORECASE)
+    _URL_CRED = re.compile(r"(?i)(\w[\w+.-]*://)([^/@\s:]+):([^@\s]+)@")
+    _URL_QUERY_TOKEN = re.compile(
+        r"(?i)([?&](?:token|key|access_token|sign|signature|secret)=)[^&\s]+")
 
 
 def redact_value(v: str) -> str:
@@ -124,7 +137,7 @@ def main() -> int:
 
     counts_lines = []
     if db.exists():
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        con = sqlite3.connect(_ro_uri(db), uri=True)
         try:
             tables = [r[0] for r in con.execute(
                 "select name from sqlite_master where type='table' and name not like 'sqlite_%'")]
@@ -138,7 +151,7 @@ def main() -> int:
 
     cams_lines = ["id\tname\ttype\tstatus\tsource"]
     if db.exists():
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        con = sqlite3.connect(_ro_uri(db), uri=True)
         try:
             for cid, name, typ, status, src in con.execute(
                     "select id,name,type,status,source from cameras"):

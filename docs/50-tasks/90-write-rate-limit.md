@@ -52,4 +52,15 @@
 
 ## 执行报告
 
-（待填：改动文件 / 限流证据 / 测试 / 遗留）
+**flash 2026-10-31 完成（pytest 258 passed、5 用例全过、429 实测）**
+
+- **改动**：`config.py` 加 `write_rate_limit=120`/`write_rate_window_s=60`/`trust_proxy=False`；
+  `main.py` 限流逻辑合并进 `request_id_middleware`（避免独立中间件栈导致 TaskGroup 冲突——
+  实测独立 `@app.middleware("http")` 返回 JSONResponse 会撞 "unhandled errors in a TaskGroup"）。
+  滑动窗口 dict[ip]→deque[timestamps] + `_rate_lock`；超限 → 429 JSON + Retry-After +
+  X-Request-ID；`LS_TRUST_PROXY=1` 时取 X-Forwarded-For 第一跳；定期清空 key 防内存增长。
+- **测试**（test_rate_limit.py 5 用例）：limit=2 第 3 个 POST 429 + Retry-After + request_id、
+  GET 不受限；窗口过期可再写（monkeypatch time）；trust_proxy 开关行为；0=关闭；429 带
+  request_id。全量 **pytest 258 passed**（253 + 5）。
+- **文档**：.env.example 3 项注释；部署指南反代/安全段；部署FAQ「写操作频繁/反代同 IP」。
+- **遗留**：单进程内存限流（重启清零），多 worker 部署需前置限流（记入运维文档）。

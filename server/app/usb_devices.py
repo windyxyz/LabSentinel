@@ -24,9 +24,18 @@ _cache: dict = {"ts": 0.0, "data": None}
 
 
 def detect_root() -> Path:
-    """从本文件向上推导项目根：便携包（runtime/python.exe）或源码根（server/ 目录）。"""
-    for p in Path(__file__).resolve().parents:
-        if (p / "runtime" / "python.exe").exists() or (p / "server").exists():
+    """从本文件向上推导项目根。
+
+    75 修复（两趟扫描）：便携包把 server 树嵌在 pkg/app/server——单趟向上时 pkg/app 会同时
+    满足"含 server/app/main.py"造成误判。先全线上找便携标记 runtime/python.exe，再找源码标记
+    server/app/main.py。
+    """
+    parents = Path(__file__).resolve().parents
+    for p in parents:
+        if (p / "runtime" / "python.exe").exists():
+            return p
+    for p in parents:
+        if (p / "server" / "app" / "main.py").exists():
             return p
     return Path(__file__).resolve().parents[2]
 

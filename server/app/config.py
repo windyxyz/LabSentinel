@@ -28,11 +28,31 @@ class Settings(BaseSettings):
     disk_min_free_gb: float = 5.0  # 磁盘低于此值触发紧急清理
     ready_min_free_gb: float = 1.0  # 就绪探针磁盘阈值（任务63，LS_READY_MIN_FREE_GB）
     sqlite_busy_timeout_ms: int = 5000  # 写锁等待窗口（任务64，LS_SQLITE_BUSY_TIMEOUT_MS；WAL 模式）
+    gzip_max_bytes: int = 4 * 1024 * 1024  # gzip 大响应保护阈值（任务77，LS_GZIP_MAX_BYTES）
+    escalate_after_min: int = 15  # 未处置升级提醒（任务82，LS_ESCALATE_AFTER_MIN；0=关闭）
+    escalate_min_level: int = 3  # 只提醒 >= 此级别
+    escalate_batch: int = 20  # 每轮最多处理条数（防启动洪峰）
+    backup_interval_h: int = 24  # 自动备份间隔小时（任务92，0=关闭）
+    backup_keep: int = 7  # 保留最近 N 份 auto 备份
+    backup_include_media: bool = False  # true 时备份含媒体（大）
+    security_headers: bool = True  # 安全响应头（任务89，LS_SECURITY_HEADERS）
+    frame_options: str = "DENY"  # X-Frame-Options 值（DENY|SAMEORIGIN）
+    csp: str = ""  # Content-Security-Policy（默认空=不发送）
+    csp_report_only: bool = False  # true 时用 Report-Only 头（任务89）
+    strict_config: bool = False  # 启动校验 FAIL 时拒绝启动（任务95，LS_STRICT_CONFIG）
+    write_rate_limit: int = 120  # 每分钟写请求数上限（任务90，0=关闭）
+    write_rate_window_s: int = 60  # 滑动窗口秒
+    trust_proxy: bool = False  # 1 时信任 X-Forwarded-For 第一跳作为客户端 IP
+    alert_template_title: str = "LabSentinel 级别{level}告警"  # 任务85：{level} 等占位符见 docs
+    alert_template_text: str = ("{icon} L{level} {type_text} · {ts}\n"
+                                "摄像头 #{camera_id}{track_part}\n{detail}")
+    alert_filters: str = ""  # 任务86：JSON，按渠道过滤 {"wecom":{"min_level":2,"types":[..]}}
     pdf_font: str | None = None  # PDF 中文字体路径（默认 C:\Windows\Fonts\msyh.ttc）
 
     # 管理鉴权（任务16）：admin_token 为空 = 不启用（内网信任场景）；启用后写操作需 X-Admin-Token
     admin_token: str = ""
     auth_read_protected: bool = False  # true 时读操作也要求 token
+    read_token: str = ""  # 只读令牌（任务88）：仅 admin_token 启用且读保护开启时可读；写永拒
 
     # go2rtc 流媒体网关（实时画面，见 app/go2rtc.py）
     go2rtc_api: str = "127.0.0.1:1984"  # go2rtc API 地址（本机）

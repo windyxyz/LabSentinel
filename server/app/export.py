@@ -24,10 +24,21 @@ def _days_param(days: int) -> int:
     return max(1, min(int(days), 366))
 
 
-def iter_events_csv(store, days: int, camera_id: int | None, status: str | None):
-    """生成器：逐批取事件写 CSV 行（UTF-8 BOM 由调用方写入响应头）。"""
-    days = _days_param(days)
-    cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+def iter_events_csv(store, days: int, camera_id: int | None, status: str | None,
+                    q: str | None = None, level: int | None = None,
+                    start_ts: str | None = None, end_ts: str | None = None):
+    """生成器：逐批取事件写 CSV 行（UTF-8 BOM 由调用方写入响应头）。
+
+    任务96：q/level/start_ts/end_ts 后过滤（store 层不支持这些参数的游标查询）；
+    start_ts 优先于 days。
+    """
+    if start_ts:
+        cutoff = start_ts
+    else:
+        days = _days_param(days)
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    end_cutoff = end_ts  # 可为 None
+    q_lower = q.lower() if q else None
     batch = 200
     last_id = None
     yield CSV_EVENT_HEADERS
@@ -38,6 +49,14 @@ def iter_events_csv(store, days: int, camera_id: int | None, status: str | None)
             break
         for r in rows:
             last_id = r["id"]
+            # 后过滤：q / level / end_ts
+            if q_lower and q_lower not in (r["detail"] or "").lower() \
+                    and q_lower not in (r["type"] or "").lower():
+                continue
+            if level is not None and r["level"] != level:
+                continue
+            if end_cutoff and r["ts"] > end_cutoff:
+                continue
             yield [
                 r["ts"], f"#{r['camera_id']}", TYPE_TEXT.get(r["type"], r["type"]),
                 f"L{r['level']}", r["track_id"], r["detail"],

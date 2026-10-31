@@ -65,4 +65,17 @@
 
 ## 执行报告
 
-（待填：改动文件 / 实跑 JSON / 测试与 build / 遗留）
+**flash 2026-10-31 完成（pytest 263 passed、build 50.49KB、5 用例）**
+
+- **改动**：新增 `server/app/redact.py`（脱敏逻辑抽离，collect_diagnostics 与 API 共用）；
+  `api.py` 加 `GET /api/model/status`（require_read）——backend/imgsz/conf/analysis_fps/
+  models(ppe,fp32)/classes(names 前 50)/ppe 阈值/face_enabled；**不加载 ONNX、不触发推理**
+  （backend 优先取已初始化引擎，否则报配置值）；`GET /api/config/summary`（require_admin）——
+  settings 全量键值脱敏输出（复用 redact.py）；`collect_diagnostics.py` 改 import redact.py
+  （import 失败保留本地 fallback）。
+- **测试**（test_model_config_status.py 5 用例）：字段/大小/classes 数量与名字/缺失不崩/
+  脱敏（admin_token/read_token/smtp_pass/webhook query token 全 ***、smtp_host/user 保留）/
+  鉴权口径。全量 **pytest 263 passed**（258 + 5）；build gzip **50.49KB**。
+- **文档**：.env.example 补 LS_ALERT_TEMPLATE/LS_ALERT_FILTERS/LS_READ_TOKEN 注释；
+  35-api-reference 补 model/status 与 config/summary 端点。
+- **遗留**：无。

@@ -56,4 +56,13 @@ labsentinel_schema_version 4
 
 ## 执行报告
 
-（待填：改动文件 / 指标样例 / 测试 / 遗留）
+**flash 2026-10-31 完成（pytest 281 passed、6 用例、无敏感标签断言）**
+
+- **改动**：`api.py` 加 `GET /api/metrics`（require_read；text/plain version=0.0.4）——
+  up/uptime/cameras_total/running/每路 fps+frame_age（带 camera_id 标签）/events_today{level}/
+  alert_deliveries{status}/disk_free_bytes/db_size_bytes/schema_version；**无摄像头名称/RTSP 地址**
+  （只 camera_id/level/status 标签）；异常降级为不输出该指标（不 500）；无外部依赖。
+- **测试**（test_metrics.py 6 用例）：200+content-type/核心行存在/无敏感串/有摄像头时 fps 行+
+  running 计数/读保护 401。全量 **pytest 281 passed**（275 + 6）；build 50.49KB。
+- **文档**：运维手册加 Prometheus/Grafana 接入示例（scrape_config 片段）；35-api-reference 端点。
+- **遗留**：无。

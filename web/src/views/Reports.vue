@@ -65,6 +65,27 @@ function setView(m) {
   if (m === 'week') weekCount.value = 4
   load()
 }
+// 任务87：审计
+const auditItems = ref([])
+const auditTotal = ref(0)
+const auditOffset = ref(0)
+const auditActor = ref('')
+const auditLoading = ref(false)
+const auditError = ref('')
+
+async function loadAudit() {
+  auditLoading.value = true
+  try {
+    const params = { limit: 50, offset: auditOffset.value }
+    if (auditActor.value) params.actor = auditActor.value
+    const r = await api.audit(params)
+    auditItems.value = r.items
+    auditTotal.value = r.total
+    auditError.value = ''
+  } catch (e) { auditError.value = String(e.message || e) }
+  auditLoading.value = false
+}
+
 onMounted(() => {
   // 2026-10-30 审阅修复：原 await api.cameras() 失败会跳过 load()，页面永久卡加载中
   load()
@@ -218,4 +239,33 @@ function barGeom(h) {
     </table>
   </div>
   </AsyncState>
+
+  <details class="panel" style="margin-top:10px">
+    <summary style="cursor:pointer"><b>操作审计（最近写操作，任务87）</b></summary>
+    <div class="row" style="margin-top:8px">
+      <select v-model="auditActor" aria-label="操作者筛选">
+        <option value="">全部操作者</option>
+        <option value="admin">admin</option>
+        <option value="anonymous">anonymous</option>
+      </select>
+      <button class="ghost" @click="loadAudit">加载</button>
+    </div>
+    <AsyncState :loading="auditLoading" :error="auditError" :empty="!auditItems.length"
+                empty-text="暂无写操作" @retry="loadAudit">
+      <table style="margin-top:8px">
+        <tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>状态码</th><th>request_id</th></tr>
+        <tr v-for="a in auditItems" :key="a.id">
+          <td class="muted">{{ a.ts }}</td><td>{{ a.actor }}</td><td>{{ a.action }}</td>
+          <td class="muted">{{ a.target || '—' }}</td>
+          <td><span :class="a.status_code < 400 ? '' : 'st-err'">{{ a.status_code }}</span></td>
+          <td class="muted" style="font-size:11px">{{ a.request_id?.slice(0, 8) }}…</td>
+        </tr>
+      </table>
+      <div class="row pager">
+        <button class="ghost" :disabled="auditOffset === 0" @click="auditOffset = Math.max(0, auditOffset - 50); loadAudit()">上一页</button>
+        <span class="muted">共 {{ auditTotal }} 条</span>
+        <button class="ghost" :disabled="auditOffset + 50 >= auditTotal" @click="auditOffset += 50; loadAudit()">下一页</button>
+      </div>
+    </AsyncState>
+  </details>
 </template>

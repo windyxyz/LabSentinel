@@ -10,6 +10,7 @@ import shutil
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from .config import settings
 
@@ -23,11 +24,15 @@ _stop = threading.Event()
 
 
 def _safe_within(path: str, parent) -> bool:
-    """路径安全校验：必须在 parent 目录内（防路径穿越/兄弟目录绕过，2026-10-30 审阅改 commonpath）。"""
+    """路径安全校验（任务76）：真实路径包含判断——resolve 后用 is_relative_to，
+    防"子串前缀"绕过（如 data-evil 与 data 同级）与 .. 穿越；不存在的文件返回 False。"""
     try:
-        return os.path.commonpath([os.path.abspath(path), os.path.abspath(parent)]) \
-            == os.path.abspath(parent)
-    except (ValueError, OSError):
+        p = Path(path).resolve()
+        base = Path(parent).resolve()
+        if not p.exists():
+            return False
+        return p == base or p.is_relative_to(base)
+    except (OSError, ValueError):
         return False
 
 
@@ -82,11 +87,20 @@ def preview_cleanup(store) -> dict:
                         pass
     except OSError:
         pass
+    audit_rows = 0
+    try:
+        with store._conn() as c:
+            # 预演只读：只统计将删除的过期审计行（87 规格口径），实际删除在 run_cleanup
+            audit_rows = c.execute("SELECT COUNT(*) FROM audit_log WHERE ts < ?",
+                                   (cutoff,)).fetchone()[0]
+    except Exception:  # noqa: BLE001  旧库无表时跳过
+        pass
     free = _disk_free_gb()
     return {
         "cutoff": cutoff,
         "events": {"count": ev_count, "bytes": ev_bytes},
         "pool": {"files": pool_files, "bytes": pool_bytes},
+        "audit": {"count": audit_rows},
         "disk_free_gb": round(free, 2),
         "estimated_free_gb": round(free + (ev_bytes + pool_bytes) / 1e9, 2),
         "would_emergency_clean": free < settings.disk_min_free_gb,
@@ -149,6 +163,15 @@ def run_cleanup(store) -> dict:
         _ = pool_cutoff  # 保留变量语义（按修改时间判定，cutoff 用于按需扩展）
     except OSError as e:
         print(f"[retention] 误报池清理失败: {e}")
+
+    # 3.5) 审计日志过期行（任务87：与事件同保留口径）
+    try:
+        with store._lock, store._conn() as c:
+            stats["deleted_audit"] = c.execute(
+                "DELETE FROM audit_log WHERE ts < ?", (cutoff,)).rowcount
+    except Exception as e:  # noqa: BLE001  旧库无 audit_log 表时跳过
+        stats["deleted_audit"] = 0
+        print(f"[retention] 审计清理跳过: {e}")
 
     # 4) 磁盘紧急清理：仍不够就从最旧事件开始逐批删（先删文件再删行，每批复查）
     freed_rounds = 0

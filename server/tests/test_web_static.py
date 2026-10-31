@@ -132,3 +132,41 @@ def test_gzip_skips_zip_and_range(dist):
         assert r.headers.get("content-encoding") != "gzip"  # zip 不压
         rr = c.get("/assets/big.js", headers={"Accept-Encoding": "gzip", "Range": "bytes=0-100"})
         assert rr.headers.get("content-encoding") != "gzip" or rr.status_code == 200  # Range 优先
+
+
+# ---- 任务77：大响应/流式保护 ----
+
+def test_gzip_large_known_size_skipped(dist, monkeypatch):
+    """Content-Length 已知但 > 阈值 → 不 gzip，body 完整。"""
+    monkeypatch.setattr(settings, "gzip_max_bytes", 1000)
+    big = "console.log('" + "x" * 3000 + "')"  # 3000B > 1000B 阈值
+    (settings.web_dist / "assets" / "large.js").write_text(big, encoding="utf-8")
+    with TestClient(app) as c:
+        r = c.get("/assets/large.js", headers={"Accept-Encoding": "gzip"})
+        assert r.headers.get("content-encoding") != "gzip"
+        assert r.text == big  # body 完整
+        assert r.headers.get("cache-control") == "public, max-age=31536000, immutable"  # 缓存头不受影响
+
+
+def test_gzip_small_below_threshold_compressed(dist, monkeypatch):
+    """阈值放宽时同尺寸文件会被压——证明跳过是阈值触发而非类型问题。"""
+    monkeypatch.setattr(settings, "gzip_max_bytes", 10_000_000)
+    big = "console.log('" + "x" * 3000 + "')"
+    (settings.web_dist / "assets" / "large.js").write_text(big, encoding="utf-8")
+    with TestClient(app) as c:
+        r = c.get("/assets/large.js", headers={"Accept-Encoding": "gzip"})
+        assert r.headers.get("content-encoding") == "gzip"
+        assert r.text == big
+
+
+def test_gzip_streaming_export_untouched(dist, monkeypatch):
+    """流式 CSV 导出（无 Content-Length + attachment）不 gzip 且内容完整。"""
+    from app.store import Store
+    s = Store(settings.db_path)
+    for i in range(3):
+        s.add_event(1, "enter", 2, i, f"流式导出行 {i}")
+    with TestClient(app) as c:
+        r = c.get("/api/export/events.csv?days=365", headers={"Accept-Encoding": "gzip"})
+        assert r.status_code == 200
+        assert r.headers.get("content-encoding") != "gzip"
+        assert "流式导出行 0" in r.text  # 内容完整
