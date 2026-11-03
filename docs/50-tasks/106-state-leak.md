@@ -32,7 +32,7 @@
 
 ## 执行报告
 
-**主线 2026-11-03 完成（提交前）**
+**主线 2026-11-03 完成（commit `f07c0df`）**
 
 - **ZoneState**（`zones.py`）：新增 `size`、`retain(active_tids, max_size=None)`：
   - 删除本帧不活跃轨迹（离场状态先由 pipeline 的 update/exit 处理，再回收）；
