@@ -108,7 +108,9 @@
 | **118** | Hyper-V 干净 VM 安装验收（低负载） | 75 出新 zip 后做 |
 | [119-first-start-reliability.md](./119-first-start-reliability.md) | 首次启动 60s 可配/便携 go2rtc/doctor 源模式 | ✅ 已验收（a8d8ca1） |
 | [120-installer-driver-split.md](./120-installer-driver-split.md) | 安装器/驱动拆分、控制面板卸载、Web 停止 | ✅ 已验收（a8d8ca1） |
-| [121-folder-image-ingestion.md](./121-folder-image-ingestion.md) | **图片文件夹自动识别（关键图片汇报）** | ✅ 主线 2026-11-03 完成 |
+| [121-folder-image-ingestion.md](./121-folder-image-ingestion.md) | **图片文件夹自动识别（关键图片汇报）** | ✅ 主线 2026-11-03 完成（f7ba376） |
+| [122-portable-rebuild-121.md](./122-portable-rebuild-121.md) | **便携包重建（含 121）+ 冒烟/manifest/doctor** | 🔥 当前（flash） |
+| [批次122-130-Windows收尾与发布候选.md](./批次122-130-Windows收尾与发布候选.md) | **Windows 收尾批次总表（flash 执行）** | 已派发 |
 
 > **平台顺序**：Windows 优先；WSL 仅开发调试；**Docker 暂不考虑**；Android/iOS 后续。
 > 见 [67 平台路线图](../67-platform-roadmap.md)。
