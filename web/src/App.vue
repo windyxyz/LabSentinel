@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import Dashboard from './views/Dashboard.vue'
 import Cameras from './views/Cameras.vue'
+import FolderImages from './views/FolderImages.vue'
 import Zones from './views/Zones.vue'
 import Events from './views/Events.vue'
 import Reports from './views/Reports.vue'
@@ -13,6 +14,8 @@ const tabs = [
     icon: '<rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/>' },
   { key: 'cams', label: '摄像头', comp: Cameras,
     icon: '<rect x="2" y="5" width="9" height="7" rx="1.5"/><path d="M11 8.2l3-1.8v5.2l-3-1.8"/>' },
+  { key: 'images', label: '图片识别', comp: FolderImages,
+    icon: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="5.5" cy="6.5" r="1.2"/><path d="M2.5 11l3.5-3 2.5 2 2-1.8 3 2.8"/>' },
   { key: 'zones', label: '安全区配置', comp: Zones,
     icon: '<path d="M8 2l5.5 3.8v5.4L8 14.5 2.5 11.2V5.8z"/>' },
   { key: 'events', label: '事件查询', comp: Events,

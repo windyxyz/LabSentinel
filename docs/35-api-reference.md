@@ -36,10 +36,26 @@
 | GET | /api/cameras/{id}/snapshot | 最新帧 JPEG（无帧时 404） |
 | GET | /api/cameras/{id}/webrtc | 实时画面信令地址 |
 
-`Camera`: `{id, name, source, type: "rtsp"|"file"|"usb", status: "running"|"stopped"|"error"}`
-`CameraCreate`: `{name, source, type="file", autostart=true}`
+`Camera`: `{id, name, source, type: "rtsp"|"file"|"usb"|"folder", status: "running"|"stopped"|"error"}`
+`CameraCreate`: `{name, source, type="file", autostart=true}`（`type=folder` 时 source 必须是已存在目录）
 
-webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（浏览器连 go2rtc 信令；RTSP 地址由 go2rtc 拉流，不额外占用摄像头连接）
+webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（浏览器连 go2rtc 信令；RTSP 地址由 go2rtc 拉流，不额外占用摄像头连接）。folder 源无实时流，返回 400。
+
+### 2.1 图片文件夹识别（任务121）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /api/folder-images/summary?days=7&camera_id= | 按摄像头汇总 `{items:[{camera_id,camera_name,total,key,violation,persons,in_zone,errors,last_image_ts,...}], totals}` |
+| GET | /api/folder-images?camera_id=&key=1&violation=1&start_ts=&end_ts=&error_only=&limit=60&offset=0 | 图片记录列表（时间倒序；`key=1` 有人，`violation=1` 显式违规） |
+| GET | /api/folder-images/{id} | 单张识别详情（含 path/zones/violations/snapshot/event_id） |
+| GET | /api/folder-images/{id}/file | 原始图片（仅允许接入目录内；读保护） |
+| GET | /api/folder-images/{id}/thumb | 480px 缩略图（磁盘缓存；读保护） |
+| GET | /api/folder-images/export.csv?camera_id=&key=&violation=&start_ts=&end_ts= | 按筛选导出 CSV（UTF-8 BOM，≤5 万行） |
+| POST | /api/folders/{id}/scan | 立即扫描（运行中唤醒；未运行则启动） |
+
+`/api/system` 的 folder 摄像头额外返回 `kind=folder, processed_total, key_total, violation_total, error_total, backlog, last_scan_ts, current_file`。
+图片记录 `FolderImage`: `{id,camera_id,path,name,ts,processed_ts,width,height,persons,in_zone,ppe_no,ppe_wearing,zones[],violations[],key,violation,event_id,snapshot,error}`。
+
 
 ## 3. 安全区
 

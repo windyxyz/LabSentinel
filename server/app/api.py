@@ -1,6 +1,7 @@
 """REST API 路由。"""
 import csv
 import io
+import mimetypes
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ from .alerts import dispatcher, render_alert
 from .config import settings
 from .engine import get_engine
 from .face import FaceClient
+from .folders import image_exts, thumbnail_bytes
 from .models import CameraCreate, RuleCreate, ZoneCreate
 from .pipeline import CameraManager
 from .stats import daily as stats_daily_query
@@ -518,9 +520,27 @@ def usb_devices(refresh: int = 0):
 
 @router.post("/cameras", dependencies=[Depends(require_admin)])
 def add_camera(body: CameraCreate):
-    if body.type not in ("rtsp", "file", "usb"):
-        raise HTTPException(400, "type must be rtsp|file|usb")
-    cid = store.add_camera(body.name, body.source, body.type)
+    if body.type not in ("rtsp", "file", "usb", "folder"):
+        raise HTTPException(400, "type must be rtsp|file|usb|folder")
+    source = (body.source or "").strip()
+    if body.type == "folder":
+        # 图片文件夹接入（任务121）：创建时校验存在性，避免把错路径静默存库后一直 error
+        p = Path(source).expanduser()
+        try:
+            ok_dir = p.is_dir()
+        except OSError:
+            ok_dir = False
+        if not ok_dir:
+            raise HTTPException(400, f"图片文件夹不存在或不是目录: {source}")
+        source = str(p.resolve())
+        try:
+            real = os.path.normcase(source)
+            data_root = os.path.normcase(str(Path(settings.data_dir).resolve()))
+            if real == data_root or real.startswith(data_root + os.sep):
+                raise HTTPException(400, "图片文件夹不能使用程序数据目录（会造成证据图自激识别）")
+        except OSError:
+            pass
+    cid = store.add_camera(body.name, source, body.type)
     if body.autostart:
         manager.start_camera(store.camera(cid))
     go2rtc.sync_streams(store)  # 实时画面：同步流媒体网关配置
@@ -539,16 +559,40 @@ def start_camera(cid: int):
 @router.delete("/cameras/{cid}", dependencies=[Depends(require_admin)])
 def delete_camera(cid: int):
     manager.stop_camera(cid)
+    # 图片文件夹：删记录 + 派生证据/缩略图（原始截图永不删除）
+    removed = store.delete_folder_images_by_camera(cid)
+    for r in removed:
+        # 事件仍引用同一证据副本时保留文件（事件保留期 180 天，查看证据不能 404）
+        if not (r.get("snapshot") and store.event_snapshot_referenced(r["snapshot"])):
+            _unlink_data_file(r.get("snapshot"))
+        _unlink_data_file(str(Path(settings.data_dir) / "thumbs" / f"img_{r['id']}.jpg"))
     store.delete_camera(cid)
     go2rtc.sync_streams(store)  # 实时画面：同步流媒体网关配置
     return {"ok": True}
 
 
+def _unlink_data_file(path: str | None) -> None:
+    """只删除 data_dir 内的派生文件（证据/缩略图），路径校验防误删。"""
+    if not path:
+        return
+    try:
+        p = Path(str(path))
+        real = os.path.normcase(str(p.resolve()))
+        base = os.path.normcase(str(Path(settings.data_dir).resolve()))
+        if (real == base or real.startswith(base + os.sep)) and p.is_file():
+            p.unlink()
+    except (OSError, RuntimeError, ValueError):
+        pass
+
+
 @router.get("/cameras/{cid}/webrtc", dependencies=[Depends(require_read)])
 def camera_webrtc(cid: int, request: Request):
     """返回该路流的 go2rtc WebRTC 信令地址（浏览器直连 go2rtc :1984）。"""
-    if store.camera(cid) is None:
+    cam = store.camera(cid)
+    if cam is None:
         raise HTTPException(404, "camera not found")
+    if cam["type"] == "folder":
+        raise HTTPException(400, "图片文件夹源没有实时流；请在「图片识别」页查看关键图片")
     host = request.url.hostname or "localhost"
     return {"camera_id": cid, "ws_url": f"ws://{host}:1984/api/ws?src={cid}"}
 
@@ -642,7 +686,8 @@ def camera_status(cid: int):
     w = manager.workers.get(cid) if manager else None
     out = {"id": cid, "name": cam["name"], "type": cam["type"], "status": cam["status"],
            "fps": None, "last_frame_ts": None, "frame_age_s": None, "last_error": None,
-           "last_error_ts": None, "reconnect_count": 0, "opened_at": None, "frames_total": 0}
+           "last_error_ts": None, "reconnect_count": 0, "opened_at": None, "frames_total": 0,
+           "kind": "folder" if cam["type"] == "folder" else "video"}
     if w is not None:
         lfw = w.last_frame_ts
         out.update({
@@ -655,6 +700,8 @@ def camera_status(cid: int):
             "opened_at": w.opened_at,
             "frames_total": w.frames_total,
         })
+        if hasattr(w, "folder_status"):
+            out.update(w.folder_status())
     return out
 
 
@@ -704,7 +751,7 @@ def _validate_config_import(data: dict):
         if not name or name in seen:
             errs.append(f"摄像头 name 空/重名: {name!r}")
             continue
-        if c.get("type") not in ("rtsp", "file", "usb"):
+        if c.get("type") not in ("rtsp", "file", "usb", "folder"):
             errs.append(f"摄像头 {name} type 非法: {c.get('type')}")
             continue
         if not (c.get("source") or "").strip():
@@ -770,6 +817,9 @@ def config_import(body: dict):
             continue
         cam_id_by_name[c["name"]] = store.add_camera(c["name"], c["source"], c["type"])
         created["cameras"] += 1
+        if c["type"] == "folder" and not Path(str(c["source"])).is_dir():
+            warns.append(f"图片文件夹不存在：{c['name']} → {c['source']}（启动后为 error，"
+                         "路径恢复后会自动重试）")
     for z in zones:
         cid = cam_id_by_name[z["camera_name"]]
         if (cid, z["name"]) in existing_zones:
@@ -822,6 +872,203 @@ def camera_snapshot(cid: int):
         raise HTTPException(500, "encode failed")
     from fastapi.responses import Response
     return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+
+# ---- 图片文件夹识别（任务121）----
+def _folder_media_path(row: dict) -> Path:
+    """把 folder_images 行还原为可读取的源文件路径，并做目录/扩展名安全校验。
+
+    只允许读取该摄像头接入目录内的图片：防 DB 被篡改/软链接指向系统敏感文件。
+    """
+    cam = store.camera(row["camera_id"])
+    if cam is None:
+        raise HTTPException(404, "camera not found")
+    p = Path(str(row["path"]))
+    if p.suffix.lower() not in image_exts():
+        raise HTTPException(415, "不支持的图片类型")
+    if not p.is_file():
+        raise HTTPException(404, "图片文件不存在（可能已被移动或删除）")
+    try:
+        real = os.path.normcase(str(p.resolve()))
+        root = os.path.normcase(str(Path(str(cam["source"])).resolve()))
+        if os.path.commonpath([real, root]) != root:
+            raise HTTPException(403, "图片路径不在接入文件夹内")
+    except ValueError:
+        raise HTTPException(403, "图片路径不在接入文件夹内")
+    except (OSError, RuntimeError):
+        raise HTTPException(404, "图片文件不可访问")
+    return p
+
+
+def _folder_readable_path(row: dict) -> Path:
+    """优先原始截图；源文件已被外部软件轮转删除时，回退到违规证据副本。"""
+    try:
+        return _folder_media_path(row)
+    except HTTPException as e:
+        snap = row.get("snapshot")
+        if e.status_code != 404 or not snap:
+            raise
+        try:
+            sp = Path(str(snap))
+            real = os.path.normcase(str(sp.resolve()))
+            base = os.path.normcase(str(Path(settings.data_dir).resolve()))
+            if (real == base or real.startswith(base + os.sep)) and sp.is_file():
+                return sp
+        except (OSError, RuntimeError, ValueError):
+            pass
+        raise
+
+
+def _folder_row_out(row: dict) -> dict:
+    out = dict(row)
+    out["thumb_url"] = f"/api/folder-images/{row['id']}/thumb"
+    out["file_url"] = f"/api/folder-images/{row['id']}/file"
+    out["has_snapshot"] = bool(row.get("snapshot"))
+    return out
+
+
+@router.get("/folder-images/summary", dependencies=[Depends(require_read)])
+def folder_images_summary(days: int = 7, camera_id: int | None = None):
+    """图片识别汇总（近 N 天，按摄像头）：汇报卡片与"关键/违规"趋势。"""
+    days = max(1, min(int(days), 3650))
+    cams = {c["id"]: c for c in store.cameras()}
+    rows = store.folder_image_summary(days=days, camera_id=camera_id)
+    items, seen = [], set()
+    totals = {"total": 0, "key": 0, "violation": 0, "persons": 0, "errors": 0}
+    for r in rows:
+        cam = cams.get(r["camera_id"], {})
+        item = {
+            "camera_id": r["camera_id"], "camera_name": cam.get("name"),
+            "status": cam.get("status"), "total": int(r["total"] or 0),
+            "key": int(r["key_n"] or 0), "violation": int(r["violation_n"] or 0),
+            "persons": int(r["persons_sum"] or 0), "in_zone": int(r["in_zone_sum"] or 0),
+            "errors": int(r["error_n"] or 0),
+            "last_image_ts": r["last_image_ts"], "last_processed_ts": r["last_processed_ts"],
+        }
+        items.append(item)
+        seen.add(r["camera_id"])
+        for k in totals:
+            totals[k] += item[k]
+    for c in cams.values():  # 尚无识别记录的 folder 摄像头也列出（UI 显示"等待图片"）
+        if c["type"] != "folder" or c["id"] in seen:
+            continue
+        if camera_id is not None and c["id"] != camera_id:
+            continue
+        items.append({"camera_id": c["id"], "camera_name": c["name"], "status": c["status"],
+                      "total": 0, "key": 0, "violation": 0, "persons": 0, "in_zone": 0,
+                      "errors": 0, "last_image_ts": None, "last_processed_ts": None})
+    items.sort(key=lambda x: x["camera_id"])
+    return {"days": days, "items": items, "totals": totals}
+
+
+@router.get("/folder-images", dependencies=[Depends(require_read)])
+def folder_images(camera_id: int | None = None, key: int | None = None,
+                  violation: int | None = None, start_ts: str | None = None,
+                  end_ts: str | None = None, error_only: int = 0,
+                  limit: int = 60, offset: int = 0):
+    """关键图片列表（默认全部，key=1 只看有人的图，violation=1 只看违规图）。"""
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    rows = store.folder_images(camera_id=camera_id, key=key, violation=violation,
+                               start_ts=start_ts, end_ts=end_ts, error_only=bool(error_only),
+                               limit=limit, offset=offset)
+    total = store.count_folder_images(camera_id=camera_id, key=key, violation=violation,
+                                      start_ts=start_ts, end_ts=end_ts,
+                                      error_only=bool(error_only))
+    names = {c["id"]: c["name"] for c in store.cameras()}
+    return {"items": [_folder_row_out(r) for r in rows], "total": total,
+            "limit": limit, "offset": offset,
+            "camera_names": names}
+
+
+def _csv_cell(value) -> str:
+    """CSV 单元格防公式注入（Excel 把 = + - @ 开头当公式执行）。"""
+    s = "" if value is None else str(value)
+    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
+
+
+@router.get("/folder-images/export.csv", dependencies=[Depends(require_read)])
+def export_folder_images_csv(camera_id: int | None = None, key: int | None = None,
+                             violation: int | None = None, start_ts: str | None = None,
+                             end_ts: str | None = None, error_only: int = 0):
+    """按当前筛选导出图片识别记录 CSV（UTF-8 BOM，Excel 直接打开）。最多 5 万行。"""
+    rows: list[dict] = []
+    offset = 0
+    while len(rows) < 50000:
+        batch = store.folder_images(camera_id=camera_id, key=key, violation=violation,
+                                    start_ts=start_ts, end_ts=end_ts,
+                                    error_only=bool(error_only), limit=500, offset=offset)
+        rows.extend(batch)
+        if len(batch) < 500:
+            break
+        offset += 500
+    names = {c["id"]: c["name"] for c in store.cameras()}
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["摄像头", "图片时间", "识别时间", "文件名", "源路径", "人数", "在区",
+                "未穿", "已穿", "命中区域", "关键", "违规", "违规明细", "关联事件", "读取错误"])
+    for r in rows:
+        w.writerow([_csv_cell(v) for v in [
+            names.get(r["camera_id"], f"#{r['camera_id']}"), r["ts"], r["processed_ts"],
+            r["name"] or Path(str(r["path"])).name, r["path"], r["persons"], r["in_zone"],
+            r["ppe_no"], r["ppe_wearing"], "、".join(r["zones"] or []),
+            "是" if r["key"] else "否", "是" if r["violation"] else "否",
+            "；".join(f"{v.get('type')}{('/' + v['zone']) if v.get('zone') else ''}"
+                      f"{('/数量' + str(v['count'])) if v.get('count') is not None else ''}"
+                      for v in (r["violations"] or [])),
+            r["event_id"] or "", r["error"] or "",
+        ]])
+    body = "\ufeff" + buf.getvalue()
+    return Response(content=body.encode("utf-8"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition":
+                             'attachment; filename="labsentinel-folder-images.csv"'})
+
+
+@router.get("/folder-images/{iid}", dependencies=[Depends(require_read)])
+def folder_image_detail(iid: int):
+    row = store.folder_image(iid)
+    if row is None:
+        raise HTTPException(404, "image record not found")
+    return _folder_row_out(row)
+
+
+@router.get("/folder-images/{iid}/file", dependencies=[Depends(require_read)])
+def folder_image_file(iid: int):
+    row = store.folder_image(iid)
+    if row is None:
+        raise HTTPException(404, "image record not found")
+    p = _folder_readable_path(row)
+    mt = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+    return FileResponse(p, media_type=mt, headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/folder-images/{iid}/thumb", dependencies=[Depends(require_read)])
+def folder_image_thumb(iid: int):
+    """列表缩略图（480px，磁盘缓存）；原图走 /file，避免首屏拉一堆 4K 截图。"""
+    row = store.folder_image(iid)
+    if row is None:
+        raise HTTPException(404, "image record not found")
+    p = _folder_readable_path(row)
+    data = thumbnail_bytes(str(p), iid)
+    if data is None:
+        raise HTTPException(415, "缩略图生成失败（图片损坏或格式不支持）")
+    from fastapi.responses import Response
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.post("/folders/{cid}/scan", dependencies=[Depends(require_admin)])
+def folder_scan(cid: int):
+    """立即扫描：运行中的文件夹源唤醒一轮；未运行则启动该路接入。"""
+    cam = store.camera(cid)
+    if cam is None:
+        raise HTTPException(404, "camera not found")
+    if cam["type"] != "folder":
+        raise HTTPException(400, "该摄像头不是图片文件夹源")
+    if manager.wake_camera(cid):
+        return {"ok": True, "started": False, "msg": "已触发立即扫描"}
+    manager.start_camera(cam)
+    return {"ok": True, "started": True, "msg": "图片文件夹接入已启动"}
 
 
 # ---- zones ----

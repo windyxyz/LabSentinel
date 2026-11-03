@@ -40,6 +40,11 @@ export const api = {
   addCamera: (d) => req('POST', '/api/cameras', d),
   startCamera: (id) => req('POST', `/api/cameras/${id}/start`),
   delCamera: (id) => req('DELETE', `/api/cameras/${id}`),
+  // 任务121：图片文件夹自动识别
+  folderImagesSummary: (params = {}) => req('GET', '/api/folder-images/summary?' + new URLSearchParams(params)),
+  folderImages: (params = {}) => req('GET', '/api/folder-images?' + new URLSearchParams(params)),
+  folderImage: (id) => req('GET', `/api/folder-images/${id}`),
+  folderScan: (id) => req('POST', `/api/folders/${id}/scan`),
   zones: (cid) => req('GET', `/api/zones?camera_id=${cid}`),
   addZone: (d) => req('POST', '/api/zones', d),
   delZone: (id) => req('DELETE', `/api/zones/${id}`),

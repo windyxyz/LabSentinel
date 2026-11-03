@@ -95,12 +95,23 @@ def preview_cleanup(store) -> dict:
                                    (cutoff,)).fetchone()[0]
     except Exception:  # noqa: BLE001  旧库无表时跳过
         pass
+    img_cutoff = (datetime.now() - timedelta(days=settings.retention_images_days)).isoformat(
+        timespec="seconds")
+    img_rows = 0
+    try:
+        with store._conn() as c:
+            img_rows = c.execute(
+                "SELECT COUNT(*) FROM folder_images WHERE processed_ts < ?",
+                (img_cutoff,)).fetchone()[0]
+    except Exception:  # noqa: BLE001  旧库无表时跳过
+        pass
     free = _disk_free_gb()
     return {
         "cutoff": cutoff,
         "events": {"count": ev_count, "bytes": ev_bytes},
         "pool": {"files": pool_files, "bytes": pool_bytes},
         "audit": {"count": audit_rows},
+        "images": {"count": img_rows, "cutoff": img_cutoff},
         "disk_free_gb": round(free, 2),
         "estimated_free_gb": round(free + (ev_bytes + pool_bytes) / 1e9, 2),
         "would_emergency_clean": free < settings.disk_min_free_gb,
@@ -172,6 +183,38 @@ def run_cleanup(store) -> dict:
     except Exception as e:  # noqa: BLE001  旧库无 audit_log 表时跳过
         stats["deleted_audit"] = 0
         print(f"[retention] 审计清理跳过: {e}")
+
+    # 3.6) 图片文件夹识别记录（任务121）：只删派生的证据副本与缩略图，原始截图永不删除
+    img_cutoff = (datetime.now() - timedelta(days=settings.retention_images_days)).isoformat(
+        timespec="seconds")
+    deleted_images = 0
+    try:
+        while True:
+            rows = store.folder_images_older_than(img_cutoff, limit=_BATCH)
+            if not rows:
+                break
+            for r in rows:
+                p = r["snapshot"]
+                if p and _safe_within(p, settings.data_dir) \
+                        and not store.event_snapshot_referenced(p):
+                    try:
+                        stats["freed_mb"] += os.path.getsize(p) / 1e6
+                        os.remove(p)
+                        stats["deleted_files"] += 1
+                    except OSError as e:
+                        print(f"[retention] 图片证据删除失败 {p}: {e}")
+                thumb = Path(str(settings.data_dir)) / "thumbs" / f"img_{r['id']}.jpg"
+                try:
+                    thumb.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                store.delete_folder_image(r["id"])
+                deleted_images += 1
+            if len(rows) < _BATCH:
+                break
+    except Exception as e:  # noqa: BLE001  旧库无 folder_images 表时不阻塞其它清理
+        print(f"[retention] 图片记录清理跳过: {e}")
+    stats["deleted_images"] = deleted_images
 
     # 4) 磁盘紧急清理：仍不够就从最旧事件开始逐批删（先删文件再删行，每批复查）
     freed_rounds = 0

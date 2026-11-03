@@ -6,6 +6,8 @@ import AsyncState from '../components/AsyncState.vue'
 
 const cams = ref([])
 const form = ref({ name: '', source: '', type: 'file', autostart: false })
+const TYPE_LABEL = { rtsp: 'RTSP', file: '视频文件', usb: 'USB', folder: '图片文件夹' }
+function typeLabel(t) { return TYPE_LABEL[t] || t }
 // 任务66：三态 + 按钮防重复
 const loading = ref(true)
 const loaded = ref(false)
@@ -224,6 +226,12 @@ async function start(id) {
   try { await api.startCamera(id); refresh() } catch (e) { alert(String(e.message || e)) }
   busyCam.value = null
 }
+async function scanFolder(id) {
+  if (busyCam.value !== null) return
+  busyCam.value = id
+  try { await api.folderScan(id); refresh() } catch (e) { alert(String(e.message || e)) }
+  busyCam.value = null
+}
 async function del(id) {
   if (busyCam.value !== null) return
   if (!confirm(`确认删除摄像头 #${id}？（其区域与规则会一并删除）`)) return
@@ -379,30 +387,37 @@ async function watchLive(cam) {
         <input v-else v-model="form.source" placeholder="USB 设备索引，如 0 / 1" aria-label="USB 设备索引" style="flex:1" />
         <button class="ghost" :disabled="usbLoading" @click="loadUsb(true)">{{ usbLoading ? '刷新中…' : '刷新设备' }}</button>
       </template>
-      <input v-else v-model="form.source" placeholder="RTSP 地址 / 视频文件路径 / 0 (USB)" aria-label="摄像头地址" style="flex:1" />
+      <input v-else v-model="form.source"
+             :placeholder="form.type === 'folder' ? '截图文件夹路径，如 D:\\screenshots（支持中文/网络盘）' : 'RTSP 地址 / 视频文件路径 / 0 (USB)'"
+             :aria-label="form.type === 'folder' ? '图片文件夹路径' : '摄像头地址'" style="flex:1" />
       <select v-model="form.type">
         <option value="file">视频文件</option>
         <option value="rtsp">RTSP</option>
         <option value="usb">USB</option>
+        <option value="folder">图片文件夹</option>
       </select>
       <label class="muted"><input type="checkbox" v-model="form.autostart" style="margin:0 4px 0 0" />立即启动</label>
       <button :disabled="adding" @click="add">{{ adding ? '添加中…' : '添加' }}</button>
     </div>
     <p v-if="form.type === 'usb' && usbError" class="muted" style="margin-top:6px">{{ usbError }}</p>
+    <p v-if="form.type === 'folder'" class="muted" style="margin-top:6px">
+      图片文件夹接入：自动轮询该目录（含子目录）的 jpg/png/bmp/webp/tif，识别人员与实验服；
+      “有人/违规”的图片会进入「图片识别」页汇报。原始截图只读，不移动、不删除。
+      建议先到「安全区配置」画好区域与规则再启动。</p>
     <p class="muted" style="margin-top:6px">提示：不勾"立即启动"可先到"安全区配置"画好区域、加好规则，再回来启动。</p>
   </div>
 
   <div class="panel">
     <AsyncState :loading="loading" :error="camsError" :notice="stale ? '刷新失败，仍显示上一次列表' : ''"
                 :empty="loaded && !cams.length"
-                empty-text="暂无摄像头 —— 用上方表单添加：视频文件/RTSP/USB 均可，添加后回到这里启动"
+                empty-text="暂无摄像头 —— 用上方表单添加：视频文件/RTSP/USB/图片文件夹均可，添加后回到这里启动"
                 @retry="refresh">
     <table>
       <tr><th>ID</th><th>名称</th><th>类型</th><th>状态</th><th>最新画面</th><th></th></tr>
       <tr v-for="c in cams" :key="c.id">
         <td>{{ c.id }}</td>
         <td>{{ c.name }}</td>
-        <td>{{ c.type }}</td>
+        <td>{{ typeLabel(c.type) }}</td>
         <td>
           <template v-for="v in [viewFor(c)]">
             <span :class="v.status === 'running' ? 'st-ok' : v.status === 'error' ? 'st-err' : 'st-idle'">{{ v.status }}</span>
@@ -410,12 +425,22 @@ async function watchLive(cam) {
             <div v-if="v.last_error" class="st-error-line" :title="v.last_error">{{ v.last_error.slice(0, 60) }}</div>
             <div v-if="v.status === 'running' && v.frame_age_s != null && v.frame_age_s > 10" class="st-warn-line">画面停滞 {{ v.frame_age_s }}s</div>
             <div v-if="v.reconnect_count > 0" class="muted">重连 {{ v.reconnect_count }} 次</div>
+            <div v-if="c.type === 'folder'" class="muted">
+              已识别 {{ v.processed_total ?? 0 }} 张 · 关键 {{ v.key_total ?? 0 }} · 违规 {{ v.violation_total ?? 0 }}
+              <span v-if="v.backlog"> · 待处理 {{ v.backlog }}</span>
+              <span v-if="v.error_total"> · 读取失败 {{ v.error_total }}</span>
+            </div>
+            <div v-if="c.type === 'folder' && v.current_file" class="muted" :title="v.current_file"
+                 style="max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
+              最近：{{ v.current_file.split(/[\\/]/).pop() }}</div>
           </template>
         </td>
         <td><img v-if="snap[c.id]" :src="mediaUrl(`/api/cameras/${c.id}/snapshot?t=${snap[c.id]}`)" alt="摄像头最新画面缩略图" class="snap" @click="snap[c.id] = Date.now()" /></td>
         <td>
           <button class="ghost" style="margin-right:6px" @click="snap[c.id] = Date.now()">看快照</button>
-          <button class="ghost" style="margin-right:6px" @click="watchLive(c)">实时画面</button>
+          <button v-if="c.type !== 'folder'" class="ghost" style="margin-right:6px" @click="watchLive(c)">实时画面</button>
+          <button v-if="c.type === 'folder'" class="ghost" style="margin-right:6px" :disabled="busyCam !== null" @click="scanFolder(c.id)">
+            {{ busyCam === c.id ? '扫描中…' : '立即扫描' }}</button>
           <button class="ghost" style="margin-right:6px" :disabled="busyCam !== null" @click="start(c.id)">
             {{ busyCam === c.id ? '启动中…' : '启动' }}</button>
           <button class="ghost" :disabled="busyCam !== null" @click="del(c.id)">

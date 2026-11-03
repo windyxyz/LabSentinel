@@ -106,12 +106,51 @@ def _mig_004(c: sqlite3.Connection):
     c.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
 
 
+def _mig_005(c: sqlite3.Connection):
+    """v5：folder_images（任务121 图片文件夹自动识别）。
+
+    每张被识别的图片一行：识别结果 + 关键/违规标记 + 证据副本；唯一键保证重启/重扫不重复。
+    原始截图只读，本表不持有也不删除源文件。
+    """
+    c.execute("""CREATE TABLE IF NOT EXISTS folder_images(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      camera_id INTEGER NOT NULL,
+      path TEXT NOT NULL,
+      name TEXT,
+      mtime_ns INTEGER NOT NULL DEFAULT 0,
+      size INTEGER NOT NULL DEFAULT 0,
+      ts TEXT NOT NULL,
+      processed_ts TEXT NOT NULL,
+      width INTEGER,
+      height INTEGER,
+      persons INTEGER DEFAULT 0,
+      in_zone INTEGER DEFAULT 0,
+      ppe_no INTEGER DEFAULT 0,
+      ppe_wearing INTEGER DEFAULT 0,
+      zones TEXT,
+      violations TEXT,
+      key INTEGER DEFAULT 0,
+      violation INTEGER DEFAULT 0,
+      event_id INTEGER,
+      snapshot TEXT,
+      error TEXT)""")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_images_uniq "
+              "ON folder_images(camera_id, path, mtime_ns, size)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_folder_images_ts "
+              "ON folder_images(camera_id, ts)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_folder_images_processed "
+              "ON folder_images(processed_ts)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_folder_images_key "
+              "ON folder_images(key, violation, ts)")
+
+
 # 版本化迁移（任务69）：只做加列/加表/索引，不做破坏性变更；每个迁移幂等、在事务内执行
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "events 增加 video/status/handled_by/handled_ts", _mig_001),
     (2, "新增 alert_silences 表（任务81 告警静默）", _mig_002),
     (3, "events 增加 escalated_ts（任务82 未处置升级提醒）", _mig_003),
     (4, "新增 audit_log 表（任务87 操作审计）", _mig_004),
+    (5, "新增 folder_images 表（任务121 图片文件夹识别）", _mig_005),
 ]
 SCHEMA_VERSION_LATEST = max(v for v, _d, _f in MIGRATIONS)
 
@@ -211,6 +250,126 @@ class Store:
     def set_camera_status(self, cid, status):
         with self._lock, self._conn() as c:
             c.execute("UPDATE cameras SET status=? WHERE id=?", (status, cid))
+
+    # ---- 图片文件夹识别（任务121）----
+    @staticmethod
+    def _folder_row(row) -> dict:
+        d = dict(row)
+        for k in ("zones", "violations"):
+            try:
+                d[k] = json.loads(d[k] or "[]")
+            except (TypeError, ValueError):
+                d[k] = []
+        for k in ("key", "violation"):
+            d[k] = bool(d.get(k))
+        return d
+
+    def folder_image_done(self, camera_id: int, path: str, mtime_ns: int, size: int) -> bool:
+        """该文件（路径+大小+修改时间）是否已识别过——重启/重扫去重依据。"""
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT 1 FROM folder_images "
+                "WHERE camera_id=? AND path=? AND mtime_ns=? AND size=? LIMIT 1",
+                (camera_id, str(path), int(mtime_ns), int(size))).fetchone()
+            return r is not None
+
+    def add_folder_image(self, row: dict) -> int:
+        """写入一张图片的识别结果；唯一键冲突时返回既有行 id（幂等）。"""
+        with self._lock, self._conn() as c:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO folder_images("
+                "camera_id,path,name,mtime_ns,size,ts,processed_ts,width,height,"
+                "persons,in_zone,ppe_no,ppe_wearing,zones,violations,key,violation,snapshot,error) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (row["camera_id"], str(row["path"]), row.get("name"), int(row["mtime_ns"]),
+                 int(row["size"]), row["ts"], row["processed_ts"], row.get("width"),
+                 row.get("height"), int(row.get("persons", 0)), int(row.get("in_zone", 0)),
+                 int(row.get("ppe_no", 0)), int(row.get("ppe_wearing", 0)),
+                 json.dumps(row.get("zones") or [], ensure_ascii=False),
+                 json.dumps(row.get("violations") or [], ensure_ascii=False),
+                 1 if row.get("key") else 0, 1 if row.get("violation") else 0,
+                 row.get("snapshot"), row.get("error")))
+            if cur.rowcount:
+                return int(cur.lastrowid)
+            r = c.execute(
+                "SELECT id FROM folder_images "
+                "WHERE camera_id=? AND path=? AND mtime_ns=? AND size=?",
+                (row["camera_id"], str(row["path"]), int(row["mtime_ns"]),
+                 int(row["size"]))).fetchone()
+            return int(r["id"]) if r else 0
+
+    def set_folder_image_event(self, iid: int, event_id: int) -> None:
+        with self._lock, self._conn() as c:
+            c.execute("UPDATE folder_images SET event_id=? WHERE id=?", (event_id, iid))
+
+    def folder_image(self, iid: int) -> dict | None:
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM folder_images WHERE id=?", (iid,)).fetchone()
+            return self._folder_row(r) if r else None
+
+    # 过滤条件全部走参数占位符（含"未启用"分支），不拼用户输入
+    @staticmethod
+    def _folder_args(camera_id, key, violation, start_ts, end_ts, error_only) -> list:
+        k = None if key is None else (1 if key else 0)
+        v = None if violation is None else (1 if violation else 0)
+        return [camera_id, camera_id, k, k, v, v, start_ts, start_ts,
+                end_ts, end_ts, 1 if error_only else 0]
+
+    def folder_images(self, camera_id=None, key=None, violation=None, start_ts=None,
+                      end_ts=None, error_only=False, limit=60, offset=0) -> list[dict]:
+        args = self._folder_args(camera_id, key, violation, start_ts, end_ts, error_only)
+        args.extend([max(1, min(int(limit), 500)), max(0, int(offset))])
+        with self._conn() as c:
+            return [self._folder_row(r) for r in c.execute(
+                "SELECT * FROM folder_images "
+                "WHERE (? IS NULL OR camera_id=?) AND (? IS NULL OR key=?) "
+                "AND (? IS NULL OR violation=?) AND (? IS NULL OR ts >= ?) "
+                "AND (? IS NULL OR ts <= ?) AND (?=0 OR error IS NOT NULL) "
+                "ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?", args)]
+
+    def count_folder_images(self, camera_id=None, key=None, violation=None, start_ts=None,
+                            end_ts=None, error_only=False) -> int:
+        args = self._folder_args(camera_id, key, violation, start_ts, end_ts, error_only)
+        with self._conn() as c:
+            return c.execute(
+                "SELECT COUNT(*) n FROM folder_images "
+                "WHERE (? IS NULL OR camera_id=?) AND (? IS NULL OR key=?) "
+                "AND (? IS NULL OR violation=?) AND (? IS NULL OR ts >= ?) "
+                "AND (? IS NULL OR ts <= ?) AND (?=0 OR error IS NOT NULL)",
+                args).fetchone()["n"]
+
+    def folder_image_summary(self, days: int = 7, camera_id: int | None = None) -> list[dict]:
+        """按摄像头聚合近 N 天：总数/关键/违规/人数/在区/错误/最近时间。"""
+        cutoff = (datetime.now() - timedelta(days=max(1, days))).isoformat(timespec="seconds")
+        with self._conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT camera_id, COUNT(*) AS total, "
+                "COALESCE(SUM(key),0) AS key_n, COALESCE(SUM(violation),0) AS violation_n, "
+                "COALESCE(SUM(persons),0) AS persons_sum, COALESCE(SUM(in_zone),0) AS in_zone_sum, "
+                "COALESCE(SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END),0) AS error_n, "
+                "MAX(ts) AS last_image_ts, MAX(processed_ts) AS last_processed_ts "
+                "FROM folder_images WHERE ts >= ? AND (? IS NULL OR camera_id=?) "
+                "GROUP BY camera_id", (cutoff, camera_id, camera_id))]
+        return rows
+
+    def folder_images_older_than(self, cutoff: str, limit: int = 200) -> list[dict]:
+        """保留清理：按处理时间取过期行（不按图片自身时间，避免导入旧档案立刻被清）。"""
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT id, camera_id, snapshot FROM folder_images WHERE processed_ts < ? "
+                "ORDER BY id LIMIT ?", (cutoff, limit))]
+
+    def delete_folder_image(self, iid: int) -> None:
+        with self._lock, self._conn() as c:
+            c.execute("DELETE FROM folder_images WHERE id=?", (iid,))
+
+    def delete_folder_images_by_camera(self, camera_id: int) -> list[dict]:
+        """删除某路图片文件夹的全部识别记录，返回被删行的证据路径（调用方清理文件）。"""
+        with self._lock, self._conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT id, snapshot FROM folder_images WHERE camera_id=?", (camera_id,))]
+            c.execute("DELETE FROM folder_images WHERE camera_id=?", (camera_id,))
+        return rows
 
     # ---- zones ----
     def zones(self, camera_id=None):
@@ -464,6 +623,12 @@ class Store:
         with self._conn() as c:
             r = c.execute("SELECT snapshot FROM events WHERE id=?", (eid,)).fetchone()
             return r["snapshot"] if r else None
+
+    def event_snapshot_referenced(self, path: str) -> bool:
+        """该证据文件是否仍被事件引用（图片记录先过期时不能删，事件保留期内还要能看）。"""
+        with self._conn() as c:
+            r = c.execute("SELECT 1 FROM events WHERE snapshot=? LIMIT 1", (str(path),)).fetchone()
+            return r is not None
 
     def set_event_video(self, eid, path):
         with self._lock, self._conn() as c:

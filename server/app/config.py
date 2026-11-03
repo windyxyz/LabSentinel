@@ -74,6 +74,17 @@ class Settings(BaseSettings):
     file_loop: bool = False  # 文件源循环播放（压测/演示用；默认关闭，正常播放完即止）
     min_box_area: int = 1200  # 过滤远处小框误检（像素面积，720p 下）
 
+    # 图片文件夹接入（type=folder）：外部软件持续截图 → 自动识别关键图片
+    folder_poll_s: float = 3.0  # 目录轮询间隔（秒）
+    folder_stable_s: float = 1.5  # 文件修改后至少静置多久才读（防读到半张截图）
+    folder_max_per_tick: int = 20  # 每轮最多处理张数（其余下一轮继续，防一次性打满）
+    folder_recursive: bool = True  # 是否递归子目录
+    folder_exts: str = ".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff"
+    folder_max_file_mb: int = 32  # 超过此大小的图片跳过（防误指大文件目录）
+    folder_full_rescan_s: int = 300  # 每 N 秒强制全量重扫（补抓"原地覆盖不改目录时间"的文件）
+    folder_enter_events: bool = False  # true 时每张"有人进区"的图也按 enter 规则产生事件（默认只报显式违规）
+    retention_images_days: int = 30  # 图片识别记录保留天数（原始截图永不删除）
+
     # 告警
     wecom_webhook: str | None = None
     dingtalk_webhook: str | None = None  # 钉钉机器人 webhook（仅 oapi.dingtalk.com）

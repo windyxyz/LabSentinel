@@ -17,9 +17,11 @@ from .alerts import dispatcher
 from .config import settings
 from .engine import get_engine, get_ppe_engine
 from .face import FaceGate
+from .folders import FolderWorker
 from .rules import RuleEngine
 from .store import Store
-from .zones import ZoneState, boxes_overlap, parse_polygon, point_inside
+from .vision import ppe_status
+from .zones import ZoneState, parse_polygon, point_inside
 
 # 视频存证：前/后各 2 秒；同一时间最多 3 个并发录制（防告警风暴拖垮 IO）
 VIDEO_PRE_S = 2.0
@@ -335,22 +337,8 @@ class CameraWorker(threading.Thread):
         return str(zid)
 
     def _ppe_status(self, frame, person_box) -> str:
-        """证据分级判定：'no'（有显式违规证据） | 'wearing'（有穿戴证据） | 'unknown'（证据不足）。
-
-        违规告警只认 No Lab Coat 类的显式检测（AP 0.81）；穿戴证据用低阈值
-        （远距离时 Lab Coat 置信度会降到 0.2 附近）；两者皆无时返回 unknown，
-        绝不把"证据不足"当"未穿"——防对合规人员误报告警。
-        """
-        if self.ppe is None:
-            return "unknown"
-        for det in self.ppe.detect_class(frame, settings.ppe_violation_class, conf=settings.ppe_conf):
-            if boxes_overlap(det.xyxy, person_box):
-                return "no"
-        for name in settings.ppe_class_names.split(","):
-            for det in self.ppe.detect_class(frame, name.strip(), conf=settings.ppe_wearing_conf):
-                if boxes_overlap(det.xyxy, person_box):
-                    return "wearing"
-        return "unknown"
+        """证据分级判定（实现见 vision.ppe_status，与图片文件夹源共用一套口径）。"""
+        return ppe_status(self.ppe, frame, person_box)
 
     def _save_snapshot(self) -> str | None:
         with self.frame_lock:
@@ -426,7 +414,10 @@ class CameraManager:
                 # 2026-10-30 审阅：旧线程刚 stop 尚未退出时，USB/RTSP 独占设备还没释放——
                 # 只在"重启同一路"这个真正需要句柄释放的场景同步等待（stop 本身保持异步不拖关停）
                 old.join(timeout=3.0)
-            w = CameraWorker(camera, self.store, self.rules)
+            if camera.get("type") == "folder":
+                w = FolderWorker(camera, self.store, self.rules)
+            else:
+                w = CameraWorker(camera, self.store, self.rules)
             self.workers[cid] = w
             w.start()
 
@@ -436,9 +427,17 @@ class CameraManager:
         if w:
             w.stop()
 
+    def wake_camera(self, cid) -> bool:
+        """图片文件夹：让 worker 立即扫描一轮（不再等下一轮轮询）。"""
+        w = self.workers.get(cid)
+        if w is None or not w.is_alive() or not hasattr(w, "wake"):
+            return False
+        w.wake()
+        return True
+
     def start_all(self):
         for cam in self.store.cameras():
-            if cam["type"] in ("rtsp", "file", "usb"):
+            if cam["type"] in ("rtsp", "file", "usb", "folder"):
                 self.start_camera(cam)
 
     def stop_all(self):
@@ -459,7 +458,7 @@ class CameraManager:
             items = list(self.workers.items())
         for cid, w in items:
             lfw = w.last_frame_ts
-            cams.append({
+            entry = {
                 "id": cid, "fps": round(w.analysis_fps_now, 1),
                 "status": "running" if w.is_alive() else "stopped",
                 "last_frame_ts": lfw,
@@ -469,5 +468,9 @@ class CameraManager:
                 "reconnect_count": w.reconnect_count,
                 "opened_at": w.opened_at,
                 "frames_total": w.frames_total,
-            })
+                "kind": getattr(w, "kind", "video"),
+            }
+            if hasattr(w, "folder_status"):
+                entry.update(w.folder_status())
+            cams.append(entry)
         return {"cameras": cams}

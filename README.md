@@ -2,7 +2,7 @@
 
 # 🧪 LabSentinel · 实验室哨兵
 
-**开源实验室安全行为智能监控系统**：接入现有摄像头（RTSP），自动识别进入安全区未穿实验服、统计进出人数，异常实时多渠道告警。全本地部署，隐私可控。
+**开源实验室安全行为智能监控系统**：接入现有摄像头（RTSP）、USB/视频文件，或外部软件持续截图的图片文件夹，自动识别进入安全区未穿实验服、统计人数，异常实时多渠道告警。全本地部署，隐私可控。
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue) ![Vue](https://img.shields.io/badge/Vue-3-42b883) ![FastAPI](https://img.shields.io/badge/FastAPI-latest-009688) ![License](https://img.shields.io/badge/License-AGPL--3.0-red) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
 
@@ -11,6 +11,7 @@
 ## ✨ 功能一览（30 秒了解）
 
 - 🔍 **白大褂检测**：进入安全区自动判定穿着状态（证据分级判定，不把"看不清"当"违规"误报）
+- 🖼️ **图片文件夹自动识别**：外部截图软件持续写入目录 → 自动识别关键图片（有人/违规）并按摄像头/时间汇报，原始截图只读
 - 👥 **人数统计**：安全区在场人数统计与超限告警
 - 🚨 **事件闭环**：告警 → 确认/误报/忽略 → 误报样本自动进标注池反哺模型
 - 📢 **多渠道告警**：企业微信 / 钉钉 / 飞书 / 微信（Server酱·PushPlus）/ QQ（Qmsg）/ 邮件，失败重试+死信可查
@@ -57,7 +58,7 @@ cd web
 npm install --registry=https://registry.npmmirror.com
 npm run dev     # http://localhost:5173（API 已代理到 8000）
 
-# 3. 浏览器操作：添加摄像头（可用视频文件路径测试）→ 安全区配置画多边形、加规则 → 启动摄像头 → 仪表盘看实时事件
+# 3. 浏览器操作：添加摄像头（视频文件/RTSP/USB/图片文件夹均可）→ 安全区配置画多边形、加规则 → 启动 → 仪表盘看实时事件
 ```
 
 一键脚本（自动体检/部署/端口检测/日志落盘/健康检查/停止）：见 [scripts/README.md](scripts/README.md)；
@@ -75,6 +76,7 @@ Docker 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道�
 | [docs/运维手册.md](docs/运维手册.md) | **部署后日常运维一本通**：巡检清单/排障/备份恢复/升级回滚/故障速查 |
 | [docs/发布核对报告.md](docs/发布核对报告.md) | 发布前核对与终检记录（版本/校验和/阻塞项） |
 | [docs/部署FAQ.md](docs/部署FAQ.md) | 踩坑集中答疑（网络/依赖/推理/训练/告警）；启动失败先跑 `python scripts/doctor.py` 自检 |
+| [docs/68-image-folder-ingestion.md](docs/68-image-folder-ingestion.md) | **图片文件夹自动识别使用手册**：截图目录接入、关键/违规定义、配置与排障 |
 | [docs/30-architecture.md](docs/30-architecture.md) | 架构总览（线程模型、推理锁机制、扩展点） |
 | [docs/35-api-reference.md](docs/35-api-reference.md) | REST/WS API 完整契约（客户端开发唯一依据） |
 | [docs/45-model-onboarding.md](docs/45-model-onboarding.md) | 模型接入手册（换模型零改代码） |

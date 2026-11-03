@@ -8,7 +8,7 @@ class Camera(BaseModel):
     id: int
     name: str
     source: str
-    type: str  # rtsp | file | usb
+    type: str  # rtsp | file | usb | folder（图片文件夹自动识别）
     status: str = "stopped"  # running | stopped | error
 
 

@@ -1,25 +1,36 @@
-# 55 · 交接快照（2026-10-31 11:25，76–97 已验收，119 冷启动加固）
+# 55 · 交接快照（2026-11-03，主线开发 121 图片文件夹识别）
 
 > 本文件是**上下文压缩的落点**：新会话/新协作者先读这一份，再按链接进细节。
-> 当前状态：M1/M1.5 功能与便携分发包已验收；**57–74 已验收提交（pytest 165，commit `6aae48e`）**；
-> **flash 审阅（24 修复）+ 任务 105 回归补丁已完成并提交 `ac7d87e`**（[审阅报告](审阅报告-2026-10-30.md)）；
-> **当前 119（首次启动可靠性/doctor 源模式）；随后 118（Hyper-V 干净 VM，低负载）→ 98…104 → 106–117**；
-> **第二批 75–104（30 项）+ 106–117（审阅回归/建议 + Windows 功能补齐）已派发**，
-> 主线负责验收与提交。**平台顺序：Windows 优先；WSL 仅开发调试；Docker 暂不考虑；Android/iOS 后续**
-> （[67 平台路线图](67-platform-roadmap.md)）。
+> 当前状态：M1/M1.5 功能与便携分发包已验收；**2026-11-03 起用户要求暂停子代理派发，主线直接开发 Windows 端**。
+> **119/120 已提交 `a8d8ca1`**（首次启动加固/安装器拆分/Web 停止）；**121 图片文件夹自动识别已完成**
+> （pytest **329 passed**、build gzip **54.29KB**、DirectML 真实端到端通过）。
 > 发布唯一硬阻塞：**真实 RTSP 摄像头 24h + 模型止损线**（用户侧硬件/数据）。
+
+## 〇、2026-11-03 主线进展（121）
+
+- **新增图片文件夹源** `type=folder`：外部截图软件持续写入目录 → 自动识别人员/实验服/安全区，
+  关键图片（有人）与违规图片（显式 No Lab Coat / 人数超限）分开展示；原视频/RTSP/USB 全部保留。
+- 新表 `folder_images`（schema **v5**）；新页「图片识别」：汇总卡、文件夹/时间/关键/违规筛选、
+  缩略图墙、原图+识别详情+关联事件；摄像头页支持 folder 类型/统计/立即扫描。
+- 默认只为显式违规产生事件/告警（`LS_FOLDER_ENTER_EVENTS=false`，避免每张截图都像“新进入”）；
+  原图只读；证据副本/缩略图 30 天保留清理；删除摄像头同步清理派生文件。
+- 长跑：目录 mtime 增量扫描 + 5 分钟全量补扫、静置窗口、路径+大小+mtime 去重、单轮限量、
+  DML 串行锁/限速；损坏图片只记一次错误。
+- 使用手册 [docs/68-image-folder-ingestion.md](68-image-folder-ingestion.md)；
+  任务/实现记录 [docs/50-tasks/121-folder-image-ingestion.md](50-tasks/121-folder-image-ingestion.md)。
+- **子代理暂停**：`派发状态.json` 置 `paused`；历史队列（118/98–117/100/104）保留，恢复需用户明确指示。
 
 ## 一、总体状态
 
 | 维度 | 状态 |
 |---|---|
 | 服务端/Web | ⏸ 当前未启动；8000/8001/1984/8554/5173 均无监听 |
-| 测试 | ✅ **pytest 286 passed**（76–97 交付后）；耗时 **367s**（新用例/集成 lifespan 显著变慢，需后续优化）；build gzip **50.55KB** |
+| 测试 | ✅ **pytest 329 passed**（121 交付后；312+17）；耗时约 362s；build gzip **54.29KB** |
 | 模型 | ✅ v2 已接入：`m0-spike/yolo11n_ppe.onnx`（11 类）+ classes.txt；v1 备份 `*_v1.*` |
-| 便携包 | ⏳ 旧包 `20261029` 264.8MiB（不含 57–74 代码）；**待任务 75 修复后重建**，最终以 104 的新 zip/manifest 为准 |
+| 便携包 | ⏳ 旧包 `20261029` / `20261031` 均不含 121 图片文件夹功能；**待后续收口时重建**，最终以新的 zip/manifest 为准 |
 | 启动 EXE | ✅ 任务 55 已交付并验收：`LabSentinel.exe`（C# winexe，5.5KB，无黑框；`--stop` 可用）；无 csc 构建自动降级到 `启动.bat`/pythonw |
 | 部署 | ✅ 便携包（普通用户）+ `一键启动.bat`/`deploy.py`（开发模式，无 Python 时自动改启便携包） |
-| Git | 最近提交 `5166496`（76–97 交付）；工作区干净（仅 `.zcode/` 工具目录未跟踪） |
+| Git | 最近提交 `a8d8ca1`（119/120）；121 交付后待提交（工作区仅 `.zcode/` 工具目录未跟踪） |
 | 协作 | ⚠️ **无定时自动化**（旧 5 分钟 cron 已删除）；派发方式 = 更新 `调度看板.md` + `派发状态.json`，flash 会话读取后执行 |
 | 发布 | ⛔ 被真实摄像头 24h + 模型停止线阻塞；其余自动可验项全绿 |
 
@@ -46,12 +57,17 @@
     restore 在拒绝覆盖前删 WAL、规则跨摄像头 zone、测试隔离/耗时、release_check 误报；
   - 106 状态字典 prune；107 孤儿媒体回收；108 告警退出/自测并发；109 deploy.py 三坑；
     110 停止 PID 复用防护 + smoke 清理 pythonw。
-- **118：Hyper-V 干净 VM 验收（2026-10-31 新增）**：本机 VM **`Win10 测试环境`**（Off/Gen2/4vCPU/
+- **119/120：已完成并提交 `a8d8ca1`**（2026-11-03 主线）：启动器 60s 可配/自动化不弹窗、
+  便携 go2rtc.yaml 指向包根、doctor 源模式优先 server/.env；安装器/驱动拆分、控制面板卸载、
+  启动脚本智能定位、Web 停止。pytest 312、smoke 8/8。
+- **121：图片文件夹自动识别（已完成，待提交）**：`type=folder`、`folder_images` v5、
+  新「图片识别」页、违规事件/证据、保留与删除清理；pytest 325、build 54.29KB、
+  DirectML 端到端通过。详见 [任务 121](./50-tasks/121-folder-image-ingestion.md) 与
+  [使用手册 68](./68-image-folder-ingestion.md)。
+- **118：Hyper-V 干净 VM 验收（顺延）**：本机 VM **`Win10 测试环境`**（Off/Gen2/4vCPU/
   Default Switch，快照「安装完毕」）可用于安装/升级/卸载/自启/UI/doctor 验收；**禁止 VM 内推理/
   压测/24h/GPU**；**VM/WSL 均无密码**（用户确认），优先 Copy-VMFile/自动登录控制台，不猜密码；
-  结束恢复快照。等 119 出稳定 zip 后做。
-- **119：首次启动可靠性 + doctor 源模式（当前，P1）**：启动器 30s→60s 可配、自动化不弹窗；
-  便携 go2rtc.yaml 指向包根 tools；doctor 源模式优先 server/.env；修完重建 zip 再跑 118。
+  结束恢复快照。等有新 zip 后做。
 - **111–117：Windows 功能补齐已派发（2026-10-31）**：111 摄像头分组/批量启停、112 规则日期/星期/假期、
   113 局域网发现助手、114 worker 守护自动重启、115 PWA/桌面通知、116 规则模板库、117 更新检查
   （只提示不自动装）。**Docker/Linux 部署不派发**；WSL Fedora 只用于开发调试。
@@ -187,6 +203,7 @@ db19dc9 fix+docs: 项目复审与三处兜底修复（preannotate/一键启动/�
 | 本批任务规格 | `50-tasks/57-multi-rtsp-sim.md` … `62-backup-restore.md` |
 | 项目复审（bug/优化） | `62-project-audit-2026-10-28.md` |
 | USB/OBS 摄像头 | `64-usb-virtual-camera-report.md` + `50-tasks/56-...md` |
+| 图片文件夹自动识别 | [68-image-folder-ingestion.md](68-image-folder-ingestion.md) + [121](./50-tasks/121-folder-image-ingestion.md) |
 | 打包分发 | `58-packaging-strategy.md` + `59-portable-install.md` |
 | M2 方向决策 | `63-m2-options.md` |
 | 模型评估 | `52-model-eval.md` |

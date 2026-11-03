@@ -106,6 +106,9 @@
 | **106–110** | 状态清理/孤儿媒体/告警退出/deploy/PID 安全 | 已派发 |
 | **111–117** | Windows 功能补齐（分组/日期规则/发现/守护/PWA/模板/更新检查） | 已派发 |
 | **118** | Hyper-V 干净 VM 安装验收（低负载） | 75 出新 zip 后做 |
+| [119-first-start-reliability.md](./119-first-start-reliability.md) | 首次启动 60s 可配/便携 go2rtc/doctor 源模式 | ✅ 已验收（a8d8ca1） |
+| [120-installer-driver-split.md](./120-installer-driver-split.md) | 安装器/驱动拆分、控制面板卸载、Web 停止 | ✅ 已验收（a8d8ca1） |
+| [121-folder-image-ingestion.md](./121-folder-image-ingestion.md) | **图片文件夹自动识别（关键图片汇报）** | ✅ 主线 2026-11-03 完成 |
 
 > **平台顺序**：Windows 优先；WSL 仅开发调试；**Docker 暂不考虑**；Android/iOS 后续。
 > 见 [67 平台路线图](../67-platform-roadmap.md)。
