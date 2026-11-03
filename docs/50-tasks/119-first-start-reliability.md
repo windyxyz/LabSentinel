@@ -50,4 +50,29 @@
 
 ## 执行报告
 
-（待填：冷启动耗时 / go2rtc 路径 / doctor 源模式 / smoke / rc_regression / 遗留）
+**flash 2026-10-31 完成（smoke 8/8、冷启动 25.1s、doctor 双模式 FAIL 0）**
+
+- **改动**：
+  1. `scripts/portable_launcher.py`——就绪等待 30s→`LS_READY_TIMEOUT_S`（默认 60，最小钳 10）；
+     每 5s 写"等待服务就绪中 Ns"进展日志；`LS_LAUNCHER_NO_BROWSER=1` 或 `LS_NO_MESSAGEBOX=1`
+     时超时**不弹 MessageBox**只落 ERROR 日志返回 1；超时后 `stop_process`（先优雅后 /F）
+     + 删锁，不再残留 uvicorn；
+  2. 同文件 `start_server` 显式设 `LS_GO2RTC_YAML=<包根>/tools/go2rtc.yaml`——根因：便携布局下
+     `config.py` 的 `BASE_DIR` 推导出 `<包>/app/tools/`（源码模式才正确）；config.env 仍可覆盖；
+  3. `scripts/smoke_portable.py`——`--timeout` 默认 25→**90**（去掉 25s 钳制，≤60 仅 WARN）；
+     `/api/system` 轮询从固定 20 次改为与 `--timeout` 一致的截止时间（冷启动 ~29s 不再擦边）；
+     失败路径打印 launcher/server 日志尾部（`print_log_tails`）；
+  4. `scripts/doctor.py`——配置选择按模式：portable→`config.env` 优先；source→`root/server/.env`
+     优先（不回退旧便携 config.env，避免坏路径假 FAIL；server/.env 缺失如实报 config=×）；
+  5. `scripts/build_portable.py`——copy_assets 前清 staging 旧残留 `app/tools/`（本次实抓：
+     10-29 旧包冷启动误写、随 zip 发布，已清并加防御）。
+- **测试**：新增 test_doctor 3 用例（source 忽略旧便携配置/优先 server/.env/portable 读 config.env）
+  + test_launcher_ready.py 5 用例（默认 60/覆盖/非法回退/钳 10/死 pid 不崩）；
+  顺带修 **test_alert_silence 墙钟依赖**：`test_match_silence_scopes` 硬编码 until 13:00，
+  时钟一过即假失败（rc_regression 实抓）——补 `now=NOW` 固定时钟。
+- **实跑**：pytest **294 passed**（286+8 新增）；npm build 50.55KB；zip 重建两轮（清残留前后），
+  最终 `LabSentinel-portable-20261031.zip` **278.6MB** / 12588 条目 / sha256 `e63cbcb8…`，
+  manifest --verify OK；smoke **8/8 PASS**（backend=directml、播种 4 路、隔离断言不变）；
+  包内 doctor **10 PASS / 0 FAIL**；冷启动直证 **25.1s** 就绪（新窗口余量充足）、
+  go2rtc.yaml 落包根 `tools/`、`app/tools` 零残留；rc_regression --fast 4/4 PASS（见发布核对报告）。
+- **遗留**：rc_regression 抓到并修复 test_alert_silence 墙钟假失败（已回归）；无其它遗留。

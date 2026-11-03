@@ -23,6 +23,11 @@ from pathlib import Path
 
 VERSION_DEFAULT = "2026.10"
 RUN_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+# 任务120：控制面板"卸载程序"条目（HKCU，无需管理员）
+UNINSTALL_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"
+# 2026-10-31 VM 实测：pythonw（无控制台）下每个 reg/powershell/taskkill 子进程都会闪一个
+# 控制台窗——统一 CREATE_NO_WINDOW；交互控制台场景该标志无副作用
+CREATE_NO_WINDOW = 0x08000000
 
 
 def log(m=""):
@@ -32,7 +37,8 @@ def log(m=""):
 def ps(script: str) -> None:
     exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     r = subprocess.run([exe, "-NoProfile", "-Command", script],
-                       capture_output=True, text=True, encoding="mbcs", errors="replace")
+                       capture_output=True, text=True, encoding="mbcs", errors="replace",
+                       creationflags=CREATE_NO_WINDOW)
     if r.returncode != 0:
         # PS 输出是 GBK：PYTHONUTF8=1 下不指定 mbcs 解码会崩（build_launcher_exe 同款修法）
         err = (r.stderr or "").strip()[:200]
@@ -43,7 +49,8 @@ def desktop_dir() -> Path:
     exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     r = subprocess.run([exe, "-NoProfile", "-Command",
                         '[Environment]::GetFolderPath("Desktop")'],
-                       capture_output=True, text=True, encoding="mbcs", errors="replace")
+                       capture_output=True, text=True, encoding="mbcs", errors="replace",
+                       creationflags=CREATE_NO_WINDOW)
     return Path((r.stdout or "").strip() or (Path.home() / "Desktop"))
 
 
@@ -112,11 +119,63 @@ def remove_shortcuts(install: Path | None = None) -> None:
     log("  快捷方式已删除")
 
 
+def set_uninstall_registry(install: Path, version: str) -> bool:
+    """注册控制面板"卸载程序"条目（任务120）。返回是否全部成功。"""
+    uninst_bat = install / "卸载.bat"
+    exe = install / "LabSentinel.exe"
+    pairs = [
+        ("DisplayName", "LabSentinel", "REG_SZ"),
+        ("DisplayVersion", version, "REG_SZ"),
+        ("Publisher", "LabSentinel", "REG_SZ"),
+        ("InstallLocation", str(install), "REG_SZ"),
+        ("DisplayIcon", str(exe if exe.exists() else install / "runtime" / "pythonw.exe"), "REG_SZ"),
+        ("UninstallString", f'"{uninst_bat}"', "REG_SZ"),
+        ("NoModify", "1", "REG_DWORD"),
+        ("NoRepair", "1", "REG_DWORD"),
+        ("SystemComponent", "0", "REG_DWORD"),
+    ]
+    ok = True
+    for name, val, typ in pairs:
+        r = subprocess.run(["reg", "add", UNINSTALL_KEY, "/v", name, "/t", typ,
+                            "/d", str(val), "/f"], capture_output=True, text=True,
+                           creationflags=CREATE_NO_WINDOW)
+        if r.returncode != 0:
+            ok = False
+            log(f"  注册表卸载项 {name} 写入失败：{(r.stderr or '').strip()[:80]}")
+    if ok:
+        log("  控制面板卸载项：已注册（设置→应用 可卸载）")
+    return ok
+
+
+def remove_uninstall_registry() -> None:
+    subprocess.run(["reg", "delete", UNINSTALL_KEY, "/f"], capture_output=True,
+                   creationflags=CREATE_NO_WINDOW)
+
+
+def installed_location() -> Path | None:
+    """读注册表卸载项 InstallLocation；目录含 LabSentinel.exe 才视为有效安装（任务120）。"""
+    try:
+        r = subprocess.run(["reg", "query", UNINSTALL_KEY, "/v", "InstallLocation"],
+                           capture_output=True, text=True, errors="replace", timeout=10,
+                           creationflags=CREATE_NO_WINDOW)
+        for ln in (r.stdout or "").splitlines():
+            ln = ln.strip()
+            if ln.startswith("InstallLocation"):
+                val = ln.split("REG_SZ", 1)[1].strip() if "REG_SZ" in ln else ""
+                p = Path(val) if val else None
+                if p and (p / "LabSentinel.exe").exists():
+                    return p
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def set_autostart(install: Path, on: bool) -> None:
     if on:
         val = f'"{install / "runtime" / "pythonw.exe"}" "{install / "scripts" / "portable_launcher.py"}"'
         r = subprocess.run(["reg", "add", RUN_KEY, "/v", "LabSentinel", "/t", "REG_SZ",
-                            "/d", val, "/f"], capture_output=True, text=True)
+                            "/d", val, "/f"], capture_output=True, text=True,
+                           creationflags=CREATE_NO_WINDOW)
         if r.returncode == 0:
             log("  开机自启：已开启（HKCU Run\\LabSentinel）")
         else:
@@ -125,7 +184,7 @@ def set_autostart(install: Path, on: bool) -> None:
                 "可能被安全软件/启动项管理锁定；可手动把快捷方式放入 shell:startup")
     else:
         subprocess.run(["reg", "delete", RUN_KEY, "/v", "LabSentinel", "/f"],
-                       capture_output=True)
+                       capture_output=True, creationflags=CREATE_NO_WINDOW)
         log("  开机自启：已关闭/清除")
 
 
@@ -185,7 +244,8 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
     stop_script = install / "scripts" / "portable_launcher.py"
     if upgrading and stopper.exists() and stop_script.exists():
         try:
-            subprocess.run([str(stopper), str(stop_script), "--stop"], capture_output=True)
+            subprocess.run([str(stopper), str(stop_script), "--stop"], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW)
         except OSError:
             pass  # runtime 损坏/非可执行（如测试假包）：升级按无服务继续
         time.sleep(1)  # 等句柄释放
@@ -203,6 +263,7 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
     else:
         log("  快捷方式：已跳过（--no-shortcuts）")
     set_autostart(install, autostart)
+    set_uninstall_registry(install, ver_file.read_text(encoding="ascii").strip())
     (install / "卸载.bat").write_text(
         "@echo off\n"
         "set \"HERE=%~dp0\"\n"
@@ -240,17 +301,47 @@ def do_uninstall(install: Path, purge: bool) -> int:
             f.write(f"{datetime.now():%H:%M:%S}.{datetime.now().microsecond // 1000:03d} {msg}\n")
     trace(f"uninstall entry dir={install} purge={purge}")
     log(f"[卸载] {install}")
+    # 2026-10-31 VM 验收修复：停止是卸载的先决步骤但绝不能让它炸掉整个卸载——
+    # 实测 exe 缺失（上次卸载残留）+ runtime 处于 PENDING_DELETE 时 spawn python 会
+    # PermissionError，原实现直接 traceback 中断，残留半删状态。现在三级降级+全 try。
     exe = install / "LabSentinel.exe"
-    if exe.exists():  # 任务55：优先 EXE 停止入口，回退 Python 启动器
-        subprocess.run([str(exe), "--stop"], capture_output=True)
-    else:
-        subprocess.run([str(install / "runtime" / "python.exe"),
-                        str(install / "scripts" / "portable_launcher.py"), "--stop"],
-                       capture_output=True)
+    launcher = install / "scripts" / "portable_launcher.py"
+    stopped = False
+    if exe.exists():  # 任务55：优先 EXE 停止入口
+        try:
+            subprocess.run([str(exe), "--stop"], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW)
+            stopped = True
+        except OSError as e:
+            trace(f"exe --stop failed: {e}")
+    if not stopped:
+        for py in (sys.executable, install / "runtime" / "python.exe"):
+            try:
+                if py and Path(py).exists() and launcher.exists():
+                    subprocess.run([str(py), str(launcher), "--stop"], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW)
+                    stopped = True
+                    break
+            except OSError as e:
+                trace(f"python --stop failed ({py}): {e}")
+    if not stopped:  # 兜底：按锁文件 PID 强杀（所有 spawn 路径都被锁时的唯一出路）
+        lock = Path(os.environ.get("LOCALAPPDATA", "")) / "LabSentinel" / "logs" / "launcher.lock"
+        try:
+            pid = int(lock.read_text(encoding="ascii").split()[0])
+            subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW)
+            time.sleep(2)
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW)
+            lock.unlink(missing_ok=True)
+            trace(f"fallback taskkill pid={pid}")
+        except (OSError, ValueError, IndexError) as e:
+            trace(f"fallback taskkill failed: {e}")
     trace("stopped")
     time.sleep(1)  # 给刚被 kill 的 uvicorn 句柄释放时间
     remove_shortcuts(install)  # 按 shortcuts.json 记录清理（自定义目录卸载才不残留）
     set_autostart(install, False)
+    remove_uninstall_registry()  # 任务120：控制面板卸载项同步清除
     trace("shortcuts+autostart done")
     data = Path(os.environ["LOCALAPPDATA"]) / "LabSentinel"
     # 2026-10-30 审阅：二次卸载/上次 rd 已成功时 install 可能已不存在——防御性容错

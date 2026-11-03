@@ -3,7 +3,7 @@
 用法（标准库）:
     python scripts/smoke_portable.py --zip dist/LabSentinel-portable-20261029.zip
     python scripts/smoke_portable.py --dir <已解压的包目录>      # 调试模式，跳过解压
-可选: --port 8180（被占则失败，不漂移）  --timeout 25（必须 <30，启动器 30s 未就绪会弹窗）
+可选: --port 8180（被占则失败，不漂移）  --timeout 90（必须大于启动器 LS_READY_TIMEOUT_S，默认 60）
       --keep（失败时保留现场；失败时本来就会保留并打印路径）
 
 隔离：zip 解到 %TEMP%\\ls-smoke-<随机>，子进程 LOCALAPPDATA 指向其中 sandbox\\LocalAppData，
@@ -59,6 +59,23 @@ def free_port(p: int) -> bool:
         s.close()
 
 
+def print_log_tails(cfg_dir: Path) -> None:
+    """失败时打印 launcher/server 日志尾部（任务119：不保留现场也能看到判负原因）。"""
+    logs = cfg_dir / "logs"
+    if not logs.exists():
+        print("[日志] 无 logs 目录")
+        return
+    for name in sorted(logs.glob("*.log"))[-4:]:
+        try:
+            tail = name.read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
+        except OSError as e:
+            print(f"[日志] {name.name} 读取失败: {e}")
+            continue
+        print(f"[日志] {name.name} 尾部:")
+        for ln in tail:
+            print(f"    {ln}")
+
+
 def wait_lock(lock: Path, timeout: int) -> tuple[int, int] | None:
     """轮询 launcher.lock（'pid port'）直到出现或超时。"""
     dl = time.time() + timeout
@@ -76,12 +93,12 @@ def main() -> int:
     ap.add_argument("--zip", type=Path, help="便携包 zip 路径")
     ap.add_argument("--dir", type=Path, help="已解压包目录（调试模式，跳过解压）")
     ap.add_argument("--port", type=int, default=8180)
-    ap.add_argument("--timeout", type=int, default=25, help="就绪等待秒数，必须 <30（启动器 30s 会弹窗）")
+    ap.add_argument("--timeout", type=int, default=90,
+                    help="就绪等待秒数，必须大于启动器 LS_READY_TIMEOUT_S（默认 60）")
     ap.add_argument("--keep", action="store_true", help="成功也保留临时目录（调试用）")
     a = ap.parse_args()
-    if a.timeout >= 30:
-        print("[WARN] --timeout>=30 会撞启动器的 30s MessageBox，已钳到 25s")
-        a.timeout = 25
+    if a.timeout <= 60:  # 任务119：启动器就绪窗口默认 60s，冒烟必须留出余量，否则冷启动误判
+        print(f"[WARN] --timeout={a.timeout}s ≤ 启动器默认就绪窗口 60s，冷启动可能误判；建议 ≥90s")
     if not a.zip and not a.dir:
         ap.error("--zip 或 --dir 必填其一")
 
@@ -143,12 +160,14 @@ def main() -> int:
         got = wait_lock(lock, a.timeout)
         if not step("3a 锁出现", got is not None, "" if got else f"{a.timeout}s 内未出现 {lock}"):
             keep_reason = "锁未出现"
+            print_log_tails(cfg_dir)
             return 1
         lock_pid, lock_port = got  # type: ignore[misc]
         api = f"http://127.0.0.1:{lock_port}"
         ok = False
         detail = ""
-        for _ in range(20):
+        dl = time.time() + a.timeout  # 任务119：窗口与 --timeout 一致（> 启动器就绪窗口），冷启动 ~29s 不再擦边
+        while time.time() < dl:
             try:
                 st, body = http_get(f"{api}/api/system")
                 if st == 200:
@@ -156,11 +175,12 @@ def main() -> int:
                     ok = bool(sysinfo.get("backend")) and bool(sysinfo.get("version"))
                     detail = f"backend={sysinfo.get('backend')} version={sysinfo.get('version')} port={lock_port}"
                     break
-                time.sleep(1)  # 2026-10-30 审阅：非 200 也要等，否则 20 连发空转后立即判负
+                time.sleep(1)  # 2026-10-30 审阅：非 200 也要等，否则连发空转后立即判负
             except OSError:
                 time.sleep(1)
         if not step("3b /api/system 200 且 backend/version 非空", ok, detail):
             keep_reason = "服务未就绪"
+            print_log_tails(cfg_dir)
             return 1
 
         # [4] 前端

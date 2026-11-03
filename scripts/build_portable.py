@@ -105,6 +105,12 @@ def ensure_deps() -> None:
 
 def copy_assets() -> None:
     deploy.log("  [4] 复制资产（服务端代码/前端产物/模型/二进制，幂等覆盖）...")
+    # 任务119 防御：修复前的启动器跑包时 go2rtc 配置会写到 <包>/app/tools/go2rtc.yaml
+    # （源码布局的默认值推导错误）。staging 是持久的，旧残留会混进新 zip——每次构建先清掉
+    stale_app_tools = DIST / "app" / "tools"
+    if stale_app_tools.exists():
+        shutil.rmtree(stale_app_tools, ignore_errors=True)
+        deploy.log("  [清理] 删除 staging 旧残留 app/tools/（任务119 前 go2rtc.yaml 误写位置）")
     # 服务端代码（排除 data/__pycache__）
     app_dir = DIST / "app" / "server"
     shutil.copytree(ROOT / "server" / "app", app_dir / "app", dirs_exist_ok=True,
@@ -157,6 +163,7 @@ def copy_assets() -> None:
     here = Path(__file__).resolve().parent
     shutil.copy2(here / "portable_launcher.py", DIST / "scripts" / "portable_launcher.py")
     shutil.copy2(here / "install_portable.py", DIST / "scripts" / "install_portable.py")
+    shutil.copy2(here / "installer.py", DIST / "scripts" / "installer.py")  # 安装器 UI 层（任务120）
     shutil.copy2(here / "seed_demo.py", DIST / "scripts" / "seed_demo.py")  # 播种单源（任务51）
     shutil.copy2(here / "doctor.py", DIST / "scripts" / "doctor.py")  # 自检工具（任务70）
     # 任务75：运维手册让用户在包内跑备份/诊断——这两个脚本必须随包
@@ -171,7 +178,7 @@ def copy_assets() -> None:
     shutil.copy2(here / "portable_stop.bat", DIST / "停止.bat")
     (DIST / "安装.bat").write_text(
         "@echo off\n"
-        "\"%~dp0runtime\\python.exe\" \"%~dp0scripts\\install_portable.py\" install --source \"%~dp0.\" %*\n"
+        "\"%~dp0runtime\\python.exe\" \"%~dp0scripts\\installer.py\" install --ui --source \"%~dp0.\" %*\n"
         "pause\n",
         encoding="ascii")
     (DIST / "app" / "VERSION").write_text("2026.10", encoding="ascii")

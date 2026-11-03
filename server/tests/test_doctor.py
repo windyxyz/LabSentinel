@@ -101,3 +101,57 @@ def test_small_model_fails_threshold(tmp_path, monkeypatch):
     results = doctor.run_checks(r, port=8765)
     model = next(x for x in results if "模型" in x["name"])
     assert model["status"] == "FAIL"
+
+
+def make_source(tmp_path: Path) -> Path:
+    """最小"源码布局"：server/app/main.py + web/dist + m0-spike 模型。"""
+    r = tmp_path / "src"
+    (r / "server" / "app").mkdir(parents=True)
+    (r / "server" / "app" / "main.py").write_text("#", encoding="ascii")
+    (r / "web" / "dist").mkdir(parents=True)
+    (r / "web" / "dist" / "index.html").write_text("<html>", encoding="ascii")
+    (r / "m0-spike").mkdir()
+    (r / "m0-spike" / "yolo11n_ppe.onnx").write_bytes(b"0" * 2_000_000)
+    (r / "m0-spike" / "yolo11n_ppe.classes.txt").write_text("person\n", encoding="ascii")
+    return r
+
+
+def test_source_mode_ignores_stale_portable_config(tmp_path, monkeypatch):
+    """任务119：源码模式读 server/.env；LOCALAPPDATA 里旧便携 config.env 的坏路径不得造成假 FAIL。"""
+    r = make_source(tmp_path)
+    (r / "server" / ".env").write_text("LS_ADMIN_TOKEN=t\n", encoding="utf-8")
+    la = tmp_path / "sandbox"
+    (la / "LabSentinel").mkdir(parents=True)
+    (la / "LabSentinel" / "config.env").write_text(
+        "LS_MODEL_FP32=Z:/definitely/not/exist.onnx\n", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(la))
+    results = doctor.run_checks(r, port=8765)
+    cfg = next(x for x in results if x["name"] == "配置")
+    assert cfg["status"] == "PASS", cfg
+
+
+def test_source_mode_prefers_server_env(tmp_path, monkeypatch):
+    """任务119：源码模式两端点都在时以 server/.env 为准——.env 内坏路径要 FAIL（证明读的是它）。"""
+    r = make_source(tmp_path)
+    (r / "server" / ".env").write_text(
+        "LS_PPE_MODEL=Z:/definitely/not/exist.onnx\n", encoding="utf-8")
+    la = tmp_path / "sandbox"
+    (la / "LabSentinel").mkdir(parents=True)
+    (la / "LabSentinel" / "config.env").write_text("LS_ADMIN_TOKEN=t\n", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(la))
+    results = doctor.run_checks(r, port=8765)
+    cfg = next(x for x in results if x["name"] == "配置")
+    assert cfg["status"] == "FAIL", cfg
+
+
+def test_portable_mode_reads_config_env(tmp_path, monkeypatch):
+    """任务119：便携模式仍以 LOCALAPPDATA config.env 为准（坏路径 → FAIL）。"""
+    r = make_pkg(tmp_path)
+    la = tmp_path / "sandbox"
+    (la / "LabSentinel").mkdir(parents=True)
+    (la / "LabSentinel" / "config.env").write_text(
+        "LS_PPE_MODEL=Z:/definitely/not/exist.onnx\n", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(la))
+    results = doctor.run_checks(r, port=8765)
+    cfg = next(x for x in results if x["name"] == "配置")
+    assert cfg["status"] == "FAIL", cfg

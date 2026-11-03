@@ -27,17 +27,19 @@ def ev(camera_id=1, level=2, type_="enter"):
 
 
 def test_match_silence_scopes():
+    # now=NOW 固定时钟：until 13:00 相对 NOW=12:00 恒为未来。不传 now 的话 match_silence
+    # 用 datetime.now()，写死的日期一过（2026-10-31 13:00 实测翻车）用例随墙钟假失败
     g = sil("global")
-    assert al.match_silence([g], ev()) is g  # global 全匹配
+    assert al.match_silence([g], ev(), now=NOW) is g  # global 全匹配
     cam = sil("camera", "1")
-    assert al.match_silence([cam], ev(camera_id=1)) is cam
-    assert al.match_silence([cam], ev(camera_id=2)) is None
+    assert al.match_silence([cam], ev(camera_id=1), now=NOW) is cam
+    assert al.match_silence([cam], ev(camera_id=2), now=NOW) is None
     lv = sil("level", "3")
-    assert al.match_silence([lv], ev(level=3)) is lv
-    assert al.match_silence([lv], ev(level=2)) is None
+    assert al.match_silence([lv], ev(level=3), now=NOW) is lv
+    assert al.match_silence([lv], ev(level=2), now=NOW) is None
     ty = sil("type", "enter_no_ppe")
-    assert al.match_silence([ty], ev(type_="enter_no_ppe")) is ty
-    assert al.match_silence([ty], ev()) is None
+    assert al.match_silence([ty], ev(type_="enter_no_ppe"), now=NOW) is ty
+    assert al.match_silence([ty], ev(), now=NOW) is None
 
 
 def test_match_silence_expiry_and_multi():

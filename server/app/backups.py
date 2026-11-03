@@ -45,11 +45,19 @@ def _prune(files: list[Path], keep: int) -> int:
     return removed
 
 
-def _find_backup_script() -> Path | None:
-    root = Path(__file__).resolve().parents[2]
-    for cand in (root / "scripts" / "backup_data.py", root / "scripts" / "backup_data.py"):
-        if cand.exists():
-            return cand
+def _find_backup_script(here: Path | None = None) -> Path | None:
+    """定位 scripts/backup_data.py。
+
+    源码布局 <仓库根>/server/app/backups.py → parents[2]=仓库根；便携布局
+    <包根>/app/server/app/backups.py → parents[2]=<包>/app（差一层，2026-10-31 VM 验收实测
+    自动备份因此静默失效）→ 追加 parents[3] 兜底。here 参数供测试注入假布局。
+    """
+    here = here or Path(__file__).resolve()
+    for i in (2, 3):
+        if i < len(here.parents):
+            cand = here.parents[i] / "scripts" / "backup_data.py"
+            if cand.exists():
+                return cand
     return None
 
 

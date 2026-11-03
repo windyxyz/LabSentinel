@@ -65,4 +65,44 @@
 
 ## 执行报告
 
-（待填：VM/凭据来源 / 六项结果 / 截图 / 快照恢复 / 遗留）
+**flash 2026-10-31 部分完成（用户协作手动验收；PS Direct 空密码被拒，转人工）**
+
+### 通道探索（自动化受阻记录）
+- `sudo.exe -N powershell` 提权通道 ✓（Get-VM/快照/防火墙均可用）；
+- 快照「安装完毕」在（10-30 22:07）；**来宾服务接口=False** → Copy-VMFile 不可用；
+- PowerShell Direct 空密码：`User`/`user`/`Administrator` 三用户全部"凭据无效"→ 规格授权路径尽，
+  **未猜未爆破**；http.server+boot.bat 自动化通道搭成后 VM 内文件异常消失（疑似杀软/清理），
+  用户决定转手动验收（用户指示：不恢复快照，当前即干净基线）。
+
+### 手动验收结果（用户提供现场输出+日志，均已归档分析）
+| # | 项 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | 双击 exe 无黑框+浏览器弹面板 | ✅ | launcher 15:59:52→就绪 **10.3s**；UI 200/WS/资产全通 |
+| 2 | backend | ✅ 预期 cpu | DML EP Error→回退 CPU（VM 无 GPU 属正常） |
+| 3 | doctor（解压根） | ✅ FAIL 0 | 9 PASS/1 WARN（WARN=服务占用 8000 属预期）；`config=√` |
+| 4 | UI 删摄像头 | ✅ | DELETE /api/cameras/1..8 全 200 |
+| 5 | 安装.bat | ✅ | 版本 2026.10/快捷方式/数据目录外置；覆盖升级路径实测 |
+| 6 | 开始菜单启动 | ✅ | 6.1s 就绪 |
+| 7 | 数据外置连续性 | ✅ | 换安装位置事件 id 38→39 连续（同一库） |
+| 8 | 卸载 | ❌→已热修 | `do_uninstall` 停服 spawn PermissionError 崩溃（exe 缺失+runtime
+  PENDING_DELETE 状态）；**120 已修**（三级降级+taskkill 兜底），待 VM 用新包复测 |
+| 9 | 控制面板卸载项 | ➡120 | 原版无；120 已加 HKCU Uninstall 键 |
+| 10 | Web 停止 | ➡120 | 用户需求；POST /api/system/shutdown + UI 按钮已交付 |
+
+### 119 修复的 VM 实证
+- **go2rtc 路径**：桌面副本写 `<包>\tools\go2rtc.yaml`、安装副本写
+  `...\Programs\LabSentinel\tools\go2rtc.yaml`——**均包根，app\tools 零写入** ✓
+- 就绪窗口：10.3s/6.1s 远低于 60s ✓
+
+### 发现（转建议）
+- **seed-if-empty 复活**：用户删光摄像头→重启重播 4 路演示（设计如此但反直觉）；
+  建议首启播种后落标记，只对全新库播种（P3）；
+- **auto-backup 便携失效**：`[auto-backup] ✗ backup_data.py 不存在`（parents[2] 布局坑）——
+  **发现即修**（backups.py+validate.py 双趟根推导，pytest 回归覆盖）；
+- VM 内 `python=True`（PATH 有 python）——"无 Python"前提不成立，如实记录。
+
+### 清理与遗留
+- 宿主机：传输服务器已杀、防火墙规则 `LS118-temp-in-8188` 已删 ✓；
+- VM：测试产物（Desktop 解压目录+安装目录+数据目录）待用户按需清理/恢复快照（用户自决）；
+- 遗留：①新包（sha256 4e2ed006…）在 VM 复测完整安装/卸载/控制面板链；②升级链（旧 20261029→新）
+  未跑（自动化中断后用户跳过）；③报告不含 24h/DML 声明——VM 仅安装/UI 验收。

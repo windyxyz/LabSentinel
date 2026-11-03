@@ -199,6 +199,15 @@ async function previewTemplate() {
   tplBusy.value = false
 }
 
+// 任务120：网页端停止服务（响应返回后服务进程 ~1s 内退出）
+async function shutdownServer() {
+  if (!confirm('确定停止 LabSentinel 服务？\n停止后面板将断开，重新启动程序后才能再次访问。')) return
+  try {
+    await api.shutdownServer()
+  } catch { /* 停止瞬间连接中断属预期，忽略 */ }
+  alert('停止指令已发出。服务退出后本页面将无法刷新；可关闭浏览器窗口。')
+}
+
 async function add() {
   if (!form.value.name || !form.value.source || adding.value) return
   adding.value = true
@@ -353,6 +362,12 @@ async function watchLive(cam) {
       占位符：{{ Object.keys(tpl.placeholders || {}).join(' / ') }}</p>
     <div v-if="tplPreview" class="muted" style="white-space:pre-wrap; border:1px solid var(--divider); border-radius:6px; padding:8px; margin-top:6px">
       {{ tplPreview }}</div>
+
+    <h3 style="margin:14px 0 10px">服务控制（任务120）</h3>
+    <div class="row" style="align-items:center">
+      <button class="ghost" @click="shutdownServer">停止服务…</button>
+      <span class="muted">停止后摄像头分析、事件推送全部暂停；重新启动程序（快捷方式/启动.bat）恢复。</span>
+    </div>
 
     <h3 style="margin:14px 0 10px">添加摄像头</h3>
     <div class="row">

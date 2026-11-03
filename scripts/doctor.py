@@ -97,7 +97,13 @@ def run_checks(root: Path, port: int) -> list[dict]:
                          f"ffmpeg={'√' if ffmpeg else '×'} go2rtc={'√' if go2rtc else '×'}",
                          "缺失会影响 USB 枚举/实时画面/视频转码（可后补）" if not tools_ok else "", level="WARN"))
     # 5 配置（只输出"已设置/未设置"，绝不输出值）
-    cfg = first(data_root / "config.env", root / "server" / ".env")
+    # 任务119：按模式选配置——源码模式服务端读的是 root/server/.env；若优先读
+    # %LOCALAPPDATA% 的旧便携 config.env（含指向已删除便携目录的绝对路径），
+    # 会把 LS_MODEL_FP32 等判成不存在 → 假 FAIL。便携模式才以 config.env 为准。
+    if mode == "portable":
+        cfg = first(data_root / "config.env", root / "server" / ".env")
+    else:
+        cfg = first(root / "server" / ".env", data_root / "config.env")
     env_lines = {}
     if cfg and cfg.exists():
         for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines():

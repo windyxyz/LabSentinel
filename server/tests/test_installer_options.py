@@ -37,6 +37,9 @@ def isolated(tmp_path, monkeypatch):
     # 2026-10-30 审阅修复：--no-autostart 走 set_autostart(False) 会 reg delete 真实 HKCU Run 键——
     # 若开发机恰好装了自启会被测试静默删掉。彻底隔离注册表。
     monkeypatch.setattr(ip, "set_autostart", lambda install, on: None)
+    # 任务120：do_install/do_uninstall 新增控制面板卸载项读写——同样不许碰真实 HKCU
+    monkeypatch.setattr(ip, "set_uninstall_registry", lambda install, version: True)
+    monkeypatch.setattr(ip, "remove_uninstall_registry", lambda: None)
     yield tmp_path
 
 

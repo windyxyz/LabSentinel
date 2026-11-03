@@ -64,6 +64,7 @@ export const api = {
   cameraWebrtc: (id) => req('GET', `/api/cameras/${id}/webrtc`),
   maintenanceStatus: () => req('GET', '/api/maintenance/status'),
   maintenancePreview: () => req('GET', '/api/maintenance/preview'),
+  shutdownServer: () => req('POST', '/api/system/shutdown'),  // 任务120：网页端停止服务
   // 任务79：配置导入导出（导出走 fetch+blob，令牌经请求头传递；<a> 裸链接带不了）
   async configExportDownload() {
     const headers = {}

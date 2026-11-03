@@ -7,7 +7,8 @@
   - 启动：runtime\\python.exe -m uvicorn app.main:app（CREATE_NO_WINDOW，日志落 logs/server-<日期>.log）
   - --stop：按锁 PID 结束进程（先 taskkill 再 /F），删锁，退出码 0
 
-环境变量 LS_LAUNCHER_NO_BROWSER=1 时不开浏览器（自动化测试用）。
+环境变量 LS_LAUNCHER_NO_BROWSER=1 时不开浏览器（自动化测试用，也不弹失败 MessageBox）；
+LS_NO_MESSAGEBOX=1 只关弹窗；LS_READY_TIMEOUT_S 覆盖就绪等待（默认 60s，任务119）。
 """
 import logging
 import os
@@ -36,6 +37,7 @@ CREATE_NO_WINDOW = 0x08000000
 # 播种单源（任务51）：schema/演示摄像头/区域/规则统一在 scripts/seed_demo.py 维护
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import seed_demo  # noqa: E402
+import install_portable  # noqa: E402  任务120：安装位置检测/注册表卸载项共用
 
 log = logging.getLogger("launcher")
 
@@ -183,6 +185,9 @@ def start_server(port: int, cfg: dict) -> int:
            "LS_PPE_MODEL": (APP_ROOT / "models" / "yolo11n_ppe.onnx").as_posix(),
            "LS_MODEL_FP32": (APP_ROOT / "models" / "yolo11n.onnx").as_posix(),
            "LS_WEB_DIST": (APP_ROOT / "app" / "web").as_posix(),
+           # 任务119：便携布局下 config.py 的 BASE_DIR 推导会落到 <包>/app/tools/go2rtc.yaml
+           # （源码模式才是 <根>/tools），显式指回包根 tools/，避免 go2rtc 冷启动读错位置
+           "LS_GO2RTC_YAML": (APP_ROOT / "tools" / "go2rtc.yaml").as_posix(),
            "PYTHONUTF8": "1"}
     for k, v in cfg.items():          # config.env 里的 LS_* 透传（用户可加告警渠道等）
         if k.startswith("LS_"):
@@ -205,12 +210,113 @@ def open_browser(port: int) -> None:
     webbrowser.open(f"http://127.0.0.1:{port}/")
 
 
+def ready_timeout_s() -> int:
+    """就绪等待秒数（任务119）：默认 60（冷启动实测 ~29s，30s 太紧会误判失败）。"""
+    raw = os.environ.get("LS_READY_TIMEOUT_S", "60")
+    try:
+        return max(10, int(raw))
+    except ValueError:
+        return 60
+
+
+# ---- 任务120：安装/便携双形态驱动逻辑 ----
+MODE_FILE = DATA_ROOT / "launch.mode"  # 内容 "portable"=用户明确选便携；安装形态以注册表为准
+
+
+def decide_launch_mode(installed: Path | None, mode_file: Path, unattended: bool,
+                       app_root: Path | None = None) -> str:
+    """启动决策（纯函数，可测）→ 'installed' | 'portable' | 'ask'。
+
+    - 无人值守（自动化/冒烟）：绝不弹窗，注册表/标记只用于"转启安装副本"这一无交互路径，
+      否则 59 冒烟的隔离语义会被真机残留安装破坏——无人值守一律便携。
+    - 交互 + 已安装 → 安装副本（用户装完再点包，不应把包当便携跑——120 核心诉求）；
+      **例外：自己就是安装副本时不得转启"自己"**（否则安装版双击 → 自我接力 fork 炸弹，
+      2026-10-31 VM 实测：每个世代从 pythonw 查注册表都闪一个 reg.exe 黑窗，无限循环）；
+    - 交互 + 无安装 + 无标记 → 首启三选；标记 portable → 便携。
+    """
+    if unattended:
+        return "portable"
+    if installed is not None:
+        root = Path(app_root) if app_root is not None else APP_ROOT
+        try:
+            self_installed = root.exists() and installed.exists() and root.samefile(installed)
+        except OSError:
+            self_installed = False
+        return "portable" if self_installed else "installed"
+    if mode_file.exists() and mode_file.read_text(encoding="ascii").strip() == "portable":
+        return "portable"
+    return "ask"
+
+
+def ask_first_run() -> str:
+    """首启三选（MessageBox，标准库）→ 'portable' | 'install' | 'cancel'。"""
+    try:
+        import ctypes
+        rc = ctypes.windll.user32.MessageBoxW(
+            None,
+            "LabSentinel 首次启动\n\n"
+            "是(Y)：仅便携运行（不安装，随时可删包走人）\n"
+            "否(N)：安装到本机（开始菜单/控制面板卸载，双击包内程序自动转到安装版）\n"
+            "取消：退出",
+            "LabSentinel", 0x03 | 0x40)  # MB_YESNOCANCEL | MB_ICONINFORMATION
+        return {6: "portable", 7: "install"}.get(rc, "cancel")  # IDYES/IDNO/其余=cancel
+    except Exception:  # noqa: BLE001  session0/无桌面：默认便携（与旧行为一致）
+        log.info("首启选择弹窗失败（无桌面会话?），按便携继续")
+        return "portable"
+
+
+def relaunch_installed(install: Path) -> int:
+    """转启安装副本（驱动自身退出）。失败回落便携并留痕。"""
+    exe = install / "LabSentinel.exe"
+    try:
+        subprocess.Popen([str(exe)], cwd=str(install), creationflags=CREATE_NO_WINDOW)
+        log.info("已转启安装副本：%s", install)
+        return 0
+    except OSError as e:
+        log.warning("转启安装副本失败（%s），继续便携启动", e)
+        return -1
+
+
+def stop_process(pid: int) -> None:
+    """停止服务进程（先优雅后强杀，与 --stop 一致）。"""
+    subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True,
+                   creationflags=CREATE_NO_WINDOW)
+    time.sleep(2)
+    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
+                   creationflags=CREATE_NO_WINDOW)
+
+
 def do_start() -> int:
     setup_logging()
     log.info("===== launcher start =====")
     if not (RUNTIME / "python.exe").exists():
         log.error("找不到 runtime\\python.exe：%s", RUNTIME)
         return 1
+
+    # 任务120：安装/便携双形态决策（无人值守不弹窗，语义见 decide_launch_mode）
+    unattended = bool(os.environ.get("LS_LAUNCHER_NO_BROWSER") or os.environ.get("LS_NO_MESSAGEBOX"))
+    installed = install_portable.installed_location()
+    mode = decide_launch_mode(installed, MODE_FILE, unattended, app_root=APP_ROOT)
+    log.info("启动形态：%s", mode)
+    if mode == "ask":
+        choice = ask_first_run()
+        if choice == "cancel":
+            return 0
+        if choice == "portable":
+            try:
+                MODE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                MODE_FILE.write_text("portable", encoding="ascii")  # 选便携才落标记
+            except OSError as e:
+                log.warning("模式标记写入失败: %s", e)
+        else:  # install：安装器接管全程（含装完启动），驱动让位退出——不再转启，避免双实例
+            installer = APP_ROOT / "scripts" / "installer.py"
+            log.info("拉起安装器（交互）...")
+            return subprocess.call([str(RUNTIME / "python.exe"), str(installer), "install", "--ui"])
+    elif mode == "installed":
+        if relaunch_installed(installed) == 0:
+            return 0
+        log.warning("已安装但转启失败，按便携继续")
+
     cfg = read_config()
     first_run(cfg)
     cfg = read_config()
@@ -241,19 +347,36 @@ def do_start() -> int:
         LOCK.write_text(f"{pid} {port}", encoding="ascii")
 
     t0 = time.monotonic()
-    while time.monotonic() - t0 < 30:
+    timeout_s = ready_timeout_s()
+    next_log = 5.0
+    while time.monotonic() - t0 < timeout_s:
         if health(port):
             log.info("服务就绪（%.1fs）http://127.0.0.1:%d/", time.monotonic() - t0, port)
             open_browser(port)
             return 0
+        waited = time.monotonic() - t0
+        if waited >= next_log:  # 每 5s 一条进展日志，排障时能区分"慢"与"死"
+            log.info("等待服务就绪中 %.0fs/%ds", waited, timeout_s)
+            next_log += 5.0
         time.sleep(1)
-    log.error("30s 内未就绪，请查看 %s", LOGS / f"server-{datetime.now():%Y%m%d}.log")
+    log.error("%ds 内未就绪，请查看 %s", timeout_s, LOGS / f"server-{datetime.now():%Y%m%d}.log")
+    # 任务119：无人值守（自动化/冒烟）不弹 MessageBox，只落日志；仍要清理子进程与锁，
+    # 避免 30s/60s 判负后残留 uvicorn 占着端口和库
+    if os.environ.get("LS_LAUNCHER_NO_BROWSER") or os.environ.get("LS_NO_MESSAGEBOX"):
+        log.error("无人值守模式（NO_BROWSER/NO_MESSAGEBOX），跳过弹窗，返回非 0")
+    else:
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                None, f"服务 {timeout_s} 秒内未就绪。\n日志：{LOGS}", "LabSentinel 启动失败", 0x10)
+        except Exception:  # noqa: BLE001
+            pass
+    log.info("超时清理：停止服务进程 pid=%d 并删除锁", pid)
     try:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(
-            None, f"服务 30 秒内未就绪。\n日志：{LOGS}", "LabSentinel 启动失败", 0x10)
-    except Exception:  # noqa: BLE001
-        pass
+        stop_process(pid)
+    except Exception as e:  # noqa: BLE001
+        log.warning("停止服务进程失败: %s", e)
+    LOCK.unlink(missing_ok=True)
     return 1
 
 
@@ -264,9 +387,11 @@ def do_stop() -> int:
         print("未发现运行中的 LabSentinel（无锁文件）。")
         return 0
     pid, port = lock
-    subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
+    subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True,
+                   creationflags=CREATE_NO_WINDOW)
     time.sleep(2)
-    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
+                   creationflags=CREATE_NO_WINDOW)
     LOCK.unlink(missing_ok=True)
     log.info("已停止 pid=%d port=%d", pid, port)
     print(f"已停止 LabSentinel（pid={pid}, port={port}）。")

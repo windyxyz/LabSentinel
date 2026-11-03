@@ -9,7 +9,7 @@
 | `stop-all.bat` | 一键停止 | 按端口找 PID `taskkill /F`，带确认；顺带关闭名为 go2rtc/server/web 的控制台窗口壳 |
 | `health-check.bat` | 状态表 | curl 探测 API/system、go2rtc /api、Web（vite 仅绑 IPv6，用 `[::1]` 探测） |
 | `release_manifest.py` | 发布产物清单与校验和（任务58） | 对 dist/ 最新 zip 生成 `SHA256SUMS.txt` + `RELEASE-MANIFEST.json`（version/size/sha256/条目数/缺失项/git）；`--verify dist` 重算对比；必需条目缺失 exit 2 |
-| `smoke_portable.py` | 便携包一键冒烟（任务59） | `python scripts/smoke_portable.py --zip dist/LabSentinel-portable-*.zip` → 解压到 %TEMP%、沙箱 LOCALAPPDATA、启动（exe 优先/启动.bat 回退）→ 就绪/前端/播种 8 项 PASS/FAIL → `--stop` → 隔离断言（真实 %LOCALAPPDATA% 不变）→ 清理；失败 exit 1 并保留现场；`--dir` 调试已解压目录；`--port` 默认 8180 不漂移 |
+| `smoke_portable.py` | 便携包一键冒烟（任务59） | `python scripts/smoke_portable.py --zip dist/LabSentinel-portable-*.zip` → 解压到 %TEMP%、沙箱 LOCALAPPDATA、启动（exe 优先/启动.bat 回退）→ 就绪/前端/播种 8 项 PASS/FAIL → `--stop` → 隔离断言（真实 %LOCALAPPDATA% 不变）→ 清理；失败 exit 1 保留现场并打印日志尾部；`--timeout` 默认 90s（须大于启动器 `LS_READY_TIMEOUT_S` 默认 60，任务119）；`--dir` 调试已解压目录；`--port` 默认 8180 不漂移 |
 
 ## 用法
 

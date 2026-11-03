@@ -182,6 +182,35 @@ def system():
     }
 
 
+# ---- 服务控制（任务120：网页端停止）----
+SHUTDOWN_DELAY_S = 0.8  # 留给响应送达客户端的窗口
+
+
+def _do_shutdown() -> None:
+    """退出前清启动器锁（便携布局锁在 data 上一级 logs/；源码模式该路径不存在，静默）。"""
+    import os
+    import time
+    from pathlib import Path as _P
+    time.sleep(SHUTDOWN_DELAY_S)
+    try:
+        lock = _P(str(settings.data_dir)).parent / "logs" / "launcher.lock"
+        lock.unlink(missing_ok=True)
+    except OSError:
+        pass
+    os._exit(0)  # 跳过 lifespan 收尾：与 taskkill /F 同级口径；WAL 崩溃安全
+
+
+@router.post("/system/shutdown", dependencies=[Depends(require_admin)])
+def shutdown_server():
+    """网页端停止服务（任务120）：响应返回后 ~1s 进程退出。
+
+    require_admin 口径与其它写接口一致（未设令牌=开放）。测试注入：monkeypatch _do_shutdown。
+    """
+    import threading
+    threading.Thread(target=_do_shutdown, daemon=True, name="shutdown").start()
+    return {"ok": True, "msg": "服务即将停止，可关闭本页面"}
+
+
 # ---- 模型/配置状态（任务91，只读）----
 @router.get("/model/status", dependencies=[Depends(require_read)])
 def model_status():
