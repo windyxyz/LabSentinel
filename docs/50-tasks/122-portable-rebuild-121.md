@@ -68,3 +68,22 @@ python scripts\rc_regression.py --fast
 - 在本文末尾写 `## 执行报告`（命令、数字、失败与修复）；
 - 把 zip 名/sha256 写进 `docs/发布核对报告.md`；
 - 下一项：118（Hyper-V 干净 VM 复测，使用本包；低负载，人工协作，失败写 BLOCKED）。
+
+## 执行报告
+
+**flash 2026-11-03 完成（HEAD f07c0df 重建；smoke 8/8、doctor 10/0/0、rc_regression 4/4、冷启动 20.0s）**
+
+- **产物**：`dist/LabSentinel-portable-20261103.zip`——278.9MB / **12598 条目** /
+  sha256 `6073b88f28c0935d1426aa533cc2f6c1689638f4e7665e7c276f8ceb3a58c5d9`
+  （git=2f0403a；**含 121**：folders.py/vision.py/图片识别页 index-9gf8y74S.js 解压核验 √；
+  也含 106-108 主线修复，f07c0df 在 f7ba376 之后）。
+- **步骤实测**：npm build ✓（gzip **54.29KB**，与看板口径一致）；build_portable --zip ✓
+  （app 体积 3→4MB）；manifest --verify **OK**（必需条目齐全，可选缺卸载.bat=安装器生成属预期）；
+  smoke **8/8 PASS**（backend=directml、播种 4 路、真实 LOCALAPPDATA 零污染、新资产 200）；
+  包内 doctor **10 PASS / 0 WARN / 0 FAIL**；
+  **冷启动直证 20.0s**（隔离解压→`/api/system` 200，窗口 60s，余量充足）；
+  **rc_regression --fast 4/4 PASS exit 0**（pytest PASS @主线口径 343 / build 1.5s /
+  release_check 0.9s / doctor 0.1s）。
+- **清理**：8180/8185/8187/1981 无监听、pythonw/LabSentinel.exe 零残留、`%TEMP%\ls-smoke-*`
+  与 ls122-* 已清、主库 mtime 10-31 未动。
+- **遗留**：无。下一项 118（Hyper-V 复测用本包）。
