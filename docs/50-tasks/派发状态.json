@@ -1,17 +1,19 @@
 {
-  "updated_ts": "2026-11-03T22:10:00",
-  "updated_epoch": 1793715016,
+  "updated_ts": "2026-11-03T23:10:00",
+  "updated_epoch": 1793718600,
   "status": "running",
+  "owner": "flash",
   "current_task": "122",
   "current_task_doc": "docs/50-tasks/122-portable-rebuild-121.md",
-  "dispatched_at": "2026-11-03T22:10:00",
-  "dispatch_epoch": 1793715016,
-  "last_progress_iso": "2026-11-03T22:10:00",
-  "last_progress_epoch": 1793715016,
-  "last_progress_note": "121已提交f7ba376（pytest329/build54.29/DirectML端到端+积压队列E2E）；子代理恢复，派发122-130批次，主线转规划/验收",
+  "mainline_tasks": [],
+  "dispatched_at": "2026-11-03T23:10:00",
+  "dispatch_epoch": 1793718600,
+  "last_progress_iso": "2026-11-03T23:10:00",
+  "last_progress_epoch": 1793718600,
+  "last_progress_note": "主线完成106/107/108（pytest343，待提交）；121已提交f7ba376；子代理从122便携包重建继续，完成写报告不要commit",
   "queue": [
     "118",
-    "106", "107", "108", "109", "110",
+    "109", "110",
     "114", "112", "111", "113", "116", "115", "117",
     "103", "102", "99", "101", "84", "87",
     "98", "100", "104"
@@ -29,13 +31,11 @@
   "auto_stop": true,
   "priority_order": [
     "122", "118",
-    "106", "107", "108", "109", "110",
+    "109", "110",
     "114", "112", "111", "113", "116", "115", "117",
     "103", "102", "99", "101", "84", "87",
     "98", "100", "104"
   ],
-  "batch_plan": "docs/50-tasks/批次122-130-Windows收尾与发布候选.md",
-  "mainline_role": "planning/acceptance only; flash executes batch 122-130; mainline commits after review",
   "hyperv_vm": {
     "name": "Win10 测试环境",
     "state": "Off",

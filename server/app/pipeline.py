@@ -259,6 +259,10 @@ class CameraWorker(threading.Thread):
         dets = engine.detect_persons(frame)
         zones = self.store.zones(self.camera["id"])
         zone_polys = {z["id"]: parse_polygon(z["polygon"]) for z in zones}
+        zone_ids = set(zone_polys)
+        for zid in list(self._zone_states):
+            if zid not in zone_ids:  # 区域已删除：状态一并回收
+                self._zone_states.pop(zid, None)
         for z in zones:
             self._zone_states.setdefault(z["id"], ZoneState())
 
@@ -271,6 +275,7 @@ class CameraWorker(threading.Thread):
                     change = st.update(tid, False)
                     if change and change[1]:
                         self._fire_event(zid, "exit", tid, f"离开安全区「{self._zone_name(zid)}」")
+                st.retain(set())  # 106：空帧后不再保留任何轨迹状态
             return
 
         # supervision Detections + ByteTrack
@@ -323,6 +328,10 @@ class CameraWorker(threading.Thread):
                         self._fire_stranger(tid, zname)
                 if exited:
                     self._fire_event(zid, "exit", tid, f"离开安全区「{self._zone_name(zid)}」")
+
+        # 106：本帧处理完进出场后，回收不再活跃的轨迹状态（防长跑 track id 无界增长）
+        for st in self._zone_states.values():
+            st.retain(active_tids)
 
         # 在场人数超限（规则级冷却统一由 RuleEngine 管，track 记 0）
         for rule in self.rules.occupancy_rules(self.camera["id"]):

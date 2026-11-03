@@ -32,4 +32,23 @@
 
 ## 执行报告
 
-（待填：改动 / 大小对比 / 测试 / 遗留）
+**主线 2026-11-03 完成（提交前）**
+
+- **ZoneState**（`zones.py`）：新增 `size`、`retain(active_tids, max_size=None)`：
+  - 删除本帧不活跃轨迹（离场状态先由 pipeline 的 update/exit 处理，再回收）；
+  - 上限 5000；超限只淘汰非 active（active 不淘汰，保住在场/离场语义）；
+  - 返回删除条数，便于测试/观测。
+- **pipeline**（`pipeline.py`）：区域配置变化时回收已删除 zone 的状态；每帧处理完进出场后
+  `st.retain(active_tids)`；空帧分支 `retain(set())`，不再保留任何轨迹。
+- **RuleEngine**（`rules.py`）：新增 `prune(now, max_age_s=None)` 与 `_maybe_prune`：
+  - 默认保留期 = `max(3600s, 全部规则最大 cooldown)`，长冷却规则不会被误清；
+  - 每 1000 次 `match` 清理一次（不做每帧全表扫描）；`_last_prune` 记录。
+- **测试**（`server/tests/test_state_prune.py`，6 项）：
+  - 10k 轨迹 → retain 活跃 10 个：`10000 → 10`，删除 9990；
+  - cap 行为：非 active 淘汰、active 永不淘汰；
+  - 冷却键按年龄清理/默认长冷却保留/每 N 次自动清理；
+  - pipeline 空帧后状态归零。
+- **回归**：`test_state_prune + test_zone_exit_state + test_core` **19 passed**；
+  事件语义（enter/exit 各一次、再进入重新 enter）不变。
+- 说明：未做真实 24h 长跑内存曲线；按状态上限+定期清理给出有界性，后续 24h 验收可观测进程内存。
+

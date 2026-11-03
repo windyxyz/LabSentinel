@@ -1,6 +1,7 @@
 """SQLite 存储（stdlib sqlite3；全部使用字面量 SQL + 参数占位符）。"""
 import json
 import logging
+import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -629,6 +630,20 @@ class Store:
         with self._conn() as c:
             r = c.execute("SELECT 1 FROM events WHERE snapshot=? LIMIT 1", (str(path),)).fetchone()
             return r is not None
+
+    def referenced_media_paths(self) -> set[str]:
+        """所有仍被事件/图片记录引用的媒体路径（任务107 孤儿扫描用，一次查完避免 N 次查询）。"""
+        out: set[str] = set()
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT snapshot FROM events WHERE snapshot IS NOT NULL "
+                "UNION SELECT video FROM events WHERE video IS NOT NULL "
+                "UNION SELECT snapshot FROM folder_images WHERE snapshot IS NOT NULL")
+            for r in rows:
+                p = r[0]
+                if p:
+                    out.add(os.path.normcase(os.path.abspath(str(p))))
+        return out
 
     def set_event_video(self, eid, path):
         with self._lock, self._conn() as c:

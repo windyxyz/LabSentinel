@@ -16,6 +16,10 @@ from .config import settings
 
 _INTERVAL_S = 6 * 3600
 _BATCH = 50  # 紧急清理每批删除的事件数（删完重查磁盘）
+_ORPHAN_GRACE_S = 3600  # 孤儿媒体宽限：1 小时内可能仍在录制/写入
+_ORPHAN_MAX_PER_RUN = 500  # 单轮最多删孤儿文件数，防一次卡死
+_ORPHAN_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp",
+                ".mp4", ".avi", ".mkv", ".mov"}
 
 _last_result: dict = {}
 _lock = threading.Lock()
@@ -41,6 +45,40 @@ def _disk_free_gb() -> float:
         return shutil.disk_usage(str(settings.data_dir)).free / 1e9
     except Exception:  # noqa: BLE001
         return float("inf")
+
+
+def _iter_orphan_media(store, referenced: set[str]):
+    """遍历 snapshot_dir/video_dir 中"未被任何事件/图片记录引用且已过宽限期"的文件。
+
+    不扫 annotation_pool（误报池有独立保留期）；路径必须在 data_dir 内；不递归子目录。
+    yield (path, size_bytes)。
+    """
+    now = time.time()
+    data_root = Path(settings.data_dir)
+    for d in (settings.snapshot_dir, settings.video_dir):
+        try:
+            if not Path(d).is_dir():
+                continue
+            with os.scandir(d) as entries:
+                for e in entries:
+                    try:
+                        if not e.is_file():
+                            continue
+                        if Path(e.path).suffix.lower() not in _ORPHAN_EXTS:
+                            continue
+                        key = os.path.normcase(os.path.abspath(e.path))
+                        if key in referenced:
+                            continue
+                        st = e.stat()
+                        if now - st.st_mtime < _ORPHAN_GRACE_S:
+                            continue  # 新文件/可能仍在写入
+                        if not _safe_within(e.path, data_root):
+                            continue
+                        yield e.path, st.st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
 
 
 def preview_cleanup(store) -> dict:
@@ -105,6 +143,14 @@ def preview_cleanup(store) -> dict:
                 (img_cutoff,)).fetchone()[0]
     except Exception:  # noqa: BLE001  旧库无表时跳过
         pass
+    orph_files, orph_bytes = 0, 0
+    try:
+        refs = store.referenced_media_paths()
+        for _p, size in _iter_orphan_media(store, refs):
+            orph_files += 1
+            orph_bytes += size
+    except Exception as e:  # noqa: BLE001  孤儿扫描失败不应阻塞预演其它部分
+        print(f"[retention] 孤儿预演跳过: {e}")
     free = _disk_free_gb()
     return {
         "cutoff": cutoff,
@@ -112,8 +158,9 @@ def preview_cleanup(store) -> dict:
         "pool": {"files": pool_files, "bytes": pool_bytes},
         "audit": {"count": audit_rows},
         "images": {"count": img_rows, "cutoff": img_cutoff},
+        "orphans": {"files": orph_files, "bytes": orph_bytes},
         "disk_free_gb": round(free, 2),
-        "estimated_free_gb": round(free + (ev_bytes + pool_bytes) / 1e9, 2),
+        "estimated_free_gb": round(free + (ev_bytes + pool_bytes + orph_bytes) / 1e9, 2),
         "would_emergency_clean": free < settings.disk_min_free_gb,
     }
 
@@ -215,6 +262,32 @@ def run_cleanup(store) -> dict:
     except Exception as e:  # noqa: BLE001  旧库无 folder_images 表时不阻塞其它清理
         print(f"[retention] 图片记录清理跳过: {e}")
     stats["deleted_images"] = deleted_images
+
+    # 3.7) 孤儿媒体（任务107）：无事件/图片记录引用、超过 1h 宽限、data_dir 内的媒体文件
+    deleted_orphans, freed_orphan_bytes, orphans_limited = 0, 0, False
+    try:
+        refs = store.referenced_media_paths()
+        for p, size in _iter_orphan_media(store, refs):
+            if deleted_orphans >= _ORPHAN_MAX_PER_RUN:
+                orphans_limited = True
+                break
+            try:
+                os.remove(p)
+                deleted_orphans += 1
+                freed_orphan_bytes += size
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"[retention] 孤儿媒体删除失败 {p}: {e}")
+    except Exception as e:  # noqa: BLE001  孤儿扫描失败不阻塞其它清理
+        print(f"[retention] 孤儿媒体清理跳过: {e}")
+    stats["deleted_orphans"] = deleted_orphans
+    stats["freed_orphan_mb"] = round(freed_orphan_bytes / 1e6, 3)
+    stats["orphans_limited"] = orphans_limited
+    if deleted_orphans:
+        print(f"[retention] 孤儿媒体清理 {deleted_orphans} 个 / "
+              f"{stats['freed_orphan_mb']:.2f}MB"
+              + ("（达单轮上限，剩余下轮）" if orphans_limited else ""))
 
     # 4) 磁盘紧急清理：仍不够就从最旧事件开始逐批删（先删文件再删行，每批复查）
     freed_rounds = 0

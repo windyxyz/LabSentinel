@@ -78,6 +78,7 @@ def _face_compliance_notice():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     dispatcher.hub.bind_loop(asyncio.get_running_loop())
+    dispatcher.reset()  # 108：同一进程多次 lifespan（测试）时重新启用告警池
     store = Store()
     dispatcher.bind_store(store)  # 任务13：投递记录/死信需要写库
     manager = CameraManager(store)
@@ -92,6 +93,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        dispatcher.shutdown(wait=False, timeout=3)  # 108：先停告警派发，退出不被重试拖住
         manager.stop_all()
         retention.stop_scheduler()
         escalation.stop_scheduler()

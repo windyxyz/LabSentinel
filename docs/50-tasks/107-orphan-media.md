@@ -30,4 +30,24 @@
 
 ## 执行报告
 
-（待填：改动 / 预演实删 / 测试 / 遗留）
+**主线 2026-11-03 完成**
+
+- `retention.py` 新增孤儿扫描：
+  - 目录 `snapshot_dir`/`video_dir`（不递归、不扫 annotation_pool）；
+  - 扩展名白名单（jpg/png/bmp/webp/mp4/avi/mkv/mov）；
+  - 仅处理 **mtime 早于 1h** 且未被事件/图片记录引用的文件；路径必须严格位于 `data_dir`；
+  - 单轮最多删 **500** 个，超出标记 `orphans_limited=true` 下轮继续；
+  - 统计新增 `deleted_orphans`、`freed_orphan_mb`、`orphans_limited`（不改旧字段）。
+- `Store.referenced_media_paths()`：一次 UNION 查询 events.snapshot/video + folder_images.snapshot，
+  避免逐文件 N 次查询；与 121 证据副本联动，**图片记录引用的证据不会被当孤儿删**。
+- `preview_cleanup()` 新增 `orphans:{files,bytes}` 并计入 `estimated_free_gb`，只读不删。
+- 测试 `server/tests/test_orphan_media.py`（4 项）：
+  - 2 个旧孤儿（各 1MB）删除、引用文件（事件截图/事件视频/图片证据）保留、
+    10 分钟新文件保留；
+  - preview 只统计 2 个/字节数>0，不删；
+  - data_dir 外路径不删；空目录/不存在目录不崩。
+- **回归**：`test_orphan_media + test_state_prune + test_retention + test_retention_preview`
+  **18 passed**。
+- 说明：真实 data 未做删除演练（按要求测试临时目录）；6 小时调度会按 500/轮清理。
+  运维手册/FAQ 的“孤儿视频/截图会不会自动清”建议在 99/104 收口时同步一句（本任务未改大文档）。
+

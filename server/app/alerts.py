@@ -7,6 +7,7 @@ import asyncio
 import concurrent.futures
 import json
 import smtplib
+import threading
 import time
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -471,11 +472,42 @@ class AlertDispatcher:
                          EmailChannel(), GenericWebhookChannel()]  # 任务67：+通用 Webhook
         self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=2,
                                                            thread_name_prefix="alert")
+        self._closing = threading.Event()  # 108：服务退出时打断退避等待，避免拖住进程
+
+    def shutdown(self, wait: bool = False, timeout: float = 3.0):
+        """停止接收新投递并尽量取消排队任务；最多等 timeout 秒（108）。
+
+        ThreadPoolExecutor 的线程无法强制杀死；这里用 _closing 打断退避 sleep，
+        让运行中的重试在 ~0s 内放弃，正常退出不被 1s/4s/15s 退避拖住。
+        """
+        self._closing.set()
+        try:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:  # Python < 3.9（本项目 3.12，仅兜底）
+            self._pool.shutdown(wait=False)
+        if wait:
+            deadline = time.monotonic() + max(0.0, timeout)
+            for t in list(threading.enumerate()):
+                if not t.name.startswith("alert") or t is threading.current_thread():
+                    continue
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                t.join(timeout=left)
+
+    def reset(self):
+        """重新启用派发（测试/重启场景：同一进程多次 lifespan，shutdown 后池已关闭）。"""
+        if self._closing.is_set():
+            self._closing.clear()
+            self._pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="alert")
 
     def bind_store(self, store):
         self.store = store
 
     def dispatch(self, event_row: dict):
+        if self._closing.is_set():
+            return  # 服务退出中：不再排队新投递
         self.hub.broadcast_sync(event_row)
         text = render_alert(event_row)
         event_id = event_row.get("id", 0)
@@ -505,11 +537,15 @@ class AlertDispatcher:
 
     def _deliver_with_retry(self, ch, event_id: int, level: int, text: str, event: dict | None = None):
         """单渠道投递：记录 → 重试（指数退避）→ 死信。线程池内执行。"""
+        if self._closing.is_set():
+            return
         name = getattr(ch, "name", type(ch).__name__)
         did = self.store.add_delivery(event_id, name) if self.store else None
         last_error = None
         attempts = 0
         for i in range(len(RETRY_BACKOFF) + 1):  # 首次 + 3 次重试
+            if self._closing.is_set():
+                return  # 退出中：不再发/不再等退避
             attempts = i + 1
             try:
                 ok = bool(ch.send(level, text, event=event) if event is not None
@@ -522,33 +558,64 @@ class AlertDispatcher:
                     self.store.update_delivery(did, "ok", attempts, None)
                 return
             if i < len(RETRY_BACKOFF):
-                time.sleep(RETRY_BACKOFF[i])  # 1s/4s/15s
+                if self._closing.wait(RETRY_BACKOFF[i]):  # 108：可被 shutdown 立即打断
+                    return
         if did is not None:
             self.store.update_delivery(did, "failed", attempts, last_error)
         print(f"[alert] {name} 投递失败（死信）event#{event_id}: {last_error}")
 
+    def _test_channel(self, ch, text: str) -> dict:
+        """单渠道自检（108）：并发执行体，返回稳定结构。"""
+        name = getattr(ch, "name", type(ch).__name__)
+        did = self.store.add_delivery(0, name) if self.store else None
+        try:
+            ok = bool(ch.send(1, text))
+            err = None if ok else "发送失败"
+        except Exception as e:  # noqa: BLE001
+            ok, err = False, f"{type(e).__name__}: {e}"
+        if did is not None:
+            self.store.update_delivery(did, "ok" if ok else "failed", 1, err)
+        return {"channel": name, "ok": ok, "error": err}
+
     def send_test(self) -> list[dict]:
-        """渠道健康自检（任务13C）：向所有已配置渠道发测试消息，event_id=0 不落 events。"""
-        results = []
-        for ch in self.channels:
+        """渠道健康自检（任务13C/108）：已配置渠道并发发送，结果按 channels 顺序稳定返回。
+
+        每渠道自身超时仍为 5s（邮件连接 10s）；future 等待上限 6s，避免串行 8 渠道拖到 ~50s。
+        """
+        text = render_alert({
+            "ts": datetime.now().isoformat(timespec="seconds"), "camera_id": 0,
+            "type": "alert_test", "level": 1, "track_id": 0,
+            "detail": "渠道自检消息，收到即表示该渠道配置正常。"})
+        results: list[dict | None] = [None] * len(self.channels)
+        todo: list[tuple[int, object]] = []
+        for i, ch in enumerate(self.channels):
             name = getattr(ch, "name", type(ch).__name__)
             cfg = getattr(ch, "configured", None)
-            if callable(cfg) and not cfg():  # 自检结果里明确标注未配置，但不落投递记录
-                results.append({"channel": name, "ok": False, "error": "未配置"})
+            if callable(cfg) and not cfg():  # 未配置：不提交、不落投递记录
+                results[i] = {"channel": name, "ok": False, "error": "未配置"}
                 continue
-            did = self.store.add_delivery(0, name) if self.store else None
+            todo.append((i, ch))
+        if todo:
+            ex = concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(todo)), thread_name_prefix="alert-test")
+            futs = {ex.submit(self._test_channel, ch, text): i for i, ch in todo}
             try:
-                ok = bool(ch.send(1, render_alert({
-                    "ts": datetime.now().isoformat(timespec="seconds"), "camera_id": 0,
-                    "type": "alert_test", "level": 1, "track_id": 0,
-                    "detail": "渠道自检消息，收到即表示该渠道配置正常。"})))
-                err = None if ok else "发送失败"
-            except Exception as e:  # noqa: BLE001
-                ok, err = False, f"{type(e).__name__}: {e}"
-            if did is not None:
-                self.store.update_delivery(did, "ok" if ok else "failed", 1, err)
-            results.append({"channel": name, "ok": ok, "error": err})
-        return results
+                for fut, idx in futs.items():
+                    try:
+                        results[idx] = fut.result(timeout=6.0)
+                    except concurrent.futures.TimeoutError:
+                        name = getattr(self.channels[idx], "name",
+                                       type(self.channels[idx]).__name__)
+                        results[idx] = {"channel": name, "ok": False,
+                                        "error": "自检超时（>6s）"}
+                    except Exception as e:  # noqa: BLE001
+                        name = getattr(self.channels[idx], "name",
+                                       type(self.channels[idx]).__name__)
+                        results[idx] = {"channel": name, "ok": False,
+                                        "error": f"{type(e).__name__}: {e}"}
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
+        return [r for r in results if r is not None]
 
 
 dispatcher = AlertDispatcher()

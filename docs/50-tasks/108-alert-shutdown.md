@@ -32,4 +32,27 @@
 
 ## 执行报告
 
-（待填：改动 / 耗时 / 测试 / 遗留）
+**主线 2026-11-03 完成**
+
+- **退出**（`alerts.py` + `main.py`）：
+  - `AlertDispatcher.shutdown(wait=False, timeout=3)`：置 `_closing` → `pool.shutdown(wait=False,
+    cancel_futures=True)`；`wait=True` 时最多等 3s。
+  - 重试退避由 `time.sleep` 改为 `_closing.wait(backoff)`：服务退出时运行中的重试**立即放弃**，
+    不再被 1s/4s/15s 拖住；`dispatch`/`_deliver_with_retry` 入口检查 `_closing`。
+  - lifespan `finally` 第一句调用 `dispatcher.shutdown(...)`，先停派发再停摄像头。
+  - 新增 `reset()`：同一进程多次 lifespan（TestClient/重启场景）时重建线程池并清除关闭标记。
+  - 说明：未使用私有 daemon 线程工厂（跨 Python 版本脆弱）；用可打断退避达到同等“不拖退出”效果。
+- **自测并发**（`send_test`）：
+  - 已配置渠道提交到短生命周期 `ThreadPoolExecutor`（max 8），结果按 `channels` 原顺序返回；
+  - 未配置渠道仍返回“未配置”，**不建投递记录、不提交任务**；
+  - 每 future 等待上限 6s（HTTP 渠道自身 5s；邮件 SMTP 10s 可能后台多跑几秒，但 UI 不再串行等待）。
+- **测试**（`tests/test_dispatcher_shutdown.py`，4 项）：
+  - 2 个 1.2s 慢渠道并发自检总耗时 <3s（串行应 ≥2.4s），顺序稳定；
+  - 未配置渠道零投递记录；
+  - `RETRY_BACKOFF=(5,5,5)` 下 shutdown 后重试线程 <1.5s 退出；
+  - shutdown 幂等、reset 可重新启用。
+- **回归**：`test_dispatcher_shutdown + test_alerts + test_alerts_page + test_push +
+  test_generic_webhook` **34 passed**。
+- 遗留：邮件渠道连接超时仍是 10s（未改投递语义）；自检 UI 对邮件最坏显示 6s 超时，
+  后台线程可能稍后完成——不影响退出（进程退出时由 Python 线程池收尾）。
+
