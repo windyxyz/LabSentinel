@@ -77,6 +77,9 @@ Docker 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道�
 | [docs/发布核对报告.md](docs/发布核对报告.md) | 发布前核对与终检记录（版本/校验和/阻塞项） |
 | [docs/部署FAQ.md](docs/部署FAQ.md) | 踩坑集中答疑（网络/依赖/推理/训练/告警）；启动失败先跑 `python scripts/doctor.py` 自检 |
 | [docs/68-image-folder-ingestion.md](docs/68-image-folder-ingestion.md) | **图片文件夹自动识别使用手册**：截图目录接入、关键/违规定义、配置与排障 |
+| [docs/72-project-review-2026-11-04.md](docs/72-project-review-2026-11-04.md) | **复审与 Windows 发布路线重排**（建议取舍/新队列/发布阻塞） |
+| [docs/69-splayer-next-benchmark.md](docs/69-splayer-next-benchmark.md) | SPlayer-Next/本机 OSS/监控同类项目对标（19 条建议池） |
+| [docs/71-oss-source-study.md](docs/71-oss-source-study.md) | OSS 源码级参考点（Frigate/MQTT/插件/防休眠等出处） |
 | [docs/30-architecture.md](docs/30-architecture.md) | 架构总览（线程模型、推理锁机制、扩展点） |
 | [docs/35-api-reference.md](docs/35-api-reference.md) | REST/WS API 完整契约（客户端开发唯一依据） |
 | [docs/45-model-onboarding.md](docs/45-model-onboarding.md) | 模型接入手册（换模型零改代码） |

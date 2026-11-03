@@ -105,12 +105,17 @@
 | **105（P0）** | 审阅修复的回归补丁 | **先做** |
 | **106–110** | 状态清理/孤儿媒体/告警退出/deploy/PID 安全 | 106–108 ✅ 主线（f07c0df）；109–110 待做 |
 | **111–117** | Windows 功能补齐（分组/日期规则/发现/守护/PWA/模板/更新检查） | 已派发 |
-| **118** | Hyper-V 干净 VM 安装验收（低负载） | 75 出新 zip 后做 |
+| **118** | Hyper-V 干净 VM 安装验收（低负载） | ✅ 用户确认已复测；待补记录 |
 | [119-first-start-reliability.md](./119-first-start-reliability.md) | 首次启动 60s 可配/便携 go2rtc/doctor 源模式 | ✅ 已验收（a8d8ca1） |
 | [120-installer-driver-split.md](./120-installer-driver-split.md) | 安装器/驱动拆分、控制面板卸载、Web 停止 | ✅ 已验收（a8d8ca1） |
 | [121-folder-image-ingestion.md](./121-folder-image-ingestion.md) | **图片文件夹自动识别（关键图片汇报）** | ✅ 主线 2026-11-03 完成（f7ba376） |
-| [122-portable-rebuild-121.md](./122-portable-rebuild-121.md) | **便携包重建（含 121）+ 冒烟/manifest/doctor** | 🔥 当前（flash） |
-| [批次122-130-Windows收尾与发布候选.md](./批次122-130-Windows收尾与发布候选.md) | **Windows 收尾批次总表（flash 执行）** | 已派发 |
+| [122-portable-rebuild-121.md](./122-portable-rebuild-121.md) | **便携包重建（含 121）+ 冒烟/manifest/doctor** | ✅ 2026-11-03 完成（aadabd5） |
+| [123-keep-awake.md](./123-keep-awake.md) | **监控机防休眠（24h 前置）** | 待做（P1） |
+| [124-genai-false-positive.md](./124-genai-false-positive.md) | **本地 VLM 误报预分类（默认关）** | 待做（P2） |
+| [125-mqtt-event-bus.md](./125-mqtt-event-bus.md) | **MQTT 事件总线（生态开放）** | 待做（P2） |
+| [126-plugin-phase1.md](./126-plugin-phase1.md) | **插件一期：约定式外挂** | 待做（P2） |
+| [129-release-hygiene.md](./129-release-hygiene.md) | 发布卫生（版本/TODO/pycache/CI） | 待做（P3，104 前） |
+| [批次122-130-Windows收尾与发布候选.md](./批次122-130-Windows收尾与发布候选.md) | Windows 收尾批次总表 | 已被 [docs/72 复审路线](../72-project-review-2026-11-04.md) 重排 |
 
 > **平台顺序**：Windows 优先；WSL 仅开发调试；**Docker 暂不考虑**；Android/iOS 后续。
 > 见 [67 平台路线图](../67-platform-roadmap.md)。
