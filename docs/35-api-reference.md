@@ -119,7 +119,10 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
 |---|---|---|
 | GET | /api/alert-deliveries?status=&limit=50 | 投递记录（pending/ok/failed；failed=死信） |
 | POST | /api/alert-deliveries/{id}/retry | 死信手动重发（重新走 1s/4s/15s 三次退避） |
-| POST | /api/alert-test | 渠道健康自检：向全部已配置渠道发测试消息，返回逐渠道 ok/error |
+| POST | /api/alert-test?channel=wecom | 渠道自检：不传 channel=全部已配置；传=只测该渠道 |
+| GET | /api/alerts/config | 网页告警配置状态（仅管理员；密钥掩码/`has_*`，不含明文） |
+| PUT | /api/alerts/config | 保存渠道配置（仅管理员；部分更新，空值=保持；保存即生效） |
+| POST | /api/alerts/config/reset?channel= | 清除网页覆盖、回退启动时 .env（仅管理员；channel 空=全部） |
 
 `GET /api/system` 新增字段：`unhandled_today`（今日未处置数）、`alerts: {pending, failed, ok}`（投递计数）。
 

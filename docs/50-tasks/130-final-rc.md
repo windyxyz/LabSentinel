@@ -63,3 +63,10 @@ python scripts\rc_regression.py --fast
 - 重跑：pytest **504 passed**、vitest **26**、build **63.22KB**、smoke **8/8**、
   包内 doctor **10/0/0**、rc **4/4**、release_check 全 PASS；app 内 pyc=0。
 - 发布阻塞不变：真实 24h、模型止损线、CI 实跑、签名；**不发布/不推 tag**。
+
+### 任务 140 后最终重建（2026-11-04）
+
+- 新增网页端告警配置后再次重建：`LabSentinel-portable-20261104.zip`
+  **279,878,789B / 12,620 条目 / sha256 `4b2eeaf3b5bd21271193af2e6a22a4be1233f2601dbbe63884789afa9b372a84`**；
+- pytest **511 passed**、vitest **26**、build **66.59KB**、smoke **8/8**、doctor **10/0/0**、
+  rc **4/4**、release_check 全 PASS；本包为当前最终候选。

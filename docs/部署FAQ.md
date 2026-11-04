@@ -254,14 +254,19 @@ D:/LabSentinel/m0-venv/Scripts/python.exe tools/train_ppe.py --data datasets/mer
 ## 7. 告警与推送
 
 **Q：各渠道 key 从哪拿**
-→ [部署指南](部署指南.md)「4. 告警渠道配置」表格（企微/钉钉/飞书/Server酱/PushPlus/Qmsg/SMTP 逐个说明）。
+→ 网页端「告警配置」页每个渠道都有「配置指引」（企微/钉钉/飞书/Server酱/PushPlus/Qmsg/SMTP 逐个说明）；
+也可看 [部署指南](部署指南.md)「4. 告警渠道配置」的 `.env` 口径。
+
+**Q：网页保存的配置存在哪/怎么回退**
+→ 存在本机 `data/labsentinel.db` 的 `app_settings`，随数据库备份；保存即生效、无需重启。
+密钥不回显；输入框留空保存=保持原值；「清除」=回退到启动时 `.env`。
 
 **Q：为什么发不出/被拒绝**
 → 安全机制：域名白名单 + 强制 https + 不跟随重定向（防 SSRF）。钉钉/企微 HTTP 200 但
 body `errcode≠0` 也判失败（`_is_ok`）。失败会重试（1s/4s/15s 三次）→ 死信 →「摄像头」页告警面板手动重发。
 
 **Q：怎么验证渠道通了**
-→ 「摄像头」页告警面板「发送测试告警」按钮，或 `POST /api/alert-test`（不落 events 表）。
+→ 「告警配置」页每个渠道的「发送测试」（单渠道），或「摄像头」页「发送测试告警」/`POST /api/alert-test`（不落 events 表）。
 
 ## 8. 前端
 

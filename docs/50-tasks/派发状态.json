@@ -1,6 +1,6 @@
 {
-  "updated_ts": "2026-11-04T21:40:00",
-  "updated_epoch": 1793799600,
+  "updated_ts": "2026-11-04T23:10:00",
+  "updated_epoch": 1793805000,
   "status": "idle",
   "owner": "flash",
   "current_task": "",
@@ -10,7 +10,7 @@
   "dispatch_epoch": 1793750414,
   "last_progress_iso": "2026-11-04T21:30:00",
   "last_progress_epoch": 1793799000,
-  "last_progress_note": "批次130-139已验收（pytest504+vitest26/build63.22）；清理旧脚本/Docker/演示/缓存后重建最终包 a8f8c75d（279.8MB/12617, smoke8/8 doctor10/0/0 rc4/4 release_check全PASS）；flash idle，137/138/139 backlog",
+  "last_progress_note": "任务140网页端告警配置完成（8渠道/保存即生效/单渠道测试/密钥掩码）；pytest511+vitest26/build66.59；最终包 4b2eeaf3（279.9MB/12620, smoke8/8 doctor10/0/0 rc4/4 release_check全PASS）；flash idle",
   "queue": [],
   "batch_plan": "docs/50-tasks/批次130-139-发布候选增强.md",
   "batch": [

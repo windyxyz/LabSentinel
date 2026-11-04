@@ -3112,6 +3112,103 @@
         }
       }
     },
+    "/api/alerts/config": {
+      "get": {
+        "summary": "Alerts Config Get",
+        "operationId": "alerts_config_get_api_alerts_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Alerts Config Put",
+        "operationId": "alerts_config_put_api_alerts_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/alerts/config/reset": {
+      "post": {
+        "summary": "Alerts Config Reset",
+        "description": "清除网页保存的覆盖，回退到启动时 .env 值（channel 为空=全部）。",
+        "operationId": "alerts_config_reset_api_alerts_config_reset_post",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Channel"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/alert-deliveries": {
       "get": {
         "summary": "Alert Deliveries",
@@ -3207,14 +3304,42 @@
     "/api/alert-test": {
       "post": {
         "summary": "Alert Test",
-        "description": "渠道健康自检：向所有已配置渠道发测试消息（event_id=0，不落 events）。部署验收用。",
+        "description": "渠道健康自检：默认测全部已配置渠道；channel 指定时只测该渠道。",
         "operationId": "alert_test_api_alert_test_post",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Channel"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }

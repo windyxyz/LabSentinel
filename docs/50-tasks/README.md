@@ -122,6 +122,7 @@
 | [134-security-audit.md](./134-security-audit.md) | 安全与依赖审计 | ✅ 完成（2 修复） |
 | [135-view-transitions.md](./135-view-transitions.md) | View Transitions 体验 | ✅ 完成 |
 | [136-event-timeline.md](./136-event-timeline.md) | 事件时间线视图 | ✅ 完成 |
+| [140-alert-config-web.md](./140-alert-config-web.md) | **网页端告警渠道配置（保存即生效）** | ✅ 完成 |
 | [批次130-139-发布候选增强.md](./批次130-139-发布候选增强.md) | 批次 130–139 总表 | 已派发 |
 
 > **平台顺序**：Windows 优先；WSL 仅开发调试；**Docker 暂不考虑**；Android/iOS 后续。
