@@ -2,7 +2,7 @@
 
 > 本文件是**上下文压缩的落点**：新会话/新协作者先读这一份，再按链接进细节。
 > 当前状态：**批次 122–130 + 130–139 全部交付并验收**（pytest **504** + vitest **26**、
-> build 63.22KB、`LabSentinel-portable-20261104.zip` sha 36ac8f9e…）；
+> build 63.22KB、`LabSentinel-portable-20261104.zip` sha a8f8c75d…）；
 > 主线复审补 3 处（人脸先限读/时间线精确到小时/View Transition 重名），**最终包需再重建**。
 > **119/120 `a8d8ca1`**；**121 `f7ba376`**；**106–108 `f07c0df`**；**122–139 待本次提交**。
 > 发布硬阻塞：**真实 RTSP 摄像头 24h + 模型止损线** + Actions 实跑/签名。
@@ -43,7 +43,7 @@
 | 服务端/Web | ⏸ 当前未启动；8000/8001/1984/8554/5173 均无监听 |
 | 测试 | ✅ **pytest 504 passed + vitest 26 passed**；build gzip **63.22KB**；release_check 全 PASS |
 | 模型 | ✅ v2 已接入：`m0-spike/yolo11n_ppe.onnx`（11 类）+ classes.txt；v1 备份 `*_v1.*` |
-| 便携包 | ✅ `LabSentinel-portable-20261104.zip` 279.7MB/12613 条目/sha 36ac8f9e…（smoke 8/8、doctor 10/0/0、rc 4/4）；**不含复审 3 小修，需再重建** |
+| 便携包 | ✅ 最终重建：`LabSentinel-portable-20261104.zip` 279.8MB/12617 条目/sha a8f8c75d…（smoke 8/8、doctor 10/0/0、rc 4/4）；含复审 3 小修与清理 |
 | 启动 EXE | ✅ 任务 55 已交付并验收：`LabSentinel.exe`（C# winexe，5.5KB，无黑框；`--stop` 可用）；无 csc 构建自动降级到 `启动.bat`/pythonw |
 | 部署 | ✅ 便携包（普通用户）+ `一键启动.bat`/`deploy.py`（开发模式，无 Python 时自动改启便携包） |
 | Git | 最近 `3f41b64`（130-139 文档）/`7e397c0`（130-139 代码）/`1f64497`（122-130）；工作区仅 `.zcode/` 未跟踪 |

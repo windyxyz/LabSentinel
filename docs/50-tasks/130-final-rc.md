@@ -42,21 +42,24 @@ python scripts\rc_regression.py --fast
 
 ## 执行报告（批次 130-139 收口，2026-11-04 flash）
 
-**flash 2026-11-04 完成（pytest 504 passed / zip 279.7MB sha 36ac8f9e… / smoke 8/8 / 包内 doctor 10/0/0 / rc 4/4 / release_check 全 PASS / vitest 26/26）**
+**flash 2026-11-04 完成（pytest 504 passed / zip 279.8MB sha a8f8c75d… / smoke 8/8 / 包内 doctor 10/0/0 / rc 4/4 / release_check 全 PASS / vitest 26/26）**
 
 - **含本批 131-136 全部**：插件 UI/AI 徽标+筛选/vitest 基线（26 用例）/安全审计修复（照片
   10MB、导入规模上限——后者挖出 cap 位置真缺陷）/View Transitions/事件时间线；
   另含主线复审 4 修复（genai 中文路径/插件入口/MQTT LWT/版本 alpha）；
-- manifest：279,666,823B / 12,613 条目 / --verify OK / 缺可选仅卸载.bat（预期）；
+- manifest：279,802,837B / 12,617 条目 / --verify OK / 缺可选仅卸载.bat（预期）；
 - OpenAPI 快照重生成（86 paths/105KB，--check 一致；132/134/136 三次加端点后均需更新——
   教训：**改 API 必同步快照**）；
 - vitest 26/26（CI 已加 npm test）；137/138/139 backlog 不变；
 - **不发布/不推 tag**；阻塞不变：真实 24h、模型止损线、CI 实跑、签名。
 - 清理：smoke/doctor 临时目录已删、端口无监听、主库未动。
 
-### 主线复审补丁（2026-11-04，之后需再重建）
+### 主线条目清理与最终重建（2026-11-04）
 
-- 本包**不含**主线在 130 之后补的 3 处小修：人脸上传先限流再读、时间线按小时精确筛选、
-  View Transition 重名修复（另 README 索引 75 号审计文档）；
-- 代码回归 **504 passed**、build **63.22KB**、release_check 全 PASS；最终对外包以
-  “130b/最终重建”结果为准（数字以 manifest 为准）。
+- 已含主线 3 处小修（人脸上传先限流再读、时间线按小时精确筛选、View Transition 重名），
+  另删除旧 demo 打包/健康检查/旧压测截图脚本、Docker 部署文件与文档、旧 zip/日志/缓存；
+- **最终包**：`LabSentinel-portable-20261104.zip` **279,802,837B / 12,617 条目 /
+  sha256 `a8f8c75d055fda0c08832c23b1de996e7992dad3510c90a615c999a76c2c2af4`**；
+- 重跑：pytest **504 passed**、vitest **26**、build **63.22KB**、smoke **8/8**、
+  包内 doctor **10/0/0**、rc **4/4**、release_check 全 PASS；app 内 pyc=0。
+- 发布阻塞不变：真实 24h、模型止损线、CI 实跑、签名；**不发布/不推 tag**。

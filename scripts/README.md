@@ -1,39 +1,46 @@
-# scripts/ · 启动/停止/健康检查/部署脚本（任务18 + 2026-10-27 扩展）
+# scripts/ · 当前有效的构建/安装/运维脚本
 
-| 脚本 | 作用 | 说明 |
-|---|---|---|
-| `..\一键启动.bat`（项目根） | **交互式一键启动器**（日常用这个） | 启动前先跑 `deploy.py check --quiet`，缺什么自动补（venv/pip/npm/ffmpeg/OpenH264/配置/演示数据）；然后探测服务：已运行→直接打开控制面板；未运行→调 start-all 拉起并等待就绪（最多 45 秒）→自动打开面板→进入菜单。菜单 [7] 重部署保留数据 / [8] 重部署清空数据 / [9] 一键卸载。环境变量 `LS_LAUNCHER_NO_BROWSER=1` 禁止自动弹浏览器 |
-| `deploy.py` | **部署引擎**（纯标准库，无 venv 也能跑） | `check` 环境体检 9 项；`install` 自动部署（venv→pip→OpenH264→node→npm→ffmpeg→.env→播种演示库）；`redeploy --keep-data/--wipe`；`uninstall`（数据改名备份）。下载全走国内镜像（pypi 清华/npmmirror），请求前校验仅公网 http/https；项目外 venv 只解除引用绝不删除 |
-| `make_demo_zip.py` | 打 demo 分发包 | 产物 `dist/LabSentinel-demo-<日期>.zip`（约 94MB）：源码/模型/演示视频/go2rtc/文档；排除数据集、训练产物、venv、node_modules、ffmpeg、server/.env（含机器路径）、server/data（新机播种） |
-| `start-all.bat` | 一键启动 go2rtc(1984) + 服务端(8000) + vite(5173) | venv 路径从 `scripts\venv_path.txt` 动态读取（deploy.py 写入，**GBK 编码**——cmd for /f 按系统代码页读，UTF-8 中文路径会乱码）；端口被占用则**跳过**该组件；环境预检；日志落 `logs/<name>.log`；尾部显式 `exit /b 0`（否则末尾端口检测的 findstr 会把 errorlevel 置 1，call 方误判失败） |
-| `stop-all.bat` | 一键停止 | 按端口找 PID `taskkill /F`，带确认；顺带关闭名为 go2rtc/server/web 的控制台窗口壳 |
-| `health-check.bat` | 状态表 | curl 探测 API/system、go2rtc /api、Web（vite 仅绑 IPv6，用 `[::1]` 探测） |
-| `release_manifest.py` | 发布产物清单与校验和（任务58） | 对 dist/ 最新 zip 生成 `SHA256SUMS.txt` + `RELEASE-MANIFEST.json`（version/size/sha256/条目数/缺失项/git）；`--verify dist` 重算对比；必需条目缺失 exit 2 |
-| `smoke_portable.py` | 便携包一键冒烟（任务59） | `python scripts/smoke_portable.py --zip dist/LabSentinel-portable-*.zip` → 解压到 %TEMP%、沙箱 LOCALAPPDATA、启动（exe 优先/启动.bat 回退）→ 就绪/前端/播种 8 项 PASS/FAIL → `--stop` → 隔离断言（真实 %LOCALAPPDATA% 不变）→ 清理；失败 exit 1 保留现场并打印日志尾部；`--timeout` 默认 90s（须大于启动器 `LS_READY_TIMEOUT_S` 默认 60，任务119）；`--dir` 调试已解压目录；`--port` 默认 8180 不漂移 |
+> 2026-11 清理后只保留**当前入口**。历史任务文档仍在 `docs/50-tasks/`，仅供追溯，不再作为操作入口。
 
-## 用法
+## 用户/发布入口
 
-```bat
-一键启动.bat              :: 日常入口：体检→自动部署→探测→按需启动→开面板→菜单（双击即可）
-python scripts\deploy.py check     :: 环境体检（9 项）
-python scripts\deploy.py install   :: 仅部署不启动
-python scripts\make_demo_zip.py    :: 打 demo 分发包
-scripts\health-check.bat  :: 状态表 [OK]/[DOWN]
-scripts\stop-all.bat      :: 停止（Y/N 确认）
-```
+| 入口 | 用途 |
+|---|---|
+| `../安装.bat`（便携包内） | 调 `installer.py install --ui`：首启三选、目录选择、自启、卸载项 |
+| `../启动.bat` / `LabSentinel.exe`（便携包内） | 便携启动（内部调 `portable_launcher.py`） |
+| `../一键启动.bat`（源码根） | 开发模式：`deploy.py check/install` → 启动 → 开面板 |
+| `installer.py` | 安装器交互 UI（安装/卸载/三选） |
+| `install_portable.py` | 安装/卸载引擎（do_install/do_uninstall，供 installer 复用） |
+| `portable_launcher.py` | 便携启动器：单实例、端口、健康等待、开浏览器、`--stop` |
+| `portable_start.bat` / `portable_stop.bat` | 安装位置/便携位置智能定位启停 |
 
-## 已知坑
+## 构建/发布
 
-1. **编码**：三个 .bat 必须是 **GBK/ANSI 编码**（cmd 按 OEM 代码页解析批处理；UTF-8 保存会把中文
-   echo 变成乱码甚至破坏语法）。用编辑器修改后请转回 ANSI 再保存。
-2. vite dev 仅绑 IPv6 localhost（README 已知事项），health-check 用 `[::1]:5173` 探测。
-3. `stop-all.bat` 会停掉**所有**占用 1984/8000/5173 的进程——若有其他服务误用这三个端口请先挪开。
-4. 不自动启动训练/推理（训练由巡检按《训练安全规程》管理）。
+| 脚本 | 用途 |
+|---|---|
+| `build_portable.py` | 构建便携运行时并 `--zip` 打包 |
+| `build_launcher_exe.py` | 用系统 csc 编译 `LabSentinel.exe` |
+| `release_manifest.py` | 对 zip 生成 `SHA256SUMS.txt` + `RELEASE-MANIFEST.json`，`--verify` |
+| `smoke_portable.py` | 便携包隔离冒烟（解压→启动→健康/播种/前端→停止→清理） |
+| `doctor.py` | 只读自检（模型/Web/DB/端口/磁盘/配置） |
+| `release_check.py` | 发布终检（链接/密钥/TODO/必需文件/manifest） |
+| `rc_regression.py` | RC 快速回归编排（pytest/build/release_check/doctor） |
+| `export_openapi.py` | 导出/校验 `docs/openapi.json` 快照 |
 
-## export_openapi.py（任务101）
+## 数据/运维
 
-```
-python scripts/export_openapi.py            # 生成 docs/openapi.json（勿手改）
-python scripts/export_openapi.py --check    # 比对漂移，不一致 exit 2（CI/RC 用）
-```
+| 脚本 | 用途 |
+|---|---|
+| `backup_data.py` | SQLite 在线备份/校验/恢复 |
+| `collect_diagnostics.py` | 收集脱敏诊断 zip |
+| `seed_demo.py` | 首次启动播种演示摄像头（安装/便携共用） |
+| `deploy.py` | 源码模式环境体检/安装/重部署/卸载 |
+| `start-all.bat` / `stop-all.bat` | 源码开发三组件启停（go2rtc 1984 / API 8000 / Vite 5173） |
+| `dispatch_tick.py` | 主线/子代理看板派发 tick（内部协作用，不随产品分发） |
 
+## 说明
+
+- 已删除：`make_demo_zip.py`（旧 demo 分发包，已被 `build_portable.py` 取代且引用失效）、
+  `health-check.bat`（被 `doctor.py`/浏览器健康检查取代）。
+- 所有 `.bat` 仍按 **GBK/ANSI** 保存（cmd OEM 代码页）；Python 脚本 UTF-8。
+- 发布物只由 `build_portable.py` 生成，不要再手工拼 zip。

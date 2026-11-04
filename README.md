@@ -65,14 +65,14 @@ npm run dev     # http://localhost:5173（API 已代理到 8000）
 源码部署由 `scripts/deploy.py` 播种演示数据，便携包由 `scripts/portable_launcher.py` 首次启动自动播种。
 `一键启动.bat` 属于**源码/开发模式**；若机器上没有 Python 且已构建便携包，它会自动改为启动便携版。
 
-Docker 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道申请、合规自查清单）：
+Windows 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道申请、合规自查清单）：
 **[docs/部署指南.md](docs/部署指南.md)**。
 
 ## 🧭 文档索引
 
 | 文档 | 内容 |
 |---|---|
-| [docs/部署指南.md](docs/部署指南.md) | Windows/Docker 部署、摄像头接入、告警配置、合规自查 |
+| [docs/部署指南.md](docs/部署指南.md) | Windows 部署、摄像头接入、告警配置、合规自查 |
 | [docs/运维手册.md](docs/运维手册.md) | **部署后日常运维一本通**：巡检清单/排障/备份恢复/升级回滚/故障速查 |
 | [docs/摄像头接入Runbook.md](docs/摄像头接入Runbook.md) | **摄像头接入一条龙**：预检/接线/区域规则/告警验证/24h 观察/故障速查 |
 | [docs/73-mqtt-protocol.md](docs/73-mqtt-protocol.md) | **MQTT 事件总线协议**：主题/payload v1/订阅示例/版本策略（任务125） |

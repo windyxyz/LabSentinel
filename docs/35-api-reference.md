@@ -471,7 +471,7 @@ Invoke-RestMethod "$BASE/api/events?limit=20"
 ### 10.4 端到端示例脚本（免手敲）
 
 - `tools/e2e_smoke.py`：黑盒全链路（摄像头→安全区→规则→启动→事件→截图→清理），`--base-url` 可指向任意实例
-- `tools/loadtest.py`：多路并发压测（训练/压测勿并行，见 50-tasks/README 铁律）
+- `tools/camera_soak.py`：长跑采样/预检（24h 验收与多路稳定性）
 
 ### 10.5 错误码速查（对照实现）
 
