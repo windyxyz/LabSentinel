@@ -1,0 +1,195 @@
+{
+  "comment": "T-306/T-323 共享测试向量：Python (app.zones.ZoneState) 与 Rust (ls-core::state::ZoneState) 必须逐用例一致。expected 编码：null=无变化，enter=进场翻转，exit=离场翻转。observations 元素 = [track_id, inside]。",
+  "cases": [
+    {
+      "name": "doc-acceptance-sequence",
+      "enter_frames": 2,
+      "exit_frames": 3,
+      "observations": [
+        [
+          1,
+          true
+        ],
+        [
+          1,
+          false
+        ],
+        [
+          1,
+          true
+        ],
+        [
+          1,
+          true
+        ],
+        [
+          1,
+          false
+        ],
+        [
+          1,
+          false
+        ],
+        [
+          1,
+          false
+        ]
+      ],
+      "expected": [
+        null,
+        null,
+        null,
+        "enter",
+        null,
+        null,
+        "exit"
+      ]
+    },
+    {
+      "name": "legacy-threshold-one",
+      "enter_frames": 1,
+      "exit_frames": 1,
+      "observations": [
+        [
+          1,
+          true
+        ],
+        [
+          1,
+          false
+        ],
+        [
+          1,
+          false
+        ],
+        [
+          1,
+          true
+        ]
+      ],
+      "expected": [
+        "enter",
+        "exit",
+        null,
+        "enter"
+      ]
+    },
+    {
+      "name": "streak-reset-on-direction-flip",
+      "enter_frames": 2,
+      "exit_frames": 2,
+      "observations": [
+        [
+          1,
+          true
+        ],
+        [
+          1,
+          false
+        ],
+        [
+          1,
+          true
+        ],
+        [
+          1,
+          true
+        ],
+        [
+          1,
+          false
+        ],
+        [
+          1,
+          false
+        ],
+        [
+          1,
+          true
+        ],
+        [
+          1,
+          true
+        ]
+      ],
+      "expected": [
+        null,
+        null,
+        null,
+        "enter",
+        null,
+        "exit",
+        null,
+        "enter"
+      ]
+    },
+    {
+      "name": "independent-tracks",
+      "enter_frames": 2,
+      "exit_frames": 2,
+      "observations": [
+        [
+          7,
+          true
+        ],
+        [
+          9,
+          true
+        ],
+        [
+          7,
+          true
+        ],
+        [
+          9,
+          true
+        ]
+      ],
+      "expected": [
+        null,
+        null,
+        "enter",
+        "enter"
+      ]
+    },
+    {
+      "name": "exit-needs-consecutive-absence",
+      "enter_frames": 1,
+      "exit_frames": 3,
+      "observations": [
+        [
+          3,
+          true
+        ],
+        [
+          3,
+          false
+        ],
+        [
+          3,
+          true
+        ],
+        [
+          3,
+          false
+        ],
+        [
+          3,
+          false
+        ],
+        [
+          3,
+          false
+        ]
+      ],
+      "expected": [
+        "enter",
+        null,
+        null,
+        null,
+        null,
+        "exit"
+      ]
+    }
+  ]
+}

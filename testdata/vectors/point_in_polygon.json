@@ -1,0 +1,20 @@
+{
+  "comment": "T-323 共享测试向量：点在多边形判定（边界算内），Python 用 cv2.pointPolygonTest(poly,p,false)>=0 为真值来源，Rust 用 ls-core::zones::point_in_polygon。polygons 键为多边形名，顶点整数坐标。",
+  "polygons": {
+    "rect": [[100, 50], [1100, 50], [1100, 650], [100, 650]],
+    "lshape": [[0, 0], [400, 0], [400, 400], [800, 400], [800, 800], [0, 800]]
+  },
+  "cases": [
+    { "poly": "rect", "point": [600, 300], "inside": true },
+    { "poly": "rect", "point": [100, 50], "inside": true },
+    { "poly": "rect", "point": [1100, 300], "inside": true },
+    { "poly": "rect", "point": [600, 50], "inside": true },
+    { "poly": "rect", "point": [99, 300], "inside": false },
+    { "poly": "rect", "point": [600, 651], "inside": false },
+    { "poly": "lshape", "point": [200, 200], "inside": true },
+    { "poly": "lshape", "point": [600, 200], "inside": false },
+    { "poly": "lshape", "point": [600, 600], "inside": true },
+    { "poly": "lshape", "point": [400, 200], "inside": true },
+    { "poly": "lshape", "point": [400, 400], "inside": true }
+  ]
+}

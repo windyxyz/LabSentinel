@@ -1,0 +1,134 @@
+// T-320（L0）：分析器 gRPC 契约——Python 控制面与 Rust 数据面（ls-analyzer sidecar）的
+// 唯一通信接口。规则：规则匹配/冷却/迟滞在分析器内完成（与 Python RuleEngine/ZoneState
+// 等价）；Python 只负责入库/告警/WS。配置以"版本化全量快照"下发（避免逐条同步不一致）。
+//
+// 代码生成：Python 侧 `python -m grpc_tools.protoc`；Rust 侧 tonic-build（T-327 接入）。
+syntax = "proto3";
+
+package labsentinel.analyzer.v1;
+
+service Analyzer {
+  // 下发摄像头/区域/规则/日历全量配置快照（带 version；版本变化即整体替换）。
+  rpc ApplyConfig(Config) returns (Ack);
+  // 启动一路摄像头分析（ingest → infer → track → zones → rules → 事件候选流）。
+  rpc StartCamera(CameraRef) returns (Ack);
+  // 停止一路。
+  rpc StopCamera(CameraRef) returns (Ack);
+  // 事件候选流（未入库；Python 侧 add_event + dispatch 后回传 event_id 触发存证收尾）。
+  rpc Events(EventsRequest) returns (stream EventCandidate);
+  // 每路 fps/帧龄/错误/重连/推理耗时/队列深度。
+  rpc Status(Empty) returns (AnalyzerStatus);
+  // 指定摄像头的当前帧（实时快照，JPEG）。
+  rpc LatestFrame(CameraRef) returns (Jpeg);
+  // 事件 id 回传后写事件前后片段视频（remux 存证）。
+  rpc FinalizeEvidence(EvidenceRequest) returns (EvidenceResult);
+}
+
+message Empty {}
+
+message Ack {
+  bool ok = 1;
+  string message = 2; // 失败原因（成功为空）
+}
+
+message CameraRef {
+  int64 camera_id = 1;
+}
+
+message Config {
+  int64 version = 1;              // 单调递增；Python 侧 store.config_version 对齐
+  repeated CameraConfig cameras = 2;
+  repeated ZoneConfig zones = 3;
+  repeated RuleConfig rules = 4;
+  CalendarConfig calendar = 5;    // 假期/工作日例外
+}
+
+message CameraConfig {
+  int64 id = 1;
+  string name = 2;
+  string type = 3;                // rtsp | file | usb | folder
+  string source = 4;
+  float analysis_fps = 5;
+  bool file_loop = 6;
+}
+
+message ZoneConfig {
+  int64 id = 1;
+  int64 camera_id = 2;
+  string name = 3;
+  // 多边形顶点（整数像素坐标；判定语义与 cv2.pointPolygonTest >= 0 对齐，边界算内）
+  repeated Point points = 4;
+}
+
+message Point {
+  int64 x = 1;
+  int64 y = 2;
+}
+
+message RuleConfig {
+  int64 id = 1;
+  int64 camera_id = 2;
+  int64 zone_id = 3;              // 0 = 整画面（按区人数去重口径）
+  string behavior = 4;            // enter | exit | enter_no_ppe | occupancy_over
+  int32 level = 5;
+  int32 cooldown_s = 6;
+  string time_start = 7;          // "HH:MM"，允许跨午夜
+  string time_end = 8;
+  string weekdays = 9;            // ISO 逗号分隔 "1-5"；空=全部
+  int32 threshold = 10;           // occupancy_over 人数阈值
+  bool enabled = 11;
+}
+
+message CalendarConfig {
+  // YYYY-MM-DD -> "holiday"|"workday"（工作日覆盖周末，假期覆盖工作日）
+  map<string, string> exceptions = 1;
+}
+
+message EventsRequest {
+  // 预留：过滤/回放参数
+}
+
+message EventCandidate {
+  int64 camera_id = 1;
+  optional int64 zone_id = 2;
+  string behavior = 3;
+  int32 level = 4;
+  int64 track_id = 5;
+  string detail = 6;
+  bytes snapshot_jpeg = 7;
+  string ts_iso = 8;              // 事件时间（分析帧时间戳，确定性模式下取视频时间）
+  string evidence_key = 9;        // 存证键（事件片段定位；FinalizeEvidence 用）
+}
+
+message AnalyzerStatus {
+  repeated CameraStatus cameras = 1;
+}
+
+message CameraStatus {
+  int64 camera_id = 1;
+  string state = 2;               // running | stopped | error
+  float analysis_fps_now = 3;
+  float frame_age_s = 4;
+  uint64 reconnect_count = 5;
+  string last_error = 6;
+  float infer_ms_p50 = 7;
+  uint64 queue_depth = 8;
+}
+
+message Jpeg {
+  bytes data = 1;
+}
+
+message EvidenceRequest {
+  int64 event_id = 1;             // Python 入库后回传
+  int64 camera_id = 2;
+  string evidence_key = 3;
+  int32 pre_seconds = 4;          // 默认 2
+  int32 post_seconds = 5;         // 默认 2
+}
+
+message EvidenceResult {
+  bool ok = 1;
+  string video_relpath = 2;       // 相对 data_dir；失败为空
+  string message = 3;
+}

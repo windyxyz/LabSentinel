@@ -55,3 +55,7 @@ server/LabSentinelgpu-venv/
 # ---- Mixkit 派生演示素材（仅个人使用，不入库；70-release-plan）----
 Resources/效果演示/*.mp4
 Resources/效果演示/*.jpg
+
+# ---- Rust 工作区（engine-rs）----
+engine-rs/target/
+**/*.rs.bk

@@ -1,0 +1,12 @@
+[package]
+name = "ls-core"
+description = "LabSentinel 领域逻辑（纯函数无 IO）：区域判定/进出迟滞/规则核心。与 Python 实现共享 testdata/vectors 测试向量（T-323）。"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
