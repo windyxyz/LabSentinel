@@ -6,6 +6,7 @@ import FolderImages from './views/FolderImages.vue'
 import Zones from './views/Zones.vue'
 import Events from './views/Events.vue'
 import Reports from './views/Reports.vue'
+import AlertSettings from './views/AlertSettings.vue'
 import Face from './views/Face.vue'
 
 // 图标为 Fluent 风格线性 SVG（16px），不依赖图标字体/库
@@ -22,6 +23,8 @@ const tabs = [
     icon: '<path d="M3 4h10M3 8h10M3 12h7"/>' },
   { key: 'reports', label: '报表', comp: Reports,
     icon: '<path d="M3 13.5V9M8 13.5V4M13 13.5V10"/><path d="M2 14.5h12"/>' },
+  { key: 'alerts', label: '告警配置', comp: AlertSettings,
+    icon: '<path d="M8 2.5a3.5 3.5 0 0 1 3.5 3.5v3l1.5 2.5H3l1.5-2.5v-3A3.5 3.5 0 0 1 8 2.5z"/><path d="M6.5 13a1.8 1.8 0 0 0 3 0"/>' },
   { key: 'face', label: '人脸管理', comp: Face,
     icon: '<circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 13.8c.9-2.7 3-4 5.5-4s4.6 1.3 5.5 4"/>' },
 ]

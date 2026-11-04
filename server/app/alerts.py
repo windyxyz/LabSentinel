@@ -582,8 +582,8 @@ class AlertDispatcher:
             self.store.update_delivery(did, "ok" if ok else "failed", 1, err)
         return {"channel": name, "ok": ok, "error": err}
 
-    def send_test(self) -> list[dict]:
-        """渠道健康自检（任务13C/108）：已配置渠道并发发送，结果按 channels 顺序稳定返回。
+    def send_test(self, channel: str | None = None) -> list[dict]:
+        """渠道健康自检（任务13C/108/140）：默认测全部；channel 指定时只测该渠道。
 
         每渠道自身超时仍为 5s（邮件连接 10s）；future 等待上限 6s，避免串行 8 渠道拖到 ~50s。
         """
@@ -591,9 +591,15 @@ class AlertDispatcher:
             "ts": datetime.now().isoformat(timespec="seconds"), "camera_id": 0,
             "type": "alert_test", "level": 1, "track_id": 0,
             "detail": "渠道自检消息，收到即表示该渠道配置正常。"})
-        results: list[dict | None] = [None] * len(self.channels)
+        channels = self.channels
+        if channel:
+            channels = [ch for ch in self.channels
+                        if getattr(ch, "name", type(ch).__name__) == channel]
+            if not channels:
+                return [{"channel": channel, "ok": False, "error": "未知渠道"}]
+        results: list[dict | None] = [None] * len(channels)
         todo: list[tuple[int, object]] = []
-        for i, ch in enumerate(self.channels):
+        for i, ch in enumerate(channels):
             name = getattr(ch, "name", type(ch).__name__)
             cfg = getattr(ch, "configured", None)
             if callable(cfg) and not cfg():  # 未配置：不提交、不落投递记录
@@ -609,13 +615,13 @@ class AlertDispatcher:
                     try:
                         results[idx] = fut.result(timeout=6.0)
                     except concurrent.futures.TimeoutError:
-                        name = getattr(self.channels[idx], "name",
-                                       type(self.channels[idx]).__name__)
+                        name = getattr(channels[idx], "name",
+                                       type(channels[idx]).__name__)
                         results[idx] = {"channel": name, "ok": False,
                                         "error": "自检超时（>6s）"}
                     except Exception as e:  # noqa: BLE001
-                        name = getattr(self.channels[idx], "name",
-                                       type(self.channels[idx]).__name__)
+                        name = getattr(channels[idx], "name",
+                                       type(channels[idx]).__name__)
                         results[idx] = {"channel": name, "ok": False,
                                         "error": f"{type(e).__name__}: {e}"}
             finally:

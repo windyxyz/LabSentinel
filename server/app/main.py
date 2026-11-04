@@ -31,6 +31,7 @@ from . import keepawake
 from . import genai
 from . import mqtt_bridge
 from . import plugins
+from . import alert_config
 from .config import settings
 from .logging_setup import setup_file_logging  # 任务61：导入阶段挂文件日志（尽早捕获启动错误）
 from .pipeline import CameraManager
@@ -84,6 +85,7 @@ async def lifespan(app: FastAPI):
     dispatcher.hub.bind_loop(asyncio.get_running_loop())
     dispatcher.reset()  # 108：同一进程多次 lifespan（测试）时重新启用告警池
     store = Store()
+    alert_config.load(store)  # 任务140：网页端告警配置（DB 覆盖 .env，保存即生效）
     dispatcher.bind_store(store)  # 任务13：投递记录/死信需要写库
     manager = CameraManager(store)
     init(store, manager)

@@ -22,6 +22,7 @@ from . import update_check
 from . import mqtt_bridge
 from . import plugins as plugins_mod
 from . import genai
+from . import alert_config
 from .alerts import dispatcher, render_alert
 from .config import settings
 from .engine import get_engine
@@ -1705,6 +1706,29 @@ def alerts_status():
     return {"channels": channels, "test_supported": True}
 
 
+# ---- 网页端告警配置（任务140；仅管理员；密钥不回显）----
+@router.get("/alerts/config", dependencies=[Depends(require_admin)])
+def alerts_config_get():
+    return alert_config.status(store)
+
+
+@router.put("/alerts/config", dependencies=[Depends(require_admin)])
+def alerts_config_put(body: dict):
+    try:
+        return alert_config.save(store, body)
+    except alert_config.AlertConfigError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/alerts/config/reset", dependencies=[Depends(require_admin)])
+def alerts_config_reset(channel: str | None = None):
+    """清除网页保存的覆盖，回退到启动时 .env 值（channel 为空=全部）。"""
+    try:
+        return alert_config.reset(store, channel)
+    except alert_config.AlertConfigError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.get("/alert-deliveries", dependencies=[Depends(require_read)])
 def alert_deliveries(status: str | None = None, limit: int = 50):
     if not dispatcher.store:
@@ -1737,9 +1761,9 @@ def alert_delivery_retry(did: int):
 
 
 @router.post("/alert-test", dependencies=[Depends(require_admin)])
-def alert_test():
-    """渠道健康自检：向所有已配置渠道发测试消息（event_id=0，不落 events）。部署验收用。"""
-    return dispatcher.send_test()
+def alert_test(channel: str | None = None):
+    """渠道健康自检：默认测全部已配置渠道；channel 指定时只测该渠道。"""
+    return dispatcher.send_test(channel=channel)
 
 
 # ---- maintenance（任务14：数据保留/清理）----

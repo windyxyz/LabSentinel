@@ -202,6 +202,18 @@ def _mig_009(c: sqlite3.Connection):
             c.execute(f"ALTER TABLE events ADD COLUMN {col} TEXT")
 
 
+def _mig_010(c: sqlite3.Connection):
+    """v10：应用配置（网页端告警渠道配置，任务 140）。
+
+    通用 key/value 表，供运行期覆盖 .env 的非敏感/密钥配置；密钥只存本机 DB，
+    API 永不回显明文。旧库无表时自动创建，行为不变。
+    """
+    c.execute("""CREATE TABLE IF NOT EXISTS app_settings(
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_ts TEXT NOT NULL)""")
+
+
 # 版本化迁移（任务69）：只做加列/加表/索引，不做破坏性变更；每个迁移幂等、在事务内执行
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "events 增加 video/status/handled_by/handled_ts", _mig_001),
@@ -213,6 +225,7 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (7, "cameras 增加 group_name（任务111 摄像头分组）", _mig_007),
     (8, "新增 rule_templates 规则模板表（任务116）", _mig_008),
     (9, "events 增加 VLM 复核列 ai_review/ai_review_ts/ai_review_model（任务124）", _mig_009),
+    (10, "新增 app_settings 表（网页端告警渠道配置，任务140）", _mig_010),
 ]
 SCHEMA_VERSION_LATEST = max(v for v, _d, _f in MIGRATIONS)
 
@@ -323,6 +336,29 @@ class Store:
             c.execute("DELETE FROM cameras")
             c.execute("DELETE FROM zones")
             c.execute("DELETE FROM rules")
+
+    # ---- 应用运行期配置（任务140：网页端告警渠道配置）----
+    def app_settings(self, prefix: str = "") -> dict[str, str]:
+        with self._conn() as c:
+            rows = c.execute("SELECT key,value FROM app_settings").fetchall()
+        return {r["key"]: r["value"] for r in rows if r["key"].startswith(prefix)}
+
+    def set_app_settings(self, items: dict[str, str]) -> None:
+        if not items:
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._lock, self._conn() as c:
+            c.executemany(
+                "INSERT INTO app_settings(key,value,updated_ts) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_ts=excluded.updated_ts",
+                [(k, v, now) for k, v in items.items()])
+
+    def delete_app_settings(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        with self._lock, self._conn() as c:
+            c.executemany("DELETE FROM app_settings WHERE key=?", [(k,) for k in keys])
 
     def set_camera_status(self, cid, status):
         with self._lock, self._conn() as c:
