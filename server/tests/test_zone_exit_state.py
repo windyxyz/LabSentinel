@@ -61,8 +61,19 @@ def event_details(s, cid):
 
 
 def test_zone_state_semantics():
-    """进入→离场→再进入：第二次必须返回 entered（105 补丁 P0-1 的状态语义核心）。"""
-    st = ZoneState()
+    """T-306 迟滞语义（76 文档验收序列）：[in,out,in,in,out,out,out] → 恰好 1 enter + 1 exit；
+    离场后再进场重新去抖（105 补丁 P0-1 的状态语义核心保持）。"""
+    st = ZoneState(enter_frames=2, exit_frames=3)
+    seq = [True, False, True, True, False, False, False]
+    results = [st.update(1, v) for v in seq]
+    assert results == [None, None, None, (True, False), None, None, (False, True)]
+    assert st.update(1, True) is None  # 再进入重新按 enter_frames 去抖
+    assert st.update(1, True) == (True, False)
+
+
+def test_zone_state_threshold_one_matches_legacy():
+    """enter_frames=exit_frames=1 退化为旧单帧翻转语义（LS_ZONE_*_FRAMES=1 兼容旧行为）。"""
+    st = ZoneState(enter_frames=1, exit_frames=1)
     assert st.update(1, True) == (True, False)
     assert st.update(1, False) == (False, True)
     assert st.update(1, False) is None  # 空帧重复离场：无变化
@@ -70,24 +81,35 @@ def test_zone_state_semantics():
 
 
 def test_empty_frame_exit_once_then_reenter(worker):
-    """空帧：exit 只发一次；人再进入必须重新 enter（原回归：was=True 永不 enter）。"""
+    """空帧消失按 exit_frames 去抖：exit 只发一次；人再进入必须重新 enter（两次在内）。"""
     w, frame, s, zid = worker
-    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)
+    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # streak=1，未进场
+    assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "enter") == 0
+    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # streak=2 → enter #1
     assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "enter") == 1
-    w._analyze(FakeEngine([]), frame)
+    w._analyze(FakeEngine([]), frame)  # 消失 streak=1：未离场
+    w._analyze(FakeEngine([]), frame)  # streak=2：未离场
+    assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "exit") == 0
+    w._analyze(FakeEngine([]), frame)  # streak=3 → exit #1
     assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "exit") == 1
-    w._analyze(FakeEngine([]), frame)  # 第二个空帧：不得重复 exit
+    w._analyze(FakeEngine([]), frame)  # 第四个空帧：不得重复 exit
     assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "exit") == 1
-    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # 再进入必须重新 enter
+    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # 再进入 streak=1
+    assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "enter") == 1
+    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # streak=2 → enter #2
     assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "enter") == 2
 
 
 def test_partial_disappear_exit_once(worker):
-    """两人同区、一人消失：消失者 exit 一次，在场者不受影响。"""
+    """两人同区、一人消失：消失者按 exit_frames 去抖后 exit 一次，在场者不受影响。"""
     w, frame, s, zid = worker
     w._analyze(FakeEngine([_det(300, 200, 500, 600), _det(600, 200, 800, 600)]), frame)
+    w._analyze(FakeEngine([_det(300, 200, 500, 600), _det(600, 200, 800, 600)]), frame)
     assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "enter") == 2
-    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # 只剩一人
+    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # 只剩一人：消失者 streak=1
+    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # streak=2
+    assert sum(1 for t, _ in event_details(s, w.camera["id"]) if t == "exit") == 0
+    w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # streak=3 → exit #1
     exits = [d for t, d in event_details(s, w.camera["id"]) if t == "exit"]
     assert len(exits) == 1
     w._analyze(FakeEngine([_det(300, 200, 500, 600)]), frame)  # 后续帧不重复 exit
@@ -108,12 +130,15 @@ def test_direct_move_a_to_b(worker):
                 "threshold": 0, "enabled": True})  # B 区自己的 enter 规则（规则按 zone 绑定）
     # 锚点 x：400(A) →20px 步进→ 1150(仅 B)。步长必须小：supervision ByteTrack 匹配要求
     # IoU≥0.8，大步长会丢轨（新轨还要两帧激活），真实视频里是连续小位移。
+    # T-306：离开 A 需连续 exit_frames(3) 帧在 A 外——步行末尾多走两步保证去抖完成。
     boxes = []
     x = 300
     while x <= 1030:
         boxes.append((x, 200, x + 200, 600))
         x += 20
-    boxes.append((1050, 200, 1250, 600))  # 锚点 1150：仅 B
+    boxes.append((1050, 200, 1250, 600))  # 锚点 1150：仅 B（A 外第 2 帧）
+    boxes.append((1060, 200, 1260, 600))  # 锚点 1160：仅 B（A 外第 3 帧 → A exit）
+    boxes.append((1070, 200, 1270, 600))  # 锚点 1170：仅 B
     for box in boxes:
         w._analyze(FakeEngine([_det(*box)]), frame)
     types = [(t, d) for t, d in event_details(s, w.camera["id"])]

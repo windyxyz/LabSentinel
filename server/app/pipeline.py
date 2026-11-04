@@ -70,7 +70,11 @@ class CameraWorker(threading.Thread):
         self.latest_frame: np.ndarray | None = None
         self.frame_lock = threading.Lock()
         self.analysis_fps_now: float = 0.0
-        self._byteTrack = sv.ByteTrack()  # M0 结论：必须 ByteTrack，IOU 跟踪 ID 会跳变
+        # T-306：lost_track_buffer 与分析帧率匹配（5fps 下 15 帧≈3s 轨迹记忆），
+        # 配合 ZoneState 迟滞（LS_ZONE_ENTER/EXIT_FRAMES）消除单帧漏检的进出抖动
+        self._byteTrack = sv.ByteTrack(
+            lost_track_buffer=max(5, int(settings.analysis_fps * 3)),
+            frame_rate=max(1, int(settings.analysis_fps)))
         self._zone_states: dict[int, ZoneState] = {}  # zone_id -> ZoneState
         self._ring: deque = deque(maxlen=1)  # 环形帧缓存，run() 里按实际帧率重建
         self._recs: list[_Recording] = []  # 进行中的录像任务

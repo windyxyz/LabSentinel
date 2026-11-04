@@ -14,21 +14,24 @@ from app.zones import ZoneState  # noqa: E402
 
 
 def test_zone_retain_removes_inactive_and_keeps_active():
-    st = ZoneState()
+    """T-306 迟滞语义下的回收：非 active 且已判离场的回收；非 active 但仍判在场的
+    保留（离场需 exit_frames 连击，由空帧/部分消失路径逐帧完成去抖）。"""
+    st = ZoneState(enter_frames=1, exit_frames=1)  # 退化语义便于构造
     for tid in range(10000):
-        st.update(tid, tid % 2 == 0)
+        st.update(tid, tid % 2 == 0)  # evens 进场，odds 离场
     assert st.size == 10000
     removed = st.retain(set(range(10)))
-    assert removed == 9990
-    assert st.size == 10
-    assert st.inside_ids == [0, 2, 4, 6, 8]
+    assert removed == 5000  # odds（已离场）回收；evens（在场）保留待离场去抖
+    assert st.size == 5000
+    assert len(st.inside_ids) == 4995  # 4990 个非 active 在场项 + active 的 5 个
+    assert st.inside_ids[:5] == [0, 2, 4, 6, 8]
 
 
 def test_zone_retain_cap_evicts_non_active_only():
-    st = ZoneState()
+    st = ZoneState(enter_frames=1, exit_frames=1)
     for tid in range(100):
         st.update(tid, True)
-    # active 只有 0..9：非 active 全部回收，size 落到 10（cap 10 满足）
+    # active 只有 0..9：超 cap 按插入顺序淘汰非 active（含在场待去抖项）至 cap
     removed = st.retain(set(range(10)), max_size=10)
     assert removed == 90 and st.size == 10
     # 全部 active 且超过 cap：active 不淘汰（保住在场/离场语义）

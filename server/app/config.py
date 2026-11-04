@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     conf_thres: float = 0.40
     iou_thres: float = 0.50
     analysis_fps: float = 5.0  # 每路分析帧率上限（检测不必逐帧）
+    zone_enter_frames: int = 2  # T-306（B-12）：连续 N 帧在内才判进场（单帧漏检不抖动）
+    zone_exit_frames: int = 3  # T-306：连续 N 帧不在/消失才判离场
     file_loop: bool = False  # 文件源循环播放（压测/演示用；默认关闭，正常播放完即止）
     min_box_area: int = 1200  # 过滤远处小框误检（像素面积，720p 下）
 

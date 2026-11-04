@@ -115,6 +115,11 @@ class FaceGate:
         if now - self._last.get(key, -1e9) < settings.face_cool_s:
             return None
         self._last[key] = now
+        # B-21（T-306 顺带）：_last 有界——每 1000 次调用清理过期键（冷却窗 ×10 之外的）
+        if len(self._last) >= 1000:
+            horizon = max(60.0, float(settings.face_cool_s) * 10)
+            for k in [k for k, t in self._last.items() if now - t > horizon]:
+                self._last.pop(k, None)
         x1, y1, x2, y2 = (int(max(0, v)) for v in box)
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
