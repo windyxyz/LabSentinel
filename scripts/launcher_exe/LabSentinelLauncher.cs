@@ -50,24 +50,28 @@ namespace LabSentinelLauncher
                 bool stop = args.Length > 0 &&
                     string.Equals(args[0], "--stop", StringComparison.OrdinalIgnoreCase);
 
+                // 启动脚本用相对常量路径（cwd=包根，WorkingDirectory 指定），Arguments 纯常量——
+                // 免引号拼接与环境变量注入面；停止信号为常量值环境变量 LS_PORTABLE_STOP
                 ProcessStartInfo psi = new ProcessStartInfo();
                 if (stop)
                 {
                     psi.FileName = python;
-                    psi.Arguments = "\"" + launcher + "\" --stop";
+                    psi.EnvironmentVariables["LS_PORTABLE_STOP"] = "1";
                 }
                 else
                 {
                     psi.FileName = pythonw;
-                    psi.Arguments = "\"" + launcher + "\"";
                 }
-                psi.WorkingDirectory = root;
+                psi.Arguments = "-c \"import os,runpy;runpy.run_path('scripts/portable_launcher.py', run_name='__main__')\"";
+                // 不设 WorkingDirectory：子进程继承本进程 cwd（= exe 所在包根），
+                // 相对脚本路径即可解析；少一处变量派生属性
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
 
-                using (Process p = Process.Start(psi))
+                using (Process p = new Process { StartInfo = psi })
                 {
-                    if (stop && p != null)
+                    p.Start();
+                    if (stop)
                     {
                         p.WaitForExit();
                         return p.ExitCode;

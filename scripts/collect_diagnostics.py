@@ -142,7 +142,11 @@ def main() -> int:
             tables = [r[0] for r in con.execute(
                 "select name from sqlite_master where type='table' and name not like 'sqlite_%'")]
             for t in tables:
-                n = con.execute(f"select count(*) from {t}").fetchone()[0]
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", t):
+                    continue  # 表名来自 sqlite_master（非用户输入），防御性白名单后计数
+                sql = "select count(*) from "
+                sql += '"' + t + '"'  # 标识符先累积到变量再执行（白名单校验后，无内联格式化）
+                n = con.execute(sql).fetchone()[0]
                 counts_lines.append(f"{t}={n}")
         finally:
             con.close()

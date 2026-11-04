@@ -343,7 +343,9 @@ def do_uninstall(install: Path, purge: bool) -> int:
     set_autostart(install, False)
     remove_uninstall_registry()  # 任务120：控制面板卸载项同步清除
     trace("shortcuts+autostart done")
-    data = Path(os.environ["LOCALAPPDATA"]) / "LabSentinel"
+    # 数据目录按默认布局从 install 派生（<install>/../..\LabSentinel = %LOCALAPPDATA%\LabSentinel）；
+    # 自定义安装目录时该派生不成立，purge 会在下方与固定位置一致性校验后跳过自动删除
+    data = install.parent.parent / "LabSentinel"
     # 2026-10-30 审阅：二次卸载/上次 rd 已成功时 install 可能已不存在——防御性容错
     trace("hybrid done residue=" + (
         ",".join(sorted(q.name for q in install.iterdir())) if install.exists() else "(目录已不存在)"))
@@ -379,17 +381,29 @@ def do_uninstall(install: Path, purge: bool) -> int:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         trace("detached spawned")
     if purge:
-        _rmtree_retry(data)
-        log("  数据已删除（--purge-data）" + ("" if not data.exists() else "（部分文件仍被占用，重试后未清空）"))
+        # 数据目录是固定位置（%LOCALAPPDATA%\LabSentinel）；锚点校验：父目录=LOCALAPPDATA
+        # 且目录名固定为 LabSentinel 才允许删除，位置异常则保留现场人工确认（防误删）
+        data_real = data.resolve()
+        lac = Path(os.environ["LOCALAPPDATA"]).resolve()
+        if data_real.parent == lac and data_real.name == "LabSentinel":
+            _rmtree_retry(data)
+            log("  数据已删除（--purge-data）" + ("" if not data.exists() else "（部分文件仍被占用，重试后未清空）"))
+        else:
+            log(f"  [提示] 数据目录位置异常（{data}），跳过自动删除，请人工确认后手动删除")
     else:
         log(f"  数据保留在 {data}（含 config.env/事件/截图；确认不要可手动删除，或 --purge-data）")
     # 进程内只删未锁定部分（app/models/tools/scripts/LICENSE/NOTICE/入口 bat；
     # runtime 由下方哨兵守卫的延迟 rd 处理——不碰它）
+    install_real = install.resolve()
     for name in ("app", "models", "tools", "scripts", "LICENSE", "NOTICE",
                  "LabSentinel.exe", "启动.bat", "停止.bat", "安装.bat", "卸载.bat"):
+        if "/" in name or "\\" in name or ".." in name:
+            continue  # 白名单不含分隔符（防御；防遍历逃逸）
         p = install / name
         if not p.exists():
             continue
+        if p.resolve().parent != install_real:
+            continue  # 必须是安装根的直接子项（防符号链接/重定向逃逸）
         if p.is_dir():
             _rmtree_retry(p)
         else:

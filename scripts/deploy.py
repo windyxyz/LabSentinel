@@ -17,6 +17,7 @@ from __future__ import annotations  # 允许老解释器（3.9）先跑起来做
 
 import argparse
 import gzip
+import hashlib
 import ipaddress
 import json
 import os
@@ -31,6 +32,7 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 VENV_MARK = ROOT / "scripts" / "venv_path.txt"
@@ -90,7 +92,7 @@ def http_download(url: str, dest: Path, timeout: int = 120) -> Path:
     _assert_public_host(url)
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+    with urllib.request.urlopen(req, timeout=timeout) as r, dest.open("wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         got = 0
         while True:
@@ -103,6 +105,53 @@ def http_download(url: str, dest: Path, timeout: int = 120) -> Path:
                 log(f"\r    下载 {got / 1e6:.1f}/{total / 1e6:.1f} MB", end="")
     log()
     return dest
+
+
+# ---------- T-005：资产哈希锁定（scripts/assets.lock.json） ----------
+ASSETS_LOCK = ROOT / "scripts" / "assets.lock.json"
+
+
+def verify_sha256(path: Path, expected: str) -> None:
+    """下载后强制 SHA256 校验；不匹配即删除残件并抛错（防篡改/防损坏扩散）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    got = h.hexdigest()
+    if got != (expected or "").lower():
+        path.unlink(missing_ok=True)
+        raise ValueError(f"SHA256 不匹配: {path.name}（got={got[:16]}… want={expected[:16]}…）")
+
+
+def _assets_lock() -> dict:
+    if not ASSETS_LOCK.exists():
+        raise SystemExit(f"[失败] 缺少资产哈希清单 {ASSETS_LOCK}（T-005）")
+    return json.loads(ASSETS_LOCK.read_text("utf-8"))
+
+
+def download_verified(asset_key: str, dest: Path) -> Path:
+    """按 assets.lock.json 下载指定资产：官方源优先，逐源下载后强制 SHA256 校验，
+    失败/不匹配删残件换下一源。LS_ALLOW_MIRROR_PROXY=1 才启用加速代理源（默认关闭），
+    哈希匹配可证明内容一致，但代理默认不出网。"""
+    entry = _assets_lock()["assets"][asset_key]
+    sources = list(entry.get("urls", []))
+    if os.environ.get("LS_ALLOW_MIRROR_PROXY") == "1":
+        sources += list(entry.get("mirror_urls", []))
+    expected = entry["sha256"]
+    last_err: Exception | None = None
+    for url in sources:
+        try:
+            http_download(url, dest, timeout=900)
+            verify_sha256(dest, expected)
+            log(f"    来源: {urlparse(url).netloc}（SHA256 已校验）")
+            return dest
+        except SystemExit:
+            raise
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            dest.unlink(missing_ok=True)
+            log(f"    源失败（残件已删除）: {e}")
+    raise SystemExit(f"[失败] 资产 {asset_key} 全部源失败或哈希不匹配: {last_err}")
 
 
 # ---------- python / venv ----------
@@ -256,28 +305,18 @@ def ensure_openh264(venv: Path) -> None:
         shutil.copy2(local, dll)
         log(f"  [3] 复用本机已有 OpenH264 DLL: {local}")
         return
-    log("  [3] 本机未找到 OpenH264，尝试下载（官方 → CDN 镜像）...")
+    log("  [3] 本机未找到 OpenH264，尝试下载（哈希锁定 scripts/assets.lock.json，官方源优先）...")
     payload = ROOT / "logs" / "openh264.download"
-    # 官方 .bz2 可直连；npmmirror 没有 openh264 目录（旧地址 404），GitHub 走加速前缀兜底
-    sources = (
-        "http://ciscobinary.openh264.org/openh264-2.5.0-win64.dll.bz2",
-        "https://ciscobinary.openh264.org/openh264-2.5.0-win64.dll.bz2",
-        "https://ghfast.top/https://github.com/cisco/openh264/releases/download/v2.5.0/openh264-2.5.0-win64.dll.bz2",
-        "https://github.com/cisco/openh264/releases/download/v2.5.0/openh264-2.5.0-win64.dll.bz2",
-    )
-    for url in sources:
-        try:
-            http_download(url, payload)
-            cv2_dir.mkdir(parents=True, exist_ok=True)
-            _extract_openh264(payload, dll)
-            log(f"    来源: {url}")
-            return
-        except Exception as e:  # noqa: BLE001
-            log(f"    源失败，换下一个: {e}")
-        finally:
-            payload.unlink(missing_ok=True)
-    log("  [警告] OpenH264 未获取（可选）：Windows 先尝试系统 H.264（MSMF），"
-        "失败才回退 mp4v，不影响分析与截图")
+    try:
+        download_verified("openh264-2.5.0-win64.dll.bz2", payload)
+        cv2_dir.mkdir(parents=True, exist_ok=True)
+        _extract_openh264(payload, dll)
+        log("    OpenH264 就绪（SHA256 已校验）")
+    except (SystemExit, Exception) as e:  # noqa: BLE001 可选组件，失败不阻断部署
+        log(f"  [警告] OpenH264 未获取（可选）: {e}")
+        log("         Windows 先尝试系统 H.264（MSMF），失败才回退 mp4v，不影响分析与截图")
+    finally:
+        payload.unlink(missing_ok=True)
 
 
 # ---------- node / npm ----------
@@ -370,24 +409,13 @@ def _node_version(node: Path) -> str:
         return ""
 
 
-def _node_zip_candidates() -> list[tuple[str, str, str]]:
-    """Node 便携包候选：npmmirror CDN 优先，官方 nodejs.org 兜底。"""
-    out: list[tuple[str, str, str]] = []
-    mirror = "https://registry.npmmirror.com/-/binary/node/latest-v20.x/"
-    try:
-        listing = json.loads(http_get(mirror))
-        name = next(f["name"] for f in listing if f["name"].endswith("win-x64.zip"))
-        out.append(("npmmirror", mirror + name, name))
-    except Exception as e:  # noqa: BLE001
-        log(f"    npmmirror 清单获取失败: {e}")
-    try:
-        index = json.loads(http_get("https://nodejs.org/dist/index.json"))
-        ver = next(e["version"] for e in index if e["version"].startswith("v20."))
-        name = f"node-{ver}-win-x64.zip"
-        out.append(("nodejs.org", f"https://nodejs.org/dist/{ver}/{name}", name))
-    except Exception as e:  # noqa: BLE001
-        log(f"    nodejs.org 清单获取失败: {e}")
-    return out
+def _node_asset() -> str:
+    """Node 便携包资产名：版本/URL/SHA256 全部由 scripts/assets.lock.json 钉死（T-005，
+    消除动态 latest 的版本漂移）；npmmirror 与官方 nodejs.org 为同文件双源。"""
+    for key in _assets_lock()["assets"]:
+        if key.startswith("node-") and key.endswith("-win-x64.zip"):
+            return key
+    raise SystemExit("[失败] assets.lock.json 缺少 node 资产条目")
 
 
 def _promote_extracted_dir(extracted: Path, dest: Path) -> None:
@@ -426,28 +454,24 @@ def ensure_node() -> None:
         _link_node_dir(local.parent)
         log(f"  [跳过] 使用本机 Node: {local} {_node_version(local)}")
         return
-    log("  [4] 本机未找到 Node.js，尝试下载便携版（npmmirror → nodejs.org，约 30MB）...")
-    for label, url, name in _node_zip_candidates():
-        if "/" in name or "\\" in name or ".." in name:  # 清单不可信，拒绝路径分隔符
-            log(f"    包名异常，跳过: {name}")
-            continue
-        zpath = ROOT / "logs" / name
-        try:
-            http_download(url, zpath, timeout=600)
-            log(f"    解压到 {NODE_DIR} ...")
-            with zipfile.ZipFile(zpath) as z:
-                _safe_extract_zip(z, ROOT / "tools")
-            extracted = ROOT / "tools" / name.removesuffix(".zip")
-            if extracted.exists():
-                _promote_extracted_dir(extracted, NODE_DIR)
-            os.environ["PATH"] = str(NODE_DIR) + os.pathsep + os.environ.get("PATH", "")
-            log(f"    Node {_node_version(NODE_DIR / 'node.exe')} 就绪（来源 {label}）")
-            return
-        except Exception as e:  # noqa: BLE001
-            log(f"    源 {label} 失败: {e}")
-        finally:
-            zpath.unlink(missing_ok=True)
-    log("  [警告] Node 便携版未下载成功：Web 面板将不可用（服务端/分析不受影响）")
+    name = _node_asset()
+    log(f"  [4] 本机未找到 Node.js，下载便携版 {name}（哈希锁定，约 30MB）...")
+    zpath = ROOT / "logs" / name
+    try:
+        download_verified(name, zpath)
+        log(f"    解压到 {NODE_DIR} ...")
+        with zipfile.ZipFile(zpath) as z:
+            _safe_extract_zip(z, ROOT / "tools")
+        extracted = ROOT / "tools" / name.removesuffix(".zip")
+        if extracted.exists():
+            _promote_extracted_dir(extracted, NODE_DIR)
+        os.environ["PATH"] = str(NODE_DIR) + os.pathsep + os.environ.get("PATH", "")
+        log(f"    Node {_node_version(NODE_DIR / 'node.exe')} 就绪（SHA256 已校验）")
+    except Exception as e:  # noqa: BLE001
+        log(f"    Node 下载/解压失败: {e}")
+        log("  [警告] Node 便携版未下载成功：Web 面板将不可用（服务端/分析不受影响）")
+    finally:
+        zpath.unlink(missing_ok=True)
 
 
 def ensure_npm_deps() -> None:
@@ -497,20 +521,6 @@ def _link_dir(src_dir: Path, link: Path) -> bool:
     return r.returncode == 0
 
 
-def _version_key(name: str) -> tuple:
-    """ffmpeg-static 目录名版本键（任务109）：字典序会把 b10.0 排在 b9.0 之前，选到旧版。
-
-    数字段按数值、文本段按字典序（tagged 元组避免 int/str 直接比较 TypeError）；
-    不含任何数字的名字排最后。
-    """
-    chunks = re.split(r"(\d+)", name)
-    if not any(ch.isdigit() for ch in chunks):
-        return ((1, name),)
-    return ((0, 0),) + tuple(
-        (0, int(ch)) if ch.isdigit() else (1, ch) for ch in chunks if ch
-    )
-
-
 def ensure_ffmpeg() -> None:
     if (FFMPEG_DIR / "ffmpeg.exe").exists():
         log("  [跳过] ffmpeg 已可用")
@@ -525,27 +535,21 @@ def ensure_ffmpeg() -> None:
         log("  [6] 本机未找到 ffmpeg，尝试下载（npmmirror CDN）...")
     FFMPEG_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        # ffmpeg-static 的 binary 目录提供单文件 .gz（win32-x64）
-        base = "https://registry.npmmirror.com/-/binary/ffmpeg-static/"
-        versions = [d["name"].rstrip("/") for d in json.loads(http_get(base)) if d["type"] == "dir"]
-        best = max(versions, key=_version_key)
-        listing = json.loads(http_get(f"{base}{best}/"))
-        fname = next(f["name"] for f in listing if f["name"] == "ffmpeg-win32-x64.gz")
-        gz = http_download(f"{base}{best}/{fname}", ROOT / "logs" / fname, timeout=900)
-        with gzip.open(gz, "rb") as g, open(FFMPEG_DIR / "ffmpeg.exe", "wb") as out:
+        # ffmpeg-static 的 binary 目录提供单文件 .gz（win32-x64）——版本与 SHA256
+        # 由 assets.lock.json 钉死（T-005，消除动态 latest 的版本漂移）
+        fname = "ffmpeg-win32-x64.gz"
+        gz = download_verified(fname, ROOT / "logs" / fname)
+        with gzip.open(gz, "rb") as g, (FFMPEG_DIR / "ffmpeg.exe").open("wb") as out:
             shutil.copyfileobj(g, out)
         gz.unlink()
-        log("    ffmpeg 来源: registry.npmmirror.com（ffmpeg-static " + best + "）")
+        log("    ffmpeg 来源: ffmpeg-static（SHA256 已校验，版本见 assets.lock.json）")
     except Exception as e:  # noqa: BLE001
         log(f"    ffmpeg-static 源失败，切换 @ffmpeg-installer 源: {e}")
         try:
-            meta = json.loads(http_get(
-                "https://registry.npmmirror.com/@ffmpeg-installer/win32-x64/latest"))
-            tgz = http_download(meta["dist"]["tarball"], ROOT / "logs" / "ffmpeg-installer.tgz",
-                                timeout=900)
+            tgz = download_verified("ffmpeg-installer.tgz", ROOT / "logs" / "ffmpeg-installer.tgz")
             _extract_tar_member(tgz, "ffmpeg.exe", FFMPEG_DIR / "ffmpeg.exe")
             tgz.unlink()
-            log("    ffmpeg 来源: @ffmpeg-installer/win32-x64（npmmirror）")
+            log("    ffmpeg 来源: @ffmpeg-installer/win32-x64（SHA256 已校验）")
         except Exception as e2:  # noqa: BLE001
             log(f"  [警告] ffmpeg 自动下载失败: {e2}")
             log("         实时画面的文件源需要它：从 https://www.gyan.dev/ffmpeg/builds/ 下载后把")
@@ -557,20 +561,15 @@ def ensure_ffmpeg() -> None:
     if local_probe:
         log(f"  [跳过] 本机已有 ffprobe: {local_probe}")
         return
-    for meta_url in ("https://registry.npmmirror.com/ffprobe-static/latest",
-                     "https://registry.npmjs.org/ffprobe-static/latest"):
-        try:
-            # ffprobe 不在 ffmpeg-static binary 里，从 ffprobe-static 的 npm 包 tarball 抽取
-            meta = json.loads(http_get(meta_url))
-            tgz = http_download(meta["dist"]["tarball"], ROOT / "logs" / "ffprobe-static.tgz",
-                                timeout=600)
-            _extract_tar_member(tgz, "win32/x64/ffprobe.exe", FFMPEG_DIR / "ffprobe.exe")
-            tgz.unlink()
-            log("    ffprobe 来源: " + meta_url)
-            return
-        except Exception as e:  # noqa: BLE001
-            log(f"    ffprobe 源失败: {e}")
-    log("  [提示] ffprobe 未获取（可选组件，不影响演示）")
+    try:
+        # ffprobe 不在 ffmpeg-static binary 里，从 ffprobe-static 的 npm 包 tarball 抽取；
+        # tarball 版本与 SHA256 由 assets.lock.json 钉死（npmjs 官方 + npmmirror 镜像双源）
+        tgz = download_verified("ffprobe-static.tgz", ROOT / "logs" / "ffprobe-static.tgz")
+        _extract_tar_member(tgz, "win32/x64/ffprobe.exe", FFMPEG_DIR / "ffprobe.exe")
+        tgz.unlink()
+        log("    ffprobe 来源: ffprobe-static npm tarball（SHA256 已校验）")
+    except Exception as e:  # noqa: BLE001
+        log(f"  [提示] ffprobe 未获取（可选组件，不影响演示）: {e}")
 
 
 # ---------- 配置与数据 ----------

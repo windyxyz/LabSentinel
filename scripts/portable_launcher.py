@@ -456,7 +456,9 @@ def do_stop() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(do_stop() if "--stop" in sys.argv else do_start())
+        # 停止信号：argv --stop（脚本直调）或 LS_PORTABLE_STOP=1（C# 启动器经环境变量传入）
+        stop = "--stop" in sys.argv or os.environ.get("LS_PORTABLE_STOP") == "1"
+        sys.exit(do_stop() if stop else do_start())
     except SystemExit:
         raise
     except Exception:  # noqa: BLE001  pythonw 无控制台：异常必须落日志否则无声死亡

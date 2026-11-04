@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -37,10 +38,14 @@ def step(name: str, ok: bool, detail: str = "") -> bool:
     return ok
 
 
-def http_get(url: str, timeout: float = 5.0) -> tuple[int, bytes]:
-    req = urllib.request.Request(url, headers={"User-Agent": "ls-smoke/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.status, r.read()
+def http_get(base: str, path: str, timeout: float = 5.0) -> tuple[int, bytes]:
+    host = urllib.parse.urlparse(base).hostname or ""
+    if host not in ("127.0.0.1", "::1", "localhost"):  # 冒烟只打本机隔离实例
+        raise SystemExit(f"[smoke] 仅允许回环地址，收到: {host}")
+    import httpx
+    with httpx.Client(base_url=base.rstrip("/"), timeout=timeout) as client:
+        r = client.get(path)  # 相对路径，base 已校验回环
+    return r.status_code, r.content
 
 
 def dir_stat(p: Path) -> tuple[int, float]:
@@ -199,7 +204,7 @@ def main() -> int:
         dl = time.time() + a.timeout  # 任务119：窗口与 --timeout 一致（> 启动器就绪窗口），冷启动 ~29s 不再擦边
         while time.time() < dl:
             try:
-                st, body = http_get(f"{api}/api/system")
+                st, body = http_get(api, "/api/system")
                 if st == 200:
                     sysinfo = json.loads(body)
                     ok = bool(sysinfo.get("backend")) and bool(sysinfo.get("version"))
@@ -215,12 +220,12 @@ def main() -> int:
 
         # [4] 前端
         try:
-            st, html = http_get(f"{api}/")
+            st, html = http_get(api, "/")
             marker_ok = st == 200 and b'id="app"' in html
             assets = re.findall(r'(?:src|href)="(/assets/[^"]+)"', html.decode("utf-8", "replace"))
             asset_st = None
             if assets:
-                asset_st, _ = http_get(f"{api}{assets[0]}")
+                asset_st, _ = http_get(api, assets[0])
             step("4 前端首页+资源", marker_ok and asset_st == 200,
                  f"根标记={'命中' if marker_ok else '缺失'} 资源 {assets[0] if assets else '无'} → {asset_st}")
         except OSError as e:

@@ -1,0 +1,63 @@
+{
+  "_readme": "T-005 资产哈希清单：scripts/deploy.py 与 scripts/build_portable.py 的所有二进制下载必须经 download_verified() 按 sha256 逐源校验，不匹配即删除残件换下一源。urls 为官方/官方镜像直连（均 https 公网）；mirror_urls 为加速代理源，仅在 LS_ALLOW_MIRROR_PROXY=1 时启用且同样强制校验。更新某个资产时：先从官方渠道下载并核对哈希（有官方校验文件的以官方为准，如 node SHASUMS256.txt），再更新本文件。哈希来源（2026-11-04 实测）：openh264/ffmpeg/ffprobe/ffmpeg-installer 为本次下载实测；python embed 为 python.org 官方产物实测；node 与 nodejs.org/dist/v20.20.2/SHASUMS256.txt 逐字一致。",
+  "assets": {
+    "openh264-2.5.0-win64.dll.bz2": {
+      "version": "2.5.0",
+      "urls": [
+        "https://ciscobinary.openh264.org/openh264-2.5.0-win64.dll.bz2",
+        "https://github.com/cisco/openh264/releases/download/v2.5.0/openh264-2.5.0-win64.dll.bz2"
+      ],
+      "mirror_urls": [
+        "https://ghfast.top/https://github.com/cisco/openh264/releases/download/v2.5.0/openh264-2.5.0-win64.dll.bz2"
+      ],
+      "sha256": "1879afe8429fc9b064cfbdeb91a19d9e0594116d06702d8e0c821150d6150972",
+      "size": 456725
+    },
+    "python-3.12.8-embed-amd64.zip": {
+      "version": "3.12.8",
+      "urls": [
+        "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip",
+        "https://registry.npmmirror.com/-/binary/python/3.12.8/python-3.12.8-embed-amd64.zip",
+        "https://mirrors.huaweicloud.com/python/3.12.8/python-3.12.8-embed-amd64.zip"
+      ],
+      "sha256": "8d3f33be9eb810f23c102f08475af2854e50484b8e4e06275e937be61ce3d2fb",
+      "size": 11094114
+    },
+    "node-v20.20.2-win-x64.zip": {
+      "version": "20.20.2",
+      "urls": [
+        "https://nodejs.org/dist/v20.20.2/node-v20.20.2-win-x64.zip",
+        "https://registry.npmmirror.com/-/binary/node/v20.20.2/node-v20.20.2-win-x64.zip"
+      ],
+      "sha256": "dc3700fdd57a63eedb8fd7e3c7baaa32e6a740a1b904167ff4204bc68ed8bf77",
+      "size": 30283903
+    },
+    "ffmpeg-win32-x64.gz": {
+      "version": "b6.1.1",
+      "urls": [
+        "https://registry.npmmirror.com/-/binary/ffmpeg-static/b6.1.1/ffmpeg-win32-x64.gz",
+        "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64.gz"
+      ],
+      "sha256": "8883a3dffbd0a16cf4ef95206ea05283f78908dbfb118f73c83f4951dcc06d77",
+      "size": 29581307
+    },
+    "ffmpeg-installer.tgz": {
+      "version": "4.1.0",
+      "urls": [
+        "https://registry.npmjs.org/@ffmpeg-installer/win32-x64/-/win32-x64-4.1.0.tgz",
+        "https://registry.npmmirror.com/@ffmpeg-installer/win32-x64/-/win32-x64-4.1.0.tgz"
+      ],
+      "sha256": "2aa313be3585994d710197bc4196f5fcbb6a1469be1013b24d200e45d773592f",
+      "size": 22202240
+    },
+    "ffprobe-static.tgz": {
+      "version": "3.1.0",
+      "urls": [
+        "https://registry.npmjs.org/ffprobe-static/-/ffprobe-static-3.1.0.tgz",
+        "https://registry.npmmirror.com/ffprobe-static/-/ffprobe-static-3.1.0.tgz"
+      ],
+      "sha256": "0193bc86ec086edcb7c3198fe8aca944e4a5d748f63d2d1b4603b26892ebb628",
+      "size": 121756431
+    }
+  }
+}

@@ -34,11 +34,7 @@ RUNTIME = DIST / "runtime"
 SITE = RUNTIME / "Lib" / "site-packages"
 PY_VER = "3.12.8"
 PY_ZIP = f"python-{PY_VER}-embed-amd64.zip"
-PY_SOURCES = [
-    f"https://registry.npmmirror.com/-/binary/python/{PY_VER}/{PY_ZIP}",
-    f"https://mirrors.huaweicloud.com/python/{PY_VER}/{PY_ZIP}",
-    f"https://www.python.org/ftp/python/{PY_VER}/{PY_ZIP}",
-]
+# PY_ZIP 下载源与 SHA256 统一在 scripts/assets.lock.json 维护（T-005）
 PIP_INDEXES = [
     "https://pypi.tuna.tsinghua.edu.cn/simple",
     "https://mirrors.aliyun.com/pypi/simple",
@@ -65,16 +61,8 @@ def ensure_runtime() -> None:
         return
     zpath = ROOT / "logs" / PY_ZIP
     if not zpath.exists():
-        deploy.log(f"  [1] 下载 CPython {PY_VER} embed（npmmirror→华为云→python.org）...")
-        for url in PY_SOURCES:
-            try:
-                deploy.http_download(url, zpath, timeout=600)
-                break
-            except Exception as e:
-                deploy.log(f"    源失败，换下一个: {e}")
-                zpath.unlink(missing_ok=True)  # 2026-10-30 审阅：残缺包会污染下次 exists() 缓存判断
-        else:
-            raise SystemExit("[失败] 三个下载源均失败")
+        deploy.log(f"  [1] 下载 CPython {PY_VER} embed（哈希锁定 assets.lock.json）...")
+        deploy.download_verified(PY_ZIP, zpath)  # 下载后强制 SHA256 校验，残件不落盘
     with zipfile.ZipFile(zpath) as z:  # 完整性校验（CRC 全量）
         assert z.testzip() is None, "embed zip 校验失败"
         deploy.log(f"  [2] 解压到 {RUNTIME} ...")

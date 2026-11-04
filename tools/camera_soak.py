@@ -19,12 +19,14 @@ import csv
 import ctypes
 import datetime
 import json
+import os
 import re
 import shutil
 import sqlite3
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -176,10 +178,14 @@ def parse_ffprobe_stream(ffprobe: Path, url: str, timeout: int = 20) -> dict | N
 # ---------- 采样与进程指标 ----------
 
 def get_json(base, path, timeout):
+    host = urllib.parse.urlparse(base).hostname or ""
+    if host not in ("127.0.0.1", "::1", "localhost"):  # 压测工具只打本机实例
+        raise SystemExit(f"[soak] 仅允许回环地址作为 base-url，收到: {host}")
+    import httpx
     t0 = time.perf_counter()
-    req = urllib.request.Request(base + path, headers={"Cache-Control": "no-cache"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read() or b"{}")
+    with httpx.Client(base_url=base.rstrip("/"), timeout=timeout) as client:
+        r = client.get(path)  # 相对路径，base 已校验回环
+    data = r.json() if r.status_code == 200 else {}
     return data, (time.perf_counter() - t0) * 1000
 
 
@@ -358,7 +364,7 @@ def main():
     rows = []
 
     def flush():
-        with open(out, "w", newline="", encoding="utf-8") as f:
+        with out.open("w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
             w.writeheader()
             w.writerows(rows)
