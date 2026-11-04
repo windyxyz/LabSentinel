@@ -17,6 +17,7 @@
 下载全部走镜像回退（npmmirror → 华为云 → python.org），请求前校验公网地址（同 deploy.py）。
 """
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -72,23 +73,27 @@ def ensure_runtime() -> None:
 
 
 def ensure_deps() -> None:
-    if (SITE / "fastapi").exists() and (SITE / "cv2").exists():
-        deploy.log("  [跳过] site-packages 已预装（fastapi/cv2 就位）")
+    """T-002（B-03/R-02）：依赖从带哈希锁文件全新安装到干净 site-packages。
+    锁文件 sha256 stamp 不一致（requirements 变更/首装/依赖漂移）即清空重装，
+    修复旧逻辑"fastapi/cv2 存在即跳过"导致的 requirements 变更不生效与 opencv 双包并存。"""
+    lock = ROOT / "server" / "requirements-win.lock"
+    stamp = SITE / ".lock.sha256"
+    want = hashlib.sha256(lock.read_bytes()).hexdigest()
+    if stamp.exists() and stamp.read_text("ascii").strip() == want:
+        deploy.log("  [跳过] site-packages 与锁文件一致（stamp 命中）")
         return
+    deploy.log("  [3] 依赖全新安装到 runtime/Lib/site-packages（--require-hashes --no-deps，约 5 分钟）...")
+    shutil.rmtree(SITE, ignore_errors=True)
+    SITE.mkdir(parents=True)
     py = venv_python()
-    SITE.mkdir(parents=True, exist_ok=True)
-    deploy.log("  [3] 预装依赖到 runtime/Lib/site-packages（清华→阿里云→官方，约 5 分钟）...")
-    for idx in PIP_INDEXES:
-        r = subprocess.run(
-            [str(py), "-m", "pip", "install", "--disable-pip-version-check",
-             "--no-warn-script-location", "--target", str(SITE),
-             "-r", str(ROOT / "server" / "requirements.txt"), "-i", idx],
-            env={**os.environ, "PYTHONUTF8": "1"})
-        if r.returncode == 0:
-            deploy.log(f"    来源: {idx}")
-            return
-        deploy.log(f"    源失败（exit {r.returncode}），换下一个")
-    raise SystemExit("[失败] pip 三个源均失败")
+    r = subprocess.run(
+        [str(py), "-m", "pip", "install", "--disable-pip-version-check",
+         "--no-warn-script-location", "--require-hashes", "--no-deps",
+         "--target", str(SITE), "-r", str(lock)],
+        env={**os.environ, "PYTHONUTF8": "1"})
+    if r.returncode != 0:
+        raise SystemExit("[失败] 锁文件依赖安装失败")
+    stamp.write_text(want, encoding="ascii")
 
 
 def copy_assets() -> None:
@@ -188,6 +193,16 @@ def smoke() -> None:
                        capture_output=True, text=True, cwd=str(RUNTIME))
     deploy.log("    " + (r.stdout.strip() or r.stderr.strip()[-300:]))
     assert r.returncode == 0, "依赖导入冒烟失败"
+    # T-002 断言：paho/reportlab 可导入 + opencv 只有一份发行版（B-03 去重）
+    code2 = ("import paho.mqtt.client, reportlab;"
+             "import importlib.metadata as md;"
+             "d=[x.metadata['Name'] for x in md.distributions() "
+             "   if x.metadata['Name'].lower().startswith('opencv')];"
+             "assert len(d)==1, d; print('paho/reportlab OK, opencv dists=', d)")
+    r = subprocess.run([str(RUNTIME / "python.exe"), "-c", code2], env=env,
+                       capture_output=True, text=True, cwd=str(RUNTIME))
+    deploy.log("    " + (r.stdout.strip() or r.stderr.strip()[-300:]))
+    assert r.returncode == 0, "paho/reportlab/opencv 单发行版 断言失败"
     r = subprocess.run(
         [str(RUNTIME / "python.exe"), "-c",
          "import sys; sys.path.insert(0, '.'); import app.main; print('app.main import OK')"],

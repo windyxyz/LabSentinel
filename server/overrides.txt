@@ -1,0 +1,4 @@
+# T-002 / B-03: supervision 依赖拉入 opencv-python（GUI 版），与 headless 版写同一 cv2/ 目录，
+# 卸载/升级使任一都会破坏另一份。此 override 使 resolver 永不选中 opencv-python；
+# headless 版在 requirements.in 单独显式列出。
+opencv-python ; sys_platform == "never"
