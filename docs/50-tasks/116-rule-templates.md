@@ -57,4 +57,46 @@ CREATE TABLE rule_templates(
 
 ## 执行报告
 
-（待填：改动 / 套用证据 / 测试与 build / 遗留）
+**flash 2026-11-04 完成（pytest 436 passed = 431+5 新增；build gzip 58.86KB；8188 实机 PASS）**
+
+### 1. 数据（**迁移 v8**——规格写 v7 已被 111 占用，顺延）
+
+- `_mig_008`：`rule_templates(id, name UNIQUE, config_json, created_ts, updated_ts)`；
+  `_SCHEMA` 基线同步；Store CRUD：`rule_templates/get_rule_template/add_rule_template
+  （重名返回 None）/update_rule_template（0 不存在/-1 名冲突/1 成功）/delete_rule_template`。
+
+### 2. API（写 require_admin，读按口径）
+
+- `GET` 列表带 rules_count（解析 config_json）；`POST` `{name ≤64, rules 1-50 条}`——
+  逐条走 `RuleCreate` 校验+behavior/HH:MM/星期集合补充校验（非法 400），**重名 409**
+  （定义：无 upsert，测试覆盖）；`PUT`（404/409）、`DELETE`（404）；
+- `POST /{id}/apply` `{camera_ids ≤100, zone_id?}`：区域跨摄像头 400、摄像头 404、
+  模板 404；**同 behavior+zone+时间窗已存在 → 跳过**；返回 created/skipped/cameras/
+  rules_per_camera；不自动启动；模板不含 camera_id（占位过 RuleCreate 校验后剥离）。
+
+### 3. 前端（Zones.vue + api.js，路由零新增）
+
+- 规则区「规则模板」块：模板下拉（含规则数）+ 套用目标下拉（全局/已有区域）+
+  "套用到当前摄像头"（confirm）+ "把上方表单存为模板"；模板管理折叠区（列表/删除）；
+  套用后刷新规则列表、失败显示 detail。
+
+### 4. 测试（test_rule_templates.py，5 用例）
+
+旧库迁移（表空/规则完好）、CRUD+校验矩阵（空 rules/非法 behavior/level=9/时间 8:0/
+星期 9/非数组）、重名 409、PUT 冲突 409/404、套用 2 路（created=4、camera_id 归属、
+112 字段随模板）、重复套用全跳过、区域校验（跨摄像头 400/正确挂 zone/404 链）、鉴权 401。
+**过程坑（已修）**：api.py 缺 `import json` → POST 500（名字冲突竟未早暴露——补上）。
+
+### 5. 实机验证（8188 临时实例）
+
+存"实验室常规"（2 条）→ 套用 2 路 → `apply: {created:4, skipped:0}`、每路 2 条规则、
+列表 rules_count=2 → **PASS**（套用 JSON 如上）。
+
+### 6. 文档
+
+35-api-reference（五端点+校验/跳重语义+与 80 并存说明）、部署FAQ「怎么复用一套规则」、
+运维手册 §4.3（原 4.3 日历顺延 4.4）。
+
+### 遗留
+
+- 无。export/import 子端点规格标"可选"，未做（主链已闭环，需要时 0.5h 补）。

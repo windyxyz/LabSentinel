@@ -55,4 +55,43 @@
 
 ## 执行报告
 
-（待填：改动 / 注册/离线证据 / build / 遗留）
+**flash 2026-11-04 完成（build gzip 59.56KB；dist 产物齐全；8188 实机 9 项断言全 PASS）**
+
+### 1. PWA
+
+- `web/public/icons/icon-{192,512}.png`：cv2 绘制主题蓝底白盾+摄像头眼（2.6KB/7.9KB；
+  **坑**：cv2.imwrite 不吃中文路径 → imencode+write_bytes）；
+- `web/public/manifest.webmanifest`：standalone/start_url / /theme #1b3366/双尺寸图标；
+- `web/public/sw.js`：install 缓存 app shell（`/`、index、manifest、icons）+skipWaiting；
+  activate 清旧版本；fetch 策略——**导航 network-first（离线回退缓存 index）、/assets/*
+  cache-first（hash 文件）、`/api/*` 与 `/ws` 一律直连不缓存**（version 常量 v1，更新 bump）；
+- `web/index.html`：manifest link + theme-color + apple-touch-icon + **内联 module script
+  注册 `/sw.js`（仅 http/https）——main.js 零改动**（无需看板申请，规格即此要求）。
+  **发现**：Vite build 会把内联 module 抽进主 chunk（代码仍在，`register("/sw.js")` 实测在
+  产物末尾）——实机断言按 chunk 内容校验。
+
+### 2. 浏览器通知（web/src/notify.js 新文件 + Dashboard.vue）
+
+- `ensurePermission()`（只在用户点击时请求）、`notifyEvent(ev)`（`document.hidden` 才弹、
+  **L1 不通知**、tag=`cam-<id>-<type>` 同 tag 10s 去重、onclick focus、失败静默）；
+  开关 localStorage `LS_DESKTOP_NOTIFY`（0=暂停）；
+- Dashboard.vue：卡片行新增「桌面通知」卡（未授权→"开启桌面通知"按钮；已授权→勾选开关，
+  权限状态 tooltip）；现有 WS `onEvent` 内接 `notifyEvent`；路由零新增、全局四件套未动。
+
+### 3. 验收证据（8188 临时实例，dist 挂载）
+
+9 项断言全 PASS：index 含 manifest link/theme-color、**SW 注册代码在构建产物 chunk 内**、
+`/manifest.webmanifest` `/sw.js` `/icons/*.png` 全 200、sw.js 明确排除 /api/ 缓存、
+manifest 字段（standalone/start_url/双图标）。build：index-*.js 159.06KB（gzip 59.56KB）。
+
+### 4. 文档
+
+部署FAQ「怎么把面板装成应用/收桌面通知（需 localhost 或 HTTPS）」；运维手册 §5.1 值班桌面通知。
+
+### 遗留
+
+- ①**浏览器真机 SW 注册/离线回退**（localhost 打开→开发者工具 Application→SW activated→
+  断网刷新出壳）需一次人工/Playwright 验证——curl 只能证明资产可达与注册代码在产物中；
+- ②dist/assets 堆积多代旧 hash chunk（121 时代的 index-9gf8y74S.js 等）——构建未清空
+  outDir（emptyOutDir 表现异常，非本任务引入），影响仅体积；建议 129 发布卫生处理；
+- ③SW 版本常量 v1 与构建 hash 无关，未来改 shell 清单时 bump。

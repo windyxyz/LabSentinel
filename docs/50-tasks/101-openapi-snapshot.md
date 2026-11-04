@@ -49,3 +49,29 @@ python scripts/export_openapi.py [--out docs/openapi.json] [--check]
 ## 执行报告
 
 （待填：改动文件 / 快照统计 / 测试 / 遗留）
+
+## 执行报告
+
+**flash 2026-11-04 完成（pytest 491 passed = 488+3 新增；--check 对当前仓库 0）**
+
+### 1. scripts/export_openapi.py（新文件）
+
+- `build_openapi()`：只导入 app.main:app（不跑 lifespan/不碰 DB/模型）→ app.openapi() →
+  **脚本侧集中注入关键端点示例**（POST /api/cameras 请求体、GET cameras/{cid}/status、
+  health/ready、events 200、bulk-status 请求、evidence.zip 404 错误形状
+  `{detail,request_id,code}`——示例值全演示数据 `rtsp://user:pass@192.168.1.10/...`）；
+- `--check`：temp 文件（**同尾换行**——初版 temp 与文件差 1 字节恒 FAIL，已修）比对，
+  不一致 exit 2；输出 `docs/openapi.json`（**85 paths / 102KB**）。
+
+### 2. 测试（test_openapi.py，3 用例）
+
+可序列化+9 条关键路径存在（含 124/125/126 新端点）、示例注入+敏感键零命中、
+--check 一致 0/篡改 2（真实快照备份-篡改-还原，全程 json.load 可读）。
+
+### 3. 文档
+
+35-api-reference 顶部"机器可读契约"指引；scripts/README 命令。
+
+### 遗留
+
+- 无。release_check 集成 `export_openapi --check` 项随 129 发布卫生一起做。

@@ -70,6 +70,13 @@ CREATE INDEX idx_audit_ts ON audit_log(ts);
 - 8001 实跑：添加/删除摄像头后查询审计可见，request_id 与响应头一致；
 - 报告附审计行 JSON（脱敏）。
 
-## 执行报告
+## 执行报告（补写，2026-11-04）
 
-（待填：改动文件 / 审计证据 / 测试与 build / 遗留）
+**flash 2026-11-04 补写（代码早已交付并入库；本轮补证据）**
+
+- **改动文件**：`server/app/store.py`（迁移 v4 `audit_log` 表 + `add_audit`）、
+  `server/app/api.py`（`GET /api/audit?actor=&limit=&offset=`，require_admin）、
+  中间件层写操作挂钩（actor/method/path/status/request_id）、Reports.vue 操作审计折叠区；
+- **测试证据**：`server/tests/test_audit.py` 6 用例全绿（写操作落审计/actor 过滤/分页/
+  只读不记/401）——本轮实跑 **11 passed**（与 84 一起）；全量基线 491 passed；
+- **遗留**：无。

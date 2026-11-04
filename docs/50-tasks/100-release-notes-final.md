@@ -37,3 +37,32 @@
 ## 执行报告
 
 （待填：改动文档 / 数字对照 / release_check / 遗留）
+
+## 执行报告
+
+**flash 2026-11-04 完成（release_check 全 PASS 319 链接；数字全部来自 104 实跑 manifest/rc）**
+
+### 数字对照表（文档值 vs manifest 实测值）
+
+| 项 | 文档引用 | manifest/实测 |
+|---|---|---|
+| zip | `LabSentinel-portable-20261104.zip` | 同 |
+| 大小 | 279,397,565 字节（279.4MB） | 同（release_manifest 实跑） |
+| SHA256 | `4de5f25648156a514f56059f18bfaf1b7519b2ef1de0c61ef622128ac89b65d7` | 同 |
+| 条目 | 12,605 | 同 |
+| pytest | 491 passed | rc_regression 实跑 |
+| 前端 gzip | 60.11KB | npm build 实跑 |
+| smoke | 8/8（110 新语义：入口退出+残留收尾） | 实跑 |
+| 包内 doctor | 10/0/0 | 解压根实测 |
+
+### 改动文档
+
+- release-notes：Features 补 Windows 收尾批次（109-126 全列，含"默认关闭"限定）+
+  Known limitations 补**未验证声明**（24h/止损线、opt-in 三件套）；
+- 发布公告「状态与边界」：补批次落地说明 + **发布候选非生产就绪**声明；
+- 发布核对报告：追加「2026-11-04 最终 RC 核对」小节（完整数字表+阻塞清单勾选状态）；
+- 未出现"已验证/生产就绪"表述（含英文 notes）。
+
+### 遗留
+
+- 无。测试数字 491 引用 104 的 rc_regression 实跑；文档零手抄未验证数字。

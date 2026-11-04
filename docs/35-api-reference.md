@@ -1,5 +1,7 @@
 # 35 · API 契约（服务端 ⇄ 客户端）
 
+> **机器可读契约**：[docs/openapi.json](openapi.json)——由 `python scripts/export_openapi.py` 生成（勿手改；CI/RC 用 `--check` 校验漂移）。
+
 > v0.1（2026-10-26）· 依据**当前真实实现**（server/app/api.py）整理。前后端/子代理开发以本文为准；改 API 必须同步更新本文。
 > Base URL：`http://127.0.0.1:8000`（Vite 开发代理 `/api`、`/ws`）。无鉴权（局域网内网部署，M3 加管理密码）。
 
@@ -18,7 +20,7 @@
 ### GET /api/system
 ```json
 {
-  "version": "0.1.0-m1",
+  "version": "0.1.0-alpha",
   "backend": "directml",                     // directml | vitisai | cpu
   "cameras": [{"id": 1, "fps": 21.3, "status": "running"}],
   "today_counts": {"1": 3, "2": 7, "3": 2}   // 今日按级别事件数
@@ -172,6 +174,102 @@ days 1-90 钳制；缺数据天补零。
 
 汇总卡片：`{"days":30, "total":n, "by_level":{"1":..,"2":..,"3":..}, "by_type":{..}, "top_days":[{"date","total"}×≤5]}`。
 
+### 插件（外挂）一期（任务126；全部 require_admin）
+
+- `GET /api/plugins`：清单+enabled/running/pid/returncode/last_error/permissions；
+- `POST /api/plugins/{id}/enable|disable|start|stop`；`GET /api/plugins/{id}/logs?tail=200`；
+- 红线：插件=代码执行——默认禁用、令牌按权限注入（不进清单/日志）、入口必须在插件目录内；
+  完整指南见 [74-plugin-guide](74-plugin-guide.md)。
+
+### MQTT 事件总线（任务125，默认关闭）
+
+- `GET /api/mqtt/status` → `{enabled,available,connected,published,dropped,failed,
+  queue_depth,host,topic_prefix,error}`（未配置也 200）；
+- 主题 `{prefix}/events/{camera_id}/{type}` + `{prefix}/status`（online/offline，LWT）；
+  payload v1（`v`/`device_type` 契约只加不减）——完整规范见
+  [73-mqtt-protocol](73-mqtt-protocol.md)；事件总线独立于告警链（不受静默/渠道过滤影响）。
+
+### GenAI 复核（任务124，默认关闭）
+
+- `GET /api/genai/status` → `{provider,model,queue_depth,enqueued,dropped,reviewed,failed,inflight,max_inflight}`；
+- 事件行（`/api/events` 等）新增 `ai_review`（对象：verdict/reason/confidence；未复核 null）
+  与 `ai_verdict` 快捷字段；`verdict ∈ likely_true|likely_false|uncertain`，**仅供参考**；
+- `/api/stats/quality` 新增 `by_ai_verdict` 计数；
+- 行为边界：provider=none 时零网络请求零字段值；复核失败静默（只计数）；
+  **绝不自动改事件 status / 不抑制告警**；截图仅发回环地址（非回环需
+  `LS_GENAI_ALLOW_REMOTE=1`）；GPU 竞争风险与 24h/压测关闭建议见部署FAQ。
+
+### GET /api/events/{id}/evidence.zip（任务103：单事件证据包）
+
+事件全字段 `event.json`（含 camera_name/exported_at）+ `snapshot.jpg` + `video.mp4` +
+`README.txt`（字段说明/缺失原因/合规提示）。文件缺失/路径越界（76 严格包含，绝不打包
+data 外文件）→ 跳过并在 README 写明，**仍 200**；事件不存在 404；总量超 200MB 400
+（提示用批量导出）。响应头 `Content-Disposition: attachment; filename="event-<id>-evidence.zip"`。
+读保护口径同事件读取（`auth_read_protected` 时需令牌）。前端：事件详情抽屉「下载证据包」。
+
+### 规则模板库（任务116；写 require_admin，读按口径）
+
+- `GET /api/rule-templates` → `{"templates":[{id,name,rules_count,updated_ts}…]}`；
+- `POST` body `{name ≤64, rules:[{behavior,level,cooldown_s,time_start,time_end,threshold,
+  days_of_week,holiday_only}…]（1-50 条）}`——逐条校验（behavior/level/HH:MM/星期集合，非法 400）；
+  **重名 409**（无 upsert）；模板只存规则参数，不绑摄像头/区域；
+- `PUT /api/rule-templates/{id}`（404/409 同上）、`DELETE /{id}`（404）；
+- `POST /api/rule-templates/{id}/apply` body `{camera_ids ≤100, zone_id?}`：区域必须属于该
+  摄像头（否则 400）；已存在同 behavior+zone+时间窗的规则跳过；返回
+  `{created, skipped, cameras, rules_per_camera}`；不自动启动摄像头；
+- 与 80「复制现有摄像头配置」并存：80 是即时复制，模板是可复用命名组合。
+
+### 局域网发现助手（任务113；require_admin）
+
+- `GET /api/discovery/cameras?timeout=3&refresh=0`：WS-Discovery 组播发现 ONVIF 设备
+  （30s 缓存，refresh=1 强制重发，timeout 限 1-5s）。返回
+  `{devices:[{ip,xaddr,name,scopes}…]（按 ip 去重、只留 10/172.16/192.168/169.254 段）,
+  lan:[本机局域网地址]（192.168/10 优先、172.x Hyper-V 殿后）, error}`——无设备/组播不可用
+  也是 200+可读 error，不 500；
+- `POST /api/discovery/probe` body `{host, port=554, username?, password?}`：TCP+ffprobe
+  只读探测 → `{host,ip,reachable,port_open,ffprobe:{codec,width,height,fps}|None,error}`。
+  凭证仅用于本次探测 URL，**不写日志/不回传**；公网地址 400 拒绝（"仅允许探测局域网地址"）；
+- 前端「摄像头」页有发现面板（品牌模板填表，不自动添加/启动）。
+
+### 摄像头分组与批量启停（任务111）
+
+- `PUT /api/cameras/{id}/group`（admin）body `{group_name}`：设置分组，空串=未分组，≤32 字符
+  （超长 400、摄像头不存在 404）；
+- `GET /api/camera-groups` → `{"groups":[{"name":"二楼东","count":2,"running":1},…]}`（读保护；
+  未分组名为空串）；
+- `POST /api/cameras/bulk`（admin）body `{ids:[..], action:"start"|"stop"}`：ids 去重非空整数
+  数组且 ≤100（违反 400）；返回 `{ok:[..], missing:[..], failed:[{id,error}…]}`——不删数据、
+  复用单路启停语义；
+- `POST /api/cameras` 新增可选 `group_name`（≤32）；`GET /api/cameras` 每行带 `group_name`。
+
+### POST/GET/DELETE /api/calendar（任务112：日期例外表）
+
+- `GET` → `{"exceptions":[{"date":"2026-10-01","mode":"holiday","note":"国庆"}…]}`（读保护口径）；
+- `POST` body `{date: YYYY-MM-DD, mode: holiday|workday, note}`（admin）——同日期**覆盖**（upsert，
+  响应 `replaced: true/false`）；date 格式错/mode 非法 → 400；删除不存在的日期 → 404；
+- 语义：`holiday`=该日按假期、`workday`=该日按工作日（覆盖周末判断）；
+  无例外记录时周末默认按假期（`LS_WEEKEND_IS_HOLIDAY=0` 关闭）。
+
+### 规则字段 days_of_week / holiday_only（任务112）
+
+`POST /api/rules` 新增可选字段：`days_of_week`（ISO 星期集合逗号串，1=周一…7=周日，
+默认 `"1,2,3,4,5,6,7"`=每天；空/非法串 400；引擎侧空/坏数据 fail-closed 不产生事件）、
+`holiday_only`（默认 false；true=只在 `is_holiday` 为真的日期生效）。
+判定顺序：星期集合 → 假期 → 时间窗（跨午夜语义不变）→ 冷却。
+**已知边界**：`occupancy_over` 全局规则目前不走时间窗/日历过滤（既有行为，未改）。
+
+### GET /api/stats/quality?days=7&camera_id=（任务102：处置质量）
+
+`days` 1–365（越界 400），只读 SQL 聚合。返回 `total`、`by_status`（new/acked/false_positive/ignored）、
+`by_level`、`by_type`、`by_camera[]`（camera_id/name/total/false_positive/rate，按 total 降序）、
+`daily[]`（date/total/false_positive）、`unhandled`（new 数）、`l3_total`、`false_positive_rate`。
+
+**口径（必读）**：`false_positive_rate = false_positive ÷ (acked + false_positive + ignored)`
+——分母是**已处置**事件（已确认/误报/忽略），不含未处置；窗口内无已处置事件时为 0。
+它是"已处置中误报占比"，**不是**"每天误报次数"（后者看 `daily[].false_positive`）。
+模型止损线（误报 ≤20%/天）的"天数"口径由 24h 验收按 `daily` 统计；本比率用于观察处置质量趋势
+（交叉引用：docs/52-model-eval.md、docs/摄像头24h验收清单.md）。
+
 ### GET /api/stats/daily?days=7&start_ts=&end_ts=（任务21 增强）
 
 `start_ts/end_ts` 给定时按自定义窗口逐日展开（纯日期自动补边界；窗口>400 天只返回有数据的天）。
@@ -279,6 +377,12 @@ date 格式错误 → 400。
 - `/api/system` 的 `cameras[]` 同步追加上述指标字段（原有键不变，向后兼容）。
 - 行为：rtsp/usb 打开失败或断流做**有限重连**（5 次 × 3s，`reconnect_count` 计数），
   耗尽转 `error` 并退出线程；file 源坏路径直接 `error` 退出。
+- 守护字段（任务114）：本端点与 `/api/system` 的 `cameras[]` 均追加
+  `restart_count`（连续自动重启次数，存活 >5s 清零）、`last_restart_ts`、
+  `supervisor_state`（`running/backoff/given_up/stopped`，从未纳入守护为 null）。
+  守护默认开启：worker 退出后按 1/5/30/60s 退避自动重启，达
+  `LS_SUPERVISOR_MAX_RESTARTS`（默认 10）转 `given_up` 并把摄像头置 `error`；
+  `POST /api/cameras/{id}/start` 会清除 given_up 并重新纳入守护。
 
 ## 9. 未实现（规划中，勿在代码中假设）
 

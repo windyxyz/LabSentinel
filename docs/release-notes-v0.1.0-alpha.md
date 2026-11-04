@@ -23,6 +23,15 @@
 - Data retention: configurable auto-cleanup with disk-pressure emergency purge (compliance: minimal storage).
 - Admin token auth (optional), multi-channel alert status page with health self-test.
 - Dual-theme WinUI 3-style web UI; Flutter Android client skeleton (task 08).
+- **Windows hardening batch (tasks 109–126)**: camera worker supervisor with backoff (114);
+  keep-awake for 24h unattended runs (123, off by default); rule calendar
+  (weekday/holiday, 112); camera groups & bulk start/stop (111); LAN ONVIF discovery
+  (113, private networks only); reusable rule templates (116); PWA + desktop notifications (115);
+  update check vs self-hosted manifest (117, never auto-downloads); per-event evidence ZIP (103);
+  optional local VLM false-positive pre-classification (124, off by default, never changes
+  event status); MQTT event bus v1 (125, off by default, see docs/73-mqtt-protocol.md);
+  plugin framework phase 1 (126, disabled by default, admin-managed).
+- Image-folder ingestion (task 121): point at a screenshots directory, same detection/alert pipeline.
 
 ## Measured performance (source: docs/40-roadmap.md, M0 exit table)
 
@@ -54,6 +63,11 @@ ByteTrack vs simple IOU tracker on lab footage: 4 tracked events vs 15 duplicate
 - Model domain gap on merged public datasets is being closed via the data flywheel (docs/90-data-flywheel.md); v1 baseline numbers are intentionally published unpolished (docs/52-model-eval.md).
 - No CI-run model tests (CI covers pytest/web build/lint only, by design).
 - Single-user admin token auth only; multi-user is planned for M3.
+- **Not yet validated: 24h continuous run on a real RTSP camera and the model stop-loss
+  targets (Lab Coat recall ≥60%, ≤20 false alarms/day)** — the release candidate is for
+  internal testing only until those pass; do not treat it as production-ready.
+- Update check, VLM review and the MQTT bus are opt-in and **off by default**; the bus is
+  read-only outbound and never blocks the alert chain.
 
 ## Installation
 

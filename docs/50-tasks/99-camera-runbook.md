@@ -38,4 +38,32 @@
 
 ## 执行报告
 
-（待填：章节 / 链接/命令核对 / 遗留）
+**flash 2026-11-04 完成（纯文档；release_check 相对链接 312 条全过）**
+
+### 交付
+
+- 新文档 `docs/摄像头接入Runbook.md`，九章：前置条件表 / 接入前预检（ffprobe 完整路径 +
+  `camera_soak --preflight`）/ 添加摄像头（USB 下拉、先配区后启动）/ 区域与规则
+  （三类型语义 + 复制接口）/ 告警验证（自测→真实→静默/升级）/ 稳定性观察
+  （1h→24h 命令、产物、判定阈值、守护重试说明）/ 故障速查表（8 症状）/ 验收清单 / 回滚停用。
+- 每步含"预期结果/失败先查什么"；Windows 路径完整可复制（`tools\ffmpeg\ffprobe …`）。
+
+### 命令/链接核对表（写前逐一实测/核对）
+
+| 项 | 现状 | 结论 |
+|---|---|---|
+| camera_soak 帮助文本 | `--preflight/--all/--duration(24h/90m/3600)/--interval/--out/--summary-json/--stall-s` 与实测 `--help` 一致 | ✓ |
+| ffprobe | `tools/ffmpeg/ffprobe.exe` 存在 | ✓ |
+| 备份脚本 | `scripts/backup_data.py` 存在（备份 API 口径） | ✓ |
+| RTSP 模板 | 部署指南（海康 101/102、大华 subtype、宇视 video1）引用一致 | ✓ |
+| 端点 | usb-devices/alerts status/alert-test/alert-silences/copy/config import/diagnostics summary/单路 status 均在 api 在位 | ✓ |
+| 文档链接 | 部署指南/FAQ/运维手册/24h清单/35-api-reference/标注手册/59-portable-install 均存在；release_check 312 条全过 | ✓ |
+| 未完成项标注 | 24h 结果明示"不含未实测结论"；验收表外链 24h 清单 | ✓ |
+
+### 入口
+
+- README 文档索引新增一行；部署指南 §3「摄像头接入」顶部指向；运维手册 §4 顶部指向。
+
+### 遗留
+
+- 无。注意：Runbook 引用的守护重试/处置质量卡来自本日任务 109/110/114/123/102 已落地实现。

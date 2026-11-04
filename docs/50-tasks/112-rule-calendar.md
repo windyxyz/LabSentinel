@@ -62,4 +62,54 @@
 
 ## 执行报告
 
-（待填：改动 / 触发矩阵 / 测试与 build / 遗留）
+**flash 2026-11-04 完成（pytest 409 passed = 402+7 新增；build gzip 55.92KB；8188 实机 PASS）**
+
+### 1. 迁移 v6（store.py）
+
+- `_mig_006`：rules ALTER 加 `days_of_week TEXT DEFAULT '1,2,3,4,5,6,7'`、
+  `holiday_only INTEGER DEFAULT 0`（PRAGMA 防重入）；新建 `calendar_exceptions(date PK, mode, note)`；
+  `_SCHEMA` 基线同步（新库/旧库两路收敛同构）；
+- `Store.is_holiday(d)`：先查例外表（holiday/workday 覆盖），无记录按周末
+  （`LS_WEEKEND_IS_HOLIDAY=0` 关闭"周末算假期"，config.py 新增）；`calendar_exceptions/
+  set_calendar_exception（upsert 返回 replaced）/delete_calendar_exception` CRUD。
+
+### 2. 引擎（rules.py）
+
+- `_matches_calendar(rule, now)`：ISO 星期集合（缺列 None=全星期兜底；**空串/非法串 fail-closed
+  不匹配**——坏数据不产生事件不抛异常）→ holiday_only 时要求 `is_holiday(today)`；
+  match 判定顺序：星期 → 假期 → 时间窗（跨午夜语义不变）→ 冷却。冷却/级别语义未动。
+- `add_rule` 持久化两新列；`store.rules()` 把 `holiday_only` 转 bool（与 enabled 同口径）。
+
+### 3. API/UI
+
+- `RuleCreate` 加 `days_of_week`/`holiday_only`（可选，默认全星期/非假期）；POST /api/rules
+  校验 days ⊆ {1..7} 且非空（400）；
+- `GET /api/calendar`（读保护）/ `POST`（admin，date 格式+mode 校验，同日期 upsert 返回
+  `replaced`）/ `DELETE /api/calendar/{d}`（404）；
+- Zones.vue：星期 7 复选（toggle 规范顺序存储）、仅假期勾选、规则表 muted 列追加
+  "周X / 仅假期"摘要；页面底部「日期例外」小区块（日期/模式/备注+列表+删除）；
+  api.js +3 方法。路由零新增。
+
+### 4. 测试（test_rule_calendar.py，7 用例，注入日期不依赖墙钟）
+
+星期过滤矩阵（周一规则×周一/周二、全星期、空串/非法串 fail-closed）、
+holiday_only（工作日不触发/周末触发/workday 例外覆盖周末/holiday 例外覆盖工作日/
+WEEKEND_IS_HOLIDAY=0）、时间窗+星期+假期组合、**旧库迁移默认值且旧行为不变**（手工建 v5 库
+迁移后断言）、calendar CRUD/覆盖语义/格式校验/404/鉴权 401、规则创建校验与读回。
+
+### 5. 实机验证（8188 临时实例+临时库）
+
+`schema_version=6`；日历 upsert `replaced False→True`、列表 1 条；规则
+`days_of_week="6,7", holiday_only=true` HTTP 创建+读回一致 → **PASS**。
+事件级星期过滤由单测注入日期矩阵覆盖（触发矩阵见上 §4）。
+
+### 6. 文档
+
+35-api-reference（/api/calendar 三端点+规则新字段+判定顺序+occupancy 边界）、
+部署FAQ「怎么设置只在夜间/周末/假期告警」、运维手册 §4.2 规则日历条件。
+
+### 约束/遗留
+
+- 现有规则 API 字段语义未变（新增可选字段）；无新依赖；前端只改 Zones.vue/api.js；
+- **已知边界（记录不修）**：`occupancy_over` 全局规则当前不走时间窗/日历过滤（既有行为，
+  112 规格只要求 match 路径）；如需统一，主线另立任务。

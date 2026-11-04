@@ -56,4 +56,44 @@
 
 ## 执行报告
 
-（待填：改动文件 / 指标对照 / 测试与 build / 遗留）
+**flash 2026-11-04 完成（pytest 402 passed = 397+5 新增；build gzip 54.88KB；8188 实测验收数字命中）**
+
+### 1. 端点（server/app/stats.py `quality()` + api.py `/stats/quality`）
+
+- 只读 SQL 聚合（COUNT/GROUP BY/SUM CASE，不加载事件行），窗口 `ts >= now-days` 至 `now`；
+- 返回：total / by_status / by_level / by_type / by_camera（LEFT JOIN cameras 取名，含
+  每路 rate，按 total 降序）/ daily / unhandled / l3_total / false_positive_rate；
+- **口径**（docstring+API 文档双写）：`false_positive_rate = fp ÷ (acked + fp + ignored)`，
+  分母=已处置（不含 new），无已处置=0；"每天误报次数"是 `daily[].false_positive`——两个口径
+  在文档里明确区分，避免把比例当次数；
+- `days` 1–365 越界 400；读保护 require_read 同口径；不影响现有 daily/weekly/summary/hourly。
+
+### 2. 前端（Reports.vue + api.js，不新增路由）
+
+- 汇总卡行下新增「处置质量」卡：未处置 / L3（窗口内）/ 误报率（%,1 位小数）/ 已处置÷总数；
+- 按摄像头小表（最多 10 路：事件/误报/误报率）；窗口无数据显示"暂无数据"；
+- 与日/周视图共用 `days`；**独立容错**：quality 请求失败（如旧服务端无此端点）只隐藏卡片，
+  不影响既有图表（try/catch 包裹，seq 保护复用）。
+
+### 3. 测试（test_quality_stats.py，5 用例，conftest 隔离 + api_mod.store 同源造数）
+
+全字段聚合（11 事件跨 2 天 2 摄像头：by_status/level/type/by_camera/daily 与误报率 0.3）、
+只有 new 时 rate=0 分母口径、空窗口零值、days 边界 0/365/366 与 camera_id 过滤、
+读保护 401/令牌 200、既有 stats 端点回归。
+**坑记录**：造数勿强制 `hour=10`——凌晨跑测试该时刻在"未来"，落不到窗口内（与
+test_alert_silence 同类墙钟脆弱，已改为 now-days_ago 相对时间）。
+
+### 4. 实机验证（8188 临时实例+临时库，恰按规格造 10 条：6 acked/2 fp/2 new）
+
+`total=10、false_positive_rate=0.25、unhandled=2、l3_total=2`——与规格验收数字逐一命中；
+`by_camera[0].rate=0.2`（该路 10 事件 2 误报）自洽。
+
+### 5. 文档
+
+- 35-api-reference §6 新端点+口径（含止损线"≤20 条/天"按 daily 口径的说明）；
+- 运维手册每周巡检加"处置质量卡"（交叉引用标注手册/52-model-eval/24h 清单）；
+- 摄像头24h验收清单 追加"误报率取证"节；52-model-eval 追加"上线后持续取证"附节。
+
+### 遗留
+
+- 无。**Phase A（发布前置）至此全部完成**：109/110/114/123/102/99/118 记录 ✓。

@@ -103,19 +103,26 @@
 | [74-release-final-check.md](./74-release-final-check.md) | 发布文档终检 | ✅ 已验收 |
 | **75–104（30 项）** | 便携修复/安全/运维/功能/发布收口 | 已派发 |
 | **105（P0）** | 审阅修复的回归补丁 | **先做** |
-| **106–110** | 状态清理/孤儿媒体/告警退出/deploy/PID 安全 | 106–108 ✅ 主线（f07c0df）；109–110 待做 |
-| **111–117** | Windows 功能补齐（分组/日期规则/发现/守护/PWA/模板/更新检查） | 已派发 |
-| **118** | Hyper-V 干净 VM 安装验收（低负载） | ✅ 用户确认已复测；待补记录 |
+| **106–110** | 状态清理/孤儿媒体/告警退出/deploy/PID 安全 | ✅ 全部完成（109/110 随批次 122–130） |
+| **111–117** | Windows 功能补齐（分组/日期规则/发现/守护/PWA/模板/更新检查） | ✅ 全部完成（122–130 批次） |
+| **118** | Hyper-V 干净 VM 安装验收（低负载） | ✅ 用户确认已复测；记录已补 |
 | [119-first-start-reliability.md](./119-first-start-reliability.md) | 首次启动 60s 可配/便携 go2rtc/doctor 源模式 | ✅ 已验收（a8d8ca1） |
 | [120-installer-driver-split.md](./120-installer-driver-split.md) | 安装器/驱动拆分、控制面板卸载、Web 停止 | ✅ 已验收（a8d8ca1） |
 | [121-folder-image-ingestion.md](./121-folder-image-ingestion.md) | **图片文件夹自动识别（关键图片汇报）** | ✅ 主线 2026-11-03 完成（f7ba376） |
 | [122-portable-rebuild-121.md](./122-portable-rebuild-121.md) | **便携包重建（含 121）+ 冒烟/manifest/doctor** | ✅ 2026-11-03 完成（aadabd5） |
-| [123-keep-awake.md](./123-keep-awake.md) | **监控机防休眠（24h 前置）** | 待做（P1） |
-| [124-genai-false-positive.md](./124-genai-false-positive.md) | **本地 VLM 误报预分类（默认关）** | 待做（P2） |
-| [125-mqtt-event-bus.md](./125-mqtt-event-bus.md) | **MQTT 事件总线（生态开放）** | 待做（P2） |
-| [126-plugin-phase1.md](./126-plugin-phase1.md) | **插件一期：约定式外挂** | 待做（P2） |
-| [129-release-hygiene.md](./129-release-hygiene.md) | 发布卫生（版本/TODO/pycache/CI） | 待做（P3，104 前） |
-| [批次122-130-Windows收尾与发布候选.md](./批次122-130-Windows收尾与发布候选.md) | Windows 收尾批次总表 | 已被 [docs/72 复审路线](../72-project-review-2026-11-04.md) 重排 |
+| [123-keep-awake.md](./123-keep-awake.md) | **监控机防休眠（24h 前置）** | ✅ 完成（批次 122–130） |
+| [124-genai-false-positive.md](./124-genai-false-positive.md) | **本地 VLM 误报预分类（默认关）** | ✅ 完成；真实 Ollama BLOCKED |
+| [125-mqtt-event-bus.md](./125-mqtt-event-bus.md) | **MQTT 事件总线（生态开放）** | ✅ 完成；真实 broker BLOCKED |
+| [126-plugin-phase1.md](./126-plugin-phase1.md) | **插件一期：约定式外挂** | ✅ 完成（UI 见 131） |
+| [129-release-hygiene.md](./129-release-hygiene.md) | 发布卫生（版本/TODO/pycache/CI） | ✅ 完成；版本统一由主线补 |
+| [130-final-rc.md](./130-final-rc.md) | **最终 RC 重建（含本批修复）** | 批次 130–139 收口 |
+| [131-plugin-ui.md](./131-plugin-ui.md) | **插件管理 UI** | 待做（P1） |
+| [132-ai-review-ui.md](./132-ai-review-ui.md) | **AI 复核徽标/筛选** | 待做（P2） |
+| [133-frontend-tests.md](./133-frontend-tests.md) | 前端自动化测试（vitest） | 待做（P2） |
+| [134-security-audit.md](./134-security-audit.md) | 安全与依赖审计 | 待做（P2） |
+| [135-view-transitions.md](./135-view-transitions.md) | View Transitions 体验 | 待做（P3） |
+| [136-event-timeline.md](./136-event-timeline.md) | 事件时间线视图 | 待做（P3） |
+| [批次130-139-发布候选增强.md](./批次130-139-发布候选增强.md) | 批次 130–139 总表 | 已派发 |
 
 > **平台顺序**：Windows 优先；WSL 仅开发调试；**Docker 暂不考虑**；Android/iOS 后续。
 > 见 [67 平台路线图](../67-platform-roadmap.md)。

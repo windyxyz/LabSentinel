@@ -38,3 +38,18 @@
 
 - 不改业务逻辑/接口字段；不引入依赖；不动 runtime site-packages；
 - 不发布/不推 tag；不宣称 CI 已真实跑通（无远端）。
+
+## 执行报告
+
+**flash 2026-11-04 完成（release_check 全 PASS：TODO WARN 清零、319 链接可达）**
+
+- **过期 TODO 清零**：api.py 两条 `TODO(任务87)` 删除（审计早已由中间件实现）——
+  release_check TODO/FIXME 由 WARN 2 处 → **PASS 0 处**；
+- **包排除 __pycache__**：build_portable.py 在 copytree 前清 staging `app/app/__pycache__`
+  旧残留（copytree ignore 只管新拷不管旧残留——122 go2rtc 同款防御）；
+  现存 zip 4993 个 pyc 全在 runtime（CPython embed 正常分发，非问题，不动）；
+- **CI 工作流**：新增 `.github/workflows/tests.yml` 三 job（pytest@ubuntu / web-build /
+  openapi-check）——YAML safe_load 校验过；实际跑通需 GitHub 远端（用户侧，发布阻塞项不变）；
+- **版本口径**：`0.1.0-m1`（代码）vs `v0.1.0-alpha`（公告）维持现状（发布核对报告已注明
+  "规格允许"），统一动作放 104 最终 RC（改版本号牵动多处引用，避免本任务单方面漂移）；
+- **遗留**：版本统一归 104；dist 旧 hash chunk 清理归 104 重建（build 前手动清 dist 可选）。

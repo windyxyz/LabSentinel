@@ -64,3 +64,64 @@
 
 - 不新增 Python 依赖（httpx 已有）；不下载模型到仓库；不把截图发到非回环地址（除非显式 allow）；
 - 不自动抑制告警、不改 status；GPU 竞争风险写进文档。
+
+## 执行报告
+
+**flash 2026-11-04 完成（pytest 463 passed = 450+13 新增；默认配置零行为变化已实测）**
+（全量回归为 103 基线上 124 的口径，数字以本轮实跑为准）
+
+### 1. server/app/genai.py（新文件，Frigate genai 蓝本）
+
+- provider：`ollama`（`/api/generate` images=b64 + format=json + temperature 0）、
+  `openai_compat`（`/v1/chat/completions`，content 数组 image_url data-URI，Bearer 可选）；
+  **默认 none=零开销**（maybe_enqueue 直接短路）；
+- 输出严格校验：剥离 markdown 围栏 → json.loads → pydantic `AIReview`（`extra="forbid"`）
+  + verdict 白名单 + confidence 钳制 0..1 + reason 截 200；
+- **回环保护**：非回环 URL 未 `LS_GENAI_ALLOW_REMOTE` 即拒（发请求前）；
+- 队列：单 daemon 线程，maxsize=100 满即丢弃+计数；单并发 enforced（测试断言 max=1）；
+  worker 任何异常只计数不自尽（两条 500 连发后线程仍活）；
+- 截图压缩：cv2 读→长边 ≤1280→JPEG q80；读失败跳过；
+- 写回 `events.ai_review`（JSON）+ai_review_ts+ai_review_model；**绝不碰 status/告警**。
+
+### 2. 接线
+
+- **迁移 v9**（events 三列 ALTER，旧行 NULL=未复核行为不变）+ `_SCHEMA` 同步；
+- `Store.add_event` 尾部 `maybe_enqueue`（try 包裹零影响）+ `Store.set_ai_review`；
+  main.py lifespan start/stop worker；
+- `_event_row` 统一转换：`ai_review`（对象）+`ai_verdict` 快捷字段（全事件端点生效）；
+- `GET /api/genai/status`（读保护，纯计数）；`/api/stats/quality` 新增 `by_ai_verdict`；
+- validate.py：缺 model WARN、并发≠1 WARN；诊断包脱敏经 redact.py KEY 正则自动覆盖。
+
+### 3. 测试（test_genai.py，13 用例，fake httpx 零外网）
+
+解析（围栏/坏 JSON/非法 verdict/extra 拒/钳制/截断）、回环保护、两 provider 请求形状、
+HTTP 失败抛错、入队门控、worker 写回链路、坏 payload 线程存活、单并发 max=1、
+满队列丢弃、v9 旧库迁移 NULL、set_ai_review。
+（坑：genai._write_back 直连 settings.db_path——生产正确、单测需 monkeypatch 指向 fixture 库；
+假 JPEG 字节 cv2 读不了 → 测试改用 imencode 真图。）
+
+### 4. 实机验证（8188 默认配置）
+
+`schema_version=9`；`/api/genai/status` provider=none 全零；造 L3 事件 →
+`ai_review=null/ai_verdict=null`；quality `by_ai_verdict` 三键全 0 → **默认态零行为 PASS**。
+
+### 5. 真实 VLM 验证
+
+⏳ **BLOCKED: 本机无 Ollama/模型**（`http://127.0.0.1:11434/api/tags` 无响应、无 ollama 可执行）；
+按规格不下载大模型。链路已由 fake provider 全覆盖；真模型接入即用（FAQ 有步骤）。
+
+### 约束遵守
+
+不新增依赖；不下载模型；截图仅回环（除非显式 ALLOW_REMOTE）；不自动改 status/抑制告警；
+GPU 竞争风险已写 FAQ/validate WARN。
+
+### 遗留
+
+- 前端事件详情徽标（"AI：疑似误报（仅供参考）"）：API 字段已就绪（ai_review/ai_verdict），
+  渲染与筛选留待随 128 桌面体验一起做（前端只读展示，零后端依赖）。
+
+### 主线复审补丁（2026-11-04）
+
+- **中文路径读图**：`_compress_jpeg` 原用 `cv2.imread`，项目默认路径含“监控识别”时静默返回 None，
+  VLM 永远无法复核 → 改 `vision.read_image`（np.fromfile+imdecode），新增中文路径回归测试。
+- 运行版本统一 `0.1.0-alpha`（原 `0.1.0-m1`），OpenAPI 快照重生成。

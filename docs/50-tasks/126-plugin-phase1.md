@@ -14,15 +14,16 @@
      "name": "事件日志外挂",
      "version": "0.1.0",
      "description": "订阅事件并写 CSV（示例）",
-     "command": ["python", "main.py"],
+     "command": ["{python}", "main.py"],
      "permissions": ["read"],
      "autostart": false,
      "env": {"OPTIONAL_KEY": "value"}
    }
    ```
    - `id` 必须匹配 `^[a-z0-9][a-z0-9_-]{1,31}$`；`command` 数组、不允许 shell 字符串；
+   - `command[0]`：`{python}`（宿主解释器，推荐）/ PATH 裸命令 / 插件目录内相对路径；
+     目录外绝对路径与 `..` 逃逸拒绝；
    - `permissions` ⊆ `["read","write"]`；`env` 不允许覆盖 `LS_*` 系统变量（防劫持）；
-   - 入口路径必须位于插件目录内（resolve 后校验）。
 3. 生命周期 API（`require_admin`）：
    - `GET /api/plugins`：清单 + enabled/running/pid/last_error/started_at/权限；
    - `POST /api/plugins/{id}/enable|disable`：持久化状态（`data/plugins/state.json`，原子写）；
@@ -71,3 +72,61 @@
 - 不引入新依赖；不做进程沙箱/Grant UI/自动重启上限（二期）；
 - 不自动运行插件、不打包示例进便携包（文档指导）；
 - 插件目录/状态文件 gitignore（`data/` 已忽略）。
+
+## 执行报告
+
+**flash 2026-11-04 完成（pytest 488 passed = 474+14 新增；默认安装零插件零进程已实测）**
+（全量回归为 125 基线上 126 的口径，数字以本轮实跑为准）
+
+### 1. server/app/plugins.py（新文件）
+
+- `PluginManifest` pydantic 严格校验（extra=forbid）：id 正则、command 非空字符串数组
+  （拒 shell 字符串）、permissions ⊆ read/write、**env 拒绝覆盖 LS_***、未知字段拒；
+- `PluginManager`：扫描（坏 JSON/缺清单/id 不一致 → error 项不崩、非目录忽略）、
+  enable/disable 持久化 `state.json`（tmp+os.replace 原子写；损坏回退全禁用+WARNING）、
+  start（disabled 拒 / **入口 resolve 后必须在插件目录内** / 环境先剥离
+  LS_ADMIN_TOKEN/LS_READ_TOKEN 再注入 LS_PLUGIN_ID/LS_API_BASE/LS_PLUGIN_DATA/
+  LS_PLUGIN_TOKEN / cwd=插件目录 / CREATE_NO_WINDOW / stdout→logs/plugin.log）、
+  stop（terminate → 5s 宽限 → kill）、stop_all、autostart_enabled（只拉 enable+autostart）、
+  logs（id 正则+resolve 双重路径安全，tail 1-2000）；
+- 令牌规则：write+admin_token → admin；read+读保护+read_token → read；未配置不注入；
+  **token 绝不进清单/状态输出（测试断言）**。
+
+### 2. API/前端/接线
+
+- 六端点全 require_admin：`GET /api/plugins`、`POST /{id}/enable|disable|start|stop`、
+  `GET /{id}/logs?tail=200`；未初始化 503；不存在/非法 404；语义错 400；
+- main.py lifespan：装配 manager + autostart_enabled()，退出 stop_all；
+- Cameras.vue「插件（外挂）」折叠区：本轮交付 API 与示例；**UI 渲染留待 128**（前端只读
+  消费 /api/plugins，零后端依赖——与 124 徽标同批，控制单任务半径）。
+
+### 3. 示例与文档
+
+- `examples/plugins/event-logger/`（plugin.json + main.py 轮询 REST 写 CSV，**不进数据
+  目录/不进便携包**）；
+- `docs/74-plugin-guide.md`（清单/注入环境/令牌规则/生命周期/安全红线五条/与二期差异）；
+  README 索引 + 35-api-reference 已加。
+
+### 4. 测试（test_plugins.py，14 用例，fake Popen 不执行真实第三方代码）
+
+清单校验矩阵 8 形态、扫描（坏 JSON/非目录/缺目录）、enable/disable 持久化+损坏回退、
+disabled 拒启、start env/cwd/防继承断言、入口越界拒、token 三规则+不进清单输出、
+stop 先宽限后强杀、logs tail/路径安全、退出后 returncode 可见、API 全链+401。
+（坑：lifespan 会重建 manager——API 测试必须写 manager.dir 而非 fixture 预设目录。）
+
+### 5. 默认态
+
+默认安装无插件目录内容 → `GET /api/plugins` 空列表、零进程、零端口。
+
+### 遗留
+
+- 前端折叠区渲染随 128；二期（沙箱/Grant UI/重启上限/manifest 版本化+哈希校验）按规格不做。
+
+### 主线复审补丁（2026-11-04）
+
+- **入口解析**：原 `["python","main.py"]` 会被解析成 `<插件目录>/python`（不存在），示例无法启动；
+  改为支持 `{python}`（宿主解释器，示例已改）/PATH 裸命令/插件内相对路径。
+- **目录穿越**：原 `startswith(str(plugin_dir))` 可被 `plugins/foo-evil/...` 同前缀兄弟目录绕过
+  → 改 `Path.is_relative_to`；新增兄弟目录回归测试。
+- 打开日志文件后父进程未关闭句柄 → Popen 后 close，防 fd 泄漏。
+- 文档更正：管理 UI 当前未实现（任务 131 提供），74 号手册改为 API 用法。

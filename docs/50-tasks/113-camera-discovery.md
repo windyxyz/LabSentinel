@@ -59,4 +59,56 @@
 
 ## 执行报告
 
-（待填：改动 / 发现结果 / 测试与 build / 遗留）
+**flash 2026-11-04 完成（pytest 431 passed = 416+15 新增；build gzip 58.02KB；本机实跑 PASS）**
+
+### 1. server/app/discovery.py（新文件）
+
+- `ws_discover(timeout=3)`：UDP 组播 `239.255.255.250:3702` 发 ONVIF Probe
+  （NetworkVideoTransmitter），收集应答；`_parse_probe_response`（纯函数）只取
+  XAddrs/Scopes/name 三字段，**DOCTYPE/ENTITY 一律拒绝**（XXE/实体爆炸加固）；
+  结果按 ip 去重、`is_lan` 白名单（10/8、172.16/12、192.168/16、169.254/16——公网/回环全滤）；
+  任何异常返回空不抛；
+- `get_devices`：30s 缓存（refresh 强制重发），锁外组播；
+- `probe_host`：gethostbyname → 白名单校验（公网直接拒）→ TCP create_connection
+  （可读 error）→ 可选 ffprobe（找 which → 仓库/包根 tools/ffmpeg，双重根推导）；
+  **凭证只进本次探测 URL，返回体/错误串零凭证**（ffprobe stderr 可能回显 URL——不进结果）；
+  `eval_fraction`（30000/1001 → 29.97，非法容错 0）；
+- `lan_addresses()`（**SPlayer-Next #5 折叠项**）：本机私网 IPv4，192.168 优先、10 段次之、
+  169.254 再次、172.x（Hyper-V/WSL 虚拟网卡）殿后——实测本机输出
+  `['192.168.1.246', '172.28.231.237', '172.30.207.46', '172.29.176.1']`。
+
+### 2. API（require_admin）
+
+- `GET /api/discovery/cameras?timeout=3&refresh=0` → `{devices, lan, error}`；
+  无设备/组播不可用 200+可读提示（不 500）；
+- `POST /api/discovery/probe` `{host,port,username?,password?}` → 探测结果（无凭证字段）；
+  host 空/port 非法 400；
+- 前端「摄像头」页发现面板：品牌模板下拉（海康/大华/宇视/通用）+"搜索/强制刷新"+
+  每行"探测 :554"（口开放/编码/分辨率/fps）+"填入表单"（模板占位用户名:密码，
+  用户自行改真实账号）；**不自动添加/不启动**；lan 地址提示同网段。
+
+### 3. 测试（test_discovery.py，15 用例，全 mock 不发组播）
+
+is_lan 白名单矩阵、单/双设备 XML 解析、畸形/XXE 拒绝、**公网 IP 过滤**（FakeSock），
+probe 开放（带 ffprobe 解析）/拒绝（可读 error）/超时/公网/无法解析、**凭证不回传**
+（返回体零凭证、URL 确带凭证为设计）、eval_fraction、API 空+提示/devices+refresh 缓存语义/
+probe 校验/鉴权 401。
+**过程坑（已修）**：①FakeSock 无 close() + 无限 recvfrom → 测试挂死（改计数后抛 timeout）；
+②组合 XML 样例双闭合标签；③eval_fraction("") 抛 ValueError（改容错 0）。
+
+### 4. 本机实跑（8188 临时实例）
+
+- 发现：`devices=0` + "未发现设备：…ONVIF…UDP 3702…"（本机无 ONVIF 设备，不崩）；
+- probe 关闭口：`端口 554 连接失败：超时或被拒绝`；probe 公网 8.8.8.8：白名单拒绝 → **PASS**。
+
+### 5. 文档
+
+35-api-reference（两端点+安全边界）、部署指南 §3.1 发现助手、部署FAQ「搜不到摄像头怎么办」。
+
+### 约束遵守
+
+只读探测；不做 ONVIF 认证/PTZ；不扫公网；不记录凭证；零新依赖；前端只改 Cameras.vue/api.js。
+
+### 遗留
+
+- doctor.py 的"访问地址"展示接 `lan_addresses()` 属 0.5h 顺手项，未含在本任务（规格未列）。

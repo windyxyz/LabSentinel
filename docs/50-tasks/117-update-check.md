@@ -62,4 +62,55 @@
 
 ## 执行报告
 
-（待填：改动 / 三态证据 / 测试与 build / 遗留）
+**flash 2026-11-04 完成（pytest 445 passed = 436+9 新增；build gzip 59.97KB；三态实机 PASS）**
+（全量回归为 116 seed 修复后基线上 117 的口径；结果见文末）
+
+### 1. 配置（config.py + .env.example）
+
+- `update_manifest_url=""`（空=关闭）、`update_allow_http=False`、`update_timeout_s=5.0`；
+- 清单格式含可选 `channel`（**SPlayer-Next #7 折叠项**：stable/beta 通道随清单回显，
+  Dashboard 显示"发现新版本 X（stable）"）。
+
+### 2. server/app/update_check.py（新文件）
+
+- `fetch_manifest`：**协议白名单（https 或显式 allow_http 的 http，检查在发请求前）→
+  `follow_redirects=False`（不跟重定向）→ 200 → JSON → version 字段**；任何失败抛
+  `UpdateCheckError`（可读信息）；
+- `check_update`：1h 缓存（**只缓存成功结果**——失败不粘住，下次可重试，实现期单测抓到
+  错误结果被缓存的问题已修）；`refresh=1` 强制；version 与当前**字符串不等即提示**；
+  只回显清单字段（url/sha256/notes/published_at/channel），**绝不访问 url/下载/执行**。
+
+### 3. API/前端
+
+- `GET /api/update/check?refresh=0`（require_read）→ `{enabled,current,latest,
+  update_available,url,sha256,notes,published_at,channel,error}`；未配置 `{enabled:false}`；
+- Dashboard「版本」卡：当前版本 +「检查更新」按钮；有更新显示"发现新版本 X（channel）"+
+  「查看」（新窗口开 url）+「忽略此版本」（localStorage `LS_UPDATE_IGNORE`）；
+  未配置/失败只静默显示当前版本（不打扰红条）；api.js `updateCheck`。
+
+### 4. 测试（test_update_check.py，9 用例，mock httpx 零外网）
+
+未配置 enabled=false、https 清单解析+版本不同/相同、http 默认拒（**协议检查先于请求，calls==[]**）/
+显式放行、**follow_redirects=False 断言**、超时/非 JSON/缺 version/404 → error 不 500、
+缓存 1h+refresh 强制、**只 GET manifest 一次**（url 字段不被访问）、API 流程与鉴权 401。
+**坑记录**：bytes 字面量不能含中文（清单样例改 str.encode）。
+
+### 5. 实机验证（8190 本地清单服务器 + 三个独立 8188/8189/8191 实例）
+
+- available：`(True, '2026.11', '')`；same：`(False, '0.1.0-m1', '')`；
+  bad：`(False, None, '清单不是合法 JSON')` → **三态 PASS**；
+- manifest 恰好被 GET 3 次（每实例一次；缓存生效、零下载访问）。
+
+### 6. 文档
+
+.env.example 3 项；部署FAQ「怎么配更新提示/为什么不在线升级」（含清单格式与手动升级链）；
+运维手册 §8 升级一节加更新提示说明。
+
+### 约束遵守
+
+不自动下载/安装/执行；不跟重定向；只 GET 清单不带本机信息；零新依赖（httpx 已有）；
+测试全 mock；前端只改 Dashboard.vue/api.js。
+
+### 遗留
+
+- 无。

@@ -55,3 +55,53 @@
 
 - 新依赖仅 `paho-mqtt`；不改告警渠道语义；不把 MQTT 当主告警通道（Webhook/厂商渠道仍在）；
 - 不发布敏感截图路径/令牌；默认关闭。
+
+## 执行报告
+
+**flash 2026-11-04 完成（pytest 474 passed = 463+11 新增；paho-mqtt 已入 requirements 并装入测试 venv）**
+（全量回归为 124 基线上 125 的口径，数字以本轮实跑为准）
+
+### 1. server/app/mqtt_bridge.py（新文件）
+
+- 懒加载 paho（未安装=unavailable，服务照常启动）；`connect_async+loop_start` 不阻塞启动；
+  broker 连不上由 paho 重连，事件主链路零感知；
+- 主题：`{prefix}/events/{camera_id}/{type}` + `{prefix}/status`（online retain + LWT offline）；
+- **payload v1**（LocalSend 协议三要素：`v` 版本字段/`device_type: lab-monitor`/字段回显；
+  **只加不减**）：含 id/ts/camera_id/camera_name/type/level/track_id/detail/zones([] 占位)/
+  has_snapshot/snapshot_url/api_base（`LS_PUBLIC_BASE_URL`，空=空串）；**无令牌/无本地绝对路径**；
+- 有界队列 1000（满丢弃+计数）；drain 线程发布失败只计数；`stop()` flush≤2s 后
+  disconnect+发布 offline；
+- 与告警链关系：`dispatcher.dispatch` 在 **WS 广播后**、静默判定**前**调用
+  `publish_event`（try 吞错）——总线独立于静默/渠道过滤，语义与规格一致。
+
+### 2. 接线
+
+- config 10 项（LS_MQTT_* + LS_PUBLIC_BASE_URL，默认全关）；requirements.txt 加
+  `paho-mqtt>=1.6,<2`（已装入测试 venv）；main.py lifespan start/stop；
+- `GET /api/mqtt/status`（读保护；未配置也 200；`available:false`=paho 缺失降级说明）；
+- 诊断包脱敏：redact.py SENSITIVE 已含 PASSWORD（测试断言 `MQTT_PASSWORD` 命中）。
+
+### 3. 测试（test_mqtt.py，11 用例，假 paho/假 client 零网络）
+
+disabled 零行为、topic+payload 断言、api_base 配置、start 连接参数+LWT+online、
+paho 缺失降级、队列满 dropped、publish 抛错不外溢、drain 循环计数、status 两态、redact 覆盖。
+
+### 4. 实机验证（8188，enabled=true + 无 broker 端口 31883）
+
+服务照常启动；`/api/mqtt/status` → `{enabled:true, available:true, connected:false,
+queue_depth:0}`；事件/接口全部照常 → **broker 不可达行为 PASS**。
+⏳ **BLOCKED: 无本地 MQTT broker**（规格允许；真实 broker 联动由用户自建后按 docs/73 验证）。
+
+### 5. 文档
+
+新增 `docs/73-mqtt-protocol.md`（主题表/payload v1/HA 与 Python 订阅示例/版本策略/安全）；
+README 文档索引 + 35-api-reference + .env.example 全部加上。
+
+### 遗留
+
+- 无。zones 字段 v1 恒空（预留，合并区域追踪后填充——契约只加不减已预留）。
+
+### 主线复审补丁（2026-11-04）
+
+- LWT `will_set` 原在 `connect_async` 之后调用，对本次连接可能不生效 → 移到连接前；
+  在线状态 publish 保留在 `loop_start` 后（paho 排队）。

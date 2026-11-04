@@ -41,3 +41,42 @@
 ## 执行报告
 
 （待填：pytest/build/zip/manifest/smoke/doctor/release_check 结果 + 阻塞 + 清理）
+
+## 执行报告
+
+**flash 2026-11-04 完成（491 passed / zip 20261104 / smoke 8/8 / 包内 doctor 10/0/0 / rc 4/4 / release_check 全 PASS）**
+
+### 逐步结果
+
+| 步骤 | 结果 |
+|---|---|
+| 1 工作区 | git status 有本批未提交文件（主线提交，不自行 commit）；端口 8000/8001/1984/5173/8554 无监听 |
+| 2 pytest | **491 passed**（含 109-126 全部新测试） |
+| 3 build | 通过，gzip 60.11KB |
+| 4 重建包 | `LabSentinel-portable-20261104.zip` 279MB（**发现并修复 staging pyc 残留**：构建期冒烟 import 会重新生成 __pycache__，make_zip 前递归清理——app 内 pyc 28→**0**） |
+| 5 manifest | 279,397,565B / sha256 4de5f256… / 12,605 条目 / 缺可选仅卸载.bat / --verify OK |
+| 6 smoke | **8/8 PASS**（directml、播种 4 路、110 残留收尾、隔离零污染） |
+| 7 包内 doctor | **10 PASS / 0 WARN / 0 FAIL**（解压根实测） |
+| 9 rc_regression | **4/4 PASS exit 0**（manifest 引用新 zip sha 4de5f256…） |
+| 10 release_check | **全 PASS**（319 链接/TODO 0/敏感 0） |
+| 11 文档终稿 | 100 完成（核对报告/notes/公告用最终数字+阻塞声明） |
+| 12 清理 | smoke/doctor 临时目录已删；端口空闲；主库未动 |
+
+### 阻塞清单（发布前必须，均未解除）
+
+1. 真实 RTSP 摄像头 24h（用户侧硬件）——**唯一硬阻塞**；
+2. 模型止损线（Lab Coat ≥60%、误报 ≤20/天）——报表页处置质量卡取证；
+3. GitHub Actions 实跑（tests.yml 就位，需远端仓库）；
+4. 代码签名（可选）。
+**不发布/不推 tag/无"24h 已验证"表述。**
+
+### 98 可选压测记录
+
+不跑（重负载独占 8001 与连续回归窗口冲突；此前 57/65 两轮多路压测记录已覆盖场景，
+发布不以其为阻塞）。转 backlog，机器空闲时按 57 规格补跑。
+
+### 主线复审补丁（2026-11-04，之后由 130 重建）
+
+- 本包构建于复审修复前：**不含** genai 中文路径、插件入口解析/目录穿越、MQTT LWT 顺序修复；
+- 版本已统一 `0.1.0-alpha`（原 m1），OpenAPI 快照已重生成；
+- 最终候选包以任务 **130** 重建结果为准，本记录保留为 122–130 批次快照。

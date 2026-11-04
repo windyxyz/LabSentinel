@@ -49,6 +49,14 @@
 - 8001 临时库实测：q=实验服 与 count 一致；`%` 不返回全量；
 - 报告附查询结果与边界用例。
 
-## 执行报告
+## 执行报告（补写，2026-11-04）
 
-（待填：改动文件 / 搜索证据 / 测试与 build / 遗留）
+**flash 2026-11-04 补写（代码早已交付并入库；本轮补证据）**
+
+- **改动文件**：`server/app/store.py`（`count_events`/`events` 增加 `q` 关键词过滤
+  `_q_clause`）、`server/app/api.py`（`GET /api/events?q=` + `/api/events/count?q=`，
+  >100 字符 400）、`web/src/views/Events.vue`（搜索框+日期预设 today/yesterday/7d/30d）；
+- **测试证据**：`server/tests/test_event_search.py` 5 用例全绿（q 过滤/长度拒绝/count 口径
+  /组合筛选）——本轮实跑 `pytest tests/test_event_search.py tests/test_audit.py -q` →
+  **11 passed**；全量基线见调度看板（当前 491 passed）；
+- **遗留**：无。
