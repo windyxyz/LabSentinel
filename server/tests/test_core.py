@@ -32,10 +32,14 @@ def test_point_inside():
 
 
 def test_zone_state_transitions():
+    # T-306 迟滞语义（默认 2/3）：同向观测无变化，连击达阈值才翻转
     zs = ZoneState()
-    assert zs.update(1, True) == (True, False)   # 进入
+    assert zs.update(1, True) is None            # 在内 streak=1（未达 enter_frames=2）
+    assert zs.update(1, True) == (True, False)   # streak=2 → 进入
     assert zs.update(1, True) is None            # 持续在内
-    assert zs.update(1, False) == (False, True)  # 离开
+    assert zs.update(1, False) is None           # 在外 streak=1（未达 exit_frames=3）
+    assert zs.update(1, False) is None           # streak=2
+    assert zs.update(1, False) == (False, True)  # streak=3 → 离开
     assert zs.update(1, False) is None
 
 
