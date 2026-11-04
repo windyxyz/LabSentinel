@@ -31,13 +31,13 @@ HairNet
 
 ```bash
 # 1) 评估（见执行报告要求：逐类 AP50 截图/表格）
-python tools/eval_report.py --weights runs/detect/<run>/weights/best.pt --data datasets/merged/data.yaml
+python tools/eval_report.py --weights Resources/runs/detect/<run>/weights/best.pt --data Resources/datasets/merged/data.yaml
 
 # 2) 导出 ONNX（opset13、imgsz640、nms=False——服务端自己后处理）
-python tools/export_onnx.py --weights runs/detect/<run>/weights/best.pt --out m0-spike/yolo11n_ppe.onnx
+python tools/export_onnx.py --weights Resources/runs/detect/<run>/weights/best.pt --out m0-spike/yolo11n_ppe.onnx
 
 # 3) 词表落盘（从训练 data.yaml 生成，不要手敲）
-python -c "import yaml;print('\n'.join(yaml.safe_load(open('datasets/merged/data.yaml'))['names']))" > m0-spike/yolo11n_ppe.classes.txt
+python -c "import yaml;print('\n'.join(yaml.safe_load(open('Resources/datasets/merged/data.yaml'))['names']))" > m0-spike/yolo11n_ppe.classes.txt
 ```
 
 ## 2. 服务端接入（零代码改动）
@@ -61,7 +61,7 @@ LS_PPE_WEARING_CONF=0.20           # 穿戴证据阈值
 ## 3. 上线前门禁（全部通过才算接入完成）
 
 - [ ] **评估门禁**：test split Lab Coat AP50 ≥0.90、Person ≥0.95；No Lab Coat 误报（穿者被判未穿）≤5%
-- [ ] **真实素材对比**：`效果演示/make_demo.py` 重跑用户素材，生成 v1/v2 对比数据（检出帧率/平均置信度/误报条数）
+- [ ] **真实素材对比**：`Resources/效果演示/make_demo.py` 重跑用户素材，生成 v1/v2 对比数据（检出帧率/平均置信度/误报条数）
 - [ ] **垂直切片回归**：文件摄像头重放 → 事件 detail 正确输出"已穿/未穿/不确定"，`enter_no_ppe` 只在未穿时触发（证据分级！）
 - [ ] **串行锁验证**：`pytest tests/test_core.py::test_accel_run_serializes -v` 通过；确认推理走 `Engine._run`
 - [ ] **24h 长稳**（真实摄像头）：无 Kernel-Power 41、无 worker 崩溃、内存无持续增长

@@ -2,8 +2,8 @@
 """数据飞轮 ①：从视频批量抽帧（按时间间隔 + 帧差去重）。
 
 用法：
-  python tools/frame_sampler.py --video m0-spike/data/lab-walk-24076.mp4 --out datasets/frames
-  python tools/frame_sampler.py --video-dir m0-spike/data --out datasets/frames --interval 2.0 --max 300
+  python tools/frame_sampler.py --video m0-spike/data/lab-walk-24076.mp4 --out Resources/datasets/frames
+  python tools/frame_sampler.py --video-dir m0-spike/data --out Resources/datasets/frames --interval 2.0 --max 300
 
 输出：
   {video_stem}_{秒数:06.1f}.jpg   （如 lab-walk-24076_0003.2.jpg）

@@ -2,13 +2,13 @@
 """数据飞轮：把一轮标注数据打包为版本化数据集目录（v1/v2/...）。
 
 职责（90-data-flywheel.md 工具清单）：
-  1. 汇总图片+标签 → 目标版本目录 datasets/lab-ppe-real/v{N}/
+  1. 汇总图片+标签 → 目标版本目录 Resources/datasets/lab-ppe-real/v{N}/
   2. 生成 VERSION.md：来源清单（manifest.csv 汇总）、数量统计、许可与脱敏声明
   3. 脱敏检查（辅助）：提示待人工确认项（本工具不做自动人脸打码——脱敏必须人工过目）
 
 用法:
-    python tools/export_dataset.py --images datasets/frames --labels datasets/labels \
-        --version 1 --source-manifest datasets/frames/manifest.csv
+    python tools/export_dataset.py --images Resources/datasets/frames --labels Resources/datasets/labels \
+        --version 1 --source-manifest Resources/datasets/frames/manifest.csv
     python tools/export_dataset.py --help
 """
 import argparse
@@ -53,7 +53,7 @@ def main():
     if not images:
         sys.exit(f"[error] 图片目录为空: {img_dir}")
 
-    root = Path(args.out_root) if args.out_root else ROOT / "datasets" / "lab-ppe-real"
+    root = Path(args.out_root) if args.out_root else ROOT / "Resources" / "datasets" / "lab-ppe-real"
     vdir = root / f"v{args.version}"
     if vdir.exists():
         sys.exit(f"[error] 版本目录已存在（勿覆盖）: {vdir}")
@@ -83,7 +83,7 @@ def main():
 
     # 类别统计（映射到 data.yaml 的 names 若能找到）
     counts = count_classes(vdir / "labels")
-    data_yaml = ROOT / "datasets" / "merged" / "data.yaml"
+    data_yaml = ROOT / "Resources" / "datasets" / "merged" / "data.yaml"
     names = {}
     if data_yaml.exists():
         import yaml

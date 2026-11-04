@@ -6,7 +6,7 @@
 
 用法（m0-venv）:
     D:\\LabSentinel\\m0-venv\\Scripts\\python.exe tools/export_onnx.py
-    D:\\LabSentinel\\m0-venv\\Scripts\\python.exe tools/export_onnx.py --weights runs/detect/runs/ppe_v1/weights/best.pt
+    D:\\LabSentinel\\m0-venv\\Scripts\\python.exe tools/export_onnx.py --weights Resources/runs/detect/runs/ppe_v1/weights/best.pt
     D:\\LabSentinel\\m0-venv\\Scripts\\python.exe tools/export_onnx.py --help
 
 导出成功后可用 tools/quantize_npu.py（npu-venv）进一步做 NPU XINT8 量化。
@@ -25,7 +25,7 @@ os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WEIGHTS = ROOT / "m0-spike" / "yolo11n_ppe.pt"
 DEFAULT_OUT = ROOT / "m0-spike" / "yolo11n_ppe.onnx"
-DEFAULT_DATA = ROOT / "datasets" / "lab-ppe" / "data.yaml"
+DEFAULT_DATA = ROOT / "Resources" / "datasets" / "lab-ppe" / "data.yaml"
 
 
 def parse_args():

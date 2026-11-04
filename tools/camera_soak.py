@@ -3,7 +3,7 @@
 用法:
     python tools/camera_soak.py                          # 默认 8000，24h，30s 间隔，全部摄像头
     python tools/camera_soak.py --base-url http://127.0.0.1:8001 --duration 90m --interval 5
-    python tools/camera_soak.py --camera-id 2 --duration 3600 --out logs/soak.csv
+    python tools/camera_soak.py --camera-id 2 --duration 3600 --out Resources/logs/soak.csv
     python tools/camera_soak.py --preflight              # 接入前预检（不采样），FAIL 退出码 2
 
 每采样点每路一行，CSV 列（任务78）：
@@ -355,7 +355,7 @@ def main():
         return 2 if has_fail else 0
 
     out = Path(args.out) if args.out else \
-        Path("logs") / f"soak-{datetime.datetime.now():%Y%m%d-%H%M%S}.csv"
+        Path("Resources") / "logs" / f"soak-{datetime.datetime.now():%Y%m%d-%H%M%S}.csv"
     summary_path = Path(args.summary_json) if args.summary_json else out.with_suffix(".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     metrics = SystemMetrics()

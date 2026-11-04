@@ -1,9 +1,9 @@
 # 生成检测效果演示视频：人(绿) / PPE 类别按 --draw 选择绘制
 # 用法（m0-venv）:
-#   python 效果演示/make_demo.py                        # 默认两段演示视频
-#   python 效果演示/make_demo.py --ppe m0-spike/yolo11n_ppe.onnx --suffix _v2
-#   python 效果演示/make_demo.py --draw "lab coat,no lab coat,hairnet"   # 扩展绘制类别
-#   python 效果演示/make_demo.py --samples              # 顺带输出抽样 jpg 到 logs/demo_samples/
+#   python Resources/效果演示/make_demo.py                        # 默认两段演示视频
+#   python Resources/效果演示/make_demo.py --ppe m0-spike/yolo11n_ppe.onnx --suffix _v2
+#   python Resources/效果演示/make_demo.py --draw "lab coat,no lab coat,hairnet"   # 扩展绘制类别
+#   python Resources/效果演示/make_demo.py --samples              # 顺带输出抽样 jpg 到 Resources/logs/demo_samples/
 # 类别词表自动从 <ppe模型>.classes.txt 读取（见 server/app/engine.py）；无则回退默认 10 类。
 import argparse
 import os
@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 from app.engine import Engine, PpeEngine
 
-BASE = os.path.join(os.path.dirname(__file__), '..')
+BASE = os.path.join(os.path.dirname(__file__), '..', '..')  # Resources/效果演示 → 项目根
 DEFAULT_NAMES = ['Glasses', 'Gloves', 'Lab Coat', 'Mask', 'No Glasses',
                  'No Gloves', 'No Lab Coat', 'No Mask', 'Person', 'Shoes']
 # 任务40-L1：输出命名显式映射（旧逻辑 split('-')[0] 把两段源都截成 "lab" 后写覆盖先写）
@@ -45,7 +45,7 @@ def parse_args():
     ap.add_argument("--draw", default=DEFAULT_DRAW,
                     help="要绘制的 PPE 类别（逗号分隔，默认 'lab coat,no lab coat'；person 始终绘制）")
     ap.add_argument("--samples", action="store_true",
-                    help="顺带输出抽样 jpg 到 logs/demo_samples/（默认关闭，不写 效果演示/）")
+                    help="顺带输出抽样 jpg 到 Resources/logs/demo_samples/（默认关闭，不写 Resources/效果演示/）")
     return ap.parse_args()
 
 
@@ -93,7 +93,7 @@ def main():
     ppe_eng = PpeEngine(args.ppe, names)
     draw_classes = resolve_draw(names, args.draw)
     print('draw classes:', draw_classes)
-    samples_dir = os.path.join(BASE, 'logs', 'demo_samples')
+    samples_dir = os.path.join(BASE, 'Resources', 'logs', 'demo_samples')
     if args.samples:
         os.makedirs(samples_dir, exist_ok=True)
 

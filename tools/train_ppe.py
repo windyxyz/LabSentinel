@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = ROOT / "m0-spike" / "yolo11n.pt"
-DEFAULT_DATA = ROOT / "datasets" / "lab-ppe" / "data.yaml"
+DEFAULT_DATA = ROOT / "Resources" / "datasets" / "lab-ppe" / "data.yaml"
 BEST_COPY_DST = ROOT / "m0-spike" / "yolo11n_ppe.pt"
 
 
@@ -39,10 +39,10 @@ def parse_args():
     ap.add_argument("--device", default=None,
                     help="训练设备：默认 auto（本机 CPU）；GPU 训练用 dml（需 gpu-venv，见 tools/README 第八节）")
     ap.add_argument("--workers", type=int, default=4, help="DataLoader 进程数（默认 4）")
-    ap.add_argument("--project", default=str(ROOT / "runs" / "detect"),
-                    help="结果根目录（默认 <项目>/runs/detect，与历史 ppe_v1 并列）")
+    ap.add_argument("--project", default=str(ROOT / "Resources" / "runs" / "detect"),
+                    help="结果根目录（默认 <项目>/Resources/runs/detect，与历史 ppe_v1 并列）")
     ap.add_argument("--name", default="runs/ppe_v2",
-                    help="本次训练结果子目录名（默认 runs/ppe_v2；勿与已有目录重名，或加 --exist-ok）")
+                    help="本次训练结果子目录名（默认 runs/ppe_v2，位于 Resources/runs/detect 下；勿与已有目录重名，或加 --exist-ok）")
     ap.add_argument("--exist-ok", action="store_true",
                     help="允许覆盖已存在的同名结果目录（默认不允许）")
     return ap.parse_args()

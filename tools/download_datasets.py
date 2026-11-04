@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""下载 LAB PPE 数据集（Roboflow Universe，CC BY 4.0）到 datasets/lab-ppe/。
+"""下载 LAB PPE 数据集（Roboflow Universe，CC BY 4.0）到 Resources/datasets/lab-ppe/。
 
 来源: https://universe.roboflow.com/gavriels-workspace-e9azv/lab-ppe-p4qe4/dataset/1
 （10 类，588 训练 / 40 验证 / 40 测试图，YOLO 格式）
@@ -20,7 +20,7 @@ from pathlib import Path
 
 # 项目根目录（脚本在 tools/ 下，无论从哪里调用路径都成立）
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUT = ROOT / "datasets" / "lab-ppe"
+DEFAULT_OUT = ROOT / "Resources" / "datasets" / "lab-ppe"
 
 
 def parse_args():

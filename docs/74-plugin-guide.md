@@ -65,7 +65,7 @@ curl http://127.0.0.1:8000/api/plugins -H "X-Admin-Token: ..."
 
 ## 4. 示例：event-logger
 
-`examples/plugins/event-logger/`（不在数据目录内，防误启）。安装：
+`Resources/examples/plugins/event-logger/`（不在数据目录内，防误启）。安装：
 
 1. 复制整个目录到 `<数据目录>/plugins/event-logger/`；
 2. 用上面的 API **启用** → **启动**（Web UI 随任务 128 提供）；
@@ -81,7 +81,7 @@ API，只给 HTTP + 令牌（进程隔离天然是边界）。
 2. 管理员显式 enable；disable 会连运行中的进程一起停；
 3. 权限最小化 + 令牌只进子进程环境；
 4. 入口必须在插件目录内（解释器可用 `{python}`/PATH 命令；目录外绝对路径拒绝）；
-5. 插件代码不进 git（`data/` 已忽略；示例在 `examples/` 且不进便携包）。
+5. 插件代码不进 git（`data/` 已忽略；示例在 `Resources/examples/` 且不进便携包）。
 
 ## 6. 与二期（规划）的差异
 

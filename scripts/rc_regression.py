@@ -71,7 +71,7 @@ def run_regression(fast=False, smoke=False, zip_path=None, py_exe=None) -> list[
         _run("manifest", [sys.executable, str(ROOT / "scripts" / "release_manifest.py"),
                           "--zip", str(zip_path)], ROOT, 120, results)
         _run("manifest verify", [sys.executable, str(ROOT / "scripts" / "release_manifest.py"),
-                                 "--verify", str(ROOT / "dist")], ROOT, 60, results)
+                                 "--verify", str(ROOT / "Resources" / "dist")], ROOT, 60, results)
     elif not fast:
         _run("manifest", [sys.executable, str(ROOT / "scripts" / "release_manifest.py")],
              ROOT, 120, results)

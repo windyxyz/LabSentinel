@@ -15,15 +15,12 @@ m0-spike/out_s*/
 m0-spike/data/
 m0-spike/quantized_info.csv
 
-# ---- 数据集（1.4GB+，下载/合并脚本在 tools/）----
-datasets/
-
-# ---- 训练产物 ----
-runs/
+# ---- Resources：非项目文件归集（资源/示例/数据集/生成物，见 Resources/README.md）----
+Resources/datasets/
+Resources/runs/
+Resources/logs/
+Resources/dist/
 .training.lock
-
-# ---- 日志 ----
-logs/
 
 # ---- Python ----
 __pycache__/
@@ -38,11 +35,11 @@ web/dist/
 
 # ---- 临时与工具产物 ----
 .mimosa/
+.zcode/
 *.log
 Thumbs.db
 
-# ---- 部署生成物（新机由 deploy.py 重建；dist 里是 94MB 分发包）----
-dist/
+# ---- 部署生成物（新机由 deploy.py 重建；Resources/dist 里是分发包）----
 scripts/venv_path.txt
 tools/node/
 # go2rtc.yaml 由服务端/deploy.py 按本机路径生成
@@ -56,5 +53,5 @@ tools/go2rtc.exe
 server/LabSentinelgpu-venv/
 
 # ---- Mixkit 派生演示素材（仅个人使用，不入库；70-release-plan）----
-效果演示/*.mp4
-效果演示/*.jpg
+Resources/效果演示/*.mp4
+Resources/效果演示/*.jpg

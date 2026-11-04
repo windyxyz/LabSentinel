@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deploy  # 复用 http_download/_assert_public_host/log 与 GBK venv 标记读取
 
 ROOT = Path(__file__).resolve().parent.parent
-DIST = ROOT / "dist" / "portable" / "LabSentinel"
+DIST = ROOT / "Resources" / "dist" / "portable" / "LabSentinel"
 RUNTIME = DIST / "runtime"
 SITE = RUNTIME / "Lib" / "site-packages"
 PY_VER = "3.12.8"
@@ -59,7 +59,7 @@ def ensure_runtime() -> None:
     if (RUNTIME / "python.exe").exists():
         deploy.log(f"  [跳过] runtime 已存在: {RUNTIME}")
         return
-    zpath = ROOT / "logs" / PY_ZIP
+    zpath = ROOT / "Resources" / "logs" / PY_ZIP
     if not zpath.exists():
         deploy.log(f"  [1] 下载 CPython {PY_VER} embed（哈希锁定 assets.lock.json）...")
         deploy.download_verified(PY_ZIP, zpath)  # 下载后强制 SHA256 校验，残件不落盘
@@ -209,7 +209,7 @@ def report() -> None:
 
 
 def make_zip() -> Path:
-    out = ROOT / "dist" / f"LabSentinel-portable-{date.today():%Y%m%d}.zip"
+    out = ROOT / "Resources" / "dist" / f"LabSentinel-portable-{date.today():%Y%m%d}.zip"
     deploy.log(f"[打包] {out} ...")
     for pyc_dir in (DIST / "app").rglob("__pycache__"):
         # 构建期冒烟 import app.main 会在清理后于 staging 重新生成 __pycache__（任务129）

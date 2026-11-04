@@ -227,7 +227,7 @@ python scripts/collect_diagnostics.py --out diag.zip --data-dir server/data
 **Q：训练命令与安全**
 → 限线程+过夜，完整前置条件与看门狗见 [50-tasks/训练安全规程.md](50-tasks/训练安全规程.md)。速记：
 ```bash
-D:/LabSentinel/m0-venv/Scripts/python.exe tools/train_ppe.py --data datasets/merged/data.yaml \
+D:/LabSentinel/m0-venv/Scripts/python.exe tools/train_ppe.py --data Resources/datasets/merged/data.yaml \
     --epochs 24 --batch 8 --workers 2 --name ppe_v2
 ```
 本机在高负载组合下（CPU 满核+GPU 推理+虚拟显示器/剪映）**发生过三次整机硬挂起**

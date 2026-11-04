@@ -20,7 +20,7 @@
 - [ ] `NOTICE`/README 注明：模型与数据集不随库分发，安装时下载；LAB PPE/CC BY 4.0 等数据集的署名
 - [ ] `server/.env` 已入 `.gitignore`（含本机路径）；**密钥零入库**（Roboflow key 只在聊天/本地，发布前确认 git 历史干净——当前无 git 历史，先建仓再提交）
 - [ ] README 合规章节：人脸默认关、现场提示标识模板、PIPL/人脸办法要点链接
-- [ ] 模型文件、`datasets/`、`runs/`、`m0-spike/data`（Mixkit 素材仅个人使用）**全部 gitignore**；只提交脚本与文档
+- [ ] 模型文件、`Resources/datasets/`、`Resources/runs/`、`m0-spike/data`（Mixkit 素材仅个人使用）**全部 gitignore**；只提交脚本与文档
 
 ### 代码质量
 - [ ] pytest 全绿（含串行锁测试）
@@ -43,7 +43,7 @@ labsentinel/
 ├── web/               # Vue3
 ├── tools/             # 训练/量化工具链（任务06）
 ├── docs/              # 规划/预研/任务/ADR
-├── datasets/          # 仅 merge/下载脚本，数据 gitignore
+├── Resources/datasets/ # 仅 merge/下载脚本，数据 gitignore
 ├── docker-compose.yml
 └── LICENSE NOTICE .gitignore README.md
 ```

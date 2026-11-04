@@ -180,15 +180,15 @@ def verify(target: Path) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="发布产物清单与校验和（任务58）")
-    ap.add_argument("--zip", type=Path, help="指定 zip（默认取 dist/ 最新便携包）")
-    ap.add_argument("--out", type=Path, default=ROOT / "dist", help="输出目录（默认 dist/）")
+    ap.add_argument("--zip", type=Path, help="指定 zip（默认取 Resources/dist/ 最新便携包）")
+    ap.add_argument("--out", type=Path, default=ROOT / "Resources" / "dist", help="输出目录（默认 Resources/dist/）")
     ap.add_argument("--verify", type=Path, help="校验模式：manifest 文件或其所在目录")
     a = ap.parse_args()
     if a.verify:
         return verify(a.verify)
-    zp = a.zip or find_latest_zip(ROOT / "dist")
+    zp = a.zip or find_latest_zip(ROOT / "Resources" / "dist")
     if not zp:
-        log("[失败] dist/ 下没有 LabSentinel-portable-*.zip")
+        log("[失败] Resources/dist/ 下没有 LabSentinel-portable-*.zip")
         return EXIT_FAIL
     return build_manifest(zp, a.out)
 

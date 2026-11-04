@@ -3,7 +3,7 @@
 
 用法（m0-venv）:
     python tools/eval_report.py --model m0-spike/yolo11n_ppe.onnx \
-        --data datasets/merged/data.yaml --classes m0-spike/yolo11n_ppe.classes.txt
+        --data Resources/datasets/merged/data.yaml --classes m0-spike/yolo11n_ppe.classes.txt
     python tools/eval_report.py --help
 
 铁律：推理只走 server/app/engine.py 的 Engine（Engine._run 全局串行锁），禁止绕过。

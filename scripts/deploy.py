@@ -306,7 +306,7 @@ def ensure_openh264(venv: Path) -> None:
         log(f"  [3] 复用本机已有 OpenH264 DLL: {local}")
         return
     log("  [3] 本机未找到 OpenH264，尝试下载（哈希锁定 scripts/assets.lock.json，官方源优先）...")
-    payload = ROOT / "logs" / "openh264.download"
+    payload = ROOT / "Resources" / "logs" / "openh264.download"
     try:
         download_verified("openh264-2.5.0-win64.dll.bz2", payload)
         cv2_dir.mkdir(parents=True, exist_ok=True)
@@ -456,7 +456,7 @@ def ensure_node() -> None:
         return
     name = _node_asset()
     log(f"  [4] 本机未找到 Node.js，下载便携版 {name}（哈希锁定，约 30MB）...")
-    zpath = ROOT / "logs" / name
+    zpath = ROOT / "Resources" / "logs" / name
     try:
         download_verified(name, zpath)
         log(f"    解压到 {NODE_DIR} ...")
@@ -538,7 +538,7 @@ def ensure_ffmpeg() -> None:
         # ffmpeg-static 的 binary 目录提供单文件 .gz（win32-x64）——版本与 SHA256
         # 由 assets.lock.json 钉死（T-005，消除动态 latest 的版本漂移）
         fname = "ffmpeg-win32-x64.gz"
-        gz = download_verified(fname, ROOT / "logs" / fname)
+        gz = download_verified(fname, ROOT / "Resources" / "logs" / fname)
         with gzip.open(gz, "rb") as g, (FFMPEG_DIR / "ffmpeg.exe").open("wb") as out:
             shutil.copyfileobj(g, out)
         gz.unlink()
@@ -546,7 +546,7 @@ def ensure_ffmpeg() -> None:
     except Exception as e:  # noqa: BLE001
         log(f"    ffmpeg-static 源失败，切换 @ffmpeg-installer 源: {e}")
         try:
-            tgz = download_verified("ffmpeg-installer.tgz", ROOT / "logs" / "ffmpeg-installer.tgz")
+            tgz = download_verified("ffmpeg-installer.tgz", ROOT / "Resources" / "logs" / "ffmpeg-installer.tgz")
             _extract_tar_member(tgz, "ffmpeg.exe", FFMPEG_DIR / "ffmpeg.exe")
             tgz.unlink()
             log("    ffmpeg 来源: @ffmpeg-installer/win32-x64（SHA256 已校验）")
@@ -564,7 +564,7 @@ def ensure_ffmpeg() -> None:
     try:
         # ffprobe 不在 ffmpeg-static binary 里，从 ffprobe-static 的 npm 包 tarball 抽取；
         # tarball 版本与 SHA256 由 assets.lock.json 钉死（npmjs 官方 + npmmirror 镜像双源）
-        tgz = download_verified("ffprobe-static.tgz", ROOT / "logs" / "ffprobe-static.tgz")
+        tgz = download_verified("ffprobe-static.tgz", ROOT / "Resources" / "logs" / "ffprobe-static.tgz")
         _extract_tar_member(tgz, "win32/x64/ffprobe.exe", FFMPEG_DIR / "ffprobe.exe")
         tgz.unlink()
         log("    ffprobe 来源: ffprobe-static npm tarball（SHA256 已校验）")
@@ -795,7 +795,7 @@ def _drop_env(full: bool = False) -> None:
             f.unlink()
     for bak in (ROOT / "server").glob(".env.bak-*"):  # ensure_env_file 的写前备份一并清
         bak.unlink(missing_ok=True)
-    for d in (ROOT / "logs", ROOT / ".pytest_cache"):
+    for d in (ROOT / "Resources" / "logs", ROOT / ".pytest_cache"):
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
     for c in ROOT.rglob("__pycache__"):

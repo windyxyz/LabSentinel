@@ -90,7 +90,7 @@ Windows 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道
 | [docs/45-model-onboarding.md](docs/45-model-onboarding.md) | 模型接入手册（换模型零改代码） |
 | [docs/50-tasks/](docs/50-tasks/README.md) | AI 协作任务包体系（子代理工作分发中心） |
 | [docs/90-data-flywheel.md](docs/90-data-flywheel.md) | 数据飞轮：模型持续变强的闭环 |
-| [GLOSSARY.md](GLOSSARY.md) | 领域术语表 |
+| [docs/GLOSSARY.md](docs/GLOSSARY.md) | 领域术语表 |
 
 ## 📁 仓库结构
 
@@ -100,9 +100,9 @@ web/             Vue3 Web 客户端
 android/         Flutter 安卓客户端骨架
 tools/           训练/量化/标注工具链 + go2rtc 网关 + ffmpeg
 docs/            规划、需求、预研、架构、API、任务包、部署指南
-datasets/        数据集（不入库，下载/合并脚本在 tools/）
 scripts/         启动/停止/健康检查脚本
 m0-spike/        M0 技术验证记录（历史保留）
+Resources/       资源归集：效果演示/插件示例/数据集/训练产物/日志/分发包（见 Resources/README.md）
 ```
 
 ## 🔒 环境变量（前缀 LS_）

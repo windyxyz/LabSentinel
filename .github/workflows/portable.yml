@@ -47,18 +47,18 @@ jobs:
       - name: Generate SHA256SUMS
         shell: pwsh
         run: |
-          $zip = Get-ChildItem dist/LabSentinel-portable-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $zip = Get-ChildItem Resources/dist/LabSentinel-portable-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($zip.Name)" | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
-          Get-Content dist/SHA256SUMS.txt
+          "$hash  $($zip.Name)" | Out-File -FilePath Resources/dist/SHA256SUMS.txt -Encoding ascii
+          Get-Content Resources/dist/SHA256SUMS.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: LabSentinel-portable
           path: |
-            dist/LabSentinel-portable-*.zip
-            dist/SHA256SUMS.txt
+            Resources/dist/LabSentinel-portable-*.zip
+            Resources/dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
 

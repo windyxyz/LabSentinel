@@ -66,7 +66,7 @@ def check_model_ready(root: Path, model: Path):
             diff = [f"{i}: txt={a!r} vs yaml={b!r}" for i, (a, b) in
                     enumerate(zip(vocab + [None] * n_cls_yaml, yaml_names + [None] * len(vocab)))
                     if a != b]
-            rows.append(("WARN", "词表与 datasets/merged/data.yaml 不一致（顺序敏感）",
+            rows.append(("WARN", "词表与 Resources/datasets/merged/data.yaml 不一致（顺序敏感）",
                          f"txt {len(vocab)} 类 vs yaml {n_cls_yaml} 类；差异: {diff}",
                          "v1(10类) 对合并数据集(11类) 属预期；v2 训后应一致（45 手册 §1 硬契约）"))
         else:
@@ -131,7 +131,7 @@ def check_model_ready(root: Path, model: Path):
     rows.append(("PASS", ".env 敏感值未读取/未打印", "仅判断非空与路径存在性", ""))
 
     # 5. 训练结果元数据（只读）
-    for csv_path in sorted(glob.glob(str(root / "runs" / "detect" / "*ppe_v2*" / "results.csv"))):
+    for csv_path in sorted(glob.glob(str(root / "Resources" / "runs" / "detect" / "*ppe_v2*" / "results.csv"))):
         try:
             with open(csv_path, encoding="utf-8") as f:
                 r = list(csv.DictReader(f))

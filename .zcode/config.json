@@ -1,8 +1,0 @@
-{
-  "plugins": {
-    "enabledPlugins": {
-      "hyper3d-rodin@zcode-plugins-official": false,
-      "tripo-3d@zcode-plugins-official": false
-    }
-  }
-}

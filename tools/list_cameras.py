@@ -2,7 +2,7 @@
 
 用法（项目 venv）:
     python tools/list_cameras.py                 # 枚举 0..5
-    python tools/list_cameras.py --max 8 --snapshot-dir logs/cam_probe
+    python tools/list_cameras.py --max 8 --snapshot-dir Resources/logs/cam_probe
 说明：Windows 下 OpenCV 按索引打开；OBS Virtual Camera 通常与物理摄像头并列出现。
 服务端添加摄像头时 type=usb、source=<这里的索引>（如 "1"）。
 """

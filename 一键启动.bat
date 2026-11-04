@@ -6,7 +6,7 @@ rem 自动化测试可设置环境变量 LS_LAUNCHER_NO_BROWSER=1 禁止自动弹浏览器
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 title LabSentinel 启动器
-if not exist logs mkdir logs
+if not exist Resources\logs mkdir Resources\logs
 
 rem ---- Python 解释器探测：py 启动器优先，其次 PATH 里的 python ----
 rem 不做管理员提权：本流程只写项目目录；提权会切换到管理员环境，新机上反而可能丢 PATH 里的 python
@@ -151,7 +151,7 @@ pause
 goto MENU
 
 :LOGS
-if not exist logs mkdir logs
+if not exist Resources\logs mkdir Resources\logs
 explorer "%~dp0logs"
 goto MENU
 

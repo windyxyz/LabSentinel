@@ -8,7 +8,7 @@
 配方（docs/40-roadmap.md M0 实测，yolo11n NPU 40 FPS）:
   - Quark XINT8 + MinMax 校准，EnableNPUCnn/FoldRelu/AlignConcat 开
   - 必须排除检测头（/model.23 前缀子图，约 84 节点）——全图量化类别输出会归零
-  - 校准集: datasets/lab-ppe/valid/images 抽 20 张
+  - 校准集: Resources/datasets/lab-ppe/valid/images 抽 20 张
   - 本机无 Visual Studio MSVC -> 需要"注入绕道": 把 quark/onnx/operators/custom_ops/
     build_custom_ops.py 末尾的 _initialize_kernels() 调用剥掉后手工注入模块（仅内存中修改，
     不改 npu-venv 里的文件），再 import quark.onnx。正式环境建议装 VS Build Tools 走官方路径。
@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_INPUT = ROOT / "m0-spike" / "yolo11n_ppe.onnx"
 DEFAULT_OUTPUT = ROOT / "m0-spike" / "yolo11n_ppe_xint8.onnx"
-DEFAULT_CALIB = ROOT / "datasets" / "lab-ppe" / "valid" / "images"
+DEFAULT_CALIB = ROOT / "Resources" / "datasets" / "lab-ppe" / "valid" / "images"
 HEAD_PREFIX = "/model.23"  # YOLO 检测头子图前缀（Quark 导出的节点名以 /model.23/ 开头）
 
 

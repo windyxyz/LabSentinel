@@ -2,8 +2,8 @@
 """数据飞轮 ②：用当前部署模型给抽帧做预标注（YOLO 检测框 txt + 目检 preview）。
 
 用法：
-  python tools/preannotate.py --images datasets/frames --out datasets/labels \
-      --model m0-spike/yolo11n_ppe.onnx --classes-file datasets/lab-ppe/classes.txt
+  python tools/preannotate.py --images Resources/datasets/frames --out Resources/datasets/labels \
+      --model m0-spike/yolo11n_ppe.onnx --classes-file Resources/datasets/lab-ppe/classes.txt
 
 铁律：推理必须走 server/app/engine.py 的 Engine（统一入口 Engine._run，DirectML 全局串行锁），
 不得绕过引擎直接调用底层会话 —— 多线程并发 DML 推理会挂死 GPU 驱动（2026-10-26 事故根因）。

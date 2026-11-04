@@ -65,7 +65,7 @@
 4. 人检与 PPE 是两个独立 ONNX 会话，均走 `Engine._run()`
 5. 部署形态：CPU 档（无 GPU 机器）→ DML 档（本机 880M，64FPS）→ NPU 档（XINT8，40FPS，可选包）
 
-## 事件模型（核心领域概念，术语见 GLOSSARY.md）
+## 事件模型（核心领域概念，术语见 docs/GLOSSARY.md）
 
 ```
 进入安全区事件流：

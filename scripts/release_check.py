@@ -35,7 +35,7 @@ LS_TOKEN_SET = re.compile(r"^#?\s*LS_ADMIN_TOKEN=.+$")
 TEXT_SUFFIXES = {".md", ".py", ".js", ".ts", ".vue", ".bat", ".txt", ".yml", ".yaml",
                  ".json", ".html", ".css", ".example"}
 SKIP_DIRS = {"dist", "node_modules", ".git", "m0-spike", "runs", "datasets", "logs",
-             "效果演示", "__pycache__", ".venv", "docs" + os.sep + "assets"}
+             "效果演示", "Resources", "__pycache__", ".venv", "docs" + os.sep + "assets"}
 LINK_RE = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)\s]+)\)|!\[[^\]]*\]\(([^)\s]+)\)")
 
 
@@ -213,12 +213,12 @@ def check_required_files(res) -> None:
 def check_zip(res, zip_path: Path | None) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import release_manifest as rm
-    zp = zip_path or rm.find_latest_zip(ROOT / "dist")
+    zp = zip_path or rm.find_latest_zip(ROOT / "Resources" / "dist")
     if zp is None:
-        results_add(res, "便携包 manifest", "WARN", "dist/ 下没有 zip（未构建或未带 --zip）", "先构建")
+        results_add(res, "便携包 manifest", "WARN", "Resources/dist/ 下没有 zip（未构建或未带 --zip）", "先构建")
         return
-    rc = rm.build_manifest(zp, ROOT / "dist")  # 幂等：重算 sha 并刷新 manifest
-    info = json.loads((ROOT / "dist" / "RELEASE-MANIFEST.json").read_text(encoding="utf-8"))
+    rc = rm.build_manifest(zp, ROOT / "Resources" / "dist")  # 幂等：重算 sha 并刷新 manifest
+    info = json.loads((ROOT / "Resources" / "dist" / "RELEASE-MANIFEST.json").read_text(encoding="utf-8"))
     status = "PASS" if rc == 0 else "FAIL"
     results_add(res, "便携包 manifest", status,
                 f"{zp.name} sha256={info['sha256'][:12]}… 缺必需={len(info['missing_required'])} "
