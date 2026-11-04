@@ -1,0 +1,28 @@
+# LabSentinel 编辑器/格式统一配置（T-007）
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Windows 批处理必须 CRLF + GBK（cmd 按 OEM 代码页解析，UTF-8 中文会炸语法）
+[*.bat]
+end_of_line = crlf
+charset = latin1
+
+[*.cmd]
+end_of_line = crlf
+
+# Python/JS/JSON 常规
+[*.py]
+indent_style = space
+indent_size = 4
+
+[*.{js,vue,json,yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false

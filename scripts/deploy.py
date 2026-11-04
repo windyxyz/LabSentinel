@@ -192,14 +192,21 @@ def _read_venv_mark() -> Path | None:
     return p if p.is_absolute() else (ROOT / p)
 
 
+def _venv_runnable(p: Path) -> bool:
+    """T-008：venv 可运行性验证（存在 ≠ 可用：pyvenv.cfg 指向不存在的宿主 Python 时，
+    python.exe 启动即报 "No Python at ..."）。失败按"未找到"处理，触发重建。"""
+    try:
+        r = subprocess.run([str(venv_python(p)), "-c", "import sys"],
+                           capture_output=True, timeout=30)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def find_venv() -> Path | None:
-    if VENV_MARK.exists():
-        p = _read_venv_mark()
-        if p and venv_python(p).exists():
+    for p in (_read_venv_mark(), ROOT / ".venv"):
+        if p and venv_python(p).exists() and _venv_runnable(p):
             return p
-    local = ROOT / ".venv"
-    if venv_python(local).exists():
-        return local
     legacy = Path(r"D:\LabSentinel\m0-venv")  # 旧装兼容（与文件头注释的优先级一致）
     if venv_python(legacy).exists():
         return legacy
@@ -211,6 +218,10 @@ def ensure_venv() -> Path:
     if v:
         log(f"  [跳过] venv 已存在: {v}")
         return v
+    broken = ROOT / ".venv"
+    if venv_python(broken).exists() and not _venv_runnable(broken):
+        log(f"  [自愈] .venv 已损坏（宿主 Python 失联），删除后重建...")
+        shutil.rmtree(broken, ignore_errors=True)
     py = find_system_python()
     if not py:
         log("  [失败] 未找到 Python（需 3.10+），请先安装：")
