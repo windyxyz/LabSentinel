@@ -1,35 +1,49 @@
-# 测试与构建工作流（任务129）：pytest + 前端构建 + OpenAPI 快照校验。
-# 便携包构建仍走 portable.yml（需 Windows runner；本工作流在 ubuntu 上跑纯 Python 测试）。
+# 测试工作流（T-004，合并原 ci.yml）：双平台 pytest + ruff 门禁 + pip-audit + 前端构建/审计 + OpenAPI 快照校验。
+# 便携包构建仍走 portable.yml（T-402 将按 76 号文档 §8.2 重写为 release.yml）。
+# 门禁说明：ruff 先取 E9/F821/PLE（真错误），规则集随 T-509 收紧。
 name: tests
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   pytest:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
-      - name: 安装依赖
-        run: pip install -r server/requirements.txt
+      - name: Install (from hash-pinned lock)
+        run: |
+          pip install --require-hashes --no-deps -r server/requirements-${{ runner.os == 'Windows' && 'win' || 'linux' }}.lock
+          pip install pytest pytest-cov ruff pip-audit
+      - name: ruff gate
+        run: ruff check server/app scripts tools --select E9,F821,PLE
       - name: pytest
         working-directory: server
         run: python -m pytest tests -q
         env:
           LS_LOG_FILE: "0"
+          LS_PPE_MODEL: ""
+      - name: pip-audit (fail on high/critical in locked runtime deps)
+        run: pip-audit -r server/requirements-${{ runner.os == 'Windows' && 'win' || 'linux' }}.lock --strict
 
-  web-build:
+  web:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: npm
@@ -40,17 +54,20 @@ jobs:
           npm ci --registry=https://registry.npmmirror.com
           npm test
           npm run build
+      - name: npm audit (production deps)
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
 
   openapi-check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
-      - name: 安装依赖
-        run: pip install -r server/requirements.txt
+      - name: Install (from hash-pinned lock)
+        run: pip install --require-hashes --no-deps -r server/requirements-linux.lock
       - name: export_openapi --check
         run: python scripts/export_openapi.py --check
