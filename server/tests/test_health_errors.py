@@ -20,6 +20,33 @@ def test_live():
         assert r.status_code == 200 and r.json() == {"status": "ok"}
 
 
+def test_system_200_and_preload_error_when_model_missing(tmp_path, monkeypatch):
+    """B-28 回归：模型缺失时 /api/system 仍 200（不再 get_engine 连带 500）；
+    components.engine 如实报告后台预热失败。"""
+    import time
+
+    from app import engine as eng_mod
+
+    with TestClient(app) as c:
+        monkeypatch.setattr(settings, "model_fp32", tmp_path / "no-such.onnx")
+        monkeypatch.setattr(eng_mod, "_engine", None)  # 强制重建路径（已加载的真模型不参与）
+        r = c.get("/api/system")
+        assert r.status_code == 200
+        body = r.json()
+        assert "components" in body and "engine" in body["components"]
+        assert body["backend"] == settings.backend_order.split(",")[0].strip()  # 回退配置首项
+        # 同步等待后台预热结果
+        eng_mod.PRELOAD.update(state="idle", backend=None, error=None)
+        eng_mod.preload_async()
+        for _ in range(100):
+            if eng_mod.PRELOAD["state"] != "loading":
+                break
+            time.sleep(0.05)
+        assert eng_mod.PRELOAD["state"] == "error", eng_mod.PRELOAD
+        assert eng_mod.PRELOAD["error"]
+        eng_mod.PRELOAD.update(state="idle", backend=None, error=None)  # 复原，避免污染后续断言
+
+
 def test_ready_ok_then_model_missing(tmp_path, monkeypatch):
     with TestClient(app) as c:
         r = c.get("/api/health/ready")

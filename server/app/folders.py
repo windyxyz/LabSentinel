@@ -264,11 +264,14 @@ class FolderWorker(threading.Thread):
                         continue
                     if st.st_size > max_bytes:
                         continue
-                    age = now - st.st_mtime
+                    # T-003 根因修复：Windows time.time() 为粗时钟（~15.6ms 粒度），可能落后于
+                    # 内核写入的精确 mtime → age 为小负数（时钟粒度假象，非"未来文件"）。
+                    # clamp 为 0：stable_s=0 时立即处理，不再整轮延后（flake 漂移根因）。
+                    age = max(0.0, now - st.st_mtime)
                     if age < stable_s:  # 刚写入未静置：下轮重列该目录
                         self._dir_sig[dirpath] = -1
                         continue
-                    if age < -300:  # 时钟异常的未来文件：跳过
+                    if now - st.st_mtime < -300:  # 真时钟异常的未来文件（>5min）：跳过
                         continue
                     out.append((p, st))
         except OSError as e:
@@ -361,8 +364,8 @@ class FolderWorker(threading.Thread):
             return True  # 文件已消失：丢弃该项
         if st.st_size <= 0:
             return True  # 空文件：丢弃，等外部软件写完产生新的目录 mtime/全量扫描再发现
-        if time.time() - st.st_mtime < max(0.0, float(settings.folder_stable_s)):
-            return False  # 仍在写入：保留到下一轮
+        if max(0.0, time.time() - st.st_mtime) < max(0.0, float(settings.folder_stable_s)):
+            return False  # 仍在写入：保留到下一轮（负年龄=粗时钟粒度假象，视作已静置）
         key = str(path)
         self.current_file = key
         img = read_image(path)

@@ -147,8 +147,10 @@ def pick_port(cfg: dict) -> int:
 
 
 def health(port: int, timeout: float = 2.0) -> bool:
+    """就绪探针（B-28）：用 /api/health/live（不触发模型加载）。
+    /api/system 现在也不加载模型，但 live 更轻、语义就是"进程活着"。"""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/system", timeout=timeout) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health/live", timeout=timeout) as r:
             return r.status == 200
     except OSError:
         return False

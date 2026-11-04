@@ -12,19 +12,10 @@ import pytest  # noqa: E402
 import deploy  # noqa: E402
 
 
-# ---------- 坑2：ffmpeg-static 版本号排序 ----------
-
-def test_version_key_numeric_order():
-    names = ["b9.0", "b10.0", "b6.0"]
-    assert sorted(names, key=deploy._version_key) == ["b6.0", "b9.0", "b10.0"]
-    assert max(names, key=deploy._version_key) == "b10.0"
-
-
-def test_version_key_mixed_and_non_numeric_last():
-    names = ["latest", "b99.0", "b100.0"]
-    assert sorted(names, key=deploy._version_key) == ["b99.0", "b100.0", "latest"]
-    # 不含数字的名字之间保持字典序稳定
-    assert max(["abc", "abd"], key=deploy._version_key) == "abd"
+# ---------- 坑2：ffmpeg-static 版本号排序（已移除） ----------
+# T-005 起 ffmpeg/ffprobe/Node 版本由 scripts/assets.lock.json 钉死（SHA256 校验），
+# deploy 不再做"动态 latest + 数值排序"——原 _version_key 函数与对应测试一并移除，
+# 锁文件结构与下载卫生由 tests/test_assets_lock.py 覆盖。
 
 
 # ---------- 坑1：Node 解压目录就位（目标已存在 / 跨盘 rename 失败） ----------

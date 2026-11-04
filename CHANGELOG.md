@@ -12,10 +12,24 @@
 - T-005：全部二进制下载（OpenH264/Python embed/Node/ffmpeg/ffprobe）强制 SHA256
   校验（`scripts/assets.lock.json`），移除 http:// 明文下载源；ghfast 加速代理默认
   关闭（`LS_ALLOW_MIRROR_PROXY=1` 才启用）；Node/ffmpeg/ffprobe 版本钉死。
+- B-28：`/api/system` 不再触发模型加载（模型缺失/损坏时返回 200，`components.engine`
+  如实报告后台预热结果）；启动器健康检查改用 `/api/health/live`。干净检出下
+  14+ 个连带测试失败随之清除。
+- folder 源时钟粒度缺陷（T-003 基线排查中定位）：Windows `time.time()` 粗时钟可能
+  落后内核 mtime，负年龄被误判"刚写入未静置"整轮延后——clamp 为 0 后全量测试
+  不再漂移（此前每轮随机挂 1-2 个 folder_source 用例）。
 - 结构化修复全仓存量高危（Mimosa）：SSRF 改回环校验 + `httpx.Client(base_url=)`、
   SQL 片段字面量化/变量累积、C# 启动器常量引导、卸载器双锚点校验、
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-002：构建可复现——`uv pip compile --generate-hashes` 生成 win/linux 带哈希锁文件
+  （opencv override 去重，只留 headless）；便携构建 `ensure_deps` 改锁驱动全新安装
+  （stamp 失配即清空重装，修 B-03"依赖已存在即跳过"）；smoke 增加依赖与单发行版断言。
+- T-006：前端 dev 依赖升级（vite 8 / vitest 5 / plugin-vue 6），生产依赖 0 漏洞。
+- T-007/T-008：新增 .editorconfig/.gitattributes/CHANGELOG；`deploy.py find_venv`
+  增加 venv 可运行性验证（损坏自动重建）。
 - 目录重构：根目录只保留项目文件；效果演示/插件示例/数据集/训练产物/日志/分发包
   统一移入 `Resources/`（见 `Resources/README.md`）；GLOSSARY.md 移入 docs/。
+- T-004：CI 合并为单 `tests.yml`（ubuntu+windows 矩阵、锁文件安装、ruff 门禁、
+  pip-audit、npm audit --omit=dev、OpenAPI 快照校验；actions 钉 commit SHA）。

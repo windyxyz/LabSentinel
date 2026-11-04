@@ -25,7 +25,7 @@ from . import genai
 from . import alert_config
 from .alerts import dispatcher, render_alert
 from .config import settings
-from .engine import get_engine
+# B-28：api 层不再导入 get_engine——/api/system 只读 engine._engine/PRELOAD，模型缺失不炸
 from .face import FaceClient
 from .folders import image_exts, thumbnail_bytes
 from .models import CameraCreate, RuleCreate, ZoneCreate
@@ -196,20 +196,31 @@ def _system_version() -> str:
     return "0.1.0-alpha"
 
 
+def _engine_backend_peek() -> str:
+    """B-28：只读后端名，绝不触发模型加载（模型缺失/损坏时 /api/system 也必须 200）。
+    口径与 /api/model/status 一致；引擎未建时回退配置顺序首项。"""
+    from . import engine as _eng_mod
+    if _eng_mod._engine is not None:
+        return _eng_mod._engine.backend
+    return _eng_mod.PRELOAD.get("backend") or settings.backend_order.split(",")[0].strip()
+
+
 @router.get("/system")
 def system():
     today = store.today_event_counts()
     unhandled = sum(n for lv, n in today.items()) - store.count_events_today_handled()
+    from . import engine as _eng_mod
     return {
         "version": _system_version(),
         "schema_version": store.schema_version(),  # 任务69
-        "backend": get_engine().backend,
+        "backend": _engine_backend_peek(),
         **(manager.status() if manager else {"cameras": []}),
         "today_counts": today,
         "unhandled_today": max(0, unhandled),  # 今日未处置（任务12）
         "alerts": dispatcher.store.delivery_counts() if dispatcher.store else {"pending": 0, "failed": 0, "ok": 0},
         "config_issues": _config_issue_counts(),
         "keep_awake": keepawake.status(),  # 任务123：防休眠状态
+        "components": {"engine": dict(_eng_mod.PRELOAD)},  # B-28：预热状态与错误如实上报
     }
 
 

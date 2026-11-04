@@ -152,6 +152,24 @@ def get_engine() -> Engine:
     return _engine
 
 
+PRELOAD: dict = {"state": "idle", "backend": None, "error": None}
+
+
+def preload_async() -> None:
+    """B-28：后台线程预热推理引擎，结果写 PRELOAD（/api/system 的 components.engine 只读展示）。
+    模型缺失/驱动异常不阻断启动——服务保持可用，预热错误在 components 里如实报告。"""
+
+    def _run() -> None:
+        PRELOAD["state"] = "loading"
+        try:
+            eng = get_engine()
+            PRELOAD.update(state="ok", backend=eng.backend, error=None)
+        except Exception as exc:  # noqa: BLE001 预热失败不外抛
+            PRELOAD.update(state="error", backend=None, error=f"{type(exc).__name__}: {exc}")
+
+    threading.Thread(target=_run, daemon=True, name="engine-preload").start()
+
+
 class PpeEngine(Engine):
     """自定义类别检测引擎（实验服等）。class_names 按模型输出顺序，名称小写匹配。"""
 

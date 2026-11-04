@@ -89,6 +89,8 @@ async def lifespan(app: FastAPI):
     dispatcher.bind_store(store)  # 任务13：投递记录/死信需要写库
     manager = CameraManager(store)
     init(store, manager)
+    from . import engine
+    engine.preload_async()  # B-28：后台预热推理引擎；失败不阻断启动，见 /api/system components
     if settings.face_enabled:
         _face_compliance_notice()
     manager.start_all()  # 启动已登记摄像头（文件源用于开发演示）
