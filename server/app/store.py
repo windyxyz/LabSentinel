@@ -699,8 +699,22 @@ class Store:
         where.append("(detail LIKE '%'||?||'%' ESCAPE '\\' OR type LIKE '%'||?||'%' ESCAPE '\\')")
         args.extend([Store._like_escape(q), Store._like_escape(q)])
 
+    @staticmethod
+    def _ai_clause(ai_verdict: str | None, where: list, args: list) -> None:
+        """AI 复核过滤（任务132）：'none'=未复核（ai_review IS NULL）；
+        其它 verdict 用 JSON1 json_extract（主流 SQLite 内建）。"""
+        if not ai_verdict:
+            return
+        v = ai_verdict.strip()
+        if v == "none":
+            where.append("ai_review IS NULL")
+        else:
+            where.append("json_extract(ai_review,'$.verdict')=?")
+            args.append(v)
+
     def events(self, limit=50, camera_id=None, level=None, status=None,
-               offset=0, start_ts=None, end_ts=None, q: str | None = None):
+               offset=0, start_ts=None, end_ts=None, q: str | None = None,
+               ai_verdict: str | None = None):
         """事件查询；status 过滤（'unhandled'='new'）；offset 分页；start_ts/end_ts 时间范围（含边界）；
         q 关键词（任务84，detail/type LIKE，通配符转义）。"""
         where, args = [], []
@@ -720,6 +734,7 @@ class Store:
             where.append("ts <= ?")
             args.append(end_ts)
         self._q_clause(q, where, args)
+        self._ai_clause(ai_verdict, where, args)
         sql = "SELECT * FROM events"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -729,7 +744,8 @@ class Store:
             return [dict(r) for r in c.execute(sql, args)]
 
     def count_events(self, camera_id=None, level=None, status=None,
-                     start_ts=None, end_ts=None, q: str | None = None) -> int:
+                     start_ts=None, end_ts=None, q: str | None = None,
+                     ai_verdict: str | None = None) -> int:
         """与 events 相同过滤条件的总数（任务19 count 端点；任务84 q 关键词）。"""
         where, args = [], []
         if camera_id is not None:
@@ -748,6 +764,7 @@ class Store:
             where.append("ts <= ?")
             args.append(end_ts)
         self._q_clause(q, where, args)
+        self._ai_clause(ai_verdict, where, args)
         sql = "SELECT COUNT(*) n FROM events"
         if where:
             sql += " WHERE " + " AND ".join(where)

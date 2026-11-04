@@ -200,3 +200,40 @@ def quality(store, days: int = 7, camera_id: int | None = None) -> dict:
         "by_ai_verdict": by_ai,  # 任务124：VLM 预分类计数（仅供参考，误报率仍以人工处置为准）
         "daily": daily,
     }
+
+
+def timeline(store, days: int = 7, camera_id: int | None = None,
+             level: int | None = None) -> dict:
+    """事件时间线（任务136）：按 日期+小时 分桶，Frigate review 式热力条数据源。
+
+    days 1-30；空数据补零；SQL group by substr(ts,1,10), substr(ts,12,2)——不加载事件行。
+    """
+    from datetime import datetime, timedelta as _td
+    now = datetime.now()
+    d0 = (now - _td(days=days - 1)).date()
+    # 从 d0 当天 00:00 起算，保证查询范围与返回的 days 个自然日完全一致
+    start_ts = f"{d0.isoformat()} 00:00:00"
+    where, args = ["ts >= ?"], [start_ts]
+    if camera_id is not None:
+        where.append("camera_id=?")
+        args.append(camera_id)
+    if level is not None:
+        where.append("level=?")
+        args.append(level)
+    sql = ("SELECT substr(ts,1,10) d, substr(ts,12,2) h, COUNT(*) n, "
+           "SUM(CASE WHEN level>=3 THEN 1 ELSE 0 END) l3 "
+           "FROM events WHERE " + " AND ".join(where) + " GROUP BY d, h")
+    with _conn(store) as c:
+        agg = {(r["d"], int(r["h"])): (r["n"], r["l3"] or 0)
+               for r in c.execute(sql, args)}
+    out = []
+    for i in range(days):
+        d = (d0 + _td(days=i)).isoformat()
+        hours = []
+        day_total = 0
+        for h in range(24):
+            n, l3 = agg.get((d, h), (0, 0))
+            day_total += n
+            hours.append({"hour": h, "total": n, "l3": l3})
+        out.append({"date": d, "total": day_total, "hours": hours})
+    return {"days": days, "days_list": out}

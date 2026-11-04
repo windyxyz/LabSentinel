@@ -176,6 +176,12 @@ function barGeom(h) {
         <td>{{ (c.rate * 100).toFixed(1) }}%</td>
       </tr>
     </table>
+    <!-- 任务132：AI 复核小计（仅供参考，误报率仍以人工处置为准） -->
+    <p v-if="quality.by_ai_verdict" class="muted" style="margin:8px 0 0">
+      AI 复核小计：疑似真实 {{ quality.by_ai_verdict.likely_true ?? 0 }} ·
+      疑似误报 {{ quality.by_ai_verdict.likely_false ?? 0 }} ·
+      不确定 {{ quality.by_ai_verdict.uncertain ?? 0 }}
+    </p>
   </div>
   <div class="panel" v-else-if="quality && quality.total === 0">暂无数据（统计窗口内无事件）</div>
 

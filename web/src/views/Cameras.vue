@@ -163,7 +163,63 @@ function viewFor(c) {
   const m = sys.value.cameras.find(x => x.id === c.id) || {}
   return { ...c, ...m }
 }
-onMounted(() => { refresh(); loadAlerts() })
+onMounted(() => { refresh(); loadAlerts(); loadPlugins() })
+
+// 任务131：插件（外挂）管理（默认禁用；启用=管理员显式授权）
+const plugins = ref([])
+const pluginsError = ref('')
+const pluginsLoaded = ref(false)
+const pluginBusy = ref('')
+const pluginLog = ref(null)
+
+async function loadPlugins() {
+  try {
+    plugins.value = (await api.pluginsList()).plugins
+    pluginsError.value = ''
+    pluginsLoaded.value = true
+  } catch (e) {
+    const msg = String(e.message || e)
+    pluginsLoaded.value = true
+    pluginsError.value = msg.includes('401') || msg.includes('403')
+      ? '需要管理令牌——请在页面顶部填写后重试'
+      : msg
+  }
+}
+function pluginStateLabel(p) {
+  if (p.last_error && !p.running) return p.last_error
+  if (p.running) return `运行中 (pid ${p.pid})`
+  if (p.returncode !== null && p.returncode !== undefined)
+    return `已退出 (rc=${p.returncode})`
+  return p.enabled ? '已启用 · 未运行' : '未启用'
+}
+async function pluginAct(p, action) {
+  if (pluginBusy.value) return
+  const word = { enable: '启用', disable: '停用', start: '启动', stop: '停止' }[action] || action
+  if (action === 'enable' && (p.permissions || []).includes('write')) {
+    if (!confirm(`「${p.name}」含 write 权限：启用后将获得管理员令牌（等同完全控制本服务）。
+确定继续？`)) return
+  } else if (!confirm(`确定${word}插件「${p.name}」？`)) return
+  pluginBusy.value = p.id
+  try {
+    await api.pluginAction(p.id, action)
+    await loadPlugins()
+  } catch (e) {
+    const msg = String(e.message || e)
+    alert(msg + (msg.includes('401') || msg.includes('403') ? '\n请先在页面顶部填写管理令牌' : ''))
+  }
+  pluginBusy.value = ''
+}
+async function showPluginLog(p) {
+  if (pluginBusy.value) return
+  pluginBusy.value = p.id
+  try {
+    const r = await api.pluginLogs(p.id)
+    pluginLog.value = { id: p.id, text: r.logs || '（暂无日志输出）' }
+  } catch (e) {
+    pluginLog.value = { id: p.id, text: '日志读取失败: ' + (e.message || e) }
+  }
+  pluginBusy.value = ''
+}
 
 // 任务113：局域网发现助手（只读探测；发现结果仅作填表参考，不自动添加）
 const discover = ref({ busy: false, devices: [], error: '', lan: [], shown: false })
@@ -450,6 +506,45 @@ async function watchLive(cam) {
       <span class="muted">停止后摄像头分析、事件推送全部暂停；重新启动程序（快捷方式/启动.bat）恢复。</span>
     </div>
 
+    <h3 style="margin:14px 0 10px">插件（外挂）<span class="muted" style="font-size:12px">（任务131，默认禁用）</span></h3>
+    <p class="muted" style="margin:0 0 6px">
+      插件=代码执行：默认禁用、管理员显式启用。清单放
+      <code>&lt;数据目录&gt;/plugins/&lt;id&gt;/plugin.json</code>，
+      指南见 docs/74-plugin-guide.md。</p>
+    <div class="row" style="margin-bottom:6px">
+      <button class="ghost" @click="loadPlugins">刷新插件</button>
+      <span v-if="pluginsError" class="muted">{{ pluginsError }}</span>
+    </div>
+    <table v-if="plugins.length">
+      <tr><th>插件</th><th>版本</th><th>权限</th><th>状态</th><th></th></tr>
+      <tr v-for="p in plugins" :key="p.id">
+        <td>{{ p.name }}<div class="muted" style="font-size:11px">{{ p.id }}</div></td>
+        <td class="muted">{{ p.version }}</td>
+        <td>
+          <span v-for="perm in (p.permissions || [])" :key="perm"
+                :style="perm === 'write' ? 'color:#dc2626; font-weight:600' : ''">{{ perm }}</span>
+          <span v-if="!(p.permissions || []).length" class="muted">无</span>
+        </td>
+        <td :class="p.running ? 'st-ok' : 'muted'">{{ pluginStateLabel(p) }}</td>
+        <td style="white-space:nowrap">
+          <button v-if="!p.enabled" class="ghost" :disabled="pluginBusy === p.id"
+                  @click="pluginAct(p, 'enable')">启用</button>
+          <button v-else class="ghost" :disabled="pluginBusy === p.id"
+                  @click="pluginAct(p, 'disable')">停用</button>
+          <button v-if="p.enabled && !p.running" :disabled="pluginBusy === p.id"
+                  @click="pluginAct(p, 'start')">启动</button>
+          <button v-if="p.running" class="ghost" :disabled="pluginBusy === p.id"
+                  @click="pluginAct(p, 'stop')">停止</button>
+          <button class="ghost" :disabled="pluginBusy === p.id"
+                  @click="showPluginLog(p)">看日志</button>
+        </td>
+      </tr>
+    </table>
+    <p v-else-if="pluginsLoaded && !pluginsError" class="muted" style="margin:6px 0">
+      暂无插件——把插件目录（含 plugin.json）放到数据目录 plugins/ 下，点「刷新插件」。</p>
+    <p class="muted" style="font-size:12px; margin:6px 0 0">
+      含 <b style="color:#dc2626">write</b> 权限的插件启用后将获得管理员令牌；未配置鉴权时插件以无令牌运行（内网使用）。</p>
+
     <h3 style="margin:14px 0 10px">添加摄像头</h3>
     <div class="row">
       <input v-model="form.name" placeholder="名称" aria-label="摄像头名称" style="width:120px" />
@@ -590,6 +685,15 @@ async function watchLive(cam) {
     <div style="width:min(92vw, 960px); cursor:default" @click.stop>
       <WebrtcPlayer :ws-url="live.wsUrl" :label="live.name" />
       <p class="muted" style="text-align:center; margin-top:8px">实时画面（WebRTC，延迟约 1s）· 点击空白处关闭</p>
+    </div>
+  </div>
+  <div v-if="pluginLog" style="position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:60" @click.self="pluginLog = null">
+    <div style="background:var(--panel, #16202e); color:inherit; border:1px solid var(--divider); border-radius:8px; padding:12px; width:min(760px, 92vw); max-height:80vh; overflow:auto">
+      <div style="display:flex; align-items:center; justify-content:space-between">
+        <b>插件日志 · {{ pluginLog.id }}</b>
+        <button class="ghost" @click="pluginLog = null">关闭</button>
+      </div>
+      <pre style="white-space:pre-wrap; font-size:12px; margin-top:8px">{{ pluginLog.text }}</pre>
     </div>
   </div>
 </template>

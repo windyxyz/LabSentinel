@@ -33,6 +33,7 @@ from .stats import daily as stats_daily_query
 from .stats import hourly as stats_hourly_query
 from .stats import summary as stats_summary_query
 from .stats import quality as stats_quality_query
+from .stats import timeline as stats_timeline_query
 from .stats import weekly as stats_weekly_query
 from .store import EVENT_STATUSES, Store, ro_uri
 from .constants import TYPE_TEXT
@@ -106,6 +107,15 @@ def require_read(request: Request):
 def init(s: Store, m: CameraManager):
     global store, manager
     store, manager = s, m
+
+
+AI_VERDICTS = ("likely_true", "likely_false", "uncertain", "none")
+
+
+def _check_ai_verdict(v: str | None) -> None:
+    """任务132：ai_verdict 过滤参数校验（None=不过滤；非法 400）。"""
+    if v is not None and v not in AI_VERDICTS:
+        raise HTTPException(400, "ai_verdict 必须是 likely_true|likely_false|uncertain|none")
 
 
 def _event_row(row: dict) -> dict:
@@ -585,6 +595,14 @@ def mqtt_status():
     return mqtt_bridge.status()
 
 
+# ---- 事件时间线（任务136：Frigate review 式热力条数据源；只读聚合）----
+@router.get("/events/timeline", dependencies=[Depends(require_read)])
+def events_timeline(days: int = 7, camera_id: int | None = None, level: int | None = None):
+    if not 1 <= days <= 30:
+        raise HTTPException(400, "days 必须在 1-30")
+    return stats_timeline_query(store, days=days, camera_id=camera_id, level=level)
+
+
 # ---- GenAI 复核状态（任务124；只读计数，不含任何截图/内容）----
 @router.get("/genai/status", dependencies=[Depends(require_read)])
 def genai_status():
@@ -915,6 +933,9 @@ def _validate_config_import(data: dict):
         raise HTTPException(400, "version 必须为 1")
     errs: list[str] = []
     cams, zones_in, rules_in = [], data.get("zones") or [], data.get("rules") or []
+    # 任务134：规模上限在填充循环前，直接量原始输入（cams 此刻还是空列表）
+    if len(data.get("cameras") or []) > 200 or len(zones_in) > 1000 or len(rules_in) > 2000:
+        raise HTTPException(400, "导入规模超限（摄像头≤200/区域≤1000/规则≤2000）")
     seen = set()
     for c in (data.get("cameras") or []):
         name = (c.get("name") or "").strip()
@@ -1455,27 +1476,31 @@ def del_calendar(d: str):
 def events(limit: int = 50, camera_id: int | None = None, level: int | None = None,
            status: str | None = None, offset: int = 0,
            start_ts: str | None = None, end_ts: str | None = None,
-           q: str | None = None):
+           q: str | None = None, ai_verdict: str | None = None):
     if q is not None and len(q.strip()) > 100:  # 任务84：>100 字符拒绝；空白=不过滤
         raise HTTPException(400, "q 长度须 ≤ 100 字符")
+    _check_ai_verdict(ai_verdict)  # 任务132
     limit = max(1, min(limit, 200))  # 任务19：上限钳制
     start_ts, end_ts = _normalize_ts_range(start_ts, end_ts)
     return [_event_row(r) for r in
             store.events(limit=limit, camera_id=camera_id, level=level, status=status,
-                         offset=offset, start_ts=start_ts, end_ts=end_ts, q=q)]
+                         offset=offset, start_ts=start_ts, end_ts=end_ts, q=q,
+                         ai_verdict=ai_verdict)]
 
 
 @router.get("/events/count", dependencies=[Depends(require_read)])
 def events_count(camera_id: int | None = None, level: int | None = None,
                  status: str | None = None,
                  start_ts: str | None = None, end_ts: str | None = None,
-                 q: str | None = None):
+                 q: str | None = None, ai_verdict: str | None = None):
     """与 events 相同过滤条件的总数（任务19；分页用；任务84 q 关键词）。"""
     if q is not None and len(q.strip()) > 100:
         raise HTTPException(400, "q 长度须 ≤ 100 字符")
+    _check_ai_verdict(ai_verdict)  # 任务132
     start_ts, end_ts = _normalize_ts_range(start_ts, end_ts)
     return {"count": store.count_events(camera_id=camera_id, level=level, status=status,
-                                        start_ts=start_ts, end_ts=end_ts, q=q)}
+                                        start_ts=start_ts, end_ts=end_ts, q=q,
+                                        ai_verdict=ai_verdict)}
 
 
 def _normalize_ts_range(start_ts: str | None, end_ts: str | None):
@@ -1601,9 +1626,15 @@ async def face_register(subject: str = Form(...), consent: bool = Form(...),
     _face_guard()
     if not consent:
         raise HTTPException(400, "注册人员必须 consent=true（《人脸识别技术应用安全管理办法》要求留痕）")
-    data = await photo.read()
+    max_bytes = 10 * 1024 * 1024  # 任务134：单张照片上限 10MB（防内存滥用）
+    size = getattr(photo, "size", None)
+    if isinstance(size, int) and size > max_bytes:  # 已声明大小：先拒，避免整包读入内存
+        raise HTTPException(413, "照片超过 10MB 上限")
+    data = await photo.read(max_bytes + 1)  # 最多读 10MB+1，超限即拒
     if not data:
         raise HTTPException(400, "照片为空")
+    if len(data) > max_bytes:
+        raise HTTPException(413, "照片超过 10MB 上限")
     try:
         face_client.add_person(subject, data)
     except Exception as e:  # noqa: BLE001
