@@ -1,10 +1,10 @@
-# 55 · 交接快照（2026-11-04 08:00，122–130 验收，当前 131）
+# 55 · 交接快照（2026-11-04 21:30，130–139 验收，flash idle）
 
 > 本文件是**上下文压缩的落点**：新会话/新协作者先读这一份，再按链接进细节。
-> 当前状态：**批次 122–130 全部交付并验收**（pytest **495**、build 60.11KB、
-> `LabSentinel-portable-20261104.zip`）；主线复审修复 genai 中文路径/插件入口/MQTT LWT/版本 alpha；
-> 当前 **131 插件 UI**，后续 [批次130-139](./50-tasks/批次130-139-发布候选增强.md)。
-> **119/120 `a8d8ca1`**；**121 `f7ba376`**；**106–108 `f07c0df`**；**122–130 待本次提交**。
+> 当前状态：**批次 122–130 + 130–139 全部交付并验收**（pytest **504** + vitest **26**、
+> build 63.22KB、`LabSentinel-portable-20261104.zip` sha 36ac8f9e…）；
+> 主线复审补 3 处（人脸先限读/时间线精确到小时/View Transition 重名），**最终包需再重建**。
+> **119/120 `a8d8ca1`**；**121 `f7ba376`**；**106–108 `f07c0df`**；**122–139 待本次提交**。
 > 发布硬阻塞：**真实 RTSP 摄像头 24h + 模型止损线** + Actions 实跑/签名。
 
 ## 〇、2026-11-03 主线进展（121）
@@ -31,17 +31,19 @@
   112/111/113/116/115/117/103（Phase B）、124/125/126（Phase C）、101/84/87/129（Phase D）、
   100/104（收口）；pytest **491→495**、build 60.11KB、zip 20261104（smoke/doctor/rc/release_check 全绿）。
   复审补丁：genai 中文路径、插件入口 `{python}`/is_relative_to、MQTT LWT 顺序、版本 alpha。
-- **当前 131**：插件管理 UI（后端 API 已就绪）；随后 132 AI 徽标/筛选、133 前端 vitest、
-  134 安全审计、135 View Transitions、136 时间线、130 最终 RC。
+- **当前 131 已完成**：插件 UI；批次 130–139（131 插件 UI/132 AI 徽标/133 vitest 26/134 安全审计/
+  135 View Transitions/136 时间线/130 最终 RC）全部交付；复审补 3 处；flash idle。
+- 后续 backlog：137 事件前缓冲、138 Label Studio、139 4 路压测（可选）；
+  桌面壳/托盘、深链、winget 仍延后。最终包需“130b”式重建。
 
 ## 一、总体状态
 
 | 维度 | 状态 |
 |---|---|
 | 服务端/Web | ⏸ 当前未启动；8000/8001/1984/8554/5173 均无监听 |
-| 测试 | ✅ **pytest 495 passed**（122–130+复审修复）；build gzip **60.11KB**；release_check 全 PASS |
+| 测试 | ✅ **pytest 504 passed + vitest 26 passed**；build gzip **63.22KB**；release_check 全 PASS |
 | 模型 | ✅ v2 已接入：`m0-spike/yolo11n_ppe.onnx`（11 类）+ classes.txt；v1 备份 `*_v1.*` |
-| 便携包 | ✅ `LabSentinel-portable-20261104.zip` 279.4MB/12605 条目（122–130 批次）；复审修复未入包，130 重建最终候选 |
+| 便携包 | ✅ `LabSentinel-portable-20261104.zip` 279.7MB/12613 条目/sha 36ac8f9e…（smoke 8/8、doctor 10/0/0、rc 4/4）；**不含复审 3 小修，需再重建** |
 | 启动 EXE | ✅ 任务 55 已交付并验收：`LabSentinel.exe`（C# winexe，5.5KB，无黑框；`--stop` 可用）；无 csc 构建自动降级到 `启动.bat`/pythonw |
 | 部署 | ✅ 便携包（普通用户）+ `一键启动.bat`/`deploy.py`（开发模式，无 Python 时自动改启便携包） |
 | Git | 最近提交 `aadabd5`（122/研究）；`f07c0df`（106–108）；`f7ba376`（121）；`a8d8ca1`（119/120）；批次 122–130 待提交 |

@@ -115,13 +115,13 @@
 | [125-mqtt-event-bus.md](./125-mqtt-event-bus.md) | **MQTT 事件总线（生态开放）** | ✅ 完成；真实 broker BLOCKED |
 | [126-plugin-phase1.md](./126-plugin-phase1.md) | **插件一期：约定式外挂** | ✅ 完成（UI 见 131） |
 | [129-release-hygiene.md](./129-release-hygiene.md) | 发布卫生（版本/TODO/pycache/CI） | ✅ 完成；版本统一由主线补 |
-| [130-final-rc.md](./130-final-rc.md) | **最终 RC 重建（含本批修复）** | 批次 130–139 收口 |
-| [131-plugin-ui.md](./131-plugin-ui.md) | **插件管理 UI** | 待做（P1） |
-| [132-ai-review-ui.md](./132-ai-review-ui.md) | **AI 复核徽标/筛选** | 待做（P2） |
-| [133-frontend-tests.md](./133-frontend-tests.md) | 前端自动化测试（vitest） | 待做（P2） |
-| [134-security-audit.md](./134-security-audit.md) | 安全与依赖审计 | 待做（P2） |
-| [135-view-transitions.md](./135-view-transitions.md) | View Transitions 体验 | 待做（P3） |
-| [136-event-timeline.md](./136-event-timeline.md) | 事件时间线视图 | 待做（P3） |
+| [130-final-rc.md](./130-final-rc.md) | **最终 RC 重建（含本批修复）** | ✅ 完成；复审后需再重建 |
+| [131-plugin-ui.md](./131-plugin-ui.md) | **插件管理 UI** | ✅ 完成（8188 实机） |
+| [132-ai-review-ui.md](./132-ai-review-ui.md) | **AI 复核徽标/筛选** | ✅ 完成 |
+| [133-frontend-tests.md](./133-frontend-tests.md) | 前端自动化测试（vitest） | ✅ 26/26 |
+| [134-security-audit.md](./134-security-audit.md) | 安全与依赖审计 | ✅ 完成（2 修复） |
+| [135-view-transitions.md](./135-view-transitions.md) | View Transitions 体验 | ✅ 完成 |
+| [136-event-timeline.md](./136-event-timeline.md) | 事件时间线视图 | ✅ 完成 |
 | [批次130-139-发布候选增强.md](./批次130-139-发布候选增强.md) | 批次 130–139 总表 | 已派发 |
 
 > **平台顺序**：Windows 优先；WSL 仅开发调试；**Docker 暂不考虑**；Android/iOS 后续。

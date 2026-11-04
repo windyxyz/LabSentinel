@@ -39,3 +39,33 @@
 
 - 只做管理 UI；不自动启用/启动插件、不打包示例、不改插件后端。
 - 不展示令牌/环境变量值；401 引导去顶部填令牌。
+
+## 执行报告
+
+**flash 2026-11-04 完成（build gzip 61.61KB；8188 隔离实例全链实机 PASS；后端零改动）**
+
+### 实现（只改 Cameras.vue + api.js；App.vue/main.js/theme 未动）
+
+- **api.js** +3：`pluginsList` / `pluginAction(id, action)` / `pluginLogs(id, tail=200)`；
+- **Cameras.vue**「服务控制」后新增「插件（外挂）」区块：
+  - 列表：名称+id/版本/权限徽章（**write 红色加粗**）/状态（运行中 pid、已退出 rc、未启用、
+    last_error 直显）；
+  - 操作：启用/停用、启动/停止、看日志——按钮按 `pluginBusy === p.id` 防重；
+    enable 含 write 权限时 confirm 明确警示"将获得管理员令牌（等同完全控制本服务）"；
+  - 安全提示：顶部"插件=代码执行，默认禁用"说明 + write 警示文案（未配置鉴权时
+    "以无令牌运行（内网使用）"）；
+  - 三态：加载中/空（引导放 `<数据目录>/plugins/<id>/`+刷新按钮）/错误
+    （**401/403 引导去页面顶部填令牌**，操作失败 alert 同样引导）；
+  - 日志弹窗：固定定位 overlay（点空白/关闭按钮关），`<pre>{{ text }}</pre>` 纯文本
+    （**禁 v-html**），不显示任何令牌；
+  - 页面 onMounted 拉一次（失败留错误提示不阻塞摄像头表），操作后自动重拉。
+- 样式复用 .panel/.row/.muted/table/.ghost/.st-ok；375px 走 panel overflow-x（既有规则）。
+
+### 实机验证（8188 隔离实例 + 示例 event-logger 复制到 data/plugins）
+
+列表（disabled 可见）→ enable → start（`{python}` 解析 pid=22584）→ running=True →
+日志含启动横幅 → stop → running=False → **全链 PASS**。
+
+### 遗留
+
+- 无。截图略（表格/弹窗结构见代码；与既有面板同构）。

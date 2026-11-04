@@ -23,3 +23,35 @@
 
 - 只测纯逻辑/组件契约，不引入 Playwright/E2E 浏览器（P3 另议）；
 - 不修改 theme/App.vue/main.js；测试文件不影响构建产物。
+
+## 执行报告
+
+**flash 2026-11-04 完成（npm test 26/26 passed / 2.66s；npm run build 62.12KB 不变；CI 已加 npm test）**
+
+### devDependencies（不加生产依赖；bundle 体积零变化）
+
+- `vitest@^2.1.9`、`jsdom@^29.1.1`、`@vue/test-utils@^2.5.1`（package.json `test: vitest run`）；
+- **兼容性坑（已记录）**：最新 vitest 5.1 要求 vite ≥6 的 `./module-runner` 导出，本项目
+  vite 5.4 → 安装即 Startup Error `ERR_PACKAGE_PATH_NOT_EXPORTED`，**降级 vitest@^2.1.9**
+  （vite5 兼容矩阵）；npm i 需 `--legacy-peer-deps`（vue peer 声明冲突）；
+- vite.config.js 加 `test: { environment: 'jsdom', include: ['tests/**/*.test.js'] }`
+  （单配置文件，vite 复用；测试零网络/零真实 Notification）。
+
+### 用例（web/tests/，26 个）
+
+- `api.test.js`（14）：token 存取、mediaUrl ?/& 拼接与 encodeURIComponent、2xx JSON、
+  非 2xx detail 抛错、401 引导文案、X-Admin-Token/Content-Type/body 断言、
+  URL 拼装抽检（usb/refresh/groups/plugins/enable/stop/group/logs tail）；
+- `notify.test.js`（7）：default 不弹、环境不支持不抛、L1 不弹、tag 格式、页面可见不弹、
+  **同 tag 10s 去重（fake timers 10_001ms 后可再弹）**、开关 localStorage、
+  ensurePermission 两分支；
+- `asyncstate.test.js`（5）：loading/error（retry 事件+401 提示区分）/empty/slot+notice。
+
+### CI
+
+`.github/workflows/tests.yml` web-build job：`npm ci → npm test → npm run build`
+（YAML 校验过；runner 实跑待远端，发布阻塞项不变）。
+
+### 遗留
+
+- 无。vitest 升 vite6 时可回 vitest@5（记录在案）。

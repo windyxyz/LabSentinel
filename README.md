@@ -77,6 +77,7 @@ Docker 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道�
 | [docs/摄像头接入Runbook.md](docs/摄像头接入Runbook.md) | **摄像头接入一条龙**：预检/接线/区域规则/告警验证/24h 观察/故障速查 |
 | [docs/73-mqtt-protocol.md](docs/73-mqtt-protocol.md) | **MQTT 事件总线协议**：主题/payload v1/订阅示例/版本策略（任务125） |
 | [docs/74-plugin-guide.md](docs/74-plugin-guide.md) | **插件（外挂）指南**：清单/权限/示例/安全红线（任务126，默认禁用） |
+| [docs/75-security-audit-2026-11-05.md](docs/75-security-audit-2026-11-05.md) | **安全与依赖审计**：路径/外联/令牌/插件执行/PWA 检查与修复 |
 | [docs/发布核对报告.md](docs/发布核对报告.md) | 发布前核对与终检记录（版本/校验和/阻塞项） |
 | [docs/部署FAQ.md](docs/部署FAQ.md) | 踩坑集中答疑（网络/依赖/推理/训练/告警）；启动失败先跑 `python scripts/doctor.py` 自检 |
 | [docs/68-image-folder-ingestion.md](docs/68-image-folder-ingestion.md) | **图片文件夹自动识别使用手册**：截图目录接入、关键/违规定义、配置与排障 |

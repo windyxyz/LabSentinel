@@ -26,3 +26,38 @@
 
 - 不改 App.vue/main.js/theme.css/style.css；不引入依赖；
 - 过渡不得遮挡处置按钮/键盘焦点；`Esc` 关闭仍可用。
+
+## 执行报告
+
+**flash 2026-11-04 完成（build gzip 62.31KB（+0.19KB）；后端零改动；events 相关 9 测试回归通过）**
+
+### 实现（只改 Events.vue）
+
+- `withViewTransition(apply)`：`document.startViewTransition` 存在且
+  `prefers-reduced-motion != reduce` 且 `vtRunning=false` 时包裹状态切换；否则直接 apply
+  （不支持/减少动效/连点防嵌套三路降级，`finished.finally` 复位标志）；
+- `openDetail`/`closeDrawer` 都走包裹（开/关双向过渡；Esc 路径经 closeDrawer 同样生效，
+  焦点恢复不受影响）；
+- 共享元素：行 `style.viewTransitionName = evi-<id>`（行内绑定），抽屉同 id 动态绑定
+  （关闭时置空）——列表行↔抽屉位移过渡；
+- CSS：**非 scoped** `<style>` 块（页面级伪元素只能全局），220ms cubic-bezier(0.2,0,0,1)；
+  `::view-transition-old/new(root)` 关默认交叉淡入（只留共享元素位移）；
+  `@media (prefers-reduced-motion: reduce)` 全部 `animation: none !important` 兜底；
+  theme/style.css/App.vue/main.js 零改动。
+
+### 验证
+
+- build 通过（gzip 62.12→62.31KB，+0.19KB）；event_search/pagination 9 用例回归通过
+  （后端零触碰）；
+- 浏览器手工项（Chrome/Edge 打开/关闭过渡、控制台无错）待用户侧一次目检——
+  jsdom 不实现 VT API（走降级分支，行为与旧版一致，覆盖测试意义有限）。
+
+### 遗留
+
+- 无。
+
+### 主线复审补丁（2026-11-04）
+
+- 打开抽屉时列表行与抽屉同时持有同一 `view-transition-name`（evi-<id>）会被浏览器判为
+  重复命名、过渡可能被跳过 → 行在 `drawer.id===e.id` 时置 `none`，由抽屉单独持有名字；
+  关闭时恢复行名，双向共享元素才成立。
