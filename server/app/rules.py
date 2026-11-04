@@ -64,11 +64,16 @@ class RuleEngine:
             self.prune(now=now)
 
     def match(self, camera_id: int, zone_id: int | None, behavior: str,
-              track_id: int = 0, level_hint: int | None = None):
-        """返回命中的规则（含冷却判定）。zone_id=None 表示无区域规则（occupancy）。"""
-        now_mono = time.monotonic()
+              track_id: int = 0, level_hint: int | None = None,
+              now_dt: datetime | None = None, now_mono: float | None = None):
+        """返回命中的规则（含冷却判定）。zone_id=None 表示无区域规则（occupancy）。
+
+        T-321（L0）：now_dt/now_mono 可注入——确定性模式（LS_DETERMINISTIC=1）下由
+        管线传入视频时间/帧序号，替代墙钟，保证同一语料两次运行事件完全一致。
+        """
+        now_mono = time.monotonic() if now_mono is None else now_mono
         self._maybe_prune(now_mono)
-        now = datetime.now()
+        now = datetime.now() if now_dt is None else now_dt
         for rule in self.store.rules(camera_id):
             if not rule["enabled"] or rule["behavior"] != behavior:
                 continue

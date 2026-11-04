@@ -618,11 +618,14 @@ class Store:
         return d.weekday() >= 5  # 5=周六 6=周日
 
     # ---- events ----
-    def add_event(self, camera_id, type_, level, track_id, detail, snapshot=None) -> int:
+    def add_event(self, camera_id, type_, level, track_id, detail, snapshot=None,
+                  ts: str | None = None) -> int:
+        """ts 可注入（T-321 确定性模式：事件时间取视频帧时间，非墙钟）。"""
         with self._lock, self._conn() as c:
             cur = c.execute(
                 "INSERT INTO events(ts,camera_id,type,level,track_id,detail,snapshot) VALUES(?,?,?,?,?,?,?)",
-                (datetime.now().isoformat(timespec="seconds"), camera_id, type_, level, track_id, detail, snapshot),
+                (ts or datetime.now().isoformat(timespec="seconds"),
+                 camera_id, type_, level, track_id, detail, snapshot),
             )
             eid = cur.lastrowid
         try:  # 任务124：VLM 误报预分类（默认 none=零开销；入队失败静默，绝不影响事件主流程）

@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from collections import deque
+from datetime import datetime, timedelta
 
 import cv2
 import numpy as np
@@ -76,6 +77,9 @@ class CameraWorker(threading.Thread):
             lost_track_buffer=max(5, int(settings.analysis_fps * 3)),
             frame_rate=max(1, int(settings.analysis_fps)))
         self._zone_states: dict[int, ZoneState] = {}  # zone_id -> ZoneState
+        # T-321 确定性模式帧时钟：run() 循环（文件源）或 golden_run 注入；
+        # 事件 ts / 规则时间窗 / 冷却全部取自这里而非墙钟
+        self._det_frame = {"ts_ms": 0.0, "index": 0}
         self._ring: deque = deque(maxlen=1)  # 环形帧缓存，run() 里按实际帧率重建
         self._recs: list[_Recording] = []  # 进行中的录像任务
         self._rec_q: queue.Queue = queue.Queue()  # 已补齐待写盘的任务
@@ -174,13 +178,17 @@ class CameraWorker(threading.Thread):
                     continue
                 self.last_frame_ts = time.time()
                 self.frames_total += 1
-                if self.camera["type"] == "file":
+                pts_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                self._det_frame = {"ts_ms": float(pts_ms), "index": self.frames_total}
+                if self.camera["type"] == "file" and not settings.deterministic:
                     time.sleep(1.0 / file_fps)
                 frame = cv2.resize(frame, (1280, 720))
                 with self.frame_lock:
                     self.latest_frame = frame
                 self._feed_recordings(frame)
                 now = time.monotonic()
+                if settings.deterministic and self.camera["type"] == "file":
+                    next_t = -1.0  # 确定性模式：不做墙钟节流，逐帧分析
                 if now >= next_t:
                     try:
                         self._analyze(engine, frame)
@@ -379,13 +387,24 @@ class CameraWorker(threading.Thread):
         row["has_video"] = False  # 视频异步写盘，事件推送时还未生成
         dispatcher.dispatch(row)
 
+    def _det_dt(self) -> datetime | None:
+        """T-321 确定性模式的"视频时间"：固定合成基准（2026-01-01）+ 帧 PTS，
+        使事件 ts / 规则时间窗 / 日历判定全部成为视频位置的纯函数（两次运行零漂移）。"""
+        if not settings.deterministic:
+            return None
+        return datetime(2026, 1, 1) + timedelta(milliseconds=self._det_frame.get("ts_ms", 0.0))
+
     def _fire_event(self, zone_id, behavior, track_id, detail, level=2, quiet=False):
-        rule = self.rules.match(self.camera["id"], zone_id, behavior, track_id, level)
+        det_dt = self._det_dt()
+        now_mono = float(self._det_frame["index"]) if det_dt is not None else None
+        rule = self.rules.match(self.camera["id"], zone_id, behavior, track_id, level,
+                                now_dt=det_dt, now_mono=now_mono)
         if rule is None:
             return
         level = rule["level"]
         snapshot = self._save_snapshot()
-        eid = self.store.add_event(self.camera["id"], behavior, level, track_id, detail, snapshot)
+        ts = det_dt.isoformat(timespec="seconds") if det_dt is not None else None
+        eid = self.store.add_event(self.camera["id"], behavior, level, track_id, detail, snapshot, ts=ts)
         self._dispatch_row(eid, behavior, level, track_id, detail, snapshot)
         # 视频存证：环形缓冲拷出前 2 秒，后 2 秒由主循环补齐；超 3 路并发退化为仅截图
         active = sum(1 for r in self._recs if not r.done.is_set())

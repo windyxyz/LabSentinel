@@ -23,6 +23,12 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-306：进出迟滞——连续 LS_ZONE_ENTER_FRAMES(2)/LS_ZONE_EXIT_FRAMES(3) 帧才翻转
+  进出判定（=1 退化旧行为），空帧/部分消失按 exit_frames 去抖；ByteTrack 轨迹记忆
+  与分析帧率匹配；FaceGate 冷却表有界。单帧漏检不再产生重复 enter/exit 告警。
+- T-321/L0：确定性模式 LS_DETERMINISTIC=1（文件源跳过墙钟节流、事件 ts/规则时间窗/
+  冷却全部取视频时间）；tools/golden_run.py + golden_diff.py 黄金语料工具。
+  实测 lab-walk 语料两次真模型运行事件一致率 100%（L0 退出标准）。
 - T-002：构建可复现——`uv pip compile --generate-hashes` 生成 win/linux 带哈希锁文件
   （opencv override 去重，只留 headless）；便携构建 `ensure_deps` 改锁驱动全新安装
   （stamp 失配即清空重装，修 B-03"依赖已存在即跳过"）；smoke 增加依赖与单发行版断言。
