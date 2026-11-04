@@ -29,3 +29,11 @@ scripts\stop-all.bat      :: 停止（Y/N 确认）
 2. vite dev 仅绑 IPv6 localhost（README 已知事项），health-check 用 `[::1]:5173` 探测。
 3. `stop-all.bat` 会停掉**所有**占用 1984/8000/5173 的进程——若有其他服务误用这三个端口请先挪开。
 4. 不自动启动训练/推理（训练由巡检按《训练安全规程》管理）。
+
+## export_openapi.py（任务101）
+
+```
+python scripts/export_openapi.py            # 生成 docs/openapi.json（勿手改）
+python scripts/export_openapi.py --check    # 比对漂移，不一致 exit 2（CI/RC 用）
+```
+

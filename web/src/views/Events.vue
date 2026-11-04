@@ -276,6 +276,13 @@ async function mark(e, status) {
             <button class="ghost" :disabled="busyEvent !== null" @click="mark(drawer, 'ignored')">忽略</button>
           </div>
           <p v-else class="muted">处理人 {{ drawer.handled_by || '-' }} · {{ drawer.handled_ts || '-' }}</p>
+          <!-- 任务103：单事件证据包（无媒体时仅含 event.json+README，不置灰） -->
+          <a class="ghost" :href="mediaUrl(`/api/events/${drawer.id}/evidence.zip`)"
+             :download="`event-${drawer.id}-evidence.zip`"
+             style="display:inline-flex; align-items:center; text-decoration:none">
+            <button class="ghost">下载证据包</button></a>
+          <p class="muted" style="font-size:12px; margin:4px 0 0">
+            含事件信息+截图+视频；无媒体时仅含事件信息与说明 README。</p>
         </div>
       </aside>
     </div>

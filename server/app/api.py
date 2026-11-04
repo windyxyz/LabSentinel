@@ -1,6 +1,7 @@
 """REST API 路由。"""
 import csv
 import io
+import json
 import mimetypes
 import os
 import re
@@ -15,6 +16,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from . import go2rtc
+from . import keepawake
+from . import discovery
+from . import update_check
+from . import mqtt_bridge
+from . import plugins as plugins_mod
+from . import genai
 from .alerts import dispatcher, render_alert
 from .config import settings
 from .engine import get_engine
@@ -25,6 +32,7 @@ from .pipeline import CameraManager
 from .stats import daily as stats_daily_query
 from .stats import hourly as stats_hourly_query
 from .stats import summary as stats_summary_query
+from .stats import quality as stats_quality_query
 from .stats import weekly as stats_weekly_query
 from .store import EVENT_STATUSES, Store, ro_uri
 from .constants import TYPE_TEXT
@@ -105,6 +113,15 @@ def _event_row(row: dict) -> dict:
     row["has_snapshot"] = bool(row.get("snapshot"))
     row["has_video"] = bool(row.get("video"))
     row["status"] = row.get("status") or "new"  # 旧库迁移前列缺失时兜底
+    raw_ai = row.get("ai_review")  # 任务124：VLM 复核结果（JSON 字符串 → 对象+verdict 快捷字段）
+    if raw_ai:
+        try:
+            row["ai_review"] = json.loads(raw_ai)
+        except ValueError:
+            row["ai_review"] = None
+    else:
+        row["ai_review"] = None
+    row["ai_verdict"] = (row["ai_review"] or {}).get("verdict")
     return row
 
 
@@ -165,7 +182,7 @@ def _config_issue_counts() -> dict:
 
 
 def _system_version() -> str:
-    return "0.1.0-m1"
+    return "0.1.0-alpha"
 
 
 @router.get("/system")
@@ -181,6 +198,7 @@ def system():
         "unhandled_today": max(0, unhandled),  # 今日未处置（任务12）
         "alerts": dispatcher.store.delivery_counts() if dispatcher.store else {"pending": 0, "failed": 0, "ok": 0},
         "config_issues": _config_issue_counts(),
+        "keep_awake": keepawake.status(),  # 任务123：防休眠状态
     }
 
 
@@ -466,7 +484,6 @@ def list_alert_silences(active: int = 1):
 
 @router.post("/alert-silences", dependencies=[Depends(require_admin)])
 def add_alert_silence(body: dict):
-    # TODO(任务87)：写操作进审计日志
     scope = body.get("scope", "global")
     if scope not in _ALLOWED_SILENCE_SCOPES:
         raise HTTPException(400, f"scope 必须为 {'|'.join(_ALLOWED_SILENCE_SCOPES)}")
@@ -492,7 +509,6 @@ def add_alert_silence(body: dict):
 
 @router.delete("/alert-silences/{sid}", dependencies=[Depends(require_admin)])
 def delete_alert_silence(sid: int):
-    # TODO(任务87)：写操作进审计日志
     if not store.delete_silence(sid):
         raise HTTPException(404, "silence not found")
     return {"ok": True}
@@ -505,6 +521,158 @@ def delete_alert_silence(sid: int):
 @router.get("/cameras", dependencies=[Depends(require_read)])
 def cameras():
     return store.cameras()
+
+
+# ---- 版本更新检查（任务117：只提示，不下载/安装/执行）----
+@router.get("/update/check", dependencies=[Depends(require_read)])
+def update_check_route(refresh: int = 0):
+    return update_check.check_update(
+        settings.update_manifest_url, _system_version(),
+        allow_http=settings.update_allow_http,
+        timeout=settings.update_timeout_s, refresh=bool(refresh))
+
+
+# ---- 插件（外挂）一期（任务126；全部 require_admin：插件=代码执行）----
+@router.get("/plugins", dependencies=[Depends(require_admin)])
+def plugins_list():
+    return {"plugins": plugins_mod.manager.scan()}
+
+
+def _mgr():
+    if plugins_mod.manager is None:
+        raise HTTPException(503, "插件管理未初始化")
+    return plugins_mod.manager
+
+
+@router.post("/plugins/{pid}/enable", dependencies=[Depends(require_admin)])
+def plugin_enable(pid: str):
+    if not _mgr().enable(pid):
+        raise HTTPException(404, "插件不存在或清单非法")
+    return {"id": pid, "enabled": True}
+
+
+@router.post("/plugins/{pid}/disable", dependencies=[Depends(require_admin)])
+def plugin_disable(pid: str):
+    if not _mgr().disable(pid):
+        raise HTTPException(404, "插件不存在或清单非法")
+    return {"id": pid, "enabled": False}
+
+
+@router.post("/plugins/{pid}/start", dependencies=[Depends(require_admin)])
+def plugin_start(pid: str):
+    ok, msg = _mgr().start(pid)
+    if not ok:
+        raise HTTPException(400, msg)
+    return {"id": pid, "status": "started", "detail": msg}
+
+
+@router.post("/plugins/{pid}/stop", dependencies=[Depends(require_admin)])
+def plugin_stop(pid: str):
+    ok, msg = _mgr().stop(pid)
+    if not ok:
+        raise HTTPException(400, msg)
+    return {"id": pid, "status": "stopped", "detail": msg}
+
+
+@router.get("/plugins/{pid}/logs", dependencies=[Depends(require_admin)])
+def plugin_logs(pid: str, tail: int = 200):
+    return {"id": pid, "logs": _mgr().logs(pid, tail=tail)}
+
+
+# ---- MQTT 事件总线状态（任务125；未配置也 200）----
+@router.get("/mqtt/status", dependencies=[Depends(require_read)])
+def mqtt_status():
+    return mqtt_bridge.status()
+
+
+# ---- GenAI 复核状态（任务124；只读计数，不含任何截图/内容）----
+@router.get("/genai/status", dependencies=[Depends(require_read)])
+def genai_status():
+    return genai.status()
+
+
+# ---- 局域网发现助手（任务113；require_admin：发现=内网动作）----
+@router.get("/discovery/cameras", dependencies=[Depends(require_admin)])
+def discovery_cameras(timeout: float = 3.0, refresh: int = 0):
+    """WS-Discovery 组播发现 ONVIF 设备（30s 缓存，refresh=1 强制重发）。
+
+    无设备/组播不可用都返回 200 + 可读 error 文案（不 500）。
+    """
+    timeout = min(max(timeout, 1.0), 5.0)
+    try:
+        devices = discovery.get_devices(timeout=timeout, refresh=bool(refresh))
+    except Exception as e:  # noqa: BLE001
+        return {"devices": [], "lan": discovery.lan_addresses(),
+                "error": f"发现失败：{e!r}"}
+    hint = ("" if devices else
+            "未发现设备：确认摄像头与主机同网段、摄像头已开启 ONVIF、UDP 3702 未被防火墙拦截；"
+            "也可用品牌模板手输 RTSP 地址")
+    return {"devices": devices, "lan": discovery.lan_addresses(), "error": hint}
+
+
+@router.post("/discovery/probe", dependencies=[Depends(require_admin)])
+def discovery_probe(body: dict):
+    """TCP/ffprobe 只读探测（凭证仅用于本次探测，不写日志/不回传）。"""
+    host = str(body.get("host") or "").strip()
+    if not host:
+        raise HTTPException(400, "host 必填")
+    try:
+        port = int(body.get("port") or 554)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "port 必须是整数")
+    if not 1 <= port <= 65535:
+        raise HTTPException(400, "port 必须在 1-65535")
+    return discovery.probe_host(host, port=port,
+                                username=str(body.get("username") or "") or None,
+                                password=str(body.get("password") or "") or None)
+
+
+# ---- 分组与批量启停（任务111）----
+@router.put("/cameras/{cid}/group", dependencies=[Depends(require_admin)])
+def set_camera_group(cid: int, body: dict):
+    name = str(body.get("group_name") or "")
+    if len(name) > 32:
+        raise HTTPException(400, "group_name 最长 32 字符")
+    if store.camera(cid) is None:
+        raise HTTPException(404, "camera not found")
+    store.set_camera_group(cid, name)
+    return {"id": cid, "group_name": name}
+
+
+@router.get("/camera-groups", dependencies=[Depends(require_read)])
+def camera_groups():
+    return {"groups": store.camera_groups()}
+
+
+@router.post("/cameras/bulk", dependencies=[Depends(require_admin)])
+def cameras_bulk(body: dict):
+    """批量启停：{ids:[...], action:"start"|"stop"}。ids 去重、1-100 个；不删数据。"""
+    ids = body.get("ids")
+    action = body.get("action")
+    if action not in ("start", "stop"):
+        raise HTTPException(400, "action must be start|stop")
+    if not isinstance(ids, list) or not ids or len(set(ids)) != len(ids) or len(ids) > 100:
+        raise HTTPException(400, "ids 必须为去重非空列表且 ≤100 个")
+    if not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        raise HTTPException(400, "ids 必须是整数数组")
+    missing, failed = [], []
+    for cid in ids:
+        cam = store.camera(cid)
+        if cam is None:
+            missing.append(cid)
+            continue
+        if manager is None:
+            failed.append({"id": cid, "error": "manager not ready"})
+            continue
+        try:
+            if action == "start":
+                manager.start_camera(cam)
+            else:
+                manager.stop_camera(cid)
+        except Exception as e:  # noqa: BLE001
+            failed.append({"id": cid, "error": repr(e)})
+    return {"ok": [i for i in ids if i not in missing and i not in [f["id"] for f in failed]],
+            "missing": missing, "failed": failed}
 
 
 @router.get("/cameras/usb-devices", dependencies=[Depends(require_read)])
@@ -540,7 +708,7 @@ def add_camera(body: CameraCreate):
                 raise HTTPException(400, "图片文件夹不能使用程序数据目录（会造成证据图自激识别）")
         except OSError:
             pass
-    cid = store.add_camera(body.name, source, body.type)
+    cid = store.add_camera(body.name, source, body.type, group_name=body.group_name)
     if body.autostart:
         manager.start_camera(store.camera(cid))
     go2rtc.sync_streams(store)  # 实时画面：同步流媒体网关配置
@@ -702,6 +870,8 @@ def camera_status(cid: int):
         })
         if hasattr(w, "folder_status"):
             out.update(w.folder_status())
+    if manager is not None:
+        out.update(manager.supervisor_info(cid))  # 任务114：restart_count/守护状态
     return out
 
 
@@ -1110,6 +1280,9 @@ def rules(camera_id: int | None = None):
 def add_rule(body: RuleCreate):
     if body.behavior not in ("enter_no_ppe", "enter", "exit", "occupancy_over"):
         raise HTTPException(400, "unknown behavior")
+    days = {d.strip() for d in body.days_of_week.split(",") if d.strip()}  # 任务112
+    if not days or not days <= {str(i) for i in range(1, 8)}:
+        raise HTTPException(400, "days_of_week 必须是 1-7 的逗号集合（ISO，1=周一；空=永不生效）")
     if store.camera(body.camera_id) is None:  # 2026-10-30 审阅：指向不存在摄像头的规则静默失活
         raise HTTPException(404, "camera not found")
     if body.zone_id is not None:
@@ -1126,6 +1299,154 @@ def add_rule(body: RuleCreate):
 @router.delete("/rules/{rid}", dependencies=[Depends(require_admin)])
 def delete_rule(rid: int):
     store.delete_rule(rid)
+    return {"ok": True}
+
+
+# ---- 规则模板库（任务116：只存规则参数，不绑摄像头/区域）----
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _validate_template_rules(rules) -> list[dict]:
+    """模板规则逐条校验（任务116）；通过后返回清洗后的列表。"""
+    from .models import RuleCreate
+    if not isinstance(rules, list) or not rules or len(rules) > 50:
+        raise HTTPException(400, "rules 必须为 1-50 条的非空数组")
+    out = []
+    for r in rules:
+        try:
+            body = RuleCreate.model_validate({
+                "camera_id": 0,  # 模板不绑摄像头，占位过校验
+                "behavior": r.get("behavior"), "level": r.get("level", 2),
+                "cooldown_s": r.get("cooldown_s", 60),
+                "time_start": r.get("time_start", "00:00"),
+                "time_end": r.get("time_end", "23:59"),
+                "threshold": r.get("threshold", 0),
+                "days_of_week": r.get("days_of_week", "1,2,3,4,5,6,7"),
+                "holiday_only": bool(r.get("holiday_only")),
+            })
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"规则字段非法: {e}")
+        if body.behavior not in ("enter_no_ppe", "enter", "exit", "occupancy_over"):
+            raise HTTPException(400, f"未知 behavior: {body.behavior}")
+        for k in ("time_start", "time_end"):
+            if not _TIME_RE.match(getattr(body, k)):
+                raise HTTPException(400, f"{k} 必须是 HH:MM")
+        days = {d.strip() for d in body.days_of_week.split(",") if d.strip()}
+        if not days or not days <= {str(i) for i in range(1, 8)}:
+            raise HTTPException(400, "days_of_week 必须是 1-7 的逗号集合")
+        out.append({k: getattr(body, k) for k in
+                    ("behavior", "level", "cooldown_s", "time_start", "time_end",
+                     "threshold", "days_of_week", "holiday_only")})
+    return out
+
+
+@router.get("/rule-templates", dependencies=[Depends(require_read)])
+def list_rule_templates():
+    items = []
+    for x in store.rule_templates():
+        try:
+            n = len(json.loads(x["config_json"]))
+        except ValueError:
+            n = 0
+        items.append({"id": x["id"], "name": x["name"], "rules_count": n,
+                      "updated_ts": x["updated_ts"]})
+    return {"templates": items}
+
+
+@router.post("/rule-templates", dependencies=[Depends(require_admin)])
+def create_rule_template(body: dict):
+    name = str(body.get("name") or "").strip()
+    if not name or len(name) > 64:
+        raise HTTPException(400, "name 必填且 ≤64 字符")
+    rules = _validate_template_rules(body.get("rules"))
+    tid = store.add_rule_template(name, json.dumps(rules, ensure_ascii=False))
+    if tid is None:
+        raise HTTPException(409, f"模板名已存在: {name}")
+    return {"id": tid, "name": name, "rules": rules}
+
+
+@router.put("/rule-templates/{tid}", dependencies=[Depends(require_admin)])
+def update_rule_template(tid: int, body: dict):
+    name = str(body.get("name") or "").strip()
+    if not name or len(name) > 64:
+        raise HTTPException(400, "name 必填且 ≤64 字符")
+    rules = _validate_template_rules(body.get("rules"))
+    rc = store.update_rule_template(tid, name, json.dumps(rules, ensure_ascii=False))
+    if rc == 0:
+        raise HTTPException(404, "template not found")
+    if rc == -1:
+        raise HTTPException(409, f"模板名已存在: {name}")
+    return {"id": tid, "name": name, "rules": rules}
+
+
+@router.delete("/rule-templates/{tid}", dependencies=[Depends(require_admin)])
+def delete_rule_template(tid: int):
+    if not store.delete_rule_template(tid):
+        raise HTTPException(404, "template not found")
+    return {"ok": True}
+
+
+@router.post("/rule-templates/{tid}/apply", dependencies=[Depends(require_admin)])
+def apply_rule_template(tid: int, body: dict):
+    """套用模板到多路：zone_id 须属该摄像头（或空=全画幅全局规则）；不自动启动。"""
+    tpl = store.get_rule_template(tid)
+    if tpl is None:
+        raise HTTPException(404, "template not found")
+    rules = json.loads(tpl["config_json"])
+    cam_ids = body.get("camera_ids")
+    if not isinstance(cam_ids, list) or not cam_ids or len(cam_ids) > 100:
+        raise HTTPException(400, "camera_ids 必须为非空数组且 ≤100")
+    zone_id = body.get("zone_id")
+    created, skipped = 0, 0
+    for cid in cam_ids:
+        cam = store.camera(int(cid))
+        if cam is None:
+            raise HTTPException(404, f"camera {cid} not found")
+        if zone_id is not None:
+            z = store.zone(int(zone_id))
+            if z is None or z["camera_id"] != cam["id"]:
+                raise HTTPException(400, f"区域 {zone_id} 不属于摄像头 #{cam['id']}")
+        for r in rules:
+            dup = any(x["behavior"] == r["behavior"]
+                      and (x["zone_id"] or None) == zone_id
+                      and x["time_start"] == r["time_start"]
+                      and x["time_end"] == r["time_end"]
+                      for x in store.rules(cam["id"]))
+            if dup:
+                skipped += 1
+                continue
+            store.add_rule({**r, "camera_id": cam["id"], "zone_id": zone_id, "enabled": True})
+            created += 1
+    return {"created": created, "skipped": skipped,
+            "cameras": len(cam_ids), "rules_per_camera": len(rules)}
+
+
+# ---- 日历例外（任务112：holiday=该日按假期 / workday=该日按工作日；覆盖周末判断）----
+@router.get("/calendar", dependencies=[Depends(require_read)])
+def list_calendar():
+    return {"exceptions": store.calendar_exceptions()}
+
+
+@router.post("/calendar", dependencies=[Depends(require_admin)])
+def set_calendar(body: dict):
+    d = str(body.get("date") or "").strip()
+    mode = str(body.get("mode") or "").strip()
+    note = str(body.get("note") or "")
+    try:
+        from datetime import date as _date
+        _date.fromisoformat(d)
+    except ValueError as e:
+        raise HTTPException(400, f"date 必须是 YYYY-MM-DD: {e}")
+    if mode not in ("holiday", "workday"):
+        raise HTTPException(400, "mode 必须是 holiday|workday")
+    replaced = store.set_calendar_exception(d, mode, note)
+    return {"date": d, "mode": mode, "note": note, "replaced": replaced}  # 覆盖语义：同日期 upsert
+
+
+@router.delete("/calendar/{d}", dependencies=[Depends(require_admin)])
+def del_calendar(d: str):
+    if not store.delete_calendar_exception(d):
+        raise HTTPException(404, "calendar exception not found")
     return {"ok": True}
 
 
@@ -1542,6 +1863,23 @@ def export_monthly_pdf(month: str):
                              f"attachment; filename=monthly_{month}.pdf"})
 
 
+@router.get("/events/{eid}/evidence.zip", dependencies=[Depends(require_read)])
+def event_evidence_zip(eid: int):
+    """单事件证据包（任务103）：event.json+截图+视频+README；缺失文件跳过并写明，不 500。"""
+    from .export import build_event_evidence
+    try:
+        out = build_event_evidence(store, settings.data_dir, eid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if out is None:
+        raise HTTPException(404, "event not found")
+    data, meta = out
+    return Response(
+        content=data, media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="event-{eid}-evidence.zip"',
+                 "X-Evidence-Files": str(meta["files"])})
+
+
 @router.get("/export/evidence.zip", dependencies=[Depends(require_read)])
 def export_evidence_zip(camera_id: int | None = None, level: int | None = None,
                         status: str | None = None,
@@ -1582,6 +1920,14 @@ def stats_weekly(weeks: int = 4, camera_id: int | None = None, status: str | Non
 def stats_summary(days: int = 30, camera_id: int | None = None, status: str | None = None):
     """汇总卡片：总数/分级/分类型/Top 事件日（任务21）。"""
     return stats_summary_query(store, days=days, camera_id=camera_id, status=status)
+
+
+@router.get("/stats/quality", dependencies=[Depends(require_read)])
+def stats_quality(days: int = 7, camera_id: int | None = None):
+    """处置质量统计（任务102）：误报率=fp/(acked+fp+ignored)，分母为已处置事件；无已处置=0。"""
+    if not 1 <= days <= 365:
+        raise HTTPException(400, "days must be 1-365")
+    return stats_quality_query(store, days=days, camera_id=camera_id)
 
 
 @router.get("/stats/hourly", dependencies=[Depends(require_read)])

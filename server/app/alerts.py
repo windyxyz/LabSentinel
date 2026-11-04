@@ -509,6 +509,11 @@ class AlertDispatcher:
         if self._closing.is_set():
             return  # 服务退出中：不再排队新投递
         self.hub.broadcast_sync(event_row)
+        try:  # 任务125：MQTT 事件总线（独立于告警链：不受静默/渠道过滤影响；失败吞掉）
+            from . import mqtt_bridge
+            mqtt_bridge.publish_event(event_row)
+        except Exception:  # noqa: BLE001
+            pass
         text = render_alert(event_row)
         event_id = event_row.get("id", 0)
         # 任务81：静默命中 → 不建投递行、不重试、不发任何外部渠道；事件/WS 照常

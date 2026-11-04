@@ -88,6 +88,36 @@ def wait_lock(lock: Path, timeout: int) -> tuple[int, int] | None:
     return None
 
 
+def _force_kill_pid(pid: int) -> None:
+    """taskkill /T /F 兜底清理（只对确认属 LabSentinel 的 PID 调用，见 reap_leftover_pids）。"""
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
+                   creationflags=CREATE_NO_WINDOW)
+
+
+def reap_leftover_pids(pids, wait_s: float = 30.0, alive=None, matcher=None,
+                       killer=None) -> list[int]:
+    """--stop 后残留收尾（任务110）：等待窗内未退出的 PID，确认仍是 LabSentinel 的
+    python 进程（防 PID 复用误杀）才 taskkill /T /F。返回强杀后仍存活的 PID（交人工）。"""
+    import portable_launcher as pl
+    alive = alive or pl.pid_alive
+    matcher = matcher or pl._pid_matches_launcher
+    killer = killer or _force_kill_pid
+    dl = time.time() + wait_s
+    pending = [int(p) for p in pids if alive(int(p))]
+    while pending and time.time() < dl:
+        time.sleep(min(1.0, max(0.0, dl - time.time())))
+        pending = [p for p in pending if alive(p)]
+    failed = []
+    for p in pending:
+        if matcher(p) is not True:  # None（查询失败）同样拒绝——宁可漏杀不可误杀
+            print(f"[残留] pid={p} 已非 LabSentinel 进程或身份不明，跳过强杀（请人工确认）")
+            continue
+        killer(p)
+        if alive(p):
+            failed.append(p)
+    return failed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="便携包一键冒烟（任务59）")
     ap.add_argument("--zip", type=Path, help="便携包 zip 路径")
@@ -211,13 +241,30 @@ def main() -> int:
         rc = subprocess.run(stop_cmd, env=env, stdin=DEVNULL, stdout=DEVNULL,
                             stderr=DEVNULL, creationflags=CREATE_NO_WINDOW,
                             timeout=60).returncode
+        # 任务110：入口进程 30s 等待窗内应自行退出；不退就句柄级 kill（Popen 句柄无 PID 复用风险）
+        entry_gone = True
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                entry_gone = False
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        # 锁内服务 PID 若等待窗后仍活，确认属 LabSentinel 才强杀（防 PID 复用误杀）
+        failed_pids = reap_leftover_pids([lock_pid])
+        if failed_pids:
+            print(f"[残留] PID {failed_pids} 强杀后仍存活，请人工处理")
         released = False
         for _ in range(15):
             if free_port(lock_port) and not lock.exists():
                 released = True
                 break
             time.sleep(1)
-        step("6 停止", rc == 0 and released, f"--stop rc={rc} 端口释放+锁删除={'是' if released else '否'}")
+        step("6 停止", rc == 0 and released and not failed_pids and entry_gone,
+             f"--stop rc={rc} 端口释放+锁删除={'是' if released else '否'} "
+             f"入口退出={'是' if entry_gone else '否'} 残留PID={failed_pids or '无'}")
 
         # [7] 隔离断言
         real_after = dir_stat(real_la)
@@ -231,13 +278,14 @@ def main() -> int:
             shutil.rmtree(tmp, ignore_errors=True)
             print(f"[清理] 已删除 {tmp}")
     finally:
-        # 兜底：任何路径离开都要确保没有残留服务进程
+        # 兜底：任何路径离开都要确保没有残留服务进程（任务110：确认属 LabSentinel 才杀）
         lock = None
         cand = tmp / "sandbox" / "LocalAppData" / "LabSentinel" / "logs" / "launcher.lock"
         if cand.exists():
             try:
                 pid = int(cand.read_text(encoding="ascii").split()[0])
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+                if reap_leftover_pids([pid], wait_s=0.0):
+                    print(f"[残留] PID {pid} 兜底清理后仍存活，请人工处理（锁: {cand}）")
             except (OSError, ValueError, IndexError):
                 pass
 

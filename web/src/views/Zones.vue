@@ -13,7 +13,36 @@ const rules = ref([])
 const drawing = ref([])      // 正在绘制的顶点（显示坐标）
 const snapT = ref(0)
 const zname = ref('')
-const newRule = ref({ behavior: 'enter', level: 2, cooldown_s: 60, time_start: '00:00', time_end: '23:59', threshold: 0 })
+const newRule = ref({ behavior: 'enter', level: 2, cooldown_s: 60, time_start: '00:00', time_end: '23:59', threshold: 0,
+  days_of_week: '1,2,3,4,5,6,7', holiday_only: false })  // 任务112：星期/假期条件
+// 任务112：日期例外表（holiday=该日按假期 / workday=按工作日）
+const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
+const calExceptions = ref([])
+const newCal = ref({ date: '', mode: 'holiday', note: '' })
+const calMsg = ref('')
+
+async function loadCal() {
+  try { calExceptions.value = (await api.calendar()).exceptions } catch { /* 旧服务端无此端点：静默 */ }
+}
+async function addCal() {
+  if (!newCal.value.date) { calMsg.value = '先选日期'; return }
+  try {
+    const r = await api.setCalendar(newCal.value)
+    calMsg.value = (r.replaced ? '已覆盖 ' : '已添加 ') + newCal.value.date
+    await loadCal()
+  } catch (e) { calMsg.value = String(e.message || e) }
+}
+function toggleDay(n) {
+  const days = new Set(newRule.value.days_of_week.split(',').filter(Boolean))
+  const key = String(n)
+  days.has(key) ? days.delete(key) : days.add(key)
+  newRule.value.days_of_week = ['1', '2', '3', '4', '5', '6', '7'].filter(d => days.has(d)).join(',')
+}
+function dayLabel(r) {
+  const s = String(r.days_of_week || '')
+  if (!s || s === '1,2,3,4,5,6,7') return ''
+  return '周' + [...s].map(d => WEEKDAYS[Number(d) - 1] || '?').join('')
+}
 // 任务80：复制区域/规则到其他摄像头
 const copyTargets = ref([])          // 选中的目标摄像头 id
 const copyZones = ref(true)
@@ -47,6 +76,42 @@ async function doCopy() {
 }
 
 watch(camId, load, { immediate: true })
+onMounted(() => { loadCal(); loadTpls() })  // 任务112/116
+// 任务116：规则模板库（只存规则参数，不绑摄像头/区域）
+const tplName = ref('')
+const tplList = ref([])
+const tplSel = ref(null)
+const tplZone = ref('')      // '' = 全局规则
+const tplMsg = ref('')
+
+async function loadTpls() {
+  try { tplList.value = (await api.ruleTemplates()).templates } catch { /* 旧服务端无端点 */ }
+}
+async function saveAsTemplate() {
+  if (!tplName.value.trim()) { tplMsg.value = '先填模板名'; return }
+  try {
+    await api.createRuleTemplate({ name: tplName.value.trim(), rules: [newRule.value] })
+    tplMsg.value = `模板「${tplName.value.trim()}」已保存`
+    tplName.value = ''
+    loadTpls()
+  } catch (e) { tplMsg.value = String(e.message || e) }
+}
+async function applyTemplate() {
+  if (!tplSel.value || !camId.value) return
+  const t = tplList.value.find(x => x.id === tplSel.value)
+  if (!t || !confirm(`把模板「${t.name}」（${t.rules_count} 条规则）套用到当前摄像头？`)) return
+  try {
+    const body = { camera_ids: [camId.value] }
+    if (tplZone.value) body.zone_id = Number(tplZone.value)
+    const r = await api.applyRuleTemplate(t.id, body)
+    tplMsg.value = `套用完成：新建 ${r.created} / 跳过 ${r.skipped}`
+    load()
+  } catch (e) { tplMsg.value = String(e.message || e) }
+}
+async function delTemplate(id) {
+  if (!confirm('删除该模板？（不影响已套用的规则）')) return
+  await api.delRuleTemplate(id).then(loadTpls)
+}
 async function load() {
   if (!camId.value) return
   zones.value = await api.zones(camId.value)
@@ -137,11 +202,20 @@ async function addRule(zoneId) {
       <input v-model="newRule.time_end" style="width:70px" />
       <input v-model.number="newRule.threshold" placeholder="人数阈值" style="width:90px" />
     </div>
+    <!-- 任务112：生效星期 + 仅假期 -->
+    <div class="row" style="margin-top:6px">
+      <span class="muted">生效星期：</span>
+      <label v-for="(w, i) in WEEKDAYS" :key="w" class="muted" style="margin-right:6px">
+        <input type="checkbox" :checked="newRule.days_of_week.split(',').includes(String(i + 1))"
+               @change="toggleDay(i + 1)" style="margin:0 2px 0 0" />周{{ w }}</label>
+      <label class="muted"><input type="checkbox" v-model="newRule.holiday_only" />仅假期生效</label>
+    </div>
     <table>
       <tr v-for="r in rules" :key="r.id">
         <td>#{{ r.id }}</td><td>区 {{ r.zone_id ?? '全部' }}</td><td>{{ r.behavior }}</td>
         <td><span :class="'lv' + r.level">L{{ r.level }}</span></td>
-        <td class="muted">冷却{{ r.cooldown_s }}s · {{ r.time_start }}-{{ r.time_end }} · 阈值{{ r.threshold }}</td>
+        <td class="muted">冷却{{ r.cooldown_s }}s · {{ r.time_start }}-{{ r.time_end }} · 阈值{{ r.threshold }}
+          <span v-if="dayLabel(r)"> · {{ dayLabel(r) }}</span><span v-if="r.holiday_only"> · 仅假期</span></td>
         <td><button class="ghost" @click="api.delRule(r.id).then(load)">删除</button></td>
       </tr>
     </table>
@@ -149,6 +223,57 @@ async function addRule(zoneId) {
       <button v-for="z in zones" :key="'a' + z.id" class="ghost" @click="addRule(z.id)">给「{{ z.name }}」加此规则</button>
       <button class="ghost" @click="addRule(null)">加为全局规则（人数超限用）</button>
     </div>
+
+    <!-- 任务112：日期例外表 -->
+    <h3 style="margin:14px 0 10px">日期例外（任务112）</h3>
+    <div class="row">
+      <input type="date" v-model="newCal.date" style="width:150px" />
+      <select v-model="newCal.mode">
+        <option value="holiday">按假期（当天可跑"仅假期"规则）</option>
+        <option value="workday">按工作日（周末补班日用）</option>
+      </select>
+      <input v-model="newCal.note" placeholder="备注（如：国庆调休）" style="width:180px" />
+      <button @click="addCal">保存</button>
+    </div>
+    <p v-if="calMsg" class="muted" style="margin:6px 0">{{ calMsg }}</p>
+    <table v-if="calExceptions.length" style="margin-top:6px">
+      <tr><th>日期</th><th>模式</th><th>备注</th><th></th></tr>
+      <tr v-for="x in calExceptions" :key="x.date">
+        <td>{{ x.date }}</td>
+        <td>{{ x.mode === 'holiday' ? '假期' : '工作日' }}</td>
+        <td class="muted">{{ x.note || '-' }}</td>
+        <td><button class="ghost" @click="api.delCalendar(x.date).then(loadCal)">删除</button></td>
+      </tr>
+    </table>
+    <p v-else class="muted" style="margin-top:6px">无例外记录：默认周末按假期（LS_WEEKEND_IS_HOLIDAY=0 可关）。</p>
+
+    <!-- 任务116：规则模板库 -->
+    <h3 style="margin:14px 0 10px">规则模板</h3>
+    <div class="row">
+      <select v-model="tplSel" aria-label="选择模板">
+        <option :value="null">选择模板…</option>
+        <option v-for="t in tplList" :key="t.id" :value="t.id">{{ t.name }}（{{ t.rules_count }} 条）</option>
+      </select>
+      <select v-model="tplZone" aria-label="套用目标">
+        <option value="">套为全局规则</option>
+        <option v-for="z in zones" :key="z.id" :value="z.id">套到区域「{{ z.name }}」</option>
+      </select>
+      <button @click="applyTemplate">套用到当前摄像头</button>
+      <input v-model="tplName" placeholder="模板名" style="width:140px" aria-label="模板名" />
+      <button class="ghost" @click="saveAsTemplate">把上方表单存为模板</button>
+    </div>
+    <p v-if="tplMsg" class="muted" style="margin:6px 0">{{ tplMsg }}</p>
+    <details v-if="tplList.length" style="margin-top:6px">
+      <summary class="muted">模板管理（{{ tplList.length }}）</summary>
+      <table style="margin-top:6px">
+        <tr><th>ID</th><th>名称</th><th>规则数</th><th>更新时间</th><th></th></tr>
+        <tr v-for="t in tplList" :key="t.id">
+          <td>{{ t.id }}</td><td>{{ t.name }}</td><td>{{ t.rules_count }}</td>
+          <td class="muted">{{ t.updated_ts }}</td>
+          <td><button class="ghost" @click="delTemplate(t.id)">删除</button></td>
+        </tr>
+      </table>
+    </details>
 
     <h3 style="margin:14px 0 10px">复制到其他摄像头（任务80）</h3>
     <div v-if="cams.length <= 1" class="muted">只有一路摄像头——先在「摄像头」页添加更多，再来复制配置。</div>

@@ -101,7 +101,8 @@ def test_migration_v2_on_legacy_db(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     s = Store(str(db))
-    assert s.schema_version() == 5  # 迁移跑到最新（v5，任务121）
+    from app import store as store_mod
+    assert s.schema_version() == store_mod.SCHEMA_VERSION_LATEST  # 迁移跑到最新（版本号随迁移演进）
     con = sqlite3.connect(db)
     tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
     cols = {r[1] for r in con.execute("PRAGMA table_info(events)")}

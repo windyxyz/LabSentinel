@@ -34,17 +34,30 @@ def connect(path, *, readonly: bool = False) -> sqlite3.Connection:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, status TEXT DEFAULT 'stopped');
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, status TEXT DEFAULT 'stopped',
+  group_name TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS zones(
   id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
 CREATE TABLE IF NOT EXISTS rules(
   id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, zone_id INTEGER,
   behavior TEXT, level INTEGER, cooldown_s INTEGER,
-  time_start TEXT, time_end TEXT, threshold INTEGER, enabled INTEGER);
+  time_start TEXT, time_end TEXT, threshold INTEGER, enabled INTEGER,
+  days_of_week TEXT DEFAULT '1,2,3,4,5,6,7', holiday_only INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS calendar_exceptions(
+  date TEXT PRIMARY KEY,
+  mode TEXT NOT NULL,
+  note TEXT);
+CREATE TABLE IF NOT EXISTS rule_templates(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  config_json TEXT NOT NULL,
+  created_ts TEXT,
+  updated_ts TEXT);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, type TEXT,
   level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT,
-  status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT);
+  status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT,
+  ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT);
 CREATE TABLE IF NOT EXISTS face_consents(
   subject TEXT PRIMARY KEY, ts TEXT);
 CREATE TABLE IF NOT EXISTS alert_deliveries(
@@ -145,6 +158,50 @@ def _mig_005(c: sqlite3.Connection):
               "ON folder_images(key, violation, ts)")
 
 
+def _mig_006(c: sqlite3.Connection):
+    """v6：规则日历条件（任务112）。
+
+    rules 加星期集合（ISO 1=周一…7=周日，缺省全星期）与"仅假期"标记；
+    calendar_exceptions 为日期例外表（holiday=该日按假期 / workday=该日按工作日，
+    覆盖周末判断）。旧库 ALTER 加列带默认值，旧行自动获得"全星期/非假期专用"=行为不变。
+    """
+    cols = {r[1] for r in c.execute("PRAGMA table_info(rules)")}
+    if "days_of_week" not in cols:
+        c.execute("ALTER TABLE rules ADD COLUMN days_of_week TEXT DEFAULT '1,2,3,4,5,6,7'")
+    if "holiday_only" not in cols:
+        c.execute("ALTER TABLE rules ADD COLUMN holiday_only INTEGER DEFAULT 0")
+    c.execute("""CREATE TABLE IF NOT EXISTS calendar_exceptions(
+      date TEXT PRIMARY KEY,
+      mode TEXT NOT NULL,
+      note TEXT)""")
+
+
+def _mig_007(c: sqlite3.Connection):
+    """v7：摄像头分组（任务111）。cameras 加 group_name（空=未分组），旧行为不变。"""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(cameras)")}
+    if "group_name" not in cols:
+        c.execute("ALTER TABLE cameras ADD COLUMN group_name TEXT DEFAULT ''")
+
+
+def _mig_008(c: sqlite3.Connection):
+    """v8：规则模板库（任务116）。只存规则参数，不绑摄像头/区域。"""
+    c.execute("""CREATE TABLE IF NOT EXISTS rule_templates(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      config_json TEXT NOT NULL,
+      created_ts TEXT,
+      updated_ts TEXT)""")
+
+
+def _mig_009(c: sqlite3.Connection):
+    """v9：VLM 复核列（任务124）。events 加 ai_review(JSON)/ai_review_ts/ai_review_model，
+    旧行 NULL=未复核，行为不变。"""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
+    for col in ("ai_review", "ai_review_ts", "ai_review_model"):
+        if col not in cols:
+            c.execute(f"ALTER TABLE events ADD COLUMN {col} TEXT")
+
+
 # 版本化迁移（任务69）：只做加列/加表/索引，不做破坏性变更；每个迁移幂等、在事务内执行
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "events 增加 video/status/handled_by/handled_ts", _mig_001),
@@ -152,6 +209,10 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (3, "events 增加 escalated_ts（任务82 未处置升级提醒）", _mig_003),
     (4, "新增 audit_log 表（任务87 操作审计）", _mig_004),
     (5, "新增 folder_images 表（任务121 图片文件夹识别）", _mig_005),
+    (6, "rules 星期/假期条件 + calendar_exceptions 日期例外表（任务112）", _mig_006),
+    (7, "cameras 增加 group_name（任务111 摄像头分组）", _mig_007),
+    (8, "新增 rule_templates 规则模板表（任务116）", _mig_008),
+    (9, "events 增加 VLM 复核列 ai_review/ai_review_ts/ai_review_model（任务124）", _mig_009),
 ]
 SCHEMA_VERSION_LATEST = max(v for v, _d, _f in MIGRATIONS)
 
@@ -230,10 +291,25 @@ class Store:
             r = c.execute("SELECT * FROM cameras WHERE id=?", (cid,)).fetchone()
             return dict(r) if r else None
 
-    def add_camera(self, name, source, type_):
+    def add_camera(self, name, source, type_, group_name=""):
         with self._lock, self._conn() as c:
-            cur = c.execute("INSERT INTO cameras(name,source,type) VALUES(?,?,?)", (name, source, type_))
+            cur = c.execute("INSERT INTO cameras(name,source,type,group_name) VALUES(?,?,?,?)",
+                            (name, source, type_, group_name or ""))
             return cur.lastrowid
+
+    # ---- 摄像头分组（任务111）----
+    def set_camera_group(self, cid, name: str) -> bool:
+        with self._lock, self._conn() as c:
+            return c.execute("UPDATE cameras SET group_name=? WHERE id=?",
+                             (name or "", cid)).rowcount > 0
+
+    def camera_groups(self) -> list:
+        """分组聚合：[{name, count, running}]；group_name='' 记作"未分组"在 API 层转换。"""
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT group_name name, COUNT(*) count, "
+                "SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) running "
+                "FROM cameras GROUP BY group_name ORDER BY name")]
 
     def delete_camera(self, cid):
         with self._lock, self._conn() as c:
@@ -408,22 +484,98 @@ class Store:
                     "SELECT * FROM rules WHERE camera_id=? ORDER BY id", (camera_id,))]
         for r in rows:
             r["enabled"] = bool(r["enabled"])
+            r["holiday_only"] = bool(r.get("holiday_only"))  # 任务112：与 enabled 同口径转 bool
         return rows
 
     def add_rule(self, r: dict):
         with self._lock, self._conn() as c:
             cur = c.execute(
-                "INSERT INTO rules(camera_id,zone_id,behavior,level,cooldown_s,time_start,time_end,threshold,enabled)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO rules(camera_id,zone_id,behavior,level,cooldown_s,time_start,time_end,"
+                "threshold,enabled,days_of_week,holiday_only) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (r["camera_id"], r.get("zone_id"), r["behavior"], r.get("level", 2),
                  r.get("cooldown_s", 60), r.get("time_start", "00:00"), r.get("time_end", "23:59"),
-                 r.get("threshold", 0), 1 if r.get("enabled", True) else 0),
+                 r.get("threshold", 0), 1 if r.get("enabled", True) else 0,
+                 r.get("days_of_week", "1,2,3,4,5,6,7"), 1 if r.get("holiday_only") else 0),
             )
             return cur.lastrowid
 
     def delete_rule(self, rid):
         with self._lock, self._conn() as c:
             c.execute("DELETE FROM rules WHERE id=?", (rid,))
+
+    # ---- 日历例外（任务112）----
+    def calendar_exceptions(self) -> list:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT date, mode, note FROM calendar_exceptions ORDER BY date")]
+
+    def set_calendar_exception(self, d: str, mode: str, note: str = "") -> bool:
+        """写入/覆盖一个日期例外（date YYYY-MM-DD，mode holiday|workday）。返回是否覆盖了旧值。"""
+        with self._lock, self._conn() as c:
+            existed = c.execute(
+                "SELECT 1 FROM calendar_exceptions WHERE date=?", (d,)).fetchone() is not None
+            c.execute("INSERT OR REPLACE INTO calendar_exceptions(date, mode, note) VALUES(?,?,?)",
+                      (d, mode, note))
+            return existed
+
+    def delete_calendar_exception(self, d: str) -> bool:
+        with self._lock, self._conn() as c:
+            return c.execute("DELETE FROM calendar_exceptions WHERE date=?", (d,)).rowcount > 0
+
+    # ---- 规则模板（任务116）----
+    def rule_templates(self) -> list:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT id, name, config_json, created_ts, updated_ts "
+                "FROM rule_templates ORDER BY id")]
+
+    def get_rule_template(self, tid: int) -> dict | None:
+        with self._conn() as c:
+            row = c.execute("SELECT id, name, config_json, created_ts, updated_ts "
+                            "FROM rule_templates WHERE id=?", (tid,)).fetchone()
+            return dict(row) if row else None
+
+    def add_rule_template(self, name: str, config_json: str) -> int | None:
+        """同名返回 None（调用方转 409）。"""
+        with self._lock, self._conn() as c:
+            if c.execute("SELECT 1 FROM rule_templates WHERE name=?", (name,)).fetchone():
+                return None
+            now = datetime.now().isoformat(timespec="seconds")
+            cur = c.execute(
+                "INSERT INTO rule_templates(name, config_json, created_ts, updated_ts) "
+                "VALUES(?,?,?,?)", (name, config_json, now, now))
+            return cur.lastrowid
+
+    def update_rule_template(self, tid: int, name: str, config_json: str) -> int:
+        """0=不存在；-1=新名与其它模板冲突；1=成功。"""
+        with self._lock, self._conn() as c:
+            if c.execute("SELECT 1 FROM rule_templates WHERE id=?", (tid,)).fetchone() is None:
+                return 0
+            if c.execute("SELECT 1 FROM rule_templates WHERE name=? AND id<>?",
+                         (name, tid)).fetchone():
+                return -1
+            c.execute("UPDATE rule_templates SET name=?, config_json=?, updated_ts=? WHERE id=?",
+                      (name, config_json, datetime.now().isoformat(timespec="seconds"), tid))
+            return 1
+
+    def delete_rule_template(self, tid: int) -> bool:
+        with self._lock, self._conn() as c:
+            return c.execute("DELETE FROM rule_templates WHERE id=?", (tid,)).rowcount > 0
+
+    def is_holiday(self, d) -> bool:
+        """日期是否按假期处理：先查例外表（holiday=是 / workday=否），
+        无记录按周末判断（默认周末算假期；LS_WEEKEND_IS_HOLIDAY=0 关闭）。"""
+        from datetime import date as _date
+        if isinstance(d, str):
+            d = _date.fromisoformat(d)
+        with self._conn() as c:
+            row = c.execute("SELECT mode FROM calendar_exceptions WHERE date=?",
+                            (d.isoformat(),)).fetchone()
+        if row:
+            return row["mode"] == "holiday"
+        if not settings.weekend_is_holiday:
+            return False
+        return d.weekday() >= 5  # 5=周六 6=周日
 
     # ---- events ----
     def add_event(self, camera_id, type_, level, track_id, detail, snapshot=None) -> int:
@@ -432,7 +584,21 @@ class Store:
                 "INSERT INTO events(ts,camera_id,type,level,track_id,detail,snapshot) VALUES(?,?,?,?,?,?,?)",
                 (datetime.now().isoformat(timespec="seconds"), camera_id, type_, level, track_id, detail, snapshot),
             )
-            return cur.lastrowid
+            eid = cur.lastrowid
+        try:  # 任务124：VLM 误报预分类（默认 none=零开销；入队失败静默，绝不影响事件主流程）
+            from .genai import maybe_enqueue
+            maybe_enqueue(eid, snapshot, level)
+        except Exception:  # noqa: BLE001
+            pass
+        return eid
+
+    def set_ai_review(self, eid: int, review_json: str, model: str) -> bool:
+        """写入 VLM 复核结果（任务124；只写标记列，绝不改 status）。"""
+        with self._lock, self._conn() as c:
+            return c.execute(
+                "UPDATE events SET ai_review=?, ai_review_ts=?, ai_review_model=? WHERE id=?",
+                (review_json, datetime.now().isoformat(timespec="seconds"), model, eid)
+            ).rowcount > 0
 
     def event_by_id(self, eid: int) -> dict | None:
         """按 id 单查事件（2026-10-30 审阅新增：替代 events(limit=1) 取"最新行"的竞态写法）。"""

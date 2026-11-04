@@ -113,6 +113,8 @@ def copy_assets() -> None:
         deploy.log("  [清理] 删除 staging 旧残留 app/tools/（任务119 前 go2rtc.yaml 误写位置）")
     # 服务端代码（排除 data/__pycache__）
     app_dir = DIST / "app" / "server"
+    for stale_cache in (app_dir / "app").glob("__pycache__"):  # 任务129：清 staging 旧残留
+        shutil.rmtree(stale_cache, ignore_errors=True)
     shutil.copytree(ROOT / "server" / "app", app_dir / "app", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     # 前端构建产物
@@ -156,7 +158,10 @@ def copy_assets() -> None:
         "LS_PPE_CLASS_NAMES=lab coat\n"
         "LS_PPE_CONF=0.30\n"
         "LS_WEB_DIST=../web\n"
-        "LS_FILE_LOOP=true\n",
+        "LS_FILE_LOOP=true\n"
+        "# 24h 挂机建议开启：服务运行期间阻止系统睡眠（不改电源计划，停止服务即恢复）\n"
+        "# LS_KEEP_AWAKE=true\n"
+        "# LS_KEEP_AWAKE_DISPLAY=true\n",
         encoding="utf-8")
     # 双击入口（内容纯 ASCII，中文文件名不影响 cmd 解析）
     (DIST / "scripts").mkdir(exist_ok=True)
@@ -218,6 +223,9 @@ def report() -> None:
 def make_zip() -> Path:
     out = ROOT / "dist" / f"LabSentinel-portable-{date.today():%Y%m%d}.zip"
     deploy.log(f"[打包] {out} ...")
+    for pyc_dir in (DIST / "app").rglob("__pycache__"):
+        # 构建期冒烟 import app.main 会在清理后于 staging 重新生成 __pycache__（任务129）
+        shutil.rmtree(pyc_dir, ignore_errors=True)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for f in DIST.rglob("*"):
             if f.is_file():

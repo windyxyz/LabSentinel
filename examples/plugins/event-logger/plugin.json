@@ -1,0 +1,10 @@
+{
+  "id": "event-logger",
+  "name": "事件日志外挂（示例）",
+  "version": "0.1.0",
+  "description": "轮询 /api/events 把新事件追加写 CSV（演示插件能做什么）",
+  "command": ["{python}", "main.py"],
+  "permissions": ["read"],
+  "autostart": false,
+  "env": {"POLL_SECONDS": "10"}
+}

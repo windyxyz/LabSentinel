@@ -1,11 +1,16 @@
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api, adminToken, mediaUrl } from '../api'
 import WebrtcPlayer from '../components/WebrtcPlayer.vue'
 import AsyncState from '../components/AsyncState.vue'
 
 const cams = ref([])
-const form = ref({ name: '', source: '', type: 'file', autostart: false })
+const form = ref({ name: '', source: '', type: 'file', autostart: false, group_name: '' })
+// 任务111：分组与批量启停
+const groupFilter = ref('')
+const checked = ref([])
+const bulkBusy = ref(false)
+const groups = ref([])
 const TYPE_LABEL = { rtsp: 'RTSP', file: '视频文件', usb: 'USB', folder: '图片文件夹' }
 function typeLabel(t) { return TYPE_LABEL[t] || t }
 // 任务66：三态 + 按钮防重复
@@ -119,6 +124,37 @@ async function refresh() {
   try {
     sys.value = await api.system()
   } catch { /* 就绪前静默 */ }
+  try { groups.value = (await api.cameraGroups()).groups } catch { /* 旧服务端无此端点 */ }
+}
+
+// 任务111：分组筛选 + 批量启停
+const shownCams = computed(() =>
+  groupFilter.value ? cams.value.filter(c => (c.group_name || '') === groupFilter.value) : cams.value)
+function groupLabel(c) { return c.group_name || '未分组' }
+async function bulk(action) {
+  const ids = [...checked.value]
+  if (!ids.length || bulkBusy.value) return
+  const word = action === 'start' ? '启动' : '停止'
+  if (!confirm(`确定${word}选中的 ${ids.length} 路摄像头？`)) return
+  bulkBusy.value = true
+  try {
+    const r = await api.bulkCameras(ids, action)
+    if (r.missing.length) alert(`不存在的摄像头: ${r.missing.join(',')}`)
+    if (r.failed.length) alert(`失败: ${r.failed.map(f => `#${f.id} ${f.error}`).join('；')}`)
+    checked.value = []
+    await refresh()
+  } catch (e) { alert(String(e.message || e)) }
+  bulkBusy.value = false
+}
+async function groupAction(name, action) {
+  const ids = cams.value.filter(c => (c.group_name || '') === name).map(c => c.id)
+  if (!ids.length || bulkBusy.value) return
+  const word = action === 'start' ? '启动' : '停止'
+  if (!confirm(`确定${word}「${name || '未分组'}」的 ${ids.length} 路？`)) return
+  bulkBusy.value = true
+  try { await api.bulkCameras(ids, action); await refresh() }
+  catch (e) { alert(String(e.message || e)) }
+  bulkBusy.value = false
 }
 
 // 任务65：DB 行 + manager 运行指标合并（按 id）
@@ -128,6 +164,43 @@ function viewFor(c) {
   return { ...c, ...m }
 }
 onMounted(() => { refresh(); loadAlerts() })
+
+// 任务113：局域网发现助手（只读探测；发现结果仅作填表参考，不自动添加）
+const discover = ref({ busy: false, devices: [], error: '', lan: [], shown: false })
+const BRANDS = [
+  { key: 'hik', label: '海康威视', tpl: 'rtsp://用户名:密码@{ip}:554/Streaming/Channels/102' },
+  { key: 'dahua', label: '大华', tpl: 'rtsp://用户名:密码@{ip}:554/cam/realmonitor?channel=1&subtype=1' },
+  { key: 'uniview', label: '宇视', tpl: 'rtsp://用户名:密码@{ip}:554/media/video1' },
+  { key: 'generic', label: '通用 ONVIF', tpl: 'rtsp://用户名:密码@{ip}:554/' },
+]
+const brandKey = ref('hik')
+const probeRow = ref(null)   // { ip, result }
+const probeBusyIp = ref('')
+
+async function discoverCams(refresh) {
+  discover.value.busy = true
+  discover.value.shown = true
+  try {
+    const r = await api.discoverCameras(refresh ? { refresh: 1 } : {})
+    discover.value.devices = r.devices
+    discover.value.error = r.error
+    discover.value.lan = r.lan || []
+  } catch (e) { discover.value.error = String(e.message || e) }
+  discover.value.busy = false
+}
+function fillFromDevice(d) {
+  const tpl = (BRANDS.find(b => b.key === brandKey.value) || BRANDS[0]).tpl
+  form.value.source = tpl.replace('{ip}', d.ip)
+  if (!form.value.name) form.value.name = d.name || `摄像头-${d.ip}`
+}
+async function probeIp(ip) {
+  if (probeBusyIp.value) return
+  probeBusyIp.value = ip
+  try {
+    probeRow.value = { ip, result: await api.probeHost({ host: ip, port: 554 }) }
+  } catch (e) { probeRow.value = { ip, result: { error: String(e.message || e) } } }
+  probeBusyIp.value = ''
+}
 
 // 任务79：配置导入导出
 const cfgBusy = ref(false)
@@ -397,6 +470,7 @@ async function watchLive(cam) {
         <option value="folder">图片文件夹</option>
       </select>
       <label class="muted"><input type="checkbox" v-model="form.autostart" style="margin:0 4px 0 0" />立即启动</label>
+      <input v-model="form.group_name" placeholder="分组（可选，≤32字）" aria-label="摄像头分组" style="width:140px" />
       <button :disabled="adding" @click="add">{{ adding ? '添加中…' : '添加' }}</button>
     </div>
     <p v-if="form.type === 'usb' && usbError" class="muted" style="margin-top:6px">{{ usbError }}</p>
@@ -405,6 +479,42 @@ async function watchLive(cam) {
       “有人/违规”的图片会进入「图片识别」页汇报。原始截图只读，不移动、不删除。
       建议先到「安全区配置」画好区域与规则再启动。</p>
     <p class="muted" style="margin-top:6px">提示：不勾"立即启动"可先到"安全区配置"画好区域、加好规则，再回来启动。</p>
+
+    <!-- 任务113：局域网发现助手（只读，不自动添加/启动） -->
+    <h3 style="margin:14px 0 10px">发现摄像头（局域网）</h3>
+    <div class="row">
+      <select v-model="brandKey" aria-label="品牌模板">
+        <option v-for="b in BRANDS" :key="b.key" :value="b.key">{{ b.label }}</option>
+      </select>
+      <button class="ghost" :disabled="discover.busy" @click="discoverCams(false)">
+        {{ discover.busy ? '搜索中…' : '搜索局域网摄像头' }}</button>
+      <button class="ghost" :disabled="discover.busy" @click="discoverCams(true)">强制刷新</button>
+    </div>
+    <p v-if="discover.shown && discover.lan.length" class="muted" style="margin:6px 0 0">
+      本机局域网地址：{{ discover.lan.join('、') }}（摄像头需与之同网段）</p>
+    <p v-if="discover.shown && discover.error" class="muted" style="margin:6px 0 0">{{ discover.error }}</p>
+    <table v-if="discover.devices.length" style="margin-top:8px">
+      <tr><th>IP</th><th>名称</th><th>探测 :554</th><th></th></tr>
+      <tr v-for="d in discover.devices" :key="d.ip">
+        <td>{{ d.ip }}</td>
+        <td>{{ d.name || '-' }}</td>
+        <td>
+          <button class="ghost" :disabled="probeBusyIp === d.ip" @click="probeIp(d.ip)">
+            {{ probeBusyIp === d.ip ? '探测中…' : '探测' }}</button>
+          <span v-if="probeRow && probeRow.ip === d.ip" class="muted">
+            {{ probeRow.result.port_open ? 'RTSP 口开放' : probeRow.result.error }}
+            <template v-if="probeRow.result.ffprobe">
+              （{{ probeRow.result.ffprobe.codec }}
+              {{ probeRow.result.ffprobe.width }}×{{ probeRow.result.ffprobe.height }}
+              @{{ probeRow.result.ffprobe.fps || '?' }}fps）</template>
+          </span>
+        </td>
+        <td><button @click="fillFromDevice(d)">填入表单</button></td>
+      </tr>
+    </table>
+    <p class="muted" style="margin-top:6px">
+      需要 ONVIF/WS-Discovery（UDP 3702 组播）；搜不到就用品牌模板手输。填入后把"用户名:密码"
+      改成真实账号（建议子码流、只读账号），再点添加。不会自动添加或启动任何摄像头。</p>
   </div>
 
   <div class="panel">
@@ -412,12 +522,29 @@ async function watchLive(cam) {
                 :empty="loaded && !cams.length"
                 empty-text="暂无摄像头 —— 用上方表单添加：视频文件/RTSP/USB/图片文件夹均可，添加后回到这里启动"
                 @retry="refresh">
+    <!-- 任务111：分组筛选与批量启停 -->
+    <div class="row" style="margin-bottom:8px">
+      <b>分组</b>
+      <select v-model="groupFilter" aria-label="分组筛选">
+        <option value="">全部（{{ cams.length }} 路）</option>
+        <option v-for="g in groups" :key="g.name" :value="g.name">
+          {{ g.name || '未分组' }}（{{ g.count }} 路 / 运行 {{ g.running }}）</option>
+      </select>
+      <button class="ghost" :disabled="bulkBusy || !groupFilter" @click="groupAction(groupFilter, 'start')">启动本组</button>
+      <button class="ghost" :disabled="bulkBusy || !groupFilter" @click="groupAction(groupFilter, 'stop')">停止本组</button>
+      <button :disabled="bulkBusy || !checked.length" @click="bulk('start')">
+        批量启动（{{ checked.length }}）</button>
+      <button :disabled="bulkBusy || !checked.length" @click="bulk('stop')">
+        批量停止（{{ checked.length }}）</button>
+    </div>
     <table>
-      <tr><th>ID</th><th>名称</th><th>类型</th><th>状态</th><th>最新画面</th><th></th></tr>
-      <tr v-for="c in cams" :key="c.id">
+      <tr><th></th><th>ID</th><th>名称</th><th>类型</th><th>分组</th><th>状态</th><th>最新画面</th><th></th></tr>
+      <tr v-for="c in shownCams" :key="c.id">
+        <td><input type="checkbox" :value="c.id" v-model="checked" :aria-label="`选择摄像头 ${c.id}`" /></td>
         <td>{{ c.id }}</td>
         <td>{{ c.name }}</td>
         <td>{{ typeLabel(c.type) }}</td>
+        <td>{{ groupLabel(c) }}</td>
         <td>
           <template v-for="v in [viewFor(c)]">
             <span :class="v.status === 'running' ? 'st-ok' : v.status === 'error' ? 'st-err' : 'st-idle'">{{ v.status }}</span>
@@ -425,6 +552,13 @@ async function watchLive(cam) {
             <div v-if="v.last_error" class="st-error-line" :title="v.last_error">{{ v.last_error.slice(0, 60) }}</div>
             <div v-if="v.status === 'running' && v.frame_age_s != null && v.frame_age_s > 10" class="st-warn-line">画面停滞 {{ v.frame_age_s }}s</div>
             <div v-if="v.reconnect_count > 0" class="muted">重连 {{ v.reconnect_count }} 次</div>
+            <!-- 任务114：守护状态 -->
+            <div v-if="v.supervisor_state === 'backoff'" class="st-warn-line"
+                 :title="`自动重启 ${v.restart_count ?? 0} 次 · 上次 ${v.last_restart_ts ?? '-'}`">
+              重试中（第 {{ (v.restart_count ?? 0) + 1 }} 次）</div>
+            <div v-if="v.supervisor_state === 'given_up'" class="st-err"
+                 :title="`自动重启 ${v.restart_count ?? 0} 次均失败 · 上次 ${v.last_restart_ts ?? '-'}；手动点「启动」可重新纳入守护`">
+              自动重启失败，请检查</div>
             <div v-if="c.type === 'folder'" class="muted">
               已识别 {{ v.processed_total ?? 0 }} 张 · 关键 {{ v.key_total ?? 0 }} · 违规 {{ v.violation_total ?? 0 }}
               <span v-if="v.backlog"> · 待处理 {{ v.backlog }}</span>

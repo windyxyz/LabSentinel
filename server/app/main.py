@@ -27,6 +27,10 @@ from . import go2rtc
 from . import retention
 from . import backups
 from . import escalation
+from . import keepawake
+from . import genai
+from . import mqtt_bridge
+from . import plugins
 from .config import settings
 from .logging_setup import setup_file_logging  # 任务61：导入阶段挂文件日志（尽早捕获启动错误）
 from .pipeline import CameraManager
@@ -86,6 +90,12 @@ async def lifespan(app: FastAPI):
     if settings.face_enabled:
         _face_compliance_notice()
     manager.start_all()  # 启动已登记摄像头（文件源用于开发演示）
+    manager.start_supervisor()  # 任务114：worker 退出自动按退避重启（24h 挂机保障）
+    keepawake.start(settings.keep_awake, settings.keep_awake_display)  # 任务123：防休眠（默认关）
+    genai.start_worker()  # 任务124：VLM 复核线程（provider=none 不启动）
+    mqtt_bridge.start()  # 任务125：MQTT 事件总线（默认关）
+    plugins.manager = plugins.PluginManager(Path(settings.data_dir) / "plugins")
+    plugins.manager.autostart_enabled()  # 任务126：只拉起 enable+autostart 的插件
     go2rtc.sync_streams(store)  # 实时画面：按当前摄像头生成 go2rtc 配置并热重载
     retention.start_scheduler(store)  # 任务14：数据保留后台清理
     escalation.start_scheduler(store)  # 任务82：未处置事件升级提醒
@@ -98,9 +108,14 @@ async def lifespan(app: FastAPI):
         retention.stop_scheduler()
         escalation.stop_scheduler()
         backups.stop_scheduler()
+        keepawake.stop()  # 任务123：退出恢复电源语义（与断言同线程解除）
+        genai.stop_worker()
+        mqtt_bridge.stop()
+        if plugins.manager is not None:
+            plugins.manager.stop_all()
 
 
-app = FastAPI(title="LabSentinel", version="0.1.0-m1", lifespan=lifespan)
+app = FastAPI(title="LabSentinel", version="0.1.0-alpha", lifespan=lifespan)
 app.include_router(router)
 
 # ---- 写接口限流（任务90）：滑动窗口，内存实现，单进程 ----

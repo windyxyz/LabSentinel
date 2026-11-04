@@ -15,13 +15,25 @@ from pathlib import Path
 # 与 server/app/store.py 的 SCHEMA 保持同步（cameras/zones/rules/events/face_consents/alert_deliveries）
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, status TEXT DEFAULT 'stopped');
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, status TEXT DEFAULT 'stopped',
+  group_name TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS zones(
   id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
 CREATE TABLE IF NOT EXISTS rules(
   id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, zone_id INTEGER,
   behavior TEXT, level INTEGER, cooldown_s INTEGER,
-  time_start TEXT, time_end TEXT, threshold INTEGER, enabled INTEGER);
+  time_start TEXT, time_end TEXT, threshold INTEGER, enabled INTEGER,
+  days_of_week TEXT DEFAULT '1,2,3,4,5,6,7', holiday_only INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS calendar_exceptions(
+  date TEXT PRIMARY KEY,
+  mode TEXT NOT NULL,
+  note TEXT);
+CREATE TABLE IF NOT EXISTS rule_templates(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  config_json TEXT NOT NULL,
+  created_ts TEXT,
+  updated_ts TEXT);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, type TEXT,
   level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT,

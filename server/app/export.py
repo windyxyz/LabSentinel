@@ -5,6 +5,7 @@
 """
 import csv
 import io
+import json
 import os
 import zipfile
 from datetime import date, datetime, timedelta
@@ -243,4 +244,62 @@ def build_evidence_zip(store, data_dir, camera_id=None, level=None, status=None,
             z.write(path, arc)
 
     return buf.getvalue(), {"events": len(events), "files": len(files),
+                            "total_mb": round(total_bytes / 1e6, 2)}
+
+
+def build_event_evidence(store, data_dir, eid: int):
+    """单事件证据包（任务103）：event.json + snapshot.jpg + video.mp4 + README.txt。
+
+    事件不存在返回 None（调用方 404）；文件缺失/越界 → 跳过并在 README 写明，不 500；
+    总大小超 200MB 抛 ValueError（调用方 400 提示用批量导出）。路径校验复用 76 的
+    _within_data_dir（严格包含），绝不打包 data 外文件。
+    """
+    e = store.event_by_id(eid)
+    if e is None:
+        return None
+    files = []  # (arcname, abs_path)
+    total_bytes = 0
+    skipped = []
+    for col, arcname, label in (("snapshot", "snapshot.jpg", "截图"),
+                                ("video", "video.mp4", "视频")):
+        p = e.get(col)
+        if not p:
+            skipped.append(f"{col}: 事件未记录{label}路径")
+            continue
+        if not _within_data_dir(p, data_dir):
+            skipped.append(f"{col}: 路径在数据目录外（防穿越已跳过）")
+            continue
+        if not os.path.exists(p):
+            skipped.append(f"{col}: 文件不存在（可能已被保留策略清理）")
+            continue
+        sz = os.path.getsize(p)
+        if total_bytes + sz > EVIDENCE_MAX_TOTAL_MB * 1e6:
+            raise ValueError(f"证据文件总量超过 {EVIDENCE_MAX_TOTAL_MB}MB——请改用批量证据包"
+                             "（/api/export/evidence.zip）或先处理该事件")
+        total_bytes += sz
+        files.append((arcname, p))
+
+    cam = store.camera(e["camera_id"])
+    payload = {**e, "camera_name": cam["name"] if cam else None,
+               "exported_at": datetime.now().isoformat(timespec="seconds")}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("event.json", json.dumps(payload, ensure_ascii=False, indent=1))
+        for arc, path in files:
+            z.write(path, arc)
+        lines = [
+            "LabSentinel 单事件证据包",
+            f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"事件: #{e['id']} ts={e['ts']} camera=#{e['camera_id']}"
+            f"({payload['camera_name'] or '未知'}) type={e['type']} level={e['level']}",
+            f"条目: event.json + 截图 {sum(1 for a, _ in files if a == 'snapshot.jpg')}"
+            f" + 视频 {sum(1 for a, _ in files if a == 'video.mp4')}",
+        ]
+        if skipped:
+            lines.append("未打包条目说明:")
+            lines += [f"  - {s}" for s in skipped]
+        lines += ["字段说明: event.json 为事件表全字段+camera_name+exported_at；",
+                  "合规提示: 包含现场画面与个人信息，谨慎分发，按 retention 政策处理后删除。"]
+        z.writestr("README.txt", "\n".join(lines) + "\n")
+    return buf.getvalue(), {"files": len(files), "skipped": skipped,
                             "total_mb": round(total_bytes / 1e6, 2)}

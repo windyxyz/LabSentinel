@@ -1,9 +1,42 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { api, connectEvents, TYPE_TEXT } from '../api'
+import { notifyEvent, ensurePermission, permissionState, notifyEnabled, setNotifyEnabled } from '../notify'
 import AsyncState from '../components/AsyncState.vue'
 
 const wsState = ref('连接中')
+// 任务115：桌面通知状态与开关
+const notifPerm = ref(permissionState())
+const notifOn = ref(notifyEnabled())
+
+async function enableNotify() {
+  notifPerm.value = await ensurePermission()
+  if (notifPerm.value === 'granted') {
+    setNotifyEnabled(true)
+    notifOn.value = true
+  }
+}
+function toggleNotify() {
+  setNotifyEnabled(!notifOn.value)
+  notifOn.value = !notifOn.value
+}
+
+// 任务117：版本更新检查（未配置/失败静默，不打扰）
+const upd = ref(null)
+const updIgnored = ref(localStorage.getItem('LS_UPDATE_IGNORE') || '')
+
+async function checkUpdate() {
+  try {
+    upd.value = await api.updateCheck({ refresh: 1 })
+  } catch { upd.value = { error: '检查失败' } }
+}
+function ignoreUpdate() {
+  if (upd.value?.latest) {
+    localStorage.setItem('LS_UPDATE_IGNORE', upd.value.latest)
+    updIgnored.value = upd.value.latest
+  }
+}
+onMounted(() => { checkUpdate() })
 const sys = ref(null)
 const feed = ref([])
 const loading = ref(true)
@@ -33,7 +66,10 @@ onMounted(async () => {
   // 2026-10-30 审阅修复：onUnmounted 必须在首个 await 之前注册（Vue 只在同步段收集生命周期钩子，
   // 原写在 await reload() 之后是 no-op → WS 永不清理）；WS 建立同样前移，不依赖首屏数据
   const close = connectEvents(
-    (ev) => { feed.value = [ev, ...feed.value].slice(0, 100) },
+    (ev) => {
+      feed.value = [ev, ...feed.value].slice(0, 100)
+      notifyEvent(ev)  // 任务115：页面隐藏且有权限时弹桌面通知（L2/L3，tag 去重）
+    },
     (s) => (wsState.value = s),
   )
   onUnmounted(close)
@@ -52,6 +88,29 @@ onUnmounted(() => clearInterval(pollTimer))
       <div class="card"><div class="muted">警告(L2)</div><div class="num">{{ sys.today_counts?.['2'] || 0 }}</div></div>
       <div class="card"><div class="muted">严重(L3)</div><div class="num">{{ sys.today_counts?.['3'] || 0 }}</div></div>
       <div class="card"><div class="muted">实时通道</div><div class="num" :style="{ fontSize: '18px', paddingTop: '6px' }">{{ wsState }}</div></div>
+      <div v-if="upd" class="card" :title="upd.error || '只提示新版本，不自动下载安装'">
+        <div class="muted">版本</div>
+        <div style="padding-top:6px; font-size:14px">
+          {{ upd.current || '-' }}
+          <button class="ghost" style="font-size:12px" @click="checkUpdate">检查更新</button>
+          <div v-if="upd.update_available && upd.latest !== updIgnored" class="muted"
+               style="font-size:12px; margin-top:4px">
+            发现新版本 {{ upd.latest }}<span v-if="upd.channel">（{{ upd.channel }}）</span>
+            <a v-if="upd.url" :href="upd.url" target="_blank" rel="noopener">查看</a> ·
+            <a href="#" @click.prevent="ignoreUpdate">忽略此版本</a>
+          </div>
+          <div v-else-if="upd.error" class="muted" style="font-size:12px">检查失败（不打扰）</div>
+        </div>
+      </div>
+      <div class="card" :title="`通知权限：${notifPerm}；页面在后台时 L2/L3 弹桌面通知`">
+        <div class="muted">桌面通知</div>
+        <div style="padding-top:6px">
+          <button v-if="notifPerm !== 'granted'" class="ghost" @click="enableNotify">开启桌面通知</button>
+          <label v-else class="muted" style="font-size:13px">
+            <input type="checkbox" :checked="notifOn" @change="toggleNotify" style="margin:0 4px 0 0" />
+            {{ notifOn ? '已开启' : '已暂停' }}</label>
+        </div>
+      </div>
       <div v-if="maint" class="card" :style="maint.low_disk ? 'border-color:#dc2626; background:rgba(220,38,38,.08)' : undefined"
            :title="maint.forecast_days != null ? `按当前增速约 ${maint.forecast_days} 天后磁盘吃紧（估算值）` : '数据目录所在磁盘'">
         <div class="muted">磁盘{{ maint.low_disk ? ' ⚠ 磁盘不足，将触发紧急清理' : '' }}</div>

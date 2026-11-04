@@ -174,6 +174,44 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+# 任务110：锁内 PID 必须真的是 LabSentinel 的 python 进程才允许 kill。
+# 锁里记的是服务进程（uvicorn），不是启动器自身——两个标记都要认。
+LAUNCHER_PROC_NAMES = ("python.exe", "pythonw.exe")
+LAUNCHER_PROC_MARKERS = ("portable_launcher.py", "uvicorn app.main:app")
+
+
+def _query_process(pid: int) -> str:
+    """PowerShell 查进程 "Name|CommandLine"（mbcs=ANSI，PS 重定向输出默认代码页）。
+
+    返回空串 = 查询失败（权限/PS 不可用/超时/进程已消失），调用方按"身份不明"处理。
+    """
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             f'$p = Get-CimInstance Win32_Process -Filter "ProcessId={int(pid)}" | '
+             'Select-Object Name,CommandLine; if ($p) { "$($p.Name)|$($p.CommandLine)" }'],
+            capture_output=True, text=True, encoding="mbcs", errors="replace",
+            timeout=5, creationflags=CREATE_NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def _pid_matches_launcher(pid: int) -> bool | None:
+    """PID 复用防护（任务110）：锁残留后 PID 可能已被系统复用给无关进程。
+
+    True=确认是 LabSentinel 的 python/pythonw；False=确认不是；
+    None=身份核实失败（宁可拒绝杀也不能误杀，锁路径交给用户手动处理）。
+    """
+    out = _query_process(pid)
+    if not out or "|" not in out:
+        return None
+    name, _, cmdline = out.partition("|")
+    if name.strip().lower() not in LAUNCHER_PROC_NAMES:
+        return False
+    return any(marker in cmdline for marker in LAUNCHER_PROC_MARKERS)
+
+
 def start_server(port: int, cfg: dict) -> int:
     data = str(DATA)
     env = {**os.environ,
@@ -387,6 +425,24 @@ def do_stop() -> int:
         print("未发现运行中的 LabSentinel（无锁文件）。")
         return 0
     pid, port = lock
+    if not pid_alive(pid):
+        LOCK.unlink(missing_ok=True)
+        print("锁已陈旧（进程不存在），已清理锁文件。")
+        return 0
+    verdict = _pid_matches_launcher(pid)
+    if verdict is None:
+        # 身份核实失败（权限/PS 不可用/超时）：锁保留，让下次重试仍能走正常停止路径
+        print(f"无法核实锁内 pid={pid} 的进程身份（PowerShell 查询失败），为防误杀未执行停止。")
+        print(f"锁文件：{LOCK}（确认服务已停后可手动删除）")
+        log.warning("进程身份查询失败，拒绝停止 pid=%d，锁保留", pid)
+        return 0
+    if not verdict:
+        # 确认不是我们的进程：锁已陈旧、PID 已被复用——删锁，绝不杀无关进程（任务110）
+        print(f"锁内 pid={pid} 不是 LabSentinel 的 python 进程（锁已陈旧，PID 已被复用），未杀进程。")
+        print("已清理锁文件；若服务确实还在运行，请用任务管理器定位后再处理。")
+        LOCK.unlink(missing_ok=True)
+        log.warning("拒绝停止 pid=%d（进程名/命令行不匹配），已删除陈旧锁", pid)
+        return 0
     subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True,
                    creationflags=CREATE_NO_WINDOW)
     time.sleep(2)

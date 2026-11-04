@@ -20,6 +20,7 @@ import gzip
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -389,6 +390,27 @@ def _node_zip_candidates() -> list[tuple[str, str, str]]:
     return out
 
 
+def _promote_extracted_dir(extracted: Path, dest: Path) -> None:
+    """把解压出的目录就位到 dest（任务109）。
+
+    Windows 上两种常见死法：dest 已存在（上次半失败/手动放过）rename 抛 FileExistsError；
+    extracted 与 dest 跨盘 rename 抛 OSError。都降级处理：先清掉旧 dest（删不掉就保留，
+    改走覆盖复制），rename 失败回退 copytree(dirs_exist_ok=True) 后删源。
+    """
+    if dest.exists():
+        try:
+            shutil.rmtree(dest)
+        except OSError:
+            pass  # 删不掉（占用/权限）→ 留给 copytree dirs_exist_ok 覆盖
+    try:
+        extracted.rename(dest)
+        return
+    except OSError:
+        pass
+    shutil.copytree(extracted, dest, dirs_exist_ok=True)
+    shutil.rmtree(extracted, ignore_errors=True)
+
+
 def ensure_node() -> None:
     if _node_ok():
         log("  [跳过] Node.js 已安装: " + subprocess.run(
@@ -417,7 +439,7 @@ def ensure_node() -> None:
                 _safe_extract_zip(z, ROOT / "tools")
             extracted = ROOT / "tools" / name.removesuffix(".zip")
             if extracted.exists():
-                extracted.rename(NODE_DIR)
+                _promote_extracted_dir(extracted, NODE_DIR)
             os.environ["PATH"] = str(NODE_DIR) + os.pathsep + os.environ.get("PATH", "")
             log(f"    Node {_node_version(NODE_DIR / 'node.exe')} 就绪（来源 {label}）")
             return
@@ -475,6 +497,20 @@ def _link_dir(src_dir: Path, link: Path) -> bool:
     return r.returncode == 0
 
 
+def _version_key(name: str) -> tuple:
+    """ffmpeg-static 目录名版本键（任务109）：字典序会把 b10.0 排在 b9.0 之前，选到旧版。
+
+    数字段按数值、文本段按字典序（tagged 元组避免 int/str 直接比较 TypeError）；
+    不含任何数字的名字排最后。
+    """
+    chunks = re.split(r"(\d+)", name)
+    if not any(ch.isdigit() for ch in chunks):
+        return ((1, name),)
+    return ((0, 0),) + tuple(
+        (0, int(ch)) if ch.isdigit() else (1, ch) for ch in chunks if ch
+    )
+
+
 def ensure_ffmpeg() -> None:
     if (FFMPEG_DIR / "ffmpeg.exe").exists():
         log("  [跳过] ffmpeg 已可用")
@@ -492,7 +528,7 @@ def ensure_ffmpeg() -> None:
         # ffmpeg-static 的 binary 目录提供单文件 .gz（win32-x64）
         base = "https://registry.npmmirror.com/-/binary/ffmpeg-static/"
         versions = [d["name"].rstrip("/") for d in json.loads(http_get(base)) if d["type"] == "dir"]
-        best = sorted(versions)[-1]
+        best = max(versions, key=_version_key)
         listing = json.loads(http_get(f"{base}{best}/"))
         fname = next(f["name"] for f in listing if f["name"] == "ffmpeg-win32-x64.gz")
         gz = http_download(f"{base}{best}/{fname}", ROOT / "logs" / fname, timeout=900)
@@ -539,28 +575,45 @@ def ensure_ffmpeg() -> None:
 
 # ---------- 配置与数据 ----------
 def ensure_env_file() -> None:
+    """保证 server/.env 的模型行指向当前安装位置（任务109：只动这一行，用户其余配置逐字保留）。"""
     env = ROOT / "server" / ".env"
     model = ROOT / "m0-spike" / "yolo11n_ppe.onnx"
-    if env.exists():
-        m = None
-        for line in env.read_text(encoding="utf-8").splitlines():
-            if line.strip().startswith("LS_PPE_MODEL="):
-                m = line.split("=", 1)[1].strip()
-        # 只接受指向当前安装位置的配置；从别的机器拷来的 .env 一律重写
-        if m and Path(m).exists() and ROOT.as_posix() in Path(m).as_posix():
-            log(f"  [跳过] server/.env 有效（模型: {m}）")
-            return
-        log("  [更新] server/.env 中模型路径失效或来自其他机器，按当前安装位置重写")
-    else:
+    if not env.exists():
         log("  [7] 生成 server/.env")
-    env.write_text(
-        "# LabSentinel 本地配置（deploy.py 自动生成；告警渠道等可选项见 server/.env.example）\n"
-        f"LS_PPE_MODEL={model.as_posix()}\n"
-        "LS_PPE_CLASS_NAMES=lab coat\n"
-        "LS_PPE_VIOLATION_CLASS=no lab coat\n"
-        "LS_PPE_CONF=0.30\n"
-        "LS_FILE_LOOP=true\n",
-        encoding="utf-8")
+        env.parent.mkdir(parents=True, exist_ok=True)
+        env.write_text(
+            "# LabSentinel 本地配置（deploy.py 自动生成；告警渠道等可选项见 server/.env.example）\n"
+            f"LS_PPE_MODEL={model.as_posix()}\n"
+            "LS_PPE_CLASS_NAMES=lab coat\n"
+            "LS_PPE_VIOLATION_CLASS=no lab coat\n"
+            "LS_PPE_CONF=0.30\n"
+            "LS_FILE_LOOP=true\n",
+            encoding="utf-8")
+        return
+    m = None
+    for line in env.read_text(encoding="utf-8").splitlines():
+        if line.strip().startswith("LS_PPE_MODEL="):
+            m = line.split("=", 1)[1].strip()
+    # 只接受指向当前安装位置的配置；失效/来自其他机器 → 只修模型行（不再整文件重写）
+    if m and Path(m).exists() and ROOT.as_posix() in Path(m).as_posix():
+        log(f"  [跳过] server/.env 有效（模型: {m}）")
+        return
+    lines = env.read_text(encoding="utf-8").splitlines()
+    new_line = f"LS_PPE_MODEL={model.as_posix()}"
+    replaced = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith("LS_PPE_MODEL="):
+            lines[i] = new_line
+            replaced = True
+            break
+    if not replaced:
+        lines.append(new_line)
+    try:  # 写前备份一份，用户告警配置多一层保险（备份失败不阻塞）
+        shutil.copy2(env, env.with_name(".env.bak-" + time.strftime("%Y%m%d-%H%M%S")))
+    except OSError:
+        pass
+    env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log("  [更新] server/.env 模型路径已修正（其余行逐字保留）")
 
 
 def write_go2rtc_yaml() -> None:
@@ -741,6 +794,8 @@ def _drop_env(full: bool = False) -> None:
     for f in (ROOT / "server" / ".env",):
         if f.exists():
             f.unlink()
+    for bak in (ROOT / "server").glob(".env.bak-*"):  # ensure_env_file 的写前备份一并清
+        bak.unlink(missing_ok=True)
     for d in (ROOT / "logs", ROOT / ".pytest_cache"):
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)

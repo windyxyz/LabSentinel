@@ -2,6 +2,7 @@
 
 时间解析用 ts 字段的 ISO 前缀：substr(ts,1,10)=日期、substr(ts,12,2)=小时。
 """
+import json
 import sqlite3  # noqa: F401  （保留给类型标注/兼容）
 from datetime import date, timedelta
 
@@ -138,3 +139,64 @@ def hourly(store, date_str: str, camera_id: int | None = None) -> dict:
         key = f"{h:02d}"
         out.append({"hour": h, **agg.get(key, dict(_EMPTY))})
     return {"date": date_str, "hours": out}
+
+
+def quality(store, days: int = 7, camera_id: int | None = None) -> dict:
+    """处置质量统计（任务102）：误报率/未处置/L3，按状态/级别/类型/摄像头/逐日分组。
+
+    口径（务必与文档一致）：false_positive_rate = false_positive / (acked + false_positive + ignored)
+    ——分母是**已处置**事件（acked/误报/忽略），不含未处置(new)；无已处置事件时为 0。
+    它是"已处置里误报占比"，不是"每天误报次数"（每天误报次数看 daily[].false_positive）。
+    """
+    from datetime import datetime
+    now = datetime.now()
+    start_ts = (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    end_ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    where, args = ["ts >= ?", "ts <= ?"], [start_ts, end_ts]
+    if camera_id is not None:
+        where.append("camera_id=?")
+        args.append(camera_id)
+    w = " WHERE " + " AND ".join(where)
+    with _conn(store) as c:
+        total = c.execute("SELECT COUNT(*) n FROM events" + w, args).fetchone()["n"]
+        by_status = {r["status"]: r["n"] for r in c.execute(
+            "SELECT status, COUNT(*) n FROM events" + w + " GROUP BY status", args)}
+        by_level = {str(r["level"]): r["n"] for r in c.execute(
+            "SELECT level, COUNT(*) n FROM events" + w + " GROUP BY level", args)}
+        by_type = {r["type"]: r["n"] for r in c.execute(
+            "SELECT type, COUNT(*) n FROM events" + w + " GROUP BY type", args)}
+        by_camera = [
+            {"camera_id": r["camera_id"], "name": r["name"] or "", "total": r["total"],
+             "false_positive": r["fp"],
+             "rate": round(r["fp"] / r["total"], 3) if r["total"] else 0.0}
+            for r in c.execute(
+                "SELECT e.camera_id camera_id, c.name name, COUNT(*) total, "
+                "SUM(CASE WHEN e.status='false_positive' THEN 1 ELSE 0 END) fp "
+                "FROM events e LEFT JOIN cameras c ON c.id = e.camera_id" + w +
+                " GROUP BY e.camera_id ORDER BY total DESC", args)]
+        daily = [{"date": r["d"], "total": r["total"], "false_positive": r["fp"]}
+                 for r in c.execute(
+                     "SELECT substr(ts,1,10) d, COUNT(*) total, "
+                     "SUM(CASE WHEN status='false_positive' THEN 1 ELSE 0 END) fp "
+                     "FROM events" + w + " GROUP BY d ORDER BY d", args)]
+    by_ai = {"likely_true": 0, "likely_false": 0, "uncertain": 0}
+    for r in c.execute(
+            "SELECT ai_review FROM events" + w + " AND ai_review IS NOT NULL", args):
+        try:
+            v = json.loads(r["ai_review"]).get("verdict")
+        except ValueError:
+            continue
+        if v in by_ai:
+            by_ai[v] += 1
+    fp = by_status.get("false_positive", 0)
+    handled = by_status.get("acked", 0) + fp + by_status.get("ignored", 0)
+    return {
+        "days": days, "start_ts": start_ts, "end_ts": end_ts,
+        "total": total, "by_status": by_status, "by_level": by_level, "by_type": by_type,
+        "by_camera": by_camera,
+        "false_positive_rate": round(fp / handled, 3) if handled else 0.0,
+        "unhandled": by_status.get("new", 0),
+        "l3_total": by_level.get("3", 0),
+        "by_ai_verdict": by_ai,  # 任务124：VLM 预分类计数（仅供参考，误报率仍以人工处置为准）
+        "daily": daily,
+    }

@@ -54,6 +54,13 @@ def validate_settings() -> list[dict]:
         add("OK", "web_dist", "index.html 存在")
     else:
         add("WARN", "web_dist", f"index.html 不存在（{wd}）", "仅 API 模式；npm run build 生成")
+    if settings.genai_provider != "none":  # 任务124：VLM 复核配置
+        if not settings.genai_model:
+            add("WARN", "genai", "provider 已启用但未配置 LS_GENAI_MODEL",
+                "设置模型名（如 qwen2.5vl:7b）后重启")
+        if settings.genai_max_concurrency != 1:
+            add("WARN", "genai", f"并发 {settings.genai_max_concurrency} 非 1",
+                "同机 GPU 与 DML 推理竞争；24h/压测建议关闭复核")
 
     # go2rtc
     go2rtc = settings.go2rtc_yaml

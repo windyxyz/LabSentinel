@@ -35,6 +35,39 @@ class Settings(BaseSettings):
     backup_interval_h: int = 24  # 自动备份间隔小时（任务92，0=关闭）
     backup_keep: int = 7  # 保留最近 N 份 auto 备份
     backup_include_media: bool = False  # true 时备份含媒体（大）
+    # 摄像头守护（任务114，24h 挂机保障）：worker 退出自动按退避 1/5/30/60s 重启
+    supervisor_enabled: bool = True  # LS_SUPERVISOR_ENABLED；false=关闭守护
+    supervisor_interval_s: float = 10.0  # LS_SUPERVISOR_INTERVAL_S 守护巡检间隔
+    supervisor_max_restarts: int = 10  # LS_SUPERVISOR_MAX_RESTARTS 连续重启上限；0=禁用守护
+    weekend_is_holiday: bool = True  # LS_WEEKEND_IS_HOLIDAY；false=周末不按假期算（任务112）
+    # 版本更新检查（任务117）：只查静态清单并提示，绝不下载/安装/执行
+    update_manifest_url: str = ""  # LS_UPDATE_MANIFEST_URL；默认空=关闭更新检查
+    update_allow_http: bool = False  # LS_UPDATE_ALLOW_HTTP；自建局域网 http 清单显式开
+    update_timeout_s: float = 5.0  # LS_UPDATE_TIMEOUT_S
+    # 本地 VLM 误报预分类（任务124，Frigate genai 蓝本；默认关闭零开销）
+    genai_provider: str = "none"  # LS_GENAI_PROVIDER：none|ollama|openai_compat
+    genai_url: str = "http://127.0.0.1:11434"  # LS_GENAI_URL（回环；非回环需 ALLOW_REMOTE）
+    genai_model: str = ""  # LS_GENAI_MODEL（如 qwen2.5vl:7b）
+    genai_api_key: str = ""  # LS_GENAI_API_KEY（openai_compat 可选；进诊断包脱敏）
+    genai_timeout_s: float = 30.0  # LS_GENAI_TIMEOUT_S
+    genai_max_concurrency: int = 1  # LS_GENAI_MAX_CONCURRENCY（同机 GPU 竞争保护）
+    genai_min_level: int = 2  # LS_GENAI_MIN_LEVEL（只复核 >= 此级别）
+    genai_allow_remote: bool = False  # LS_GENAI_ALLOW_REMOTE；true 才允许非回环 VLM
+    # MQTT 事件总线（任务125，默认关；只读外发、非告警通道）
+    mqtt_enabled: bool = False  # LS_MQTT_ENABLED
+    mqtt_host: str = "127.0.0.1"  # LS_MQTT_HOST
+    mqtt_port: int = 1883  # LS_MQTT_PORT
+    mqtt_username: str = ""  # LS_MQTT_USERNAME
+    mqtt_password: str = ""  # LS_MQTT_PASSWORD（进诊断包脱敏）
+    mqtt_tls: bool = False  # LS_MQTT_TLS（系统默认 CA，无跳过校验开关）
+    mqtt_topic_prefix: str = "labsentinel"  # LS_MQTT_TOPIC_PREFIX
+    mqtt_qos: int = 0  # LS_MQTT_QOS
+    mqtt_retain: bool = False  # LS_MQTT_RETAIN
+    mqtt_client_id: str = ""  # LS_MQTT_CLIENT_ID（默认 labsentinel-<host>-<rand>）
+    public_base_url: str = ""  # LS_PUBLIC_BASE_URL（payload api_base；空=不写）
+    # 监控机防休眠（任务123）：服务运行期间临时阻止系统睡眠（不改电源计划；退出即恢复）
+    keep_awake: bool = False  # LS_KEEP_AWAKE；24h 挂机建议 true（默认关：不擅自改变机器行为）
+    keep_awake_display: bool = False  # LS_KEEP_AWAKE_DISPLAY；true 同时阻止关闭显示器
     security_headers: bool = True  # 安全响应头（任务89，LS_SECURITY_HEADERS）
     frame_options: str = "DENY"  # X-Frame-Options 值（DENY|SAMEORIGIN）
     csp: str = ""  # Content-Security-Policy（默认空=不发送）

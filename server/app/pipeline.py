@@ -407,15 +407,134 @@ class CameraWorker(threading.Thread):
 
 
 class CameraManager:
+    # 任务114：守护退避表——第 k 次自动重启失败后，下次尝试前等待 BACKOFF_S[min(k-1,3)] 秒
+    SUPERVISOR_BACKOFF_S = (1.0, 5.0, 30.0, 60.0)
+    SUPERVISOR_SUCCESS_S = 5.0  # worker 存活超过此时长视为"启动成功"，重置退避计数
+
     def __init__(self, store: Store):
         self.store = store
         self.rules = RuleEngine(store)
         self.workers: dict[int, CameraWorker] = {}
         self._mgmt_lock = threading.Lock()  # 2026-10-30 审阅：start/stop/status 与 API 线程互斥
+        # 任务114：守护状态——desired=应该是运行中（用户主动 stop 移出）；sup=每路守护状态
+        self._desired_running: set[int] = set()
+        self._sup: dict[int, dict] = {}
+        self._sup_clock = time.monotonic  # 测试可注入
+        self._sup_stop = threading.Event()
+        self._sup_thread: threading.Thread | None = None
+
+    # ---- 任务114：守护（worker 退出自动按退避重启，24h 挂机保障） ----
+    def start_supervisor(self) -> None:
+        """守护线程；stop_all/进程退出时停止。禁用（ENABLED=false 或 MAX_RESTARTS=0）不启动。"""
+        if self._sup_thread is not None:
+            return
+        if not settings.supervisor_enabled or settings.supervisor_max_restarts <= 0:
+            print("[supervisor] 守护已禁用（LS_SUPERVISOR_ENABLED / LS_SUPERVISOR_MAX_RESTARTS=0）")
+            return
+        self._sup_stop.clear()
+        self._sup_thread = threading.Thread(
+            target=self._supervise_loop, args=(settings.supervisor_interval_s,),
+            name="camera-supervisor", daemon=True)
+        self._sup_thread.start()
+
+    def stop_supervisor(self) -> None:
+        self._sup_stop.set()
+        t, self._sup_thread = self._sup_thread, None
+        if t is not None:
+            t.join(timeout=3.0)
+
+    def _supervise_loop(self, interval: float) -> None:
+        while not self._sup_stop.wait(interval):
+            try:
+                self.supervise_tick()
+            except Exception as e:  # noqa: BLE001  守护线程绝不能死
+                print(f"[supervisor] tick 异常: {e!r}")
+
+    def supervise_tick(self) -> None:
+        """守护一轮（只在守护线程/测试里调用，不在 API/帧循环里做）。"""
+        now = self._sup_clock()
+        starts: list[int] = []
+        with self._mgmt_lock:
+            # 启动成功（worker 存活 >5s）→ 重置退避计数
+            for cid, st in self._sup.items():
+                w = self.workers.get(cid)
+                if (st["restarts"] and st["state"] != "given_up" and st.get("start_ts")
+                        and now - st["start_ts"] > self.SUPERVISOR_SUCCESS_S
+                        and w is not None and w.is_alive()):
+                    st["restarts"] = 0
+                    st["state"] = "running"
+            for cid in list(self._desired_running):
+                st = self._sup.setdefault(cid, self._sup_new_state())
+                if st["state"] == "given_up":
+                    continue
+                w = self.workers.get(cid)
+                if w is not None and w.is_alive():
+                    st["state"] = "running"
+                    continue
+                if now < st["next_attempt_ts"]:
+                    st["state"] = "backoff"
+                    continue
+                starts.append(cid)
+        for cid in starts:
+            self._sup_restart(cid)
+
+    @staticmethod
+    def _sup_new_state() -> dict:
+        return {"restarts": 0, "last_restart_ts": None, "state": "running",
+                "next_attempt_ts": 0.0, "start_ts": None}
+
+    def _sup_restart(self, cid: int) -> None:
+        """拉起一路（_mgmt_lock 外执行：start_camera 内部要拿锁）。"""
+        max_r = settings.supervisor_max_restarts
+        cam = self.store.camera(cid)
+        with self._mgmt_lock:
+            st = self._sup.setdefault(cid, self._sup_new_state())
+            if cam is None:  # 摄像头已被删除：退出守护
+                self._desired_running.discard(cid)
+                self._sup.pop(cid, None)
+                return
+            if max_r and st["restarts"] >= max_r:  # 达上限：放弃并标注
+                st["state"] = "given_up"
+                self._desired_running.discard(cid)
+            else:
+                st["state"] = "pending"
+        if st["state"] == "given_up":
+            try:
+                self.store.set_camera_status(cid, "error")
+            except Exception as e:  # noqa: BLE001
+                print(f"[supervisor] cam-{cid} 标记 error 失败: {e!r}")
+            print(f"[supervisor] cam-{cid} 自动重启 {max_r} 次仍失败，停止守护（given_up）")
+            return
+        print(f"[supervisor] cam-{cid} worker 已退出，自动重启（第 {st['restarts'] + 1} 次尝试）")
+        self.start_camera(cam)
+        with self._mgmt_lock:
+            st = self._sup.setdefault(cid, self._sup_new_state())
+            st["restarts"] += 1
+            st["last_restart_ts"] = time.time()
+            st["start_ts"] = self._sup_clock()
+            backoff = self.SUPERVISOR_BACKOFF_S[min(st["restarts"] - 1,
+                                                    len(self.SUPERVISOR_BACKOFF_S) - 1)]
+            st["next_attempt_ts"] = self._sup_clock() + backoff
+            st["state"] = "backoff"
+
+    def supervisor_info(self, cid: int) -> dict:
+        """单路守护状态（API 用；从未纳入守护的路返回中性值）。"""
+        st = self._sup.get(cid)
+        if st is None:
+            return {"restart_count": 0, "last_restart_ts": None,
+                    "supervisor_state": "running" if cid in self._desired_running else None}
+        return {"restart_count": st["restarts"], "last_restart_ts": st["last_restart_ts"],
+                "supervisor_state": st["state"]}
 
     def start_camera(self, camera: dict):
         cid = camera["id"]
         with self._mgmt_lock:
+            # 任务114：只守护持续型源；file 播完/坏路径正常退出，不应无限重播/重启
+            if camera.get("type") != "file":
+                self._desired_running.add(cid)
+                st = self._sup.setdefault(cid, self._sup_new_state())
+                if st["state"] == "given_up":  # 手动 start 清除 given_up、重新纳入守护
+                    st.update({"state": "running", "restarts": 0, "next_attempt_ts": 0.0})
             old = self.workers.get(cid)
             if old is not None and old.is_alive():
                 return
@@ -432,6 +551,10 @@ class CameraManager:
 
     def stop_camera(self, cid):
         with self._mgmt_lock:
+            self._desired_running.discard(cid)  # 任务114：用户主动停止不自动拉起
+            st = self._sup.get(cid)
+            if st is not None:
+                st.update({"state": "stopped", "restarts": 0, "next_attempt_ts": 0.0})
             w = self.workers.pop(cid, None)
         if w:
             w.stop()
@@ -450,8 +573,11 @@ class CameraManager:
                 self.start_camera(cam)
 
     def stop_all(self):
+        self.stop_supervisor()  # 任务114：进程退出先停守护线程
         for cid in list(self.workers):
             self.stop_camera(cid)
+        with self._mgmt_lock:
+            self._desired_running.clear()
 
     def latest_frame(self, cid):
         w = self.workers.get(cid)
@@ -481,5 +607,6 @@ class CameraManager:
             }
             if hasattr(w, "folder_status"):
                 entry.update(w.folder_status())
+            entry.update(self.supervisor_info(cid))  # 任务114：restart_count/守护状态
             cams.append(entry)
         return {"cameras": cams}

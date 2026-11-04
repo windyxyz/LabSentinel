@@ -17,6 +17,7 @@ class CameraCreate(BaseModel):
     source: str
     type: str = "file"
     autostart: bool = True  # 置 false 可先配安全区/规则再手动启动
+    group_name: str = Field("", max_length=32)  # 任务111：分组（空=未分组）
 
 
 class Zone(BaseModel):
@@ -55,6 +56,8 @@ class RuleCreate(BaseModel):
     time_end: str = "23:59"
     threshold: int = Field(0, ge=0)  # occupancy_over 用：人数上限
     enabled: bool = True
+    days_of_week: str = "1,2,3,4,5,6,7"  # 任务112：ISO 星期集合（1=周一…7=周日），空=不生效
+    holiday_only: bool = False  # 任务112：true=只在假期日期生效（见 /api/calendar 例外表）
 
 
 class Event(BaseModel):

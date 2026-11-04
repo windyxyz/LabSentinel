@@ -21,6 +21,7 @@ const viewMode = ref('day')            // 'day' | 'week'
 const weekCount = ref(4)               // 周视图周数（4/12）
 const weekly = ref([])
 const summary = ref(null)
+const quality = ref(null)  // 任务102：处置质量统计
 const rangeStart = ref('')
 const rangeEnd = ref('')
 
@@ -49,6 +50,11 @@ async function load() {
     summary.value = s
     hourly.value = h
     daily.value = d
+    // 任务102：处置质量（独立容错——旧服务端无此端点时只隐藏卡片，不影响图表）
+    try {
+      const q = await api.statsQuality({ days: days.value, ...base })
+      if (seq === loadSeq) quality.value = q
+    } catch { /* 端点缺失静默 */ }
     error.value = ''
     stale.value = false
   } catch (e) {
@@ -149,6 +155,29 @@ function barGeom(h) {
     <div class="card"><div class="muted">L3 严重</div><div class="num">{{ summary.by_level[3] }}</div></div>
     <div class="card"><div class="muted">最高事件日</div><div class="num" style="font-size:16px">{{ summary.top_days[0]?.date || '-' }}（{{ summary.top_days[0]?.total || 0 }}）</div></div>
   </div>
+
+  <!-- 任务102：处置质量（误报率=已处置中误报占比，分母不含未处置） -->
+  <div class="cards" v-if="quality && quality.total > 0">
+    <div class="card"><div class="muted">未处置</div><div class="num">{{ quality.unhandled }}</div></div>
+    <div class="card"><div class="muted">L3 严重（窗口内）</div><div class="num">{{ quality.l3_total }}</div></div>
+    <div class="card"><div class="muted">误报率（已处置口径）</div>
+      <div class="num">{{ (quality.false_positive_rate * 100).toFixed(1) }}%</div></div>
+    <div class="card"><div class="muted">已处置 / 总数</div>
+      <div class="num" style="font-size:16px">{{ quality.total - quality.unhandled }} / {{ quality.total }}</div></div>
+  </div>
+  <div class="panel" v-if="quality && quality.total > 0">
+    <b>按摄像头处置质量（近 {{ quality.days }} 天，最多 10 路）</b>
+    <table style="margin-top:8px">
+      <tr><th>摄像头</th><th>事件</th><th>误报</th><th>误报率</th></tr>
+      <tr v-for="c in quality.by_camera.slice(0, 10)" :key="c.camera_id">
+        <td>{{ c.name || ('#' + c.camera_id) }}</td>
+        <td>{{ c.total }}</td>
+        <td>{{ c.false_positive }}</td>
+        <td>{{ (c.rate * 100).toFixed(1) }}%</td>
+      </tr>
+    </table>
+  </div>
+  <div class="panel" v-else-if="quality && quality.total === 0">暂无数据（统计窗口内无事件）</div>
 
   <div class="panel">
     <div class="row">
