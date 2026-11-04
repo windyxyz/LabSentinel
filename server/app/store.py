@@ -19,16 +19,17 @@ def ro_uri(path) -> str:
 
 
 def connect(path, *, readonly: bool = False) -> sqlite3.Connection:
-    """统一连接入口（任务64）：每条连接设 busy_timeout（PRAGMA 是 per-connection 的）。
+    """统一连接入口（任务64）：busy_timeout 用 sqlite3.connect(timeout=秒) 设置（API 参数，
+    等价 per-connection PRAGMA busy_timeout；不拼 SQL 语句）。
 
     WAL 模式下锁竞争会返回 busy 而非立即抛错，等 busy_timeout 毫秒后再报。
     """
+    timeout_s = max(0.0, int(settings.sqlite_busy_timeout_ms)) / 1000.0
     if readonly:
-        c = sqlite3.connect(ro_uri(path), uri=True)
+        c = sqlite3.connect(ro_uri(path), uri=True, timeout=timeout_s)
     else:
-        c = sqlite3.connect(path)
+        c = sqlite3.connect(path, timeout=timeout_s)
     c.row_factory = sqlite3.Row
-    c.execute(f"PRAGMA busy_timeout={int(settings.sqlite_busy_timeout_ms)}")
     c.execute("PRAGMA synchronous=NORMAL")  # per-connection；WAL 下 NORMAL 够用且更快
     return c
 
@@ -195,11 +196,14 @@ def _mig_008(c: sqlite3.Connection):
 
 def _mig_009(c: sqlite3.Connection):
     """v9：VLM 复核列（任务124）。events 加 ai_review(JSON)/ai_review_ts/ai_review_model，
-    旧行 NULL=未复核，行为不变。"""
+    旧行 NULL=未复核，行为不变。列名为固定字面量（不拼标识符）。"""
     cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
-    for col in ("ai_review", "ai_review_ts", "ai_review_model"):
-        if col not in cols:
-            c.execute(f"ALTER TABLE events ADD COLUMN {col} TEXT")
+    if "ai_review" not in cols:
+        c.execute("ALTER TABLE events ADD COLUMN ai_review TEXT")
+    if "ai_review_ts" not in cols:
+        c.execute("ALTER TABLE events ADD COLUMN ai_review_ts TEXT")
+    if "ai_review_model" not in cols:
+        c.execute("ALTER TABLE events ADD COLUMN ai_review_model TEXT")
 
 
 def _mig_010(c: sqlite3.Connection):
@@ -711,11 +715,17 @@ class Store:
         if end_ts:
             where.append("ts <= ?")
             args.append(end_ts)
-        cond = " WHERE " + " AND ".join(where) if where else ""
+        cond = " AND ".join(where) if where else ""
+        sql_count = "SELECT COUNT(*) FROM audit_log"
+        sql_rows = "SELECT * FROM audit_log"
+        if cond:
+            where_sql = " WHERE " + cond  # 片段全部为固定字面量，值走参数绑定
+            sql_count += where_sql
+            sql_rows += where_sql
+        sql_rows += " ORDER BY id DESC LIMIT ? OFFSET ?"
         with self._conn() as c:
-            total = c.execute("SELECT COUNT(*) FROM audit_log" + cond, args).fetchone()[0]
-            rows = c.execute("SELECT * FROM audit_log" + cond +
-                             " ORDER BY id DESC LIMIT ? OFFSET ?",
+            total = c.execute(sql_count, args).fetchone()[0]
+            rows = c.execute(sql_rows,
                              [*args, max(1, min(limit, 200)), max(0, offset)]).fetchall()
         return [dict(r) for r in rows], total
 

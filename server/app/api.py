@@ -150,8 +150,8 @@ def health_ready():
     checks = {}
 
     try:
-        con = sqlite3.connect(ro_uri(store.path), uri=True)  # 任务76：URI 编码安全
-        con.execute(f"PRAGMA busy_timeout={int(settings.sqlite_busy_timeout_ms)}")
+        timeout_s = max(0.0, int(settings.sqlite_busy_timeout_ms)) / 1000.0
+        con = sqlite3.connect(ro_uri(store.path), uri=True, timeout=timeout_s)  # 任务76：URI 编码安全
         try:
             con.execute("SELECT 1").fetchone()
         finally:
@@ -1911,6 +1911,8 @@ def export_monthly_pdf(month: str):
         raise HTTPException(400, "month 必须是 YYYY-MM 格式")
     try:
         data = monthly_pdf(store, month)
+    except ImportError as e:
+        raise HTTPException(503, f"PDF 月报依赖缺失（reportlab），请安装 server/requirements.txt 中的 reportlab: {e}")
     except ValueError as e:
         raise HTTPException(400, str(e))
     return Response(data, media_type="application/pdf",

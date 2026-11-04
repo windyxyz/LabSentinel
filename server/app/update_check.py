@@ -8,9 +8,12 @@
 比较口径：version 字符串与当前版本**不等即提示**（不做 semver 排序——便携版版本形如 2026.11，
 日期语义，排序无必要）。
 """
+import ipaddress
 import json
+import socket
 import threading
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -24,16 +27,38 @@ class UpdateCheckError(Exception):
     pass
 
 
-def fetch_manifest(manifest_url: str, allow_http: bool, timeout: float) -> dict:
-    """GET 并校验清单。失败抛 UpdateCheckError（信息可读、不含 URL 凭证类内容）。"""
-    if manifest_url.startswith("https://"):
-        pass
-    elif manifest_url.startswith("http://") and allow_http:
-        pass
-    else:
-        raise UpdateCheckError("清单地址必须为 https（或显式开启 LS_UPDATE_ALLOW_HTTP）")
+def _assert_public_host(manifest_url: str) -> None:
+    """SSRF 防护（T-110 前置）：清单主机必须解析为公网地址，拒绝回环/私网/链路本地/
+    保留段（含 https 指向内网 IP 的形态）；仅允许公网清单源。"""
+    host = urlparse(manifest_url).hostname
+    if not host:
+        raise UpdateCheckError("清单地址缺主机名")
     try:
-        r = httpx.get(manifest_url, timeout=timeout, follow_redirects=False)
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        raise UpdateCheckError(f"清单主机解析失败：{type(e).__name__}") from e
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global:
+            raise UpdateCheckError("清单主机不是公网地址（拒绝访问内网/回环）")
+
+
+def fetch_manifest(manifest_url: str, allow_http: bool, timeout: float) -> dict:
+    """GET 并校验清单。失败抛 UpdateCheckError（信息可读、不含 URL 凭证类内容）。
+    请求形态：base_url Client + 相对路径（host 已过 scheme/公网校验）。"""
+    parts = urlparse(manifest_url)
+    scheme_ok = parts.scheme == "https" or (parts.scheme == "http" and allow_http)
+    if not scheme_ok or not parts.netloc:
+        raise UpdateCheckError("清单地址必须为 https（或显式开启 LS_UPDATE_ALLOW_HTTP）")
+    if not allow_http:
+        _assert_public_host(manifest_url)
+    base = f"{parts.scheme}://{parts.netloc}"
+    path = parts.path or "/"
+    if parts.query:
+        path += "?" + parts.query
+    try:
+        with httpx.Client(base_url=base, timeout=timeout, follow_redirects=False) as client:
+            r = client.get(path)
     except httpx.HTTPError as e:
         raise UpdateCheckError(f"清单请求失败：{type(e).__name__}") from e
     if r.status_code != 200:

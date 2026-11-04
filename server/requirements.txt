@@ -14,4 +14,5 @@ opencv-python-headless>=4.9
 supervision==0.25.1      # MIT; ByteTrack moved out of the package in 0.26+, do not bump
 httpx>=0.27
 numpy
-paho-mqtt>=1.6,<2  # 任务125 MQTT 事件总线（懒加载，未装不影响启动）
+paho-mqtt>=1.6,<2  # task125 MQTT event bus (lazy import; optional)
+reportlab>=4.2,<6  # monthly PDF report (export.py); NOTICE declares 5.x

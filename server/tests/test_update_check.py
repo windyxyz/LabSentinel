@@ -19,13 +19,32 @@ def reset_cache():
 
 def _fake_httpx(monkeypatch, calls, body=b'{"version":"2026.11"}', status=200,
                 raise_exc=None):
-    def fake_get(url, timeout=None, follow_redirects=None):
-        calls.append({"url": url, "follow_redirects": follow_redirects})
-        if raise_exc is not None:
-            raise raise_exc
-        return httpx.Response(status, content=body,
-                              request=httpx.Request("GET", url))
-    monkeypatch.setattr(uc.httpx, "get", fake_get)
+    """mock 生产实现的新请求接缝（httpx.Client base_url+相对路径，语义同旧 httpx.get：
+    单次 GET、不跟随重定向）；同时 mock DNS 解析保证单测不触网。"""
+    class _FakeClient:
+        def __init__(self, base_url=None, timeout=None, follow_redirects=None, **kw):
+            self._base = str(base_url or "")
+            self._follow = follow_redirects
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, path):
+            url = self._base + str(path)
+            calls.append({"url": url, "follow_redirects": self._follow})
+            if raise_exc is not None:
+                raise raise_exc
+            return httpx.Response(status, content=body,
+                                  request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(uc.httpx, "Client", _FakeClient)
+
+    def fake_getaddrinfo(host, port, *a, **kw):
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]  # 公网 IP，公网校验放行
+    monkeypatch.setattr(uc.socket, "getaddrinfo", fake_getaddrinfo)
 
 
 MANIFEST = ('{"version":"2026.11","url":"https://example.com/LabSentinel-portable.zip",'
