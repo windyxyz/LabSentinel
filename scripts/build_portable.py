@@ -120,12 +120,18 @@ def copy_assets() -> None:
         src = ROOT / "m0-spike" / name
         assert src.exists(), f"缺模型文件 {src}"
         shutil.copy2(src, DIST / "models" / name)
-    # 演示视频（任务47：首次运行播种 4 路演示摄像头用）
+    # 演示视频：T-406/Q-07 起不再随包（Mixkit 素材仅个人使用，公开分发有版权风险）。
+    # 首启无演示摄像头，引导用户添加自己的源；自拍 CC0 素材就绪后经 media/SOURCES.md 恢复。
     (DIST / "media").mkdir(parents=True, exist_ok=True)
+    sources_md = ROOT / "Resources" / "效果演示" / "SOURCES.md"
+    if sources_md.exists():
+        shutil.copy2(sources_md, DIST / "media" / "SOURCES.md")
+    seed_media = ROOT / "m0-spike" / "data"
     for fn in ("lab-walk-24076.mp4", "lab-equip-21453.mp4"):
-        src = ROOT / "m0-spike" / "data" / fn
-        assert src.exists() and src.stat().st_size > 1_000_000, f"缺演示视频 {src}"
-        shutil.copy2(src, DIST / "media" / fn)
+        if (seed_media / fn).exists():
+            print(f"  [提示] {fn} 不再进包（T-406）；本地保留用于开发/语料")
+        else:
+            print(f"  [提示] {fn} 不存在（已按 T-406 移除随包分发）")
     # 二进制
     tools = DIST / "tools"
     tools.mkdir(parents=True, exist_ok=True)
@@ -179,7 +185,8 @@ def copy_assets() -> None:
         "\"%~dp0runtime\\python.exe\" \"%~dp0scripts\\installer.py\" install --ui --source \"%~dp0.\" %*\n"
         "pause\n",
         encoding="ascii")
-    (DIST / "app" / "VERSION").write_text("2026.10", encoding="ascii")
+    (DIST / "app" / "VERSION").write_text(
+        (ROOT / "VERSION").read_text("ascii").strip(), encoding="ascii")  # T-401
 
 
 def smoke() -> None:

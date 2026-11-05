@@ -197,7 +197,8 @@ def _config_issue_counts() -> dict:
 
 
 def _system_version() -> str:
-    return "0.1.0-alpha"
+    from .version import read_version
+    return read_version()
 
 
 def _engine_backend_peek() -> str:

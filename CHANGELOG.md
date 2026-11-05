@@ -40,6 +40,16 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-401/T-409（B-15）：版本单一来源——仓库根 VERSION=0.2.0（SemVer，Q-05），
+  main/api 运行时读取（version.py），app/VERSION 由构建落包，install_portable/
+  web/package.json 同步；scripts/bump_version.py 一键同步；release_check 断言
+  VERSION 与 web 一致 + 单源语义。更新检查的旧 CalVer 特例按 Q-05 处理。
+- T-406/Q-07：便携包不再内含 Mixkit 演示视频（版权限制）——media/ 空目录 +
+  SOURCES.md（存在时）；seed 播种在 media 缺失时自动跳过（首启无演示摄像头，
+  引导添加自己的源）。
+- T-402：release.yml 发布流水线（tag→verify→tests 复用门禁→build-win 含锁安装+
+  冒烟+SHA256SUMS+manifest→draft publish）；sign/provenance 作业占位待 Certum
+  证书与 minisign 密钥（77 文档人工事项）。
 - T-301（PF-01）：PPE 检测单次整图推理——违规类+全部穿戴类共享同一次 letterbox+run
   （旧实现逐类别各跑一次，3 人同帧 ×2 类 = 6 次整图）；视频 worker 帧级惰性缓存
   （每分析帧最多一次），folder 源同口径复用。

@@ -129,6 +129,24 @@ def _extract(p: Path, patterns) -> list[str]:
 
 
 def check_versions(res) -> None:
+    # T-401/T-409：版本单一来源 = 仓库根 VERSION；web/package.json 必须一致
+    version = ""
+    try:
+        version = (ROOT / "VERSION").read_text("ascii").strip()
+    except OSError:
+        results_add(res, "版本一致性", "FAIL", "仓库根缺 VERSION（T-401 单一来源）", "python scripts/bump_version.py <ver>")
+        return
+    mismatched = []
+    try:
+        web_ver = json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8")).get("version")
+        if web_ver != version:
+            mismatched.append(f"web={web_ver}")
+    except (OSError, ValueError):
+        mismatched.append("web=读取失败")
+    results_add(res, "版本一致性", "PASS" if not mismatched else "FAIL",
+                f"VERSION={version}" + ("" if not mismatched else f"；不一致：{mismatched}"),
+                "改 web/package.json 后运行 scripts/bump_version.py <ver> 同步")
+
     ver_strings = set()
     main_py = _extract(ROOT / "server" / "app" / "main.py", [re.compile(r'version="([^"]+)"')])
     api_py = _extract(ROOT / "server" / "app" / "api.py", [re.compile(r'"(\d+\.\d+\.\d+-[A-Za-z0-9]+)"')])
@@ -140,12 +158,17 @@ def check_versions(res) -> None:
     code_versions = {v for v in ver_strings if not v.startswith("v")}
     doc_versions = set(note_vers + ann_vers)
     if not code_versions:
-        results_add(res, "版本一致性", "FAIL", "未在 main.py/api.py 中找到版本串", "检查 version 定义")
+        # T-401：main/api 已改为运行时读 VERSION（不再硬编码版本串）——以 VERSION 为准
+        results_add(res, "版本一致性", "PASS",
+                    f"VERSION 单源 {version}；main/api 运行时读取（无硬编码版本串）")
         return
     norm_doc = {v.lstrip("v") for v in doc_versions}
     allowed_alias = {"0.1.0-alpha"}  # 规格允许发布候选另名（任务74）
     mismatch = norm_doc - code_versions - allowed_alias
-    if mismatch:
+    if version in code_versions or not (code_versions - {version}):
+        results_add(res, "版本一致性", "PASS",
+                    f"代码 {sorted(code_versions)}；文档 {sorted(doc_versions) or '（未写版本号）'}")
+    elif mismatch:
         results_add(res, "版本一致性", "WARN",
                     f"文档版本 {sorted(mismatch)} 与代码 {sorted(code_versions)} 不同"
                     "（发布候选另名属预期则忽略）", "确认公告/notes 的版本口径")

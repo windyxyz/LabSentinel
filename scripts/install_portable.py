@@ -21,7 +21,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION_DEFAULT = "2026.10"
+
+def _version_default() -> str:
+    """T-401：跟随仓库根 VERSION（单一来源）。"""
+    try:
+        return (ROOT / "VERSION").read_text("ascii").strip()
+    except OSError:
+        return "0.2.0"
+
+
+VERSION_DEFAULT = _version_default()
 RUN_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 # 任务120：控制面板"卸载程序"条目（HKCU，无需管理员）
 UNINSTALL_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"

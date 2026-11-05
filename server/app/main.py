@@ -119,7 +119,8 @@ async def lifespan(app: FastAPI):
             plugins.manager.stop_all()
 
 
-app = FastAPI(title="LabSentinel", version="0.1.0-alpha", lifespan=lifespan)
+from .version import read_version as _read_version
+app = FastAPI(title="LabSentinel", version=_read_version(), lifespan=lifespan)
 app.include_router(router)
 
 # ---- T-105（S-03/P1）：Host 白名单（防 DNS Rebinding）----

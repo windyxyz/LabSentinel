@@ -6,6 +6,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call: {}  # T-402：release.yml 复用本工作流作为发布门禁
 
 permissions:
   contents: read
