@@ -24,12 +24,10 @@ def store(tmp_path, monkeypatch):
     s.add_event(1, "enter", 2, 2, "l2-old")
     acked = s.add_event(1, "enter_no_ppe", 3, 3, "acked")
     s.add_event(1, "enter", 3, 4, "l3-fresh")
-    con = s._conn()
-    con.execute("UPDATE events SET ts=?, status='new' WHERE detail IN ('l3-old','l2-old')", (old_ts,))
-    con.execute("UPDATE events SET ts=?, status='acked' WHERE detail='acked'", (old_ts,))
-    con.execute("UPDATE events SET ts=?, status='new' WHERE detail='l3-fresh'", (new_ts,))
-    con.commit()
-    con.close()
+    with s._conn() as con:  # T-302：_conn 现为 contextmanager（线程本地连接）
+        con.execute("UPDATE events SET ts=?, status='new' WHERE detail IN ('l3-old','l2-old')", (old_ts,))
+        con.execute("UPDATE events SET ts=?, status='acked' WHERE detail='acked'", (old_ts,))
+        con.execute("UPDATE events SET ts=?, status='new' WHERE detail='l3-fresh'", (new_ts,))
     yield s
 
 
@@ -47,9 +45,8 @@ def test_escalate_once_send_injection_and_mark(store, monkeypatch):
     assert len(sends) == 1 and "⏰ 未处置提醒" in sends[0][1] and "l3-old" in sends[0][1]
     # escalated_ts 已写入；再跑不重复（105 空帧教训：状态必须清）
     assert escalation.escalate_once(store, datetime.now())["checked"] == 0
-    con = store._conn()
-    row = con.execute("select escalated_ts from events where detail='l3-old'").fetchone()
-    con.close()
+    with store._conn() as con:
+        row = con.execute("select escalated_ts from events where detail='l3-old'").fetchone()
     assert row[0]
 
 

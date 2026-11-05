@@ -129,7 +129,16 @@ def test_backlog_drains_without_dir_change(env, monkeypatch):
 
 
 def test_add_folder_camera_validation(env, monkeypatch):
+    from pathlib import Path as _P
+    import secrets as _secrets
     from app.models import CameraCreate
+    # 本机 TEMP 落在 C:\Windows\Temp → T-111 系统目录黑名单先于其余检查拒绝；
+    # 旁路目录隔离产品规则与本用例意图（测的是 missing/数据目录冲突语义）
+    base = _P("D:/tmp") / ("ls-foldertest-" + _secrets.token_hex(4))
+    (base / "data").mkdir(parents=True, exist_ok=True)  # data_dir 必须存在（走数据目录冲突分支）
+    monkeypatch.setattr(settings, "data_dir", base / "data")
+    monkeypatch.setenv("APPDATA", str(base / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(base / "localappdata"))
     api.store = env["store"]
     monkeypatch.setattr(api, "manager", None)
     with pytest.raises(HTTPException) as e1:
@@ -139,6 +148,8 @@ def test_add_folder_camera_validation(env, monkeypatch):
     with pytest.raises(HTTPException) as e2:
         api.add_camera(CameraCreate(name="data", source=str(settings.data_dir),
                                     type="folder", autostart=False))
+    import shutil
+    shutil.rmtree(base, ignore_errors=True)
     assert e2.value.status_code == 400 and "数据目录" in str(e2.value.detail)
 
 

@@ -1269,7 +1269,7 @@
     "/api/cameras/{cid}/webrtc": {
       "get": {
         "summary": "Camera Webrtc",
-        "description": "返回该路流的 go2rtc WebRTC 信令地址（浏览器直连 go2rtc :1984）。",
+        "description": "T-102：返回经 FastAPI 鉴权代理的相对 WS 路径（浏览器不再直连 go2rtc :1984）。\n\n前端按 location 组装 ws/wss（http→ws、https→wss），令牌走 Sec-WebSocket-Protocol\n子协议（T-106），媒体面仍在 go2rtc :8555（webrtc.candidates 可配跨网段地址）。",
         "operationId": "camera_webrtc_api_cameras__cid__webrtc_get",
         "parameters": [
           {

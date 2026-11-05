@@ -37,7 +37,7 @@ def test_write_request_audited(client):
     items = _audit_rows(client)
     row = next(x for x in items if x["action"] == "POST /api/cameras")
     assert row["request_id"] == rid  # 与响应头一致
-    assert row["actor"] == "anonymous"  # 未启用令牌 → anonymous
+    assert row["actor"] == "anonymous(auth-off)"  # T-113：未启用令牌的匿名写入如实标注
     assert row["status_code"] == 200
     assert row["target"] is None  # 创建端点路径无 ID → target 为空
     # 带 ID 的路径：target 提取（删除该摄像头，产生 DELETE /api/cameras/{cid}）
@@ -58,7 +58,7 @@ def test_unauthorized_write_also_audited(client, monkeypatch):
         assert r.status_code == 401
         items = _audit_rows(c, token="tok87")
         row = next(x for x in items if x["action"] == "POST /api/cameras")
-        assert row["status_code"] == 401 and row["actor"] == "anonymous"
+        assert row["status_code"] == 401 and row["actor"] == "rejected"  # T-113：未授权写如实标注
 
 
 def test_body_secrets_not_in_audit(client):

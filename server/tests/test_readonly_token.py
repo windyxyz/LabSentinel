@@ -23,9 +23,9 @@ def _matrix(client):
     rr = client.get("/api/cameras")
     rr_read = client.get("/api/cameras", headers={"X-Admin-Token": "read-tok"})
     rr_admin = client.get("/api/cameras", headers={"X-Admin-Token": "adm-tok"})
-    wr = client.post("/api/cameras", json={"name": "x", "type": "file", "source": "s"},
+    wr = client.post("/api/cameras", json={"name": "x", "type": "file", "source": "s.mp4"},
                      headers={"X-Admin-Token": "read-tok"})
-    wa = client.post("/api/cameras", json={"name": "y", "type": "file", "source": "s"},
+    wa = client.post("/api/cameras", json={"name": "y", "type": "file", "source": "s.mp4"},
                      headers={"X-Admin-Token": "adm-tok"})
     return rr.status_code, rr_read.status_code, rr_admin.status_code, wr.status_code, wa.status_code
 
@@ -77,7 +77,7 @@ def test_matrix_read_unprotected_stays_public(isolated):
     settings.auth_read_protected = False
     with TestClient(app) as c:
         assert c.get("/api/cameras").status_code == 200  # 公开读
-        assert c.post("/api/cameras", json={"name": "x", "type": "file", "source": "s"},
+        assert c.post("/api/cameras", json={"name": "x", "type": "file", "source": "s.mp4"},
                       ).status_code == 401  # 写仍需管理令牌
 
 
@@ -85,15 +85,16 @@ def test_read_token_write_401_message(isolated):
     settings.admin_token = "adm-tok"
     settings.read_token = "read-tok"
     with TestClient(app) as c:
-        r = c.post("/api/cameras", json={"name": "x", "type": "file", "source": "s"},
+        r = c.post("/api/cameras", json={"name": "x", "type": "file", "source": "s.mp4"},
                    headers={"X-Admin-Token": "read-tok"})
         assert r.status_code == 401
         assert "无写权限" in r.json()["detail"]
 
 
-def test_ws_read_token(isolated):
-    settings.admin_token = "adm-tok"
-    settings.read_token = "read-tok"
+def test_ws_read_token(isolated, monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "adm-tok")
+    monkeypatch.setattr(settings, "read_token", "read-tok")
+    monkeypatch.setattr(settings, "auth_read_protected", True)  # 显式声明，不依赖前序测试状态
     with TestClient(app) as c:
         import pytest as _p
         with _p.raises(Exception):
