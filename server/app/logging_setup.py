@@ -8,6 +8,7 @@
 """
 import logging
 import os
+import sys
 import time
 from collections import deque
 from logging.handlers import RotatingFileHandler
@@ -95,9 +96,52 @@ def setup_file_logging(data_dir: Path | None = None) -> Path | None:
             root.setLevel(level)
         root.addHandler(h)
         _file_handler = h
+        _attach_print_tee()  # T-504（B-22）：历史 print 输出同样进轮转文件（/api/logs 可查）
         return target
     except OSError:
         return None  # 目录不可写等：文件日志静默关闭，console 照常
+
+
+class _PrintTee:
+    """T-504：stdout 行级 tee——把各模块的历史 print（如 [engine]/[cam-1]/[retention]）
+    以 INFO 级别双写进 logging（→ server.log 轮转文件），print 本身照常上控制台。
+    替代方案是全仓 100+ 处 print 逐个改 logging；该重定向以零侵入达成同等可观测性。"""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._buf = ""
+
+    def write(self, s):
+        self._stream.write(s)
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                logging.getLogger("app.stdout").info(line.rstrip())
+
+    def flush(self):
+        self._stream.flush()
+
+    def isatty(self):
+        return getattr(self._stream, "isatty", lambda: False)()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+_tee_attached = False
+
+
+def _attach_print_tee() -> None:
+    global _tee_attached
+    if _tee_attached or os.environ.get("LS_LOG_TEE", "").strip().lower() in ("0", "false"):
+        return
+    # pytest 的捕获流不接（caplog 已覆盖）；仅真实 stdout/stderr 场景挂
+    out = sys.__stdout__
+    if out is None:
+        return
+    sys.stdout = _PrintTee(out)  # noqa: A001
+    _tee_attached = True
 
 
 def uptime_s() -> int:

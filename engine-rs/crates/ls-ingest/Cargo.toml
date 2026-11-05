@@ -1,0 +1,9 @@
+[package]
+name = "ls-ingest"
+description = "LabSentinel 取流：ffmpeg 子进程解码（RTSP/文件通用，rawvideo 管道读帧，T-326）——按 analysis_fps 抽帧、断流指数退避重连"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }

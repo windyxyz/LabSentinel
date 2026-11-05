@@ -399,6 +399,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ls-infer"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ls-ingest"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "ls-proto"
 version = "0.1.0"
 dependencies = [

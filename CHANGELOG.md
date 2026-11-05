@@ -40,6 +40,14 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-504（B-22）：stdout 行级 tee——各模块历史 print 以 INFO 双写进 logging（→
+  server.log 轮转），/api/logs 可查后端日志；LS_LOG_TEE=0 可关。pytest 捕获流不接。
+- T-326（L1/Rust）：ls-ingest——ffmpeg 子进程取流（RTSP/文件通用，rawvideo 管道，
+  fps+scale 交给 ffmpeg 滤镜链），断流指数退避（0.5s×2^n 上限 30s）；合成视频实测
+  2s@5fps 抽 ~10 帧 BGR。
+- T-325（L1/Rust）：ls-infer 后处理纯 Rust 层——letterbox 几何（与 Python 逐位对齐）、
+  YOLO 反变换解码、类别最优分、NMS；ort 推理层 feature=ort 留接口（libclang 环境具备
+  后启用）。Rust workspace 全测试通过（ls-core/ls-track/ls-ingest/ls-infer/ls-proto/ls-analyzer）。
 - S5 可维护性第一批：T-501 discovery 改 defusedxml（防 XXE，依赖入锁）；T-502 CSV
   公式注入防护统一到 app/csvsafe.py（事件/证据包导出补齐）；T-506 Service Worker
   只缓存 2xx 导航响应（B-25）；T-507 pydantic v2 ConfigDict（弃用告警清零）；

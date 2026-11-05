@@ -5,6 +5,8 @@ members = [
     "crates/ls-track",
     "crates/ls-proto",
     "crates/ls-analyzer",
+    "crates/ls-ingest",
+    "crates/ls-infer",
 ]
 
 [workspace.package]

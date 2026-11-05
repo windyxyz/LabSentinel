@@ -1,0 +1,12 @@
+[package]
+name = "ls-infer"
+description = "LabSentinel 推理：YOLO 后处理（decode/NMS 纯 Rust，与 Python 共享检测向量）+ ort 推理（feature=ort，load-dynamic）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
