@@ -1,0 +1,24 @@
+[package]
+name = "ls-analyzer"
+description = "LabSentinel Rust 分析器 sidecar（gRPC 服务，T-327）：配置快照/摄像头生命周期/事件流/状态；数据面（ingest/infer）由 T-325/T-326 填充"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ls-analyzer"
+path = "src/main.rs"
+
+[dependencies]
+ls-proto = { path = "../ls-proto" }
+ls-core = { path = "../ls-core" }
+ls-track = { path = "../ls-track" }
+tonic = "0.13"
+prost = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

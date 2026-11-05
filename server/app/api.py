@@ -900,7 +900,9 @@ def camera_status(cid: int):
     out = {"id": cid, "name": cam["name"], "type": cam["type"], "status": cam["status"],
            "fps": None, "last_frame_ts": None, "frame_age_s": None, "last_error": None,
            "last_error_ts": None, "reconnect_count": 0, "opened_at": None, "frames_total": 0,
-           "kind": "folder" if cam["type"] == "folder" else "video"}
+           "kind": "folder" if cam["type"] == "folder" else "video",
+           # T-336：迁移期观测——本路分析器实现（python|rust），切换/回退以设置页为准
+           "analyzer": cam.get("analyzer") or settings.analyzer_default}
     if w is not None:
         lfw = w.last_frame_ts
         out.update({
