@@ -1,4 +1,5 @@
 """ONNX Runtime 推理引擎：后端自动降级 directml → vitisai → cpu（M0 实测三档均可用）。"""
+import os
 import threading
 import time
 from pathlib import Path
@@ -72,7 +73,14 @@ class Engine:
                 settings.model_int8 if name == "vitisai" else settings.model_fp32)
             try:
                 t0 = time.perf_counter()
-                sess = ort.InferenceSession(model, providers=_providers_for(name))
+                so = ort.SessionOptions()
+                so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL  # T-304
+                if name == "cpu":
+                    so.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)  # T-304
+                if name.startswith("Dml"):
+                    so.enable_mem_pattern = False  # T-304：DML 官方建议
+                sess = ort.InferenceSession(model, sess_options=so,
+                                            providers=_providers_for(name))
                 if not sess.get_providers()[0].startswith(("Dml", "VitisAI")) and name != "cpu":
                     continue  # 实际没拿到目标后端
                 self.sess, self.backend = sess, name
@@ -186,10 +194,7 @@ class PpeEngine(Engine):
         if not idx:
             return []
         conf = conf if conf is not None else settings.conf_thres
-        canvas, r, dx, dy = self._letterbox(frame_bgr)
-        rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        blob = np.transpose(rgb, (2, 0, 1))[None]
-        out = self._run(blob)[0][0]  # sess.run→[(1,C,N)]，[0][0]→(C,N)=(4+num_cls,N)
+        out = self.detect_all_raw(frame_bgr)  # T-301：单次整图推理，各类别共享
         pred = out.T
         best = np.zeros(pred.shape[0], dtype=np.float32)
         for i in idx:
@@ -197,6 +202,36 @@ class PpeEngine(Engine):
         m = best > conf
         if not m.any():
             return []
+        boxes = self._decode_boxes(out, m)  # (x1,y1,x2,y2) 反 letterbox
+        keep = self._nms(boxes, best[m], settings.iou_thres)
+        return [Detection(boxes[i].tolist(), float(best[m][i]), 0) for i in keep]
+
+    def detect_all_raw(self, frame_bgr):
+        """T-301（PF-01）：一次 letterbox+整图推理，返回 (原始输出, 反letterbox几何)。
+        调用方（vision.ppe_boxes）在同一次调用内把 out 复用到全部类别——
+        旧实现每个类别各跑一次整图推理（3 人同帧 ×2 类 = 6 次整图）。"""
+        canvas, r, dx, dy = self._letterbox(frame_bgr)
+        rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        blob = np.transpose(rgb, (2, 0, 1))[None]
+        out = self._run(blob)[0][0]  # (4+C, N)
+        return out, (r, dx, dy)
+
+    def detect_class_from_raw(self, out, geom, class_name: str, conf: float):
+        """共享推理输出的类别解码（不再触发推理）。精确匹配优先。"""
+        want = class_name.lower()
+        idx = [i for i, n in enumerate(self.class_names) if n == want]
+        if not idx:
+            idx = [i for i, n in enumerate(self.class_names) if want in n]
+        if not idx:
+            return []
+        pred = out.T
+        best = np.zeros(pred.shape[0], dtype=np.float32)
+        for i in idx:
+            best = np.maximum(best, pred[:, 4 + i])
+        m = best > conf
+        if not m.any():
+            return []
+        r, dx, dy = geom
         boxes = np.stack([
             (pred[m, 0] - pred[m, 2] / 2 - dx) / r,
             (pred[m, 1] - pred[m, 3] / 2 - dy) / r,
@@ -205,6 +240,11 @@ class PpeEngine(Engine):
         ], axis=1)
         keep = self._nms(boxes, best[m], settings.iou_thres)
         return [Detection(boxes[i].tolist(), float(best[m][i]), 0) for i in keep]
+
+    def _decode_boxes(self, out, mask):
+        """兼容保留：无几何时直接按当前缓存解码（仅内部调用）。"""
+        pred = out.T
+        return pred[mask, :4]
 
 
 _ppe_engine: PpeEngine | None = None

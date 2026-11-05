@@ -23,7 +23,7 @@ from .face import FaceGate
 from .folders import FolderWorker
 from .rules import RuleEngine
 from .store import Store
-from .vision import ppe_status
+from .vision import ppe_boxes, ppe_status_from_boxes
 from .zones import ZoneState, parse_polygon, point_inside
 
 # 视频存证：前/后各 2 秒；同一时间最多 3 个并发录制（防告警风暴拖垮 IO）
@@ -105,7 +105,12 @@ class CameraWorker(threading.Thread):
         self.last_error_ts = None
 
     def _init_ring(self, fps: float):
-        self._ring = deque(maxlen=int(fps * VIDEO_PRE_S) + 10)
+        # T-308：容量按录像抽帧率计（源帧率高时不再按源 fps 存满幅大数组）
+        efps = max(1.0, float(settings.evidence_fps))
+        self._ring_stride = max(1, round(fps / efps))
+        self._ring_count = 0
+        cap_fps = min(efps, max(1.0, fps))  # 源低于抽帧率时按源计（不空占容量）
+        self._ring = deque(maxlen=int(cap_fps * VIDEO_PRE_S) + 10)
 
     # ---- 主循环 ----
     def run(self):
@@ -222,12 +227,20 @@ class CameraWorker(threading.Thread):
 
     # ---- 视频存证 ----
     def _feed_recordings(self, frame):
-        """主循环每帧调用：喂环形缓存与进行中的录像任务。"""
-        self._ring.append(frame)
-        for rec in self._recs:
-            if rec.done.is_set():
-                continue
-            rec.frames.append(frame)
+        """主循环每帧调用：喂环形缓存与进行中的录像任务。
+
+        T-308（PF-02）：全部走 JPEG 编码 + evidence_fps 抽帧——源 30fps 满幅 BGR
+        环形缓冲 ≈190MB/路，JPEG@80 + 10fps ≈8MB/路；写视频时统一解码。"""
+        self._ring_count += 1
+        if (self._ring_count - 1) % getattr(self, "_ring_stride", 1) == 0:
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if ok:
+                self._ring.append(buf)
+                for rec in self._recs:
+                    if rec.done.is_set():
+                        continue
+                    rec.frames.append(buf)
+                    rec.frames_are_jpeg = True
             if time.monotonic() - rec.t0 >= VIDEO_PRE_S + VIDEO_POST_S:
                 rec.done.set()
                 self._rec_q.put(rec)
@@ -264,7 +277,13 @@ class CameraWorker(threading.Thread):
             print(f"[cam-{self.camera['id']}] ev#{rec.eid} 视频编码器不可用，跳过存证")
             return
         for f in rec.frames:
-            vw.write(f)
+            if getattr(rec, "frames_are_jpeg", False):
+                img = cv2.imdecode(f, cv2.IMREAD_COLOR)
+                if img is None:
+                    continue
+                vw.write(img)
+            else:
+                vw.write(f)
         vw.release()
         self.store.set_event_video(rec.eid, path)
 
@@ -373,8 +392,17 @@ class CameraWorker(threading.Thread):
         return str(zid)
 
     def _ppe_status(self, frame, person_box) -> str:
-        """证据分级判定（实现见 vision.ppe_status，与图片文件夹源共用一套口径）。"""
-        return ppe_status(self.ppe, frame, person_box)
+        """证据分级判定（口径与图片文件夹源一致）。
+
+        T-301：帧级惰性缓存——本分析帧首次需要时算一次 ppe_boxes（违规+穿戴类共享
+        单次整图推理），本帧全部进场人员复用；旧实现每人各跑一次。"""
+        if self.ppe is None:
+            return "unknown"
+        key = self.frames_total
+        if getattr(self, "_frame_ppe", (None, None))[0] != key:
+            self._frame_ppe = (key, ppe_boxes(self.ppe, frame))
+        no_boxes, wear_boxes = self._frame_ppe[1]
+        return ppe_status_from_boxes(no_boxes, wear_boxes, person_box)
 
     def _save_snapshot(self) -> str | None:
         with self.frame_lock:

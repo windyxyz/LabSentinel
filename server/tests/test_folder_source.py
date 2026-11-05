@@ -37,15 +37,26 @@ class FakeEngine:
 
 
 class FakePpe:
-    """按类别返回预置框；calls 用于断言"每张图只推理一次/类"，不随人数重复。"""
+    """按 T-301 新接口桩：detect_all_raw=一次整图推理（raw_calls 计数），
+    detect_class_from_raw=纯解码（decode_calls 计数，不触发推理）。"""
 
     def __init__(self, no_boxes=(), wear_boxes=()):
         self.no = [FakeDet(b) for b in no_boxes]
         self.wear = [FakeDet(b) for b in wear_boxes]
-        self.calls = 0
+        self.raw_calls = 0
+        self.decode_calls = 0
+
+    def detect_all_raw(self, frame):
+        self.raw_calls += 1
+        return ("raw", (1.0, 0.0, 0.0))
+
+    def detect_class_from_raw(self, out, geom, name, conf=None):
+        self.decode_calls += 1
+        return self.no if name == settings.ppe_violation_class else self.wear
 
     def detect_class(self, frame, name, conf=None):
-        self.calls += 1
+        # 兼容旧直调路径（pipeline 单人判定等）
+        self.decode_calls += 1
         return self.no if name == settings.ppe_violation_class else self.wear
 
 
@@ -272,8 +283,9 @@ def test_ppe_inference_once_per_image(env):
     ppe = FakePpe(no_boxes=[])
     w.ppe = ppe
     w._scan_once(FakeEngine(people), root)
-    # 1 次违规类 + 1 次穿戴类（默认 "lab coat"）= 2 次，不随 3 个人翻倍
-    assert ppe.calls == 2
+    # T-301：1 次整图推理（不随人数/类别翻倍）+ 2 次纯解码（违规类+穿戴类）
+    assert ppe.raw_calls == 1, ppe.raw_calls
+    assert ppe.decode_calls == 2, ppe.decode_calls
 
 
 def test_occupancy_over_marks_violation(env):

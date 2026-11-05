@@ -5,6 +5,7 @@
 """
 import asyncio
 import concurrent.futures
+from collections import deque
 import json
 import smtplib
 import socket
@@ -499,9 +500,13 @@ class AlertDispatcher:
         self.channels = [WeComChannel(), DingTalkChannel(), FeishuChannel(),
                          ServerChanChannel(), PushPlusChannel(), QmsgChannel(),
                          EmailChannel(), GenericWebhookChannel()]  # 任务67：+通用 Webhook
-        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=2,
+        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=4,
                                                            thread_name_prefix="alert")
         self._closing = threading.Event()  # 108：服务退出时打断退避等待，避免拖住进程
+        # T-305（PF-06/F-11）：每渠道滑动窗口限流（默认 20 条/分钟，企微/钉钉官方口径）；
+        # 超限不丢弃——累计 pending，窗口放行后的首条文本附摘要
+        self._rate: dict[str, deque] = {}
+        self._rate_pending: dict[str, int] = {}
 
     def shutdown(self, wait: bool = False, timeout: float = 3.0):
         """停止接收新投递并尽量取消排队任务；最多等 timeout 秒（108）。
@@ -571,8 +576,13 @@ class AlertDispatcher:
                 continue
             # 任务67：send 支持 event 参数的渠道（通用 Webhook）附带完整事件行，其余渠道签名不变
             extra = event_row if _send_accepts_event(ch) else None
-            self._pool.submit(self._deliver_with_retry, ch, event_id,
-                              event_row["level"], text, extra)
+            if self._rate_gate(ch_name):
+                summary = self._take_pending(ch_name)
+                send_text = text + (f"\n（上一窗口合并 {summary} 条）" if summary else "")
+                self._pool.submit(self._deliver_with_retry, ch, event_id,
+                                  event_row["level"], send_text, extra)
+            else:
+                self._pend(ch_name)  # T-305：风暴时限流合并，不丢弃不刷屏
 
     def dispatch_text(self, event_row: dict, text: str, kind: str = "escalation") -> bool:
         """T-207（B-13）：外部文本（升级提醒等）走完整派发链——静默/渠道过滤/投递记录/
@@ -595,10 +605,36 @@ class AlertDispatcher:
             if reason:
                 continue
             extra = event_row if _send_accepts_event(ch) else None
-            self._pool.submit(self._deliver_with_retry, ch, event_id,
-                              event_row["level"], text, extra)
-            submitted += 1
+            if self._rate_gate(ch_name):
+                summary = self._take_pending(ch_name)
+                send_text = text + (f"\n（上一窗口合并 {summary} 条）" if summary else "")
+                self._pool.submit(self._deliver_with_retry, ch, event_id,
+                                  event_row["level"], send_text, extra)
+                submitted += 1
+            else:
+                self._pend(ch_name)
         return submitted > 0
+
+    _RATE_WINDOW_S = 60.0
+    _RATE_MAX = 20  # 企微/钉钉官方 20 条/分钟
+
+    def _rate_gate(self, ch_name: str) -> bool:
+        """T-305：滑窗闸门——窗口内 <max 放行并记账；超限返回 False（调用方挂 pending）。"""
+        dq = self._rate.setdefault(ch_name, deque())
+        now = time.monotonic()
+        while dq and dq[0] < now - self._RATE_WINDOW_S:
+            dq.popleft()
+        if len(dq) < self._RATE_MAX:
+            dq.append(now)
+            return True
+        return False
+
+    def _pend(self, ch_name: str) -> None:
+        self._rate_pending[ch_name] = self._rate_pending.get(ch_name, 0) + 1
+
+    def _take_pending(self, ch_name: str) -> int:
+        n = self._rate_pending.pop(ch_name, 0)
+        return n
 
     def _deliver_with_retry(self, ch, event_id: int, level: int, text: str, event: dict | None = None):
         """单渠道投递：记录 → 重试（指数退避）→ 死信。线程池内执行。"""

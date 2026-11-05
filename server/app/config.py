@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     analysis_fps: float = 5.0  # 每路分析帧率上限（检测不必逐帧）
     zone_enter_frames: int = 2  # T-306（B-12）：连续 N 帧在内才判进场（单帧漏检不抖动）
     zone_exit_frames: int = 3  # T-306：连续 N 帧不在/消失才判离场
+    evidence_fps: float = 10.0  # T-308：录像抽帧率（与源/分析帧率解耦）
     deterministic: bool = False  # T-321（L0）：确定性模式——文件源不按墙钟节奏、事件/规则时间取视频时间
     analyzer_default: str = "python"  # T-310/T-327（L1）：新装默认后端 python|rust（逐路可覆盖 cameras.analyzer）
     file_loop: bool = False  # 文件源循环播放（压测/演示用；默认关闭，正常播放完即止）

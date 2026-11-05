@@ -42,17 +42,20 @@ def normalize_frame(img: np.ndarray) -> np.ndarray:
 def ppe_boxes(ppe, frame: np.ndarray):
     """一次推理拿到全图实验服证据框：([违规框], [穿戴框])。
 
-    图片文件夹可能一张图多人，逐人调用 detect_class 会重复跑模型；先按图取框，
-    再对每个人做框重叠判定（ppe_status_from_boxes），每人只花几何计算。
+    T-301（PF-01）：违规类 + 全部穿戴类共享同一次整图推理（旧实现逐类别各跑一次，
+    3 人同帧进场 ×2 类 = 6 次整图推理）；视频 worker 另做帧级缓存（每分析帧最多一次）。
     """
     if ppe is None:
         return [], []
+    out, geom = ppe.detect_all_raw(frame)
     no_boxes = [det.xyxy for det in
-                ppe.detect_class(frame, settings.ppe_violation_class, conf=settings.ppe_conf)]
+                ppe.detect_class_from_raw(out, geom, settings.ppe_violation_class,
+                                          conf=settings.ppe_conf)]
     wear_boxes = []
     for name in settings.ppe_class_names.split(","):
         wear_boxes += [det.xyxy for det in
-                       ppe.detect_class(frame, name.strip(), conf=settings.ppe_wearing_conf)]
+                       ppe.detect_class_from_raw(out, geom, name.strip(),
+                                                 conf=settings.ppe_wearing_conf)]
     return no_boxes, wear_boxes
 
 

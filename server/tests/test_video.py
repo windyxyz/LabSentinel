@@ -19,7 +19,8 @@ def test_ring_buffer_capacity():
     w = CameraWorker(_CAM, None, None)
     assert VIDEO_PRE_S == 2.0 and VIDEO_POST_S == 2.0
     w._init_ring(30)
-    assert w._ring.maxlen == 30 * 2 + 10
+    # T-308：容量按 evidence_fps（默认 10）×PRE 秒 + 10 抽帧余量
+    assert w._ring.maxlen == 10 * 2 + 10
     for i in range(200):
         w._ring.append(np.full((720, 1280, 3), i % 255, np.uint8))
     assert len(w._ring) == w._ring.maxlen
