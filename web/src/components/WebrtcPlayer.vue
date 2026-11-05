@@ -31,6 +31,7 @@
 -->
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { adminToken } from '../api'
 
 const props = defineProps({
   /** go2rtc 信令 WebSocket 完整地址，如 ws://localhost:1984/api/ws?src=1 */
@@ -154,7 +155,13 @@ function connect() {
     if (pc && (pc.connectionState === 'failed' || pc.connectionState === 'disconnected')) markStreamBroken()
   }
 
-  ws = new WebSocket(props.wsUrl)
+  // T-102：服务端返回相对路径 /ws/webrtc/{cid}（经 FastAPI 鉴权代理），
+  // 按 location 组装同源 ws/wss；兼容旧绝对 ws:// 地址（回滚用）。
+  const raw = String(props.wsUrl || '')
+  const wsUrl = raw.startsWith('ws') ? raw
+    : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + raw
+  const t = adminToken.get()
+  ws = new WebSocket(wsUrl, t ? ['labsentinel', 'bearer.' + t] : undefined)
 
   ws.onopen = async () => {
     try {

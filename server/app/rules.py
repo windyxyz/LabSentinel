@@ -1,7 +1,9 @@
 """告警规则引擎：区域 × 时段 × 行为 × 级别 × 冷却期。"""
+import functools
 import time
 from datetime import datetime
 
+from . import configcache
 from .store import Store
 
 
@@ -37,9 +39,20 @@ class RuleEngine:
                 allowed.add(part)
         if not allowed or str(now.isoweekday()) not in allowed:
             return False
-        if rule.get("holiday_only") and not self.store.is_holiday(now.date()):
+        if rule.get("holiday_only") and not self._holiday(now.date()):
             return False
         return True
+
+    @functools.lru_cache(maxsize=64)
+    def _holiday_cached(self, day_iso: str, version: int, weekend_flag: bool) -> bool:
+        # T-303：日期 LRU（config_version + 周末开关 参与 key，写入/配置变更自动失效）
+        from datetime import date as _date
+        return self.store.is_holiday(_date.fromisoformat(day_iso))
+
+    def _holiday(self, d) -> bool:
+        from .config import settings
+        return self._holiday_cached(d.isoformat(), self.store.config_version(),
+                                    bool(settings.weekend_is_holiday))
 
     def prune(self, now: float | None = None, max_age_s: int | None = None) -> int:
         """回收过期冷却键（106）：超过 max(cooldown, 3600s) 的记录已不可能再抑制告警。
@@ -48,7 +61,7 @@ class RuleEngine:
         """
         now = time.monotonic() if now is None else now
         if max_age_s is None:
-            cooldowns = [int(r.get("cooldown_s") or 0) for r in self.store.rules()]
+            cooldowns = [int(r.get("cooldown_s") or 0) for r in configcache.rules(self.store)]
             max_age_s = max([3600, *cooldowns])
         cutoff = now - max(0, int(max_age_s))
         stale = [key for key, ts in self._last_fire.items() if ts < cutoff]
@@ -74,7 +87,7 @@ class RuleEngine:
         now_mono = time.monotonic() if now_mono is None else now_mono
         self._maybe_prune(now_mono)
         now = datetime.now() if now_dt is None else now_dt
-        for rule in self.store.rules(camera_id):
+        for rule in configcache.rules(self.store, camera_id):  # T-303：热路径不每帧查库
             if not rule["enabled"] or rule["behavior"] != behavior:
                 continue
             if rule["zone_id"] is not None and zone_id is not None and rule["zone_id"] != zone_id:
@@ -91,5 +104,5 @@ class RuleEngine:
         return None
 
     def occupancy_rules(self, camera_id: int):
-        return [r for r in self.store.rules(camera_id)
+        return [r for r in configcache.rules(self.store, camera_id)
                 if r["enabled"] and r["behavior"] == "occupancy_over"]

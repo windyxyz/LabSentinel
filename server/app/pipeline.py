@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import supervision as sv
 
+from . import configcache
 from .alerts import dispatcher
 from .config import settings
 from .engine import get_engine, get_ppe_engine
@@ -269,7 +270,7 @@ class CameraWorker(threading.Thread):
     # ---- 单帧分析 ----
     def _analyze(self, engine, frame):
         dets = engine.detect_persons(frame)
-        zones = self.store.zones(self.camera["id"])
+        zones = configcache.zones(self.store, self.camera["id"])  # T-303：配置版本命中即缓存
         zone_polys = {z["id"]: parse_polygon(z["polygon"]) for z in zones}
         zone_ids = set(zone_polys)
         for zid in list(self._zone_states):
@@ -352,7 +353,7 @@ class CameraWorker(threading.Thread):
                                  f"在场人数 {occupancy} 超过阈值 {rule['threshold']}", level=rule["level"])
 
     def _zone_name(self, zid):
-        for z in self.store.zones(self.camera["id"]):
+        for z in configcache.zones(self.store, self.camera["id"]):
             if z["id"] == zid:
                 return z["name"]
         return str(zid)

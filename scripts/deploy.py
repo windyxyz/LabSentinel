@@ -631,7 +631,10 @@ def write_go2rtc_yaml() -> None:
 
     打包时 yaml 里是打包机的绝对路径，新机器 go2rtc 先于服务端启动会读到坏流——
     部署时直接重写为本机路径，省掉首次启动的坏流窗口。
+    T-101：与服务端同构——回环监听 + 鉴权 + 去 origin:* + 媒体端口独立。
     """
+    import json as _json
+    import secrets as _secrets
     import sqlite3 as _sq
     db_path = ROOT / "server" / "data" / "labsentinel.db"
     if not db_path.exists():
@@ -639,15 +642,33 @@ def write_go2rtc_yaml() -> None:
     db = _sq.connect(db_path)
     rows = db.execute("select id, source from cameras where type='file' order by id").fetchall()
     db.close()
-    lines = ["# 本文件由 LabSentinel 服务端自动生成（摄像头增删时重写），勿手工编辑",
-             'api:', '  listen: ":1984"', '  origin: "*"',
-             'webrtc:', '  listen: ":1984"', 'streams:', '']
+    # 凭据与服务端共用同一份 data/go2rtc.secret（服务端首启生成；部署期先生成占位）
+    secret_path = db_path.parent / "go2rtc.secret"
+    if secret_path.exists():
+        try:
+            sd = _json.loads(secret_path.read_text("ascii"))
+            user, pwd = sd["username"], sd["password"]
+        except (OSError, ValueError, KeyError):
+            user, pwd = "ls-" + _secrets.token_urlsafe(12), _secrets.token_urlsafe(24)
+    else:
+        user, pwd = "ls-" + _secrets.token_urlsafe(12), _secrets.token_urlsafe(24)
+        secret_path.write_text(_json.dumps({"username": user, "password": pwd}), encoding="ascii")
+    lines = [
+        "# 本文件由 LabSentinel 服务端/部署脚本自动生成（摄像头增删时重写），勿手工编辑",
+        "api:", '  listen: "127.0.0.1:1984"',
+        f"  username: {_json.dumps(user)}", f"  password: {_json.dumps(pwd)}",
+        "# origin: 删除（禁止任意网页跨域读控制面）",
+        "webrtc:", '  listen: ":8555"',
+        "rtsp:", '  listen: ""',
+        "log:", "  level: warn",
+        "streams:",
+    ]
     for cid, src in rows:
         if src:
-            # YAML 双引号串里反斜杠是转义符：Windows 路径必须转成 /，
-            # 否则 go2rtc 解析报 "did not find expected hexdecimal number" 并整体忽略配置
+            # YAML 双引号串里反斜杠是转义符：Windows 路径必须转成 /；
+            # JSON 字符串转义挡引号/换行注入（T-103）
             forward = src.replace("\\", "/")
-            lines.append(f'  "{cid}": "ffmpeg:{forward}"')
+            lines.append(f"  {_json.dumps(str(cid))}: {_json.dumps('ffmpeg:' + forward)}")
     (ROOT / "tools" / "go2rtc.yaml").write_text("\n".join(lines), encoding="utf-8")
 
 

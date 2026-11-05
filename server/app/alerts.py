@@ -76,8 +76,9 @@ class WebSocketHub:
     def bind_loop(self, loop):
         self._loop = loop
 
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
+    async def connect(self, ws: WebSocket, subprotocol: str | None = None):
+        # T-106：客户端通过子协议传令牌时回显 labsentinel（浏览器 WebSocket 要求）
+        await ws.accept(subprotocol=subprotocol)
         self._clients.append(ws)
 
     def disconnect(self, ws: WebSocket):
@@ -94,14 +95,17 @@ class WebSocketHub:
             pass
 
     async def _broadcast(self, payload: dict):
-        dead = []
-        for ws in self._clients:
+        # T-201/B-19：并发发送 + 单客户端 2s 超时 + 异常统一清理（无残留连接）
+        text = json.dumps(payload, ensure_ascii=False)
+        clients = list(self._clients)
+
+        async def one(ws):
             try:
-                await ws.send_text(json.dumps(payload, ensure_ascii=False))
+                await asyncio.wait_for(ws.send_text(text), timeout=2.0)
             except Exception:  # noqa: BLE001
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
+                self.disconnect(ws)
+
+        await asyncio.gather(*(one(w) for w in clients), return_exceptions=True)
 
 
 class _HttpPushChannel:

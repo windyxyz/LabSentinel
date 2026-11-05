@@ -86,10 +86,14 @@ class Settings(BaseSettings):
     admin_token: str = ""
     auth_read_protected: bool = False  # true 时读操作也要求 token
     read_token: str = ""  # 只读令牌（任务88）：仅 admin_token 启用且读保护开启时可读；写永拒
+    auth_disabled: bool = False  # T-104/Q-02：显式逃生口；仅回环绑定时生效
+    trusted_hosts: str = "127.0.0.1,localhost,::1"  # T-105：Host 白名单（防 DNS Rebinding）
+    allowed_origins: str = ""  # T-105/T-106：逗号分隔额外同源白名单（移动端/桌面自定义 scheme）
 
     # go2rtc 流媒体网关（实时画面，见 app/go2rtc.py）
     go2rtc_api: str = "127.0.0.1:1984"  # go2rtc API 地址（本机）
     go2rtc_yaml: Path = BASE_DIR.parent / "tools" / "go2rtc.yaml"
+    folder_allowed_roots: str = ""  # T-111：图片文件夹允许根（分号/逗号分隔，空=系统黑名单模式）
 
     # 人脸比对（合规敏感，默认关闭；开启前必读 README 合规章节）
     face_enabled: bool = False

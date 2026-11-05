@@ -69,12 +69,21 @@ def test_auth_read_protected_flag(client, monkeypatch):
 
 
 def test_ws_close_4401(client, monkeypatch):
+    """T-106/Q-03：WS 与 HTTP 读口径一致——未开读保护时仅设管理令牌不要求 WS 令牌
+    （修正旧 B-04 反例）；开读保护后无令牌 4401、子协议/查询参数令牌可连。"""
     from starlette.websockets import WebSocketDisconnect
     monkeypatch.setattr(settings, "admin_token", "s3cret")
+    monkeypatch.setattr(settings, "auth_read_protected", False)
+    with client.websocket_connect("/ws/events") as ws:
+        assert ws is not None  # 口径一致：不需要令牌
+    monkeypatch.setattr(settings, "auth_read_protected", True)
     with pytest.raises(WebSocketDisconnect) as ei:
         with client.websocket_connect("/ws/events"):
             pass
     assert ei.value.code == 4401
-    # 带 token 正常连接
+    # 子协议传令牌（T-106 推荐形态，不进 URL）
+    with client.websocket_connect("/ws/events", subprotocols=["labsentinel", "bearer.s3cret"]) as ws:
+        assert ws is not None
+    # 兼容旧 ?token=（弃用期）
     with client.websocket_connect("/ws/events?token=s3cret") as ws:
         assert ws is not None

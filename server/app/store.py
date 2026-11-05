@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sqlite3
+import contextlib
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -218,6 +219,14 @@ def _mig_010(c: sqlite3.Connection):
       updated_ts TEXT NOT NULL)""")
 
 
+def _mig_011(c: sqlite3.Connection):
+    """v11（T-309）：events.snapshot 循环引用查询 + 投递表状态/渠道索引（只加索引）。"""
+    c.execute("CREATE INDEX IF NOT EXISTS idx_events_snapshot ON events(snapshot)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_deliveries_status ON alert_deliveries(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_deliveries_channel_status "
+              "ON alert_deliveries(channel, status)")
+
+
 # 版本化迁移（任务69）：只做加列/加表/索引，不做破坏性变更；每个迁移幂等、在事务内执行
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "events 增加 video/status/handled_by/handled_ts", _mig_001),
@@ -230,6 +239,7 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (8, "新增 rule_templates 规则模板表（任务116）", _mig_008),
     (9, "events 增加 VLM 复核列 ai_review/ai_review_ts/ai_review_model（任务124）", _mig_009),
     (10, "新增 app_settings 表（网页端告警渠道配置，任务140）", _mig_010),
+    (11, "查询索引：events.snapshot / alert_deliveries(status, channel)（T-309/PF-09）", _mig_011),
 ]
 SCHEMA_VERSION_LATEST = max(v for v, _d, _f in MIGRATIONS)
 
@@ -238,6 +248,10 @@ class Store:
     def __init__(self, path=None):
         self.path = str(path or settings.db_path)
         self._lock = threading.Lock()
+        # T-302（B-18/PF-11）：线程本地连接（每线程一条，复用连接 + PRAGMA 一次）；
+        # T-303：配置版本号（zones/rules/calendar/camera 写入即 bump，供 ConfigCache 失效）
+        self._local = threading.local()
+        self._config_version: int = 0
         with self._conn() as c:
             self._enable_wal(c)  # 任务64：WAL + synchronous=NORMAL（建库一次；失败只警告）
             c.executescript(_SCHEMA)
@@ -295,8 +309,27 @@ class Store:
         except sqlite3.DatabaseError as e:
             log.warning("WAL 启用失败（%s），继续用默认 journal 模式", e)
 
+    @contextlib.contextmanager
     def _conn(self):
-        return connect(self.path)
+        """T-302：线程本地连接；with 提交/回滚（语义不变），连接随线程复用而非每次新建。
+        check_same_thread 默认 True 与线程本地一致；异常回溯不再延迟关闭句柄。"""
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = connect(self.path)
+            self._local.conn = c
+        try:
+            yield c
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+
+    def config_version(self) -> int:
+        return self._config_version
+
+    def _bump(self) -> None:
+        """T-303：配置写入后递增版本（ConfigCache 据此失效）。"""
+        self._config_version += 1
 
     # ---- cameras ----
     def cameras(self):
@@ -312,13 +345,18 @@ class Store:
         with self._lock, self._conn() as c:
             cur = c.execute("INSERT INTO cameras(name,source,type,group_name) VALUES(?,?,?,?)",
                             (name, source, type_, group_name or ""))
-            return cur.lastrowid
+            cid = cur.lastrowid
+        self._bump()
+        return cid
 
     # ---- 摄像头分组（任务111）----
     def set_camera_group(self, cid, name: str) -> bool:
         with self._lock, self._conn() as c:
-            return c.execute("UPDATE cameras SET group_name=? WHERE id=?",
-                             (name or "", cid)).rowcount > 0
+            ok = c.execute("UPDATE cameras SET group_name=? WHERE id=?",
+                           (name or "", cid)).rowcount > 0
+        if ok:
+            self._bump()
+        return ok
 
     def camera_groups(self) -> list:
         """分组聚合：[{name, count, running}]；group_name='' 记作"未分组"在 API 层转换。"""
@@ -333,6 +371,7 @@ class Store:
             c.execute("DELETE FROM cameras WHERE id=?", (cid,))
             c.execute("DELETE FROM zones WHERE camera_id=?", (cid,))
             c.execute("DELETE FROM rules WHERE camera_id=?", (cid,))
+        self._bump()
 
     def clear_config(self):
         """清空 cameras/zones/rules（任务79 replace 导入用）；events 等用户数据不动。"""
@@ -340,6 +379,7 @@ class Store:
             c.execute("DELETE FROM cameras")
             c.execute("DELETE FROM zones")
             c.execute("DELETE FROM rules")
+        self._bump()
 
     # ---- 应用运行期配置（任务140：网页端告警渠道配置）----
     def app_settings(self, prefix: str = "") -> dict[str, str]:
@@ -507,11 +547,14 @@ class Store:
                 "INSERT INTO zones(camera_id,name,polygon) VALUES(?,?,?)",
                 (camera_id, name, json.dumps(polygon)),
             )
-            return cur.lastrowid
+            zid = cur.lastrowid
+        self._bump()
+        return zid
 
     def delete_zone(self, zid):
         with self._lock, self._conn() as c:
             c.execute("DELETE FROM zones WHERE id=?", (zid,))
+        self._bump()
 
     # ---- rules ----
     def rules(self, camera_id=None):
@@ -537,11 +580,14 @@ class Store:
                  r.get("threshold", 0), 1 if r.get("enabled", True) else 0,
                  r.get("days_of_week", "1,2,3,4,5,6,7"), 1 if r.get("holiday_only") else 0),
             )
-            return cur.lastrowid
+            rid = cur.lastrowid
+        self._bump()
+        return rid
 
     def delete_rule(self, rid):
         with self._lock, self._conn() as c:
             c.execute("DELETE FROM rules WHERE id=?", (rid,))
+        self._bump()
 
     # ---- 日历例外（任务112）----
     def calendar_exceptions(self) -> list:
@@ -556,11 +602,15 @@ class Store:
                 "SELECT 1 FROM calendar_exceptions WHERE date=?", (d,)).fetchone() is not None
             c.execute("INSERT OR REPLACE INTO calendar_exceptions(date, mode, note) VALUES(?,?,?)",
                       (d, mode, note))
-            return existed
+        self._bump()  # T-303：日历写入使 is_holiday LRU 失效
+        return existed
 
     def delete_calendar_exception(self, d: str) -> bool:
         with self._lock, self._conn() as c:
-            return c.execute("DELETE FROM calendar_exceptions WHERE date=?", (d,)).rowcount > 0
+            ok = c.execute("DELETE FROM calendar_exceptions WHERE date=?", (d,)).rowcount > 0
+        if ok:
+            self._bump()
+        return ok
 
     # ---- 规则模板（任务116）----
     def rule_templates(self) -> list:
@@ -684,7 +734,8 @@ class Store:
         sql = "SELECT * FROM alert_silences"
         if active_only:
             sql += " WHERE until_ts > ?"
-        rows = self._conn().execute(sql, (now,) if active_only else ()).fetchall()
+        with self._conn() as c:  # B-18：原来直接 .execute() 不进 with，连接悬空
+            rows = c.execute(sql, (now,) if active_only else ()).fetchall()
         return [dict(r) for r in rows]
 
     def delete_silence(self, sid: int) -> bool:

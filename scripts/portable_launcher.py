@@ -113,6 +113,13 @@ def first_run(cfg: dict) -> None:
         d.mkdir(parents=True, exist_ok=True)
     seed_if_empty()
     repair_media_paths()
+    # T-104（Q-02）：升级路径也要补生成令牌（旧 config.env 无 LS_ADMIN_TOKEN）
+    try:
+        sys.path.insert(0, str(SERVER))
+        from app.auth_setup import ensure_admin_token
+        ensure_admin_token(CONFIG, DATA)
+    except Exception as e:  # noqa: BLE001 令牌生成失败不阻断启动（退回无令牌模式 + 日志）
+        log.warning("首启/升级令牌生成失败（退回无令牌模式）: %s", e)
     if CONFIG.exists():
         return
     text = TEMPLATE.read_text(encoding="utf-8") if TEMPLATE.exists() else ""
@@ -121,6 +128,13 @@ def first_run(cfg: dict) -> None:
     text += f"\nLS_PPE_MODEL={model_abs}\nport={cfg.get('port', PORT_DEFAULT)}\n"
     CONFIG.write_text(text, encoding="utf-8")
     log.info("首次运行：config.env 已生成 %s", CONFIG)
+    # T-104（Q-02）：首启/升级自动生成管理令牌（只动 LS_ADMIN_TOKEN 一行，其余逐字保留）
+    try:
+        sys.path.insert(0, str(SERVER))
+        from app.auth_setup import ensure_admin_token
+        ensure_admin_token(CONFIG, DATA)
+    except Exception as e:  # noqa: BLE001 令牌生成失败不阻断启动（退回无令牌模式 + 日志）
+        log.warning("首启令牌生成失败（退回无令牌模式）: %s", e)
 
 
 def pick_port(cfg: dict) -> int:

@@ -122,6 +122,45 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="LabSentinel", version="0.1.0-alpha", lifespan=lifespan)
 app.include_router(router)
 
+# ---- T-105（S-03/P1）：Host 白名单（防 DNS Rebinding）----
+from starlette.middleware.trustedhost import TrustedHostMiddleware  # noqa: E402
+
+_allowed_hosts = [h.strip() for h in settings.trusted_hosts.split(",") if h.strip()] + ["testserver"]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
+
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _same_origin(request: Request) -> bool:
+    """T-105：写请求同源校验（Sec-Fetch-Site 优先，其次 Origin；无 Origin 视为非浏览器客户端放行）。"""
+    sfs = request.headers.get("sec-fetch-site")
+    if sfs is not None:
+        return sfs in ("same-origin", "none")  # none = 地址栏/书签/非浏览器
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    host = request.headers.get("host", "")
+    if origin.split("://", 1)[-1] == host:
+        return True
+    allowed = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+    return origin in allowed
+
+
+def _security_headers(response: Response) -> None:
+    """任务89 安全响应头（T-113/S-18：抽成函数，500 分支也调用）。"""
+    if not settings.security_headers:
+        return
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", settings.frame_options)
+    h.setdefault("Referrer-Policy", "no-referrer")
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    h.setdefault("Cross-Origin-Resource-Policy", "same-site")
+    if settings.csp:
+        name = "Content-Security-Policy-Report-Only" if settings.csp_report_only \
+            else "Content-Security-Policy"
+        h.setdefault(name, settings.csp)
+
 # ---- 写接口限流（任务90）：滑动窗口，内存实现，单进程 ----
 _rate_lock = threading.Lock()
 _rate_windows: dict[str, deque] = {}  # client_ip → [timestamps]
@@ -144,6 +183,13 @@ async def request_id_middleware(request: Request, call_next):
     rid = _client_request_id(request)
     request.state.request_id = rid
     request_id_var.set(rid)
+    # T-105：跨站写请求拒绝（防任意网页 fetch POST /api/system/shutdown 等简单请求 CSRF）
+    if (request.method in _UNSAFE_METHODS and request.url.path.startswith("/api/")
+            and not _same_origin(request)):
+        return JSONResponse({"detail": "跨站请求被拒绝", "request_id": rid,
+                             "code": "csrf_blocked"},
+                            status_code=403,
+                            headers={"X-Request-ID": rid, **({"Vary": "Origin"})})
     # 任务90：写接口限流（在 request_id 之后、业务之前；429 直接返回）
     if (request.method in ("POST", "PUT", "PATCH", "DELETE")
             and request.url.path.startswith("/api/")
@@ -176,31 +222,25 @@ async def request_id_middleware(request: Request, call_next):
         logging.getLogger("app.errors").exception(
             "[req=%s] %s %s 未捕获异常（中间件层）", rid, request.method, request.url.path)
         # 75 修复：错误体带 request_id，响应头也要带（原实现漏了头，前端拿不到关联 ID）
-        return JSONResponse({"detail": "服务器内部错误", "request_id": rid, "code": "internal_error"},
-                            status_code=500, headers={"X-Request-ID": rid})
+        resp500 = JSONResponse({"detail": "服务器内部错误", "request_id": rid, "code": "internal_error"},
+                               status_code=500, headers={"X-Request-ID": rid})
+        _security_headers(resp500)  # S-18：500 分支不再缺安全头
+        return resp500
     response.headers["X-Request-ID"] = rid
     # 任务87：审计（/api/* 写操作；写失败只 WARNING 不影响响应；不含 body/headers/query）
-    if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+    if (request.method in _UNSAFE_METHODS
             and request.url.path.startswith("/api/")):
         try:
-            actor = "admin" if request.headers.get("X-Admin-Token") else "anonymous"
+            # T-113：actor 由 require_admin 判定结果写入 state；401 记 rejected
+            actor = getattr(request.state, "actor", None)
+            if not actor:
+                actor = "rejected" if response.status_code == 401 else \
+                        ("admin" if request.headers.get("X-Admin-Token") else "anonymous")
             _audit_write(datetime.datetime.now().isoformat(timespec="seconds"), rid, actor,
                          f"{request.method} {request.url.path}", response.status_code)
         except Exception as e:  # noqa: BLE001
             logging.getLogger("app.errors").warning("[audit] 写审计失败: %s", e)
-    # 任务89：安全响应头（不覆盖已有同名头；CSP 默认不发送）
-    if settings.security_headers:
-        _add_header_once = lambda h, k, v: h.setdefault(k, v)  # noqa: E731
-        _add_header_once(response.headers, "X-Content-Type-Options", "nosniff")
-        _add_header_once(response.headers, "X-Frame-Options", settings.frame_options)
-        _add_header_once(response.headers, "Referrer-Policy", "no-referrer")
-        _add_header_once(response.headers, "Permissions-Policy",
-                         "camera=(), microphone=(), geolocation=()")
-        _add_header_once(response.headers, "Cross-Origin-Resource-Policy", "same-site")
-        if settings.csp:
-            name = "Content-Security-Policy-Report-Only" if settings.csp_report_only \
-                else "Content-Security-Policy"
-            _add_header_once(response.headers, name, settings.csp)
+    _security_headers(response)
     return response
 
 
@@ -259,6 +299,24 @@ async def unhandled_exc_handler(request: Request, exc: Exception):
 @app.websocket("/ws/events")
 async def events_ws(ws: WebSocket):
     await ws_events(ws)
+
+
+@app.websocket("/ws/webrtc/{cid}")
+async def webrtc_ws(ws: WebSocket, cid: int):
+    """T-102：WebRTC 信令鉴权代理——浏览器只连 8000，go2rtc :1984 仅回环可达。"""
+    from .api import _ws_auth_check
+    from . import webrtc_proxy
+    if not _ws_auth_check(ws):
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    try:
+        await webrtc_proxy.proxy(ws, cid)
+    except (WebSocketDisconnect, OSError, ConnectionError):
+        pass
+    except Exception as e:  # noqa: BLE001 上游不可用时不拖垮服务
+        from .logging_setup import get_logger
+        get_logger("app.webrtc").warning("WebRTC 代理异常: %s: %s", type(e).__name__, e)
 
 
 class SPAStaticFiles(StaticFiles):

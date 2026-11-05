@@ -2,6 +2,7 @@
 
 不加载 ONNX、不启动线程、不改配置/文件（临时写探针写完即删）。
 """
+import os
 import shutil
 from pathlib import Path
 
@@ -15,6 +16,23 @@ def validate_settings() -> list[dict]:
 
     def add(level, key, message, hint=""):
         results.append({"level": level, "key": key, "message": message, "hint": hint})
+
+    # T-104（Q-02）：绑定非回环地址时强制要求管理令牌（即使不 strict 也拒绝启动）
+    host = os.environ.get("LS_HOST", "127.0.0.1").strip()
+    loopback = host in ("127.0.0.1", "localhost", "::1", "")
+    if not loopback and not settings.admin_token and not settings.auth_disabled:
+        add("FAIL", "admin_token", f"绑定 {host} 但未设 LS_ADMIN_TOKEN",
+            "首启生成令牌或显式 LS_AUTH_DISABLED=1（仅回环允许）")
+    elif not settings.admin_token and not settings.auth_disabled:
+        add("WARN", "admin_token", "未设管理令牌（本机默认无鉴权）",
+            "Q-02：首启/升级应自动生成；源码模式可手动设 LS_ADMIN_TOKEN")
+    if settings.auth_disabled:
+        if loopback:
+            add("WARN", "auth_disabled", "LS_AUTH_DISABLED=1 已启用（仅回环绑定生效）",
+                "生产环境建议关闭")
+        else:
+            add("FAIL", "auth_disabled", "LS_AUTH_DISABLED=1 仅在回环绑定时允许",
+                "去掉 LS_AUTH_DISABLED 并设置管理令牌")
 
     # 目录可写
     for key in ("data_dir", "snapshot_dir", "video_dir", "annotation_pool_dir"):

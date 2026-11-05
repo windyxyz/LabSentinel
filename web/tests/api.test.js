@@ -1,6 +1,6 @@
 // 任务133：api.js 契约测试（mock fetch，零网络）。
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, adminToken, mediaUrl } from '../src/api'
+import { api, adminToken, mediaUrl, connectEvents } from '../src/api'
 
 function mockFetch(status, body) {
   const fn = vi.fn().mockResolvedValue({
@@ -91,5 +91,36 @@ describe('URL 拼装（新增方法抽检）', () => {
     const fn = mockFetch(200, { logs: '' })
     await api.pluginLogs('p1', 50)
     expect(fn.mock.calls[0][0]).toBe('/api/plugins/p1/logs?tail=50')
+  })
+})
+
+// T-106/T-201：WS 令牌走子协议（不进 URL），启用令牌后实时事件不失效
+describe('connectEvents WS 子协议', () => {
+  const makeWs = () => {
+    const spy = vi.fn()
+    class FakeWS {
+      constructor(...args) { spy(...args); this.close = vi.fn(); this.onopen = null; this.onmessage = null; this.onclose = null }
+    }
+    vi.stubGlobal('WebSocket', FakeWS)
+    return spy
+  }
+
+  it('无令牌时不传 protocols', () => {
+    const wsSpy = makeWs()
+    vi.stubGlobal('location', { protocol: 'http:', host: '127.0.0.1:8000' })
+    const stop = connectEvents(() => {}, () => {})
+    expect(wsSpy.mock.calls[0][0]).toBe('ws://127.0.0.1:8000/ws/events')
+    expect(wsSpy.mock.calls[0][1]).toBeUndefined()
+    stop()
+  })
+
+  it('有令牌时用 labsentinel + bearer.<token> 子协议', () => {
+    const wsSpy = makeWs()
+    vi.stubGlobal('location', { protocol: 'https:', host: 'ls.example' })
+    adminToken.set('s3cret')
+    const stop = connectEvents(() => {}, () => {})
+    expect(wsSpy.mock.calls[0][0]).toBe('wss://ls.example/ws/events')
+    expect(wsSpy.mock.calls[0][1]).toEqual(['labsentinel', 'bearer.s3cret'])
+    stop()
   })
 })

@@ -1,7 +1,7 @@
 """API 数据模型（与前端契约一致，见 web/）。"""
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Camera(BaseModel):
@@ -18,6 +18,14 @@ class CameraCreate(BaseModel):
     type: str = "file"
     autostart: bool = True  # 置 false 可先配安全区/规则再手动启动
     group_name: str = Field("", max_length=32)  # 任务111：分组（空=未分组）
+
+    @model_validator(mode="after")
+    def _source_valid(self):
+        # T-103（S-02/P0）：source 白名单校验——挡 exec:/ffmpeg:#raw/YAML 注入。
+        # SourceError 是 ValueError，Pydantic 自动转 422；API 层统一转 400。
+        from .sources import validate_source
+        self.source = validate_source(self.type, self.source)
+        return self
 
 
 class Zone(BaseModel):

@@ -143,7 +143,11 @@ export function connectEvents(onEvent, onState) {
   let ws, timer, closed = false
   function open() {
     if (closed) return
-    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/events')
+    // T-106/T-201：令牌走 Sec-WebSocket-Protocol 子协议（不进 URL/日志），
+    // 服务端口径与 HTTP 读一致（auth_read_protected 开启才要求令牌）。
+    const t = adminToken.get()
+    const protos = t ? ['labsentinel', 'bearer.' + t] : undefined
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/events', protos)
     ws.onopen = () => onState && onState('ok')
     ws.onmessage = (m) => { try { onEvent(JSON.parse(m.data)) } catch {} }
     ws.onclose = () => {

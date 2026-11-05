@@ -82,12 +82,14 @@ _warn_same_token()
 
 
 def require_admin(request: Request):
-    """写操作守卫：只接受管理令牌（任务88：只读令牌写永拒）。"""
-    """写操作守卫：只接受管理令牌（任务88：只读令牌写永拒）。"""
+    """写操作守卫：只接受管理令牌（任务88：只读令牌写永拒）。T-113：结果写入 state.actor。"""
     if not _token_ok(request.headers.get("X-Admin-Token")):
-        if settings.admin_token and settings.read_token and                 request.headers.get("X-Admin-Token") and                 request.headers.get("X-Admin-Token") == settings.read_token:
+        request.state.actor = "rejected"
+        if settings.admin_token and settings.read_token and \
+                request.headers.get("X-Admin-Token") == settings.read_token:
             raise HTTPException(401, "当前令牌无写权限（只读令牌）——请使用管理令牌")
         raise HTTPException(401, "需要管理令牌（X-Admin-Token）")
+    request.state.actor = "admin" if settings.admin_token else "anonymous(auth-off)"
 
 
 def require_read(request: Request):
@@ -95,14 +97,16 @@ def require_read(request: Request):
 
     105 回归补丁 P0-2：`<img>/<video>/<a download>` 裸 URL 不带 X-Admin-Token 头，读保护开启后
     截图/视频/导出全 401——接受 `?token=` 查询参数作为回退（与 header 同用 hmac.compare_digest）。
-    任务88：admin_token 或 read_token 均可通过；URL token 会进浏览器历史/代理日志，
-    文档建议配合独立只读令牌与 Referrer-Policy（任务 89）。
+    T-113：结果写入 state.actor。
     """
     if not settings.auth_read_protected:
+        request.state.actor = "anonymous(auth-off)"
         return
     provided = request.headers.get("X-Admin-Token") or request.query_params.get("token")
     if not _read_token_ok(provided):  # admin_token 空时恒 True（鉴权未启用）
+        request.state.actor = "rejected"
         raise HTTPException(401, "需要管理令牌（X-Admin-Token 头或 ?token= 查询参数）")
+    request.state.actor = "read"
 
 
 def init(s: Store, m: CameraManager):
@@ -218,10 +222,23 @@ def system():
         "today_counts": today,
         "unhandled_today": max(0, unhandled),  # 今日未处置（任务12）
         "alerts": dispatcher.store.delivery_counts() if dispatcher.store else {"pending": 0, "failed": 0, "ok": 0},
-        "config_issues": _config_issue_counts(),
+        "config_issues": {**_config_issue_counts(),
+                          "source_issues": startup_source_issues() if store else []},
         "keep_awake": keepawake.status(),  # 任务123：防休眠状态
-        "components": {"engine": dict(_eng_mod.PRELOAD)},  # B-28：预热状态与错误如实上报
+        "components": {
+            "engine": dict(_eng_mod.PRELOAD),  # B-28：预热状态与错误如实上报
+            "go2rtc": go2rtc.health(),         # T-101/T-202：回环鉴权网关健康
+        },
     }
+
+
+def startup_source_issues() -> list[str]:
+    """T-103：启动迁移检查——已存摄像头中不合规 source 逐条报告（不自动删除/改写）。"""
+    from .sources import startup_issues
+    try:
+        return startup_issues(list(store.cameras()) if store else [])
+    except Exception as e:  # noqa: BLE001 迁移检查失败不拖垮主接口
+        return [f"source 迁移检查异常: {type(e).__name__}"]
 
 
 # ---- 服务控制（任务120：网页端停止）----
@@ -721,23 +738,18 @@ def add_camera(body: CameraCreate):
     if body.type not in ("rtsp", "file", "usb", "folder"):
         raise HTTPException(400, "type must be rtsp|file|usb|folder")
     source = (body.source or "").strip()
+    # T-103：source 白名单已在 CameraCreate 校验器执行（CameraCreate 返回规范化后的 source）
     if body.type == "folder":
-        # 图片文件夹接入（任务121）：创建时校验存在性，避免把错路径静默存库后一直 error
-        p = Path(source).expanduser()
+        # T-111：允许根/系统目录黑名单（符号链接逃逸由 check_folder_root 的 resolve 处理）
+        from .sources import SourceError, check_folder_root
         try:
-            ok_dir = p.is_dir()
-        except OSError:
-            ok_dir = False
-        if not ok_dir:
-            raise HTTPException(400, f"图片文件夹不存在或不是目录: {source}")
-        source = str(p.resolve())
-        try:
-            real = os.path.normcase(source)
+            source = check_folder_root(source, settings.folder_allowed_roots)
             data_root = os.path.normcase(str(Path(settings.data_dir).resolve()))
-            if real == data_root or real.startswith(data_root + os.sep):
+            if os.path.normcase(source) == data_root or \
+                    os.path.normcase(source).startswith(data_root + os.sep):
                 raise HTTPException(400, "图片文件夹不能使用程序数据目录（会造成证据图自激识别）")
-        except OSError:
-            pass
+        except SourceError as e:
+            raise HTTPException(400, str(e))
     cid = store.add_camera(body.name, source, body.type, group_name=body.group_name)
     if body.autostart:
         manager.start_camera(store.camera(cid))
@@ -784,15 +796,18 @@ def _unlink_data_file(path: str | None) -> None:
 
 
 @router.get("/cameras/{cid}/webrtc", dependencies=[Depends(require_read)])
-def camera_webrtc(cid: int, request: Request):
-    """返回该路流的 go2rtc WebRTC 信令地址（浏览器直连 go2rtc :1984）。"""
+def camera_webrtc(cid: int):
+    """T-102：返回经 FastAPI 鉴权代理的相对 WS 路径（浏览器不再直连 go2rtc :1984）。
+
+    前端按 location 组装 ws/wss（http→ws、https→wss），令牌走 Sec-WebSocket-Protocol
+    子协议（T-106），媒体面仍在 go2rtc :8555（webrtc.candidates 可配跨网段地址）。
+    """
     cam = store.camera(cid)
     if cam is None:
         raise HTTPException(404, "camera not found")
     if cam["type"] == "folder":
         raise HTTPException(400, "图片文件夹源没有实时流；请在「图片识别」页查看关键图片")
-    host = request.url.hostname or "localhost"
-    return {"camera_id": cid, "ws_url": f"ws://{host}:1984/api/ws?src={cid}"}
+    return {"camera_id": cid, "ws_url": f"/ws/webrtc/{cid}"}
 
 
 @router.post("/cameras/{cid}/copy-config", dependencies=[Depends(require_admin)])
@@ -960,8 +975,15 @@ def _validate_config_import(data: dict):
         if not (c.get("source") or "").strip():
             errs.append(f"摄像头 {name} source 为空")
             continue
+        # T-103：导入路径同样做 source 白名单校验（file 允许跨机器缺失路径）
+        from .sources import SourceError, validate_source
+        try:
+            src = validate_source(c["type"], c["source"], allow_missing=True)
+        except SourceError as e:
+            errs.append(f"摄像头 {name} source 非法: {e}")
+            continue
         seen.add(name)
-        cams.append({"name": name, "source": c["source"], "type": c["type"]})
+        cams.append({"name": name, "source": src, "type": c["type"]})
     for z in zones_in:
         cname, zname = z.get("camera_name"), (z.get("name") or "").strip()
         poly = z.get("polygon")
@@ -2006,15 +2028,58 @@ def stats_hourly(date: str, camera_id: int | None = None):
         raise HTTPException(400, str(e))
 
 
-# ---- websocket ----
+# ---- websocket ----（T-106 / Q-03：口径统一 + 强制同源 + 子协议传令牌）
+WS_ORIGIN_CODE = 4403
+
+
+def _ws_origin_ok(ws: WebSocket) -> bool:
+    """存在 Origin 时必须与 Host 同源或在 LS_ALLOWED_ORIGINS 白名单（防 CSWSH）。"""
+    origin = ws.headers.get("origin")
+    if not origin:
+        return True  # 非浏览器客户端（curl/插件/移动端）
+    host = ws.headers.get("host", "")
+    if origin.split("://", 1)[-1] == host:
+        return True
+    allowed = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+    return origin in allowed
+
+
+def _ws_token(ws) -> str | None:
+    """令牌来源优先级：Sec-WebSocket-Protocol: bearer.<token> → ?token=（弃用，日志告警）。"""
+    protos = [p.strip() for p in ws.headers.get("sec-websocket-protocol", "").split(",")]
+    for p in protos:
+        if p.startswith("bearer."):
+            return p[len("bearer."):]
+    t = ws.query_params.get("token")
+    if t:
+        print("[auth] WS 仍使用 ?token= 查询参数（弃用，改用子协议 bearer.<token>）", flush=True)
+    return t
+
+
+def _ws_auth_check(ws) -> bool:
+    """WS 握手鉴权：Origin 校验 + 与 HTTP 读口径一致（auth_read_protected=false 不要求令牌）。"""
+    if not _ws_origin_ok(ws):
+        return False
+    if settings.auth_read_protected:
+        return _read_token_ok(_ws_token(ws))
+    return True
+
+
 async def ws_events(ws: WebSocket):
-    # 任务16：启用鉴权时 WS 用 query ?token=（URL 传 token 有日志泄漏风险，文档已注明）
-    if not _read_token_ok(ws.query_params.get("token")):  # 任务88：读事件流属只读
+    if not _ws_origin_ok(ws):
+        await ws.close(code=WS_ORIGIN_CODE)
+        return
+    if settings.auth_read_protected and not _read_token_ok(_ws_token(ws)):
         await ws.close(code=WS_AUTH_CODE)
         return
-    await dispatcher.hub.connect(ws)
+    # T-201/B-19：try/finally 保证任何异常都清理 hub；子协议回显（客户端发了 labsentinel 时）
+    protos = [p.strip() for p in ws.headers.get("sec-websocket-protocol", "").split(",")]
+    subprotocol = "labsentinel" if "labsentinel" in protos else None
+    await dispatcher.hub.connect(ws, subprotocol=subprotocol)
     try:
         while True:
             await ws.receive_text()  # 忽略客户端心跳
     except WebSocketDisconnect:
+        pass
+    finally:
         dispatcher.hub.disconnect(ws)
