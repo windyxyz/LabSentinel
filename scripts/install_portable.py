@@ -23,9 +23,10 @@ from pathlib import Path
 
 
 def _version_default() -> str:
-    """T-401：跟随仓库根 VERSION（单一来源）。"""
+    """T-401：跟随仓库根 VERSION（单一来源）。
+    注意：模块导入期执行，不能用本文件后段才定义的 ROOT——从 __file__ 推导。"""
     try:
-        return (ROOT / "VERSION").read_text("ascii").strip()
+        return (Path(__file__).resolve().parent.parent / "VERSION").read_text("ascii").strip()
     except OSError:
         return "0.2.0"
 

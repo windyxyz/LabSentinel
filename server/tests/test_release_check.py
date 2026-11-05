@@ -17,6 +17,7 @@ def make_repo(tmp_path: Path) -> Path:
     (r / "docs").mkdir(parents=True)
     (r / "server").mkdir()
     (r / "web").mkdir()
+    (r / "VERSION").write_text("0.2.0\n", encoding="ascii")  # T-401：单源文件
     (r / "README.md").write_text("[指南](docs/guide.md) 与 [外链](https://a.b) 与 [锚点](#x)", encoding="utf-8")
     (r / "docs" / "guide.md").write_text("内容", encoding="utf-8")
     (r / "docs" / "broken.md").write_text("[没了](nope.md) 与 ![图](missing.png)", encoding="utf-8")
@@ -24,9 +25,10 @@ def make_repo(tmp_path: Path) -> Path:
     (r / "server" / "app").mkdir()
     (r / "server" / "app" / "main.py").write_text('version="0.1.0-m1"', encoding="utf-8")
     (r / "server" / "app" / "api.py").write_text('return "0.1.0-m1"', encoding="utf-8")
-    for f in ("LICENSE", "NOTICE", "server/.env.example", "server/requirements.txt",
-              "web/package.json"):
+    for f in ("LICENSE", "NOTICE", "server/.env.example", "server/requirements.txt"):
         (r / f).write_text("x", encoding="utf-8")
+    (r / "web" / "package.json").write_text(
+        '{"name": "labsentinel-web", "version": "0.2.0"}', encoding="utf-8")  # T-401 口径
     return r
 
 
