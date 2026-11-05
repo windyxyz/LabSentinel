@@ -227,6 +227,13 @@ def _mig_011(c: sqlite3.Connection):
               "ON alert_deliveries(channel, status)")
 
 
+def _mig_012(c: sqlite3.Connection):
+    """v12（T-310/T-327）：按摄像头灰度选择分析器（python|rust）。"""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(cameras)")}
+    if "analyzer" not in cols:
+        c.execute("ALTER TABLE cameras ADD COLUMN analyzer TEXT DEFAULT 'python'")
+
+
 # 版本化迁移（任务69）：只做加列/加表/索引，不做破坏性变更；每个迁移幂等、在事务内执行
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "events 增加 video/status/handled_by/handled_ts", _mig_001),
@@ -240,6 +247,7 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (9, "events 增加 VLM 复核列 ai_review/ai_review_ts/ai_review_model（任务124）", _mig_009),
     (10, "新增 app_settings 表（网页端告警渠道配置，任务140）", _mig_010),
     (11, "查询索引：events.snapshot / alert_deliveries(status, channel)（T-309/PF-09）", _mig_011),
+    (12, "cameras 增加 analyzer 列（T-310/T-327：python|rust 按摄像头灰度）", _mig_012),
 ]
 SCHEMA_VERSION_LATEST = max(v for v, _d, _f in MIGRATIONS)
 
