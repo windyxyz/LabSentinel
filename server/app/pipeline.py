@@ -7,6 +7,7 @@ import queue
 import re
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timedelta
 
@@ -307,13 +308,16 @@ class CameraWorker(threading.Thread):
                 if change and change[1]:
                     self._fire_event(zid, "exit", tid, f"离开安全区「{self._zone_name(zid)}」")
 
-        occupancy = 0
+        # T-206（B-11）：按区统计人数——occ_by_zone[zid] = 该区内唯一 track 集合；
+        # zone_id=None 的规则用"任一区内去重人数"（整画面口径），不再人×区域数重复计数
+        occ_by_zone: dict[int, set[int]] = {zid: set() for zid in zone_polys}
         for i in range(len(sdets)):
             tid = int(sdets.tracker_id[i])
             x1, y1, x2, y2 = sdets.xyxy[i].tolist()
             anchor = (int((x1 + x2) / 2), int(y2))
             inside_zones = {zid for zid, poly in zone_polys.items() if point_inside(poly, anchor)}
-            occupancy += len(inside_zones)
+            for zid in inside_zones:
+                occ_by_zone[zid].add(tid)
             # 每帧对每个 zone 更新 inside 状态（2026-10-30 审阅修复：原实现只在"不在任何区域"
             # 时才补 exit——A→B 直移会漏掉 A 的 exit，且离开重叠区时产生滞后重复 exit）
             for zid in zone_polys:
@@ -330,8 +334,11 @@ class CameraWorker(threading.Thread):
                     if ppe == "wearing":
                         self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」（已穿实验服{face_txt}）")
                     elif ppe == "no":
-                        self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」（未穿实验服{face_txt}）")
-                        self._fire_event(zid, "enter_no_ppe", tid, f"进入安全区「{zname}」未穿实验服{face_txt}")
+                        # T-205（F-05）：同帧同 track 合并——只发 enter_no_ppe（级别更高的违规事件）；
+                        # 规则未配置 enter_no_ppe 时由 _fire_event 内规则匹配自然落空，回退口在下方
+                        if not self._fire_event(zid, "enter_no_ppe", tid,
+                                                f"进入安全区「{zname}」未穿实验服{face_txt}"):
+                            self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」（未穿实验服{face_txt}）")
                     else:
                         note = "实验服检测未启用" if self.ppe is None else "实验服状态不确定"
                         self._fire_event(zid, "enter", tid, f"进入安全区「{zname}」{face_txt}")
@@ -346,11 +353,18 @@ class CameraWorker(threading.Thread):
         for st in self._zone_states.values():
             st.retain(active_tids)
 
-        # 在场人数超限（规则级冷却统一由 RuleEngine 管，track 记 0）
+        # 在场人数超限（规则级冷却统一由 RuleEngine 管，track 记 0）——T-206 按区口径
+        any_zone: set[int] = set()
+        for ids in occ_by_zone.values():
+            any_zone |= ids
         for rule in self.rules.occupancy_rules(self.camera["id"]):
-            if rule["threshold"] and occupancy > rule["threshold"]:
-                self._fire_event(None, "occupancy_over", 0,
-                                 f"在场人数 {occupancy} 超过阈值 {rule['threshold']}", level=rule["level"])
+            zid = rule.get("zone_id")
+            n = len(occ_by_zone.get(zid, set())) if zid is not None else len(any_zone)
+            if rule["threshold"] and n > rule["threshold"]:
+                where = f"「{self._zone_name(zid)}」" if zid is not None else "画面"
+                self._fire_event(zid, "occupancy_over", 0,
+                                 f"{where}在场人数 {n} 超过阈值 {rule['threshold']}",
+                                 level=rule["level"])
 
     def _zone_name(self, zid):
         for z in configcache.zones(self.store, self.camera["id"]):
@@ -366,13 +380,22 @@ class CameraWorker(threading.Thread):
         with self.frame_lock:
             if self.latest_frame is None:
                 return None
-            path = settings.snapshot_dir / f"ev_{int(time.time()*1000)}.jpg"
+            # T-205（B-10）：文件名含摄像头 ID + 时间 + 短随机段——多路同毫秒不再互相覆盖；
+            # 同一帧多事件共享同一截图（帧级缓存，事件合并的物理基础）
+            key = self.frames_total
+            if getattr(self, "_frame_snapshot", (None, None))[0] == key:
+                return self._frame_snapshot[1]
+            ts = time.time()
+            path = settings.snapshot_dir / (
+                f"ev_{self.camera['id']}_{time.strftime('%Y%m%d_%H%M%S', time.localtime(ts))}"
+                f"_{int((ts % 1) * 1000):03d}_{uuid.uuid4().hex[:6]}.jpg")
             ok, buf = cv2.imencode(".jpg", self.latest_frame)
             if not ok:
                 return None
             # Windows 下 cv2.imwrite 对含中文的路径静默返回 False（本项目路径即含「监控识别」），
             # 统一走 imencode + Python 写盘，保证截图证据不丢。
             path.write_bytes(buf.tobytes())
+            self._frame_snapshot = (key, str(path))
             return str(path)
 
     def _dispatch_row(self, eid, behavior, level, track_id, detail, snapshot):
@@ -401,7 +424,7 @@ class CameraWorker(threading.Thread):
         rule = self.rules.match(self.camera["id"], zone_id, behavior, track_id, level,
                                 now_dt=det_dt, now_mono=now_mono)
         if rule is None:
-            return
+            return False  # T-205：未命中规则返回 False，供事件合并回退
         level = rule["level"]
         snapshot = self._save_snapshot()
         ts = det_dt.isoformat(timespec="seconds") if det_dt is not None else None
@@ -413,6 +436,7 @@ class CameraWorker(threading.Thread):
             self._recs.append(_Recording(eid, list(self._ring)))
         if not quiet:
             print(f"[cam-{self.camera['id']}] event#{eid} {behavior} L{level} {detail}")
+        return True
 
     def _fire_stranger(self, track_id, zname):
         """陌生人事件（未注册人员进入）。不走规则匹配：人脸门控冷却已限频，级别固定 L2。"""

@@ -185,9 +185,18 @@ class PluginManager:
             return settings.read_token
         return ""
 
+    # T-112（S-11）：插件子进程环境白名单——SMTP/GenAI/MQTT/告警 webhook 等机密
+    # 不再随 os.environ 全量继承；只放行运行必需的系统变量 + LS_PLUGIN_*/LS_API_BASE
+    _ENV_PASS = frozenset({
+        "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+        "TEMP", "TMP", "USERPROFILE", "HOME", "LANG", "LC_ALL",
+        "LOCALAPPDATA", "APPDATA", "PROGRAMFILES", "SYSTEMDRIVE",
+        "PYTHONUTF8", "PYTHONIOENCODING",
+    })
+
     def _build_env(self, d: Path, mf: PluginManifest) -> dict:
         env = {k: v for k, v in os.environ.items()
-               if k not in ("LS_ADMIN_TOKEN", "LS_READ_TOKEN")}  # 防意外继承
+               if k.upper() in self._ENV_PASS and not k.upper().startswith("LS_")}
         env["LS_PLUGIN_ID"] = mf.id
         env["LS_API_BASE"] = settings.public_base_url or "http://127.0.0.1:8000"
         (d / "data").mkdir(parents=True, exist_ok=True)

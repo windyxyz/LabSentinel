@@ -57,7 +57,9 @@ def build_payload(event: dict, camera_name: str | None) -> str:
         "track_id": event.get("track_id"),
         "detail": event.get("detail"),
         "zones": [],
-        "has_snapshot": bool(event.get("snapshot")),
+        # T-208（B-14）：派发前行里 snapshot 已 pop，has_snapshot 布尔由 _dispatch_row 写入；
+        # 兼容直传完整行的调用方（或字段）
+        "has_snapshot": bool(event.get("has_snapshot") or event.get("snapshot")),
         "snapshot_url": f"/api/events/{event.get('id')}/snapshot",
         "api_base": settings.public_base_url or "",
     }, ensure_ascii=False)

@@ -66,32 +66,12 @@ def escalate_once(store, now: datetime | None = None, send=None) -> dict:
 
 
 def _dispatch_reminder(r: dict, text: str) -> bool:
-    """提醒走现有渠道（复用 send 路径：未配置渠道自动跳过、不建投递行）。"""
+    """T-207（B-13）：提醒走完整派发链（静默/渠道过滤/投递记录/重试/死信）——
+    旧实现直接 ch.send 绕过静默与过滤、无投递记录、同步串行。"""
     from .alerts import dispatcher
     if dispatcher.store is None:
-        dispatcher.bind_store(dispatcher.store or _noop_store())
-    ok = True
-    for ch in dispatcher.channels:
-        cfg = getattr(ch, "configured", None)
-        if callable(cfg) and not cfg():
-            continue  # 未配置渠道：跳过不建投递行（与 51 语义一致）
-        try:
-            if not ch.send(r["level"], text):
-                ok = False
-        except Exception as e:  # noqa: BLE001
-            print(f"[escalate] {getattr(ch, 'name', ch)} 提醒失败: {e}")
-            ok = False
-    return ok
-
-
-class _noop_store:
-    """dispatcher.store 为 None 时的占位（提醒场景不落投递行）。"""
-
-    def add_delivery(self, *a, **k):
-        return None
-
-    def update_delivery(self, *a, **k):
-        return None
+        return False
+    return dispatcher.dispatch_text(r, text, kind="escalation")
 
 
 def status(store) -> dict:

@@ -7,6 +7,8 @@ import asyncio
 import concurrent.futures
 import json
 import smtplib
+import socket
+import ssl
 import threading
 import time
 from datetime import datetime
@@ -271,11 +273,34 @@ class EmailChannel:
         msg["Subject"] = f"[LabSentinel] 级别{level}告警"
         msg["From"] = settings.smtp_user or ""
         msg["To"] = settings.alert_email_to
+        # T-210（F-08）：LS_SMTP_SECURITY=ssl（默认 465 兼容现状）|starttls（587）|none（仅私网）
+        security = (settings.smtp_security or "ssl").lower()
         try:
-            with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as s:
-                if settings.smtp_user:
-                    s.login(settings.smtp_user, settings.smtp_pass or "")
-                s.sendmail(msg["From"], [settings.alert_email_to], msg.as_string())
+            if security == "ssl":
+                with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as s:
+                    if settings.smtp_user:
+                        s.login(settings.smtp_user, settings.smtp_pass or "")
+                    s.sendmail(msg["From"], [settings.alert_email_to], msg.as_string())
+            elif security == "starttls":
+                with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as s:
+                    s.ehlo()
+                    s.starttls(context=ssl.create_default_context())
+                    if settings.smtp_user:
+                        s.login(settings.smtp_user, settings.smtp_pass or "")
+                    s.sendmail(msg["From"], [settings.alert_email_to], msg.as_string())
+            elif security == "none":
+                import ipaddress as _ip
+                host_ip = _ip.ip_address(socket.gethostbyname(settings.smtp_host))
+                if not (host_ip.is_private or host_ip.is_loopback):
+                    print("[email] LS_SMTP_SECURITY=none 仅允许私网 SMTP（明文口令风险）")
+                    return False
+                with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as s:
+                    if settings.smtp_user:
+                        s.login(settings.smtp_user, settings.smtp_pass or "")
+                    s.sendmail(msg["From"], [settings.alert_email_to], msg.as_string())
+            else:
+                print(f"[email] 未知 LS_SMTP_SECURITY: {security}")
+                return False
             return True
         except Exception as e:  # noqa: BLE001
             print(f"[email] send failed: {e}")
@@ -515,7 +540,12 @@ class AlertDispatcher:
         self.hub.broadcast_sync(event_row)
         try:  # 任务125：MQTT 事件总线（独立于告警链：不受静默/渠道过滤影响；失败吞掉）
             from . import mqtt_bridge
-            mqtt_bridge.publish_event(event_row)
+            # T-208（B-14）：派发前行里 snapshot 已被 pop（只回布尔）——has_snapshot
+            # 由 _dispatch_row 写入；camera_name 走 ConfigCache（避免每事件查库）
+            from . import configcache
+            mqtt_bridge.publish_event(event_row,
+                                      camera_name=configcache.camera_name(self.store, event_row.get("camera_id", 0))
+                                      if self.store is not None else None)
         except Exception:  # noqa: BLE001
             pass
         text = render_alert(event_row)
@@ -543,6 +573,32 @@ class AlertDispatcher:
             extra = event_row if _send_accepts_event(ch) else None
             self._pool.submit(self._deliver_with_retry, ch, event_id,
                               event_row["level"], text, extra)
+
+    def dispatch_text(self, event_row: dict, text: str, kind: str = "escalation") -> bool:
+        """T-207（B-13）：外部文本（升级提醒等）走完整派发链——静默/渠道过滤/投递记录/
+        重试/死信全部复用；返回是否全部渠道接受提交（不等待发送结果）。"""
+        if self._closing.is_set() or self.store is None:
+            return False
+        event_id = event_row.get("id", 0)
+        sil = match_silence(self.store.silences(active_only=True), event_row)
+        if sil is not None:
+            print(f"[alert] event#{event_id} {kind} 命中静默——外部渠道不推送")
+            return False
+        filters = alert_filters()
+        submitted = 0
+        for ch in self.channels:
+            cfg = getattr(ch, "configured", None)
+            if callable(cfg) and not cfg():
+                continue
+            ch_name = getattr(ch, "name", type(ch).__name__)
+            reason = channel_filtered(ch_name, event_row, filters)
+            if reason:
+                continue
+            extra = event_row if _send_accepts_event(ch) else None
+            self._pool.submit(self._deliver_with_retry, ch, event_id,
+                              event_row["level"], text, extra)
+            submitted += 1
+        return submitted > 0
 
     def _deliver_with_retry(self, ch, event_id: int, level: int, text: str, event: dict | None = None):
         """单渠道投递：记录 → 重试（指数退避）→ 死信。线程池内执行。"""

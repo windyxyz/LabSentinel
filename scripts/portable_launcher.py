@@ -11,6 +11,7 @@
 LS_NO_MESSAGEBOX=1 只关弹窗；LS_READY_TIMEOUT_S 覆盖就绪等待（默认 60s，任务119）。
 """
 import logging
+import json
 import os
 import socket
 import subprocess
@@ -228,6 +229,42 @@ def _pid_matches_launcher(pid: int) -> bool | None:
     return any(marker in cmdline for marker in LAUNCHER_PROC_MARKERS)
 
 
+def start_go2rtc(cfg: dict) -> int | None:
+    """T-202（B-05）：托管 go2rtc.exe（生命周期同服务）。
+
+    存在且 127.0.0.1:1984 未被占才拉起；yaml 由服务端/deploy 生成（回环+鉴权）。
+    返回 pid（写入锁文件），None=无需托管（缺 exe 或端口已占）。"""
+    exe = APP_ROOT / "tools" / "go2rtc.exe"
+    if not exe.exists():
+        log.info("tools/go2rtc.exe 不存在——实时画面不可用（其余功能不受影响）")
+        return None
+    import socket as _s
+    probe = _s.socket()
+    try:
+        probe.bind(("127.0.0.1", 1984))
+    except OSError:
+        log.info("1984 已被占用——假定 go2rtc 已在运行，不重复拉起")
+        return None
+    finally:
+        probe.close()
+    logf = LOGS / f"go2rtc-{datetime.now():%Y%m%d}.log"
+    with open(logf, "ab") as lf:
+        proc = subprocess.Popen(
+            [str(exe), "-config", str(APP_ROOT / "tools" / "go2rtc.yaml")],
+            cwd=str(APP_ROOT), stdout=lf, stderr=subprocess.STDOUT,
+            creationflags=CREATE_NO_WINDOW)
+    log.info("go2rtc pid=%d 日志=%s", proc.pid, logf)
+    return proc.pid
+
+
+def write_go2rtc_lock(pid: int) -> None:
+    """锁文件升级为 JSON（兼容旧 'pid port' 文本读取）。"""
+    try:
+        LOCK.write_text(json.dumps({"go2rtc": {"pid": pid}}), encoding="ascii")
+    except OSError as e:
+        log.warning("go2rtc 锁写入失败: %s", e)
+
+
 def start_server(port: int, cfg: dict) -> int:
     data = str(DATA)
     env = {**os.environ,
@@ -392,6 +429,7 @@ def do_start() -> int:
 
     port = pick_port(cfg)
     write_config_port(port)
+    g2r = start_go2rtc(cfg)  # T-202（B-05）：便携版实时画面——启动器托管 go2rtc
     pid = start_server(port, cfg)
     try:
         LOCK.write_text(f"{pid} {port}", encoding="ascii")
@@ -400,6 +438,8 @@ def do_start() -> int:
         time.sleep(0.5)
         LOCK.write_text(f"{pid} {port}", encoding="ascii")
 
+    if g2r:
+        write_go2rtc_lock(g2r)
     t0 = time.monotonic()
     timeout_s = ready_timeout_s()
     next_log = 5.0
@@ -467,6 +507,20 @@ def do_stop() -> int:
     LOCK.unlink(missing_ok=True)
     log.info("已停止 pid=%d port=%d", pid, port)
     print(f"已停止 LabSentinel（pid={pid}, port={port}）。")
+
+    # T-202：go2rtc 与服务同生命周期——按锁内 go2rtc.pid 停（锁含 JSON go2rtc 段时）
+    try:
+        lock_data = json.loads(LOCK.read_text(encoding="ascii")) if LOCK.exists() else {}
+        g2r_pid = (lock_data.get("go2rtc") or {}).get("pid") if isinstance(lock_data, dict) else None
+    except (OSError, ValueError):
+        g2r_pid = None
+    if g2r_pid and pid_alive(g2r_pid):
+        try:
+            subprocess.run(["taskkill", "/PID", str(g2r_pid), "/F"], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW)
+            log.info("已停止 go2rtc pid=%d", g2r_pid)
+        except OSError as e:
+            log.warning("go2rtc 停止失败: %s", e)
     return 0
 
 

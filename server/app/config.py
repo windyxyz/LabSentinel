@@ -136,6 +136,7 @@ class Settings(BaseSettings):
     qmsg_qq: str | None = None  # Qmsg 接收消息的 QQ 号
     smtp_host: str | None = None
     smtp_port: int = 465
+    smtp_security: str = "ssl"  # T-210：ssl | starttls | none（none 仅私网）
     smtp_user: str | None = None
     smtp_pass: str | None = None
     alert_email_to: str | None = None

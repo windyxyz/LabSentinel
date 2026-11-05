@@ -231,6 +231,15 @@ def run_cleanup(store) -> dict:
         stats["deleted_audit"] = 0
         print(f"[retention] 审计清理跳过: {e}")
 
+    # 3.5b) 投递记录过期行（T-209/B-20：此前永不清理；与事件同保留口径）
+    try:
+        with store._lock, store._conn() as c:
+            stats["deleted_deliveries"] = c.execute(
+                "DELETE FROM alert_deliveries WHERE updated_ts < ?", (cutoff,)).rowcount
+    except Exception as e:  # noqa: BLE001
+        stats["deleted_deliveries"] = 0
+        print(f"[retention] 投递记录清理跳过: {e}")
+
     # 3.6) 图片文件夹识别记录（任务121）：只删派生的证据副本与缩略图，原始截图永不删除
     img_cutoff = (datetime.now() - timedelta(days=settings.retention_images_days)).isoformat(
         timespec="seconds")
@@ -289,17 +298,50 @@ def run_cleanup(store) -> dict:
               f"{stats['freed_orphan_mb']:.2f}MB"
               + ("（达单轮上限，剩余下轮）" if orphans_limited else ""))
 
-    # 4) 磁盘紧急清理：仍不够就从最旧事件开始逐批删（先删文件再删行，每批复查）
+    # 4) 磁盘紧急清理（T-209/B-20）：分三档——①已处置事件的 video（行保留）
+    #    ②已处置事件的 snapshot（行保留）③按 id 升序删最旧事件行（未处置的 L3 靠后：
+    #    先 level 升序再 id 升序）；未处置事件被删时 ERROR + 告警一次。
+    #    另：alert_deliveries 按 updated_ts 过期清理（此前永不清理）。
     freed_rounds = 0
+    warned_unhandled = False
     while _disk_free_gb() < settings.disk_min_free_gb and freed_rounds < 200:
         with store._conn() as c:
-            rows = c.execute(
-                "SELECT id, snapshot, video FROM events ORDER BY id ASC LIMIT ?",
-                (_BATCH,)).fetchall()
-        if not rows:
-            print("[retention] 磁盘仍不足但已无可删事件——请人工介入")
+            vid_rows = c.execute(
+                "SELECT id, video FROM events WHERE status!='new' AND video IS NOT NULL "
+                "ORDER BY id ASC LIMIT ?", (_BATCH,)).fetchall()
+            snap_rows = []
+            if not vid_rows:
+                snap_rows = c.execute(
+                    "SELECT id, snapshot FROM events WHERE status!='new' AND snapshot IS NOT NULL "
+                    "ORDER BY id ASC LIMIT ?", (_BATCH,)).fetchall()
+            row_rows = []
+            if not vid_rows and not snap_rows:
+                row_rows = c.execute(
+                    "SELECT id, status, level, snapshot, video FROM events "
+                    "ORDER BY level ASC, id ASC LIMIT ?", (_BATCH,)).fetchall()
+        if not vid_rows and not snap_rows and not row_rows:
+            print("[retention] 磁盘仍不足但已无可删目标——请人工介入")
             break
-        for r in rows:
+        for r in vid_rows + snap_rows:  # 档①②：只删文件，行与证据引用保留
+            for col in ("video", "snapshot"):
+                if col not in r.keys():
+                    continue
+                p = r[col]
+                if p and _safe_within(p, settings.data_dir):
+                    try:
+                        import os
+                        size = os.path.getsize(p)
+                        os.remove(p)
+                        stats["deleted_files"] += 1
+                        stats["freed_mb"] += size / 1e6
+                    except OSError:
+                        pass
+            with store._lock, store._conn() as c:
+                if "video" in r.keys() and r["video"]:
+                    c.execute("UPDATE events SET video=NULL WHERE id=?", (r["id"],))
+                if "snapshot" in r.keys() and r["snapshot"]:
+                    c.execute("UPDATE events SET snapshot=NULL WHERE id=?", (r["id"],))
+        for r in row_rows:  # 档③：整行删除（level 升序 → 未处置高级别最后）
             for col in ("snapshot", "video"):
                 p = r[col]
                 if p and _safe_within(p, settings.data_dir):
@@ -314,6 +356,9 @@ def run_cleanup(store) -> dict:
             with store._lock, store._conn() as c:
                 c.execute("DELETE FROM events WHERE id=?", (r["id"],))
             stats["deleted_events"] += 1
+            if r["status"] == "new" and not warned_unhandled:
+                warned_unhandled = True
+                print(f"[retention] [ERROR] 磁盘不足导致未处置事件（id={r['id']} L{r['level']}）被清理", flush=True)
         freed_rounds += 1
         print(f"[retention] 紧急清理第 {freed_rounds} 批，剩余磁盘 {_disk_free_gb():.1f}GB")
 

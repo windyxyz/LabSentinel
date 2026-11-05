@@ -423,23 +423,25 @@ class FolderWorker(threading.Thread):
                  for z in self._zones_with_polygons()]
         no_boxes, wear_boxes = ppe_boxes(self.ppe, frame) if dets else ([], [])
         zone_stat: dict[int, dict] = {}
-        in_zone = 0
-        for det in dets:
+        # T-206（B-11）：按区去重统计（一张图同一个人只算一次；任一区命中即画面口径）
+        occ_by_zone: dict[int, set[int]] = {}
+        for det_i, det in enumerate(dets):
             x1, y1, x2, y2 = det.xyxy
             anchor = (int((x1 + x2) / 2), int(y2))
             hits = [(zid, zname) for zid, zname, poly in polys
                     if _point_inside(poly, anchor)]
             if not hits:
                 continue
-            in_zone += 1
             status = ppe_status_from_boxes(no_boxes, wear_boxes, det.xyxy)
             for zid, zname in hits:
+                occ_by_zone.setdefault(zid, set()).add(det_i)
                 st = zone_stat.setdefault(zid, {"name": zname, "persons": 0, "no": 0, "wearing": 0})
                 st["persons"] += 1
                 if status == "no":
                     st["no"] += 1
                 elif status == "wearing":
                     st["wearing"] += 1
+        in_zone = len(set().union(*occ_by_zone.values())) if occ_by_zone else 0
 
         events: list[dict] = []
         violations: list[dict] = []
@@ -459,12 +461,17 @@ class FolderWorker(threading.Thread):
 
         for rule in self.rules.occupancy_rules(cid):
             threshold = int(rule.get("threshold") or 0)
-            if threshold and in_zone > threshold:
-                violations.append({"type": "occupancy_over", "zone": None,
-                                   "count": in_zone, "threshold": threshold})
-                events.append({"zone_id": None, "behavior": "occupancy_over",
+            # T-206：规则 zone_id 非空 → 该区人数；None → 任一区去重人数
+            rid_zid = rule.get("zone_id")
+            n = len(occ_by_zone.get(rid_zid, set())) if rid_zid is not None else in_zone
+            if threshold and n > threshold:
+                zname = zone_stat.get(rid_zid, {}).get("name") if rid_zid is not None else None
+                where = f"安全区「{zname}」" if zname else "画面"
+                violations.append({"type": "occupancy_over", "zone": zname,
+                                   "count": n, "threshold": threshold})
+                events.append({"zone_id": rid_zid, "behavior": "occupancy_over",
                                "level": rule["level"],
-                               "detail": f"图片「{name}」：在场人数 {in_zone} 超过阈值 {threshold}"})
+                               "detail": f"图片「{name}」：{where}在场人数 {n} 超过阈值 {threshold}"})
 
         return {
             "persons": len(dets),

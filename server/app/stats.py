@@ -150,8 +150,10 @@ def quality(store, days: int = 7, camera_id: int | None = None) -> dict:
     """
     from datetime import datetime
     now = datetime.now()
-    start_ts = (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    end_ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    # T-203（B-06）：库内 ts 是 ISO 'T' 分隔；"%Y-%m-%d %H:%M:%S"（空格）与它做字符串
+    # 比较时 'T'(0x54)>' '(0x20) → 当天事件全部被 end_ts 排除。统一 isoformat。
+    start_ts = (now - timedelta(days=days)).isoformat(timespec="seconds")
+    end_ts = now.isoformat(timespec="seconds")
     where, args = ["ts >= ?", "ts <= ?"], [start_ts, end_ts]
     if camera_id is not None:
         where.append("camera_id=?")
