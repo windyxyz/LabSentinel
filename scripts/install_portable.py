@@ -238,7 +238,7 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
             return 2
     data_root = Path(os.environ["LOCALAPPDATA"]) / "LabSentinel"
     if dry_run:
-        log(f"[dry-run] 将执行（未写任何文件/注册表）：")
+        log("[dry-run] 将执行（未写任何文件/注册表）：")
         log(f"  复制 {src} -> {install}{'（覆盖升级，数据目录不动）' if upgrading else '（全新安装）'}")
         log(f"  快捷方式：{'桌面+开始菜单' if shortcuts else '跳过（--no-shortcuts）'}"
             + (f"（桌面覆盖={desktop_dir} 开始菜单覆盖={start_menu_dir}）"

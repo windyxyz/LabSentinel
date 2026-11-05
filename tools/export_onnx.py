@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """把训练好的 best.pt 导出为 FP32 ONNX（opset 13，imgsz 640），供 DirectML/NPU/CPU 推理。
 
 默认: m0-spike/yolo11n_ppe.pt -> m0-spike/yolo11n_ppe.onnx（server/.env 的 LS_PPE_MODEL 指向它）。

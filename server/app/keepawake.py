@@ -12,7 +12,6 @@ Win32 语义：SetThreadExecutionState 的效果是 **per-thread** 的（ES_CONT
 """
 import sys
 import threading
-import time
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001

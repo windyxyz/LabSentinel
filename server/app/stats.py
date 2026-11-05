@@ -210,7 +210,8 @@ def timeline(store, days: int = 7, camera_id: int | None = None,
 
     days 1-30；空数据补零；SQL group by substr(ts,1,10), substr(ts,12,2)——不加载事件行。
     """
-    from datetime import datetime, timedelta as _td
+    from datetime import datetime
+    from datetime import timedelta as _td
     now = datetime.now()
     d0 = (now - _td(days=days - 1)).date()
     # 从 d0 当天 00:00 起算，保证查询范围与返回的 days 个自然日完全一致

@@ -15,9 +15,10 @@ import subprocess
 import threading
 import time
 import uuid
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import quote, urlparse
+
+from defusedxml import ElementTree as ET  # T-501（S-14）：防 XXE/实体爆炸
 
 WS_MULTICAST_ADDR = "239.255.255.250"
 WS_PORT = 3702

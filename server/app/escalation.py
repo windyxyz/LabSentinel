@@ -8,7 +8,6 @@
 - `LS_ESCALATE_AFTER_MIN=0` 关闭。
 """
 import threading
-import time
 from datetime import datetime, timedelta
 
 from .config import settings
@@ -43,7 +42,7 @@ def escalate_once(store, now: datetime | None = None, send=None) -> dict:
     if after_min <= 0:
         return {"checked": 0, "escalated": 0, "disabled": True}
     now = now or datetime.now()
-    from .alerts import dispatcher, render_alert
+    from .alerts import render_alert
     rows = find_unhandled(store, now, after_min,
                           settings.escalate_min_level, settings.escalate_batch)
     escalated = 0

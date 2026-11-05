@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """数据飞轮：把一轮标注数据打包为版本化数据集目录（v1/v2/...）。
 
 职责（90-data-flywheel.md 工具清单）：
@@ -118,7 +117,7 @@ def main():
     (vdir / "VERSION.md").write_text(version_md, encoding="utf-8")
     print(f"[done] v{args.version}: {copied} 图 + 标签 → {vdir}")
     print(f"       缺标签跳过 {missing_lbl}，空标签(背景) {empty_lbl}")
-    print(f"       VERSION.md 已生成（含脱敏确认清单，发布前必须人工勾完）")
+    print("       VERSION.md 已生成（含脱敏确认清单，发布前必须人工勾完）")
 
 
 if __name__ == "__main__":

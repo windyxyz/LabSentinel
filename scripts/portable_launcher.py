@@ -10,8 +10,8 @@
 环境变量 LS_LAUNCHER_NO_BROWSER=1 时不开浏览器（自动化测试用，也不弹失败 MessageBox）；
 LS_NO_MESSAGEBOX=1 只关弹窗；LS_READY_TIMEOUT_S 覆盖就绪等待（默认 60s，任务119）。
 """
-import logging
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -37,8 +37,8 @@ CREATE_NO_WINDOW = 0x08000000
 
 # 播种单源（任务51）：schema/演示摄像头/区域/规则统一在 scripts/seed_demo.py 维护
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import seed_demo  # noqa: E402
 import install_portable  # noqa: E402  任务120：安装位置检测/注册表卸载项共用
+import seed_demo  # noqa: E402
 
 log = logging.getLogger("launcher")
 

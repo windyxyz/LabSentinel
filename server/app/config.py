@@ -1,7 +1,7 @@
 """LabSentinel 服务端配置。"""
 from pathlib import Path
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -150,9 +150,8 @@ class Settings(BaseSettings):
     # 单端口模式（任务43）：托管 web/dist，npm run build 后只开一个端口
     web_dist: Path = BASE_DIR.parent / "web" / "dist"
 
-    class Config:
-        env_prefix = "LS_"
-        env_file = ".env"
+    # T-507：pydantic v2 写法（class Config 已弃用，PydanticDeprecatedSince20）
+    model_config = SettingsConfigDict(env_prefix="LS_", env_file=".env")
 
 
 settings = Settings()

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """T-321（L0）黄金语料运行器：把一段视频逐帧喂进真实分析管线，输出事件 JSONL。
 
 用途（L0 对齐基准，76 文档 §7.2.4）：
@@ -43,7 +42,6 @@ def main() -> int:
     os.environ["LS_DETERMINISTIC"] = "1"
     os.environ["LS_LOG_FILE"] = "0"
     import cv2  # noqa: E402
-
     from app.config import settings  # noqa: E402
     from app.pipeline import CameraWorker  # noqa: E402
     from app.rules import RuleEngine  # noqa: E402

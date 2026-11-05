@@ -7,7 +7,7 @@
 import asyncio
 
 import websockets
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 
 from . import go2rtc
 

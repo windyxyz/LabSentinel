@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """T-324：导出 ByteTrack 轨迹一致性共享向量（Python supervision = 真值实现）。
 
 生成 testdata/vectors/track_sequences.json：合成检测序列（单人/双人交叉/遮挡重现/

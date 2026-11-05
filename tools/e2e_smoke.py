@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """LabSentinel 端到端冒烟脚本（任务22）：起服务前提下的主链路自动化验证。
 
 黑盒：全程走 HTTP API，不 import 服务端内部模块；不启动/停止服务进程——
@@ -18,7 +17,6 @@
 import argparse
 import sys
 import time
-from datetime import datetime
 
 import httpx
 

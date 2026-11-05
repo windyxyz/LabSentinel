@@ -17,8 +17,8 @@ def summary(store) -> dict:
         disk = {"data_dir": str(settings.data_dir), "free_bytes": du.free, "total_bytes": du.total}
     except OSError:
         disk = {"data_dir": str(settings.data_dir), "free_bytes": None, "total_bytes": None}
-    from .engine import get_engine
     from .api import _system_version  # 版本常量单一来源（api 模块此时已加载）
+    from .engine import get_engine
     return {
         "version": _system_version(),
         "backend": get_engine().backend,

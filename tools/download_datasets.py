@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """下载 LAB PPE 数据集（Roboflow Universe，CC BY 4.0）到 Resources/datasets/lab-ppe/。
 
 来源: https://universe.roboflow.com/gavriels-workspace-e9azv/lab-ppe-p4qe4/dataset/1
@@ -47,7 +46,7 @@ def main():
     # 已存在则跳过（以 data.yaml 为存在标志）
     if (out / "data.yaml").exists():
         print(f"[skip] {out} 已存在 data.yaml，视为数据集已下载，跳过。")
-        print(f"       如需强制重下，请先删除该目录或用 --out 指定新目录。")
+        print("       如需强制重下，请先删除该目录或用 --out 指定新目录。")
         return
 
     # key 必须来自环境变量，缺失时给出清晰设置说明

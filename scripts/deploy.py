@@ -13,7 +13,9 @@
   - 下载源仅限公网 http/https（(_assert_public_host 校验），npm/pip 用国内镜像
   - 种子库 schema 与 server/app/store.py 的 SCHEMA 保持同步
 """
-from __future__ import annotations  # 允许老解释器（3.9）先跑起来做体检，venv 仍会挑 3.10+
+from __future__ import (
+    annotations,  # 允许老解释器（3.9）先跑起来做体检，venv 仍会挑 3.10+
+)
 
 import argparse
 import gzip
@@ -21,7 +23,6 @@ import hashlib
 import ipaddress
 import json
 import os
-import re
 import shutil
 import socket
 import sqlite3
@@ -220,7 +221,7 @@ def ensure_venv() -> Path:
         return v
     broken = ROOT / ".venv"
     if venv_python(broken).exists() and not _venv_runnable(broken):
-        log(f"  [自愈] .venv 已损坏（宿主 Python 失联），删除后重建...")
+        log("  [自愈] .venv 已损坏（宿主 Python 失联），删除后重建...")
         shutil.rmtree(broken, ignore_errors=True)
     py = find_system_python()
     if not py:

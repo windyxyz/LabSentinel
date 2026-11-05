@@ -10,7 +10,6 @@
 退出码：有 FAIL → 2；只有 WARN → 0。
 """
 import argparse
-import hashlib
 import json
 import os
 import re

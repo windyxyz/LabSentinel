@@ -14,7 +14,6 @@ import json
 import logging
 import queue
 import threading
-import time
 from urllib.parse import urlparse
 
 import cv2
@@ -173,6 +172,7 @@ def _review_one(event_id: int, snapshot_path: str) -> None:
 
 def _write_back(event_id: int, review: AIReview) -> None:
     import sqlite3
+
     from .config import settings as _s
     con = sqlite3.connect(str(_s.db_path), timeout=10)
     try:

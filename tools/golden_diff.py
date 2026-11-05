@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """T-321（L0）黄金语料事件 diff：比较两次 golden_run 输出的一致率。
 
 匹配口径（76 文档 §11 T-321）：事件按 (camera, type, zone, 帧±1) 对齐——
@@ -12,7 +11,6 @@ zone 信息含于 detail（区域名），detail 不一致即视为不匹配（L
 import argparse
 import json
 import sys
-from pathlib import Path
 
 
 def _load(p: str) -> list[dict]:

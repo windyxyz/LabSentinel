@@ -56,7 +56,7 @@ class SidecarAnalyzer(AnalyzerBackend):
         import grpc
         channel = grpc.insecure_channel(f"127.0.0.1:{self._port}")
         grpc.channel_ready_future(channel).result(timeout=10)
-        from . import analyzer_pb2, analyzer_pb2_grpc
+        from . import analyzer_pb2_grpc
         self._stub = analyzer_pb2_grpc.AnalyzerStub(channel)
         self._started = True
 

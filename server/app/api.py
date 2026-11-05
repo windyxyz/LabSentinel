@@ -11,20 +11,33 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import cv2
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from . import go2rtc
-from . import keepawake
-from . import discovery
-from . import update_check
-from . import mqtt_bridge
+from . import (
+    alert_config,
+    discovery,
+    genai,
+    go2rtc,
+    keepawake,
+    mqtt_bridge,
+    update_check,
+)
 from . import plugins as plugins_mod
-from . import genai
-from . import alert_config
 from .alerts import dispatcher, render_alert
 from .config import settings
+from .constants import TYPE_TEXT
+
 # B-28：api 层不再导入 get_engine——/api/system 只读 engine._engine/PRELOAD，模型缺失不炸
 from .face import FaceClient
 from .folders import image_exts, thumbnail_bytes
@@ -32,12 +45,11 @@ from .models import CameraCreate, RuleCreate, ZoneCreate
 from .pipeline import CameraManager
 from .stats import daily as stats_daily_query
 from .stats import hourly as stats_hourly_query
-from .stats import summary as stats_summary_query
 from .stats import quality as stats_quality_query
+from .stats import summary as stats_summary_query
 from .stats import timeline as stats_timeline_query
 from .stats import weekly as stats_weekly_query
 from .store import EVENT_STATUSES, Store, ro_uri
-from .constants import TYPE_TEXT
 
 router = APIRouter(prefix="/api")
 
@@ -191,7 +203,7 @@ def health_ready():
 # ---- system ----
 def _config_issue_counts() -> dict:
     """任务95：启动校验 FAIL/WARN 计数（不泄露路径）。"""
-    from .validate import fail_count, warn_count, validate_settings
+    from .validate import fail_count, validate_settings, warn_count
     r = validate_settings()
     return {"fail": fail_count(r), "warn": warn_count(r)}
 
@@ -283,7 +295,6 @@ def model_status():
         fp = _P(str(p))
         if not fp.exists():
             return {"path": str(p), "exists": False, "size_bytes": None, "mtime": None}
-        import os as _os
         return {"path": str(p), "exists": True,
                 "size_bytes": fp.stat().st_size,
                 "mtime": datetime.fromtimestamp(fp.stat().st_mtime).isoformat(timespec="seconds")}
@@ -495,7 +506,7 @@ def alert_template_get():
 
 @router.post("/alert-template/preview", dependencies=[Depends(require_admin)])
 def alert_template_preview(body: dict):
-    from .alerts import render_alert, alert_title
+    from .alerts import alert_title, render_alert
     row = {"ts": body.get("ts") or datetime.now().isoformat(timespec="seconds"),
            "camera_id": int(body.get("camera_id", 1)),
            "type": body.get("type", "enter"),
@@ -1210,9 +1221,9 @@ def folder_images(camera_id: int | None = None, key: int | None = None,
 
 
 def _csv_cell(value) -> str:
-    """CSV 单元格防公式注入（Excel 把 = + - @ 开头当公式执行）。"""
-    s = "" if value is None else str(value)
-    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
+    """CSV 单元格防公式注入（T-502：与 export 共用 csvsafe，防两套规则漂移）。"""
+    from .csvsafe import safe_cell
+    return safe_cell(value)
 
 
 @router.get("/folder-images/export.csv", dependencies=[Depends(require_read)])
@@ -1828,6 +1839,7 @@ def maintenance_preview():
 def maintenance_status():
     """维护状态（任务14/68）：清理结果 + 磁盘水位/数据体量/增速预估（估算值已标注）。"""
     import os
+
     from . import retention
 
     def _core_bytes() -> int:

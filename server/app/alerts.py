@@ -5,13 +5,13 @@
 """
 import asyncio
 import concurrent.futures
-from collections import deque
 import json
 import smtplib
 import socket
 import ssl
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from email.mime.text import MIMEText
 from urllib.parse import quote, urlparse
@@ -544,10 +544,9 @@ class AlertDispatcher:
             return  # 服务退出中：不再排队新投递
         self.hub.broadcast_sync(event_row)
         try:  # 任务125：MQTT 事件总线（独立于告警链：不受静默/渠道过滤影响；失败吞掉）
-            from . import mqtt_bridge
             # T-208（B-14）：派发前行里 snapshot 已被 pop（只回布尔）——has_snapshot
             # 由 _dispatch_row 写入；camera_name 走 ConfigCache（避免每事件查库）
-            from . import configcache
+            from . import configcache, mqtt_bridge
             mqtt_bridge.publish_event(event_row,
                                       camera_name=configcache.camera_name(self.store, event_row.get("camera_id", 0))
                                       if self.store is not None else None)

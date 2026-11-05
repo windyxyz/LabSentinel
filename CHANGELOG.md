@@ -40,6 +40,12 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- S5 可维护性第一批：T-501 discovery 改 defusedxml（防 XXE，依赖入锁）；T-502 CSV
+  公式注入防护统一到 app/csvsafe.py（事件/证据包导出补齐）；T-506 Service Worker
+  只缓存 2xx 导航响应（B-25）；T-507 pydantic v2 ConfigDict（弃用告警清零）；
+  T-509 ruff 自动修复 68 项（unused import/导入排序等）——顺带抓出 webrtc 代理
+  WebSocketDisconnect 未导入的真 bug（F821）；T-510 部署指南同步 S1 后拓扑
+  （端口/防火墙/首启令牌/WS 子协议）。
 - T-401/T-409（B-15）：版本单一来源——仓库根 VERSION=0.2.0（SemVer，Q-05），
   main/api 运行时读取（version.py），app/VERSION 由构建落包，install_portable/
   web/package.json 同步；scripts/bump_version.py 一键同步；release_check 断言

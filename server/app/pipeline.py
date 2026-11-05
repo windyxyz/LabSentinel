@@ -2,7 +2,6 @@
 
 取流 → (限频)检测 → ByteTrack 跟踪 → 区域进出判定 → 规则/冷却 → 事件入库+告警+截图+视频存证。
 """
-import os
 import queue
 import re
 import threading

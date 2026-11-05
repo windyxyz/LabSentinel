@@ -43,8 +43,9 @@ def default_data_dir(root: Path) -> Path:
 try:
     _sys_path_saved = sys.path[:]
     sys.path.insert(0, str(ROOT / "server"))
-    from app.redact import SENSITIVE as _SENSITIVE, URL_CRED as _URL_CRED, \
-        URL_QUERY_TOKEN as _URL_QUERY_TOKEN
+    from app.redact import SENSITIVE as _SENSITIVE
+    from app.redact import URL_CRED as _URL_CRED
+    from app.redact import URL_QUERY_TOKEN as _URL_QUERY_TOKEN
     sys.path = _sys_path_saved
 except ImportError:
     _SENSITIVE = re.compile(r"TOKEN|PASSWORD|SECRET|KEY|PASS\b|CREDENTIAL", re.IGNORECASE)

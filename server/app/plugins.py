@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from .config import settings
 

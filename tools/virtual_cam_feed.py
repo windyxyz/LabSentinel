@@ -9,10 +9,8 @@
 注意：本脚本只负责产生虚拟摄像头画面；不要与真实摄像头 24h 验收同时跑。
 """
 import argparse
-import sys
 
 import cv2
-import numpy as np
 
 try:
     import pyvirtualcam

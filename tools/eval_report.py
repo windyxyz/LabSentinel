@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """数据飞轮 ④：模型在 test 集上的评估报告（Markdown 表，可多版本对比）。
 
 用法（m0-venv）:
@@ -10,7 +9,6 @@
 输出：逐类 AP50/检出率/平均置信度 + 置信度分布 + Markdown 表（--report 追加对比行）。
 """
 import argparse
-import csv
 import sys
 from collections import defaultdict
 from pathlib import Path

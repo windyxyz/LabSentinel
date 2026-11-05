@@ -25,6 +25,7 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       fetch(e.request)
         .then((r) => {
+          if (!r.ok) return r // T-506（B-25）：非 2xx（500/离线网关页）不污染缓存
           const copy = r.clone()
           caches.open(CACHE).then((c) => c.put('/index.html', copy))
           return r

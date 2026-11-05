@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """模型就绪自检（任务32，docs/45-model-onboarding.md §3 上线门禁）。
 
 只读检查：不启停服务、不做推理（onnxruntime 仅 CPU 建 session 读形状）、不改任何文件、
@@ -14,7 +13,6 @@
 import argparse
 import csv
 import glob
-import os
 import sys
 from datetime import datetime
 from pathlib import Path

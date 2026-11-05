@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """LAB PPE 微调训练脚本（ultralytics YOLO11n 起点）。
 
 流程: m0-spike/yolo11n.pt（COCO 预训练）+ datasets/lab-ppe/data.yaml

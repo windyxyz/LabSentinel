@@ -12,8 +12,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import stats as stats_mod
-from .constants import TYPE_TEXT
 from .config import settings
+from .constants import TYPE_TEXT
 
 # 中文列名固定常量表（Excel 用户视角；禁止散落字符串）
 CSV_EVENT_HEADERS = ["时间", "摄像头", "类型", "级别", "track", "详情", "状态", "处理人", "处理时间"]
@@ -92,7 +92,6 @@ def _register_cn_font():
 
 def monthly_pdf(store, month: str) -> bytes:
     """生成月报 PDF（yyyy-mm）。一页：标题/统计/每日柱状/合规脚注。"""
-    from reportlab.graphics.shapes import Drawing, Rect, String
     from reportlab.lib.colors import HexColor
     from reportlab.pdfgen import canvas as pdfcanvas
 
@@ -182,12 +181,14 @@ def _within_data_dir(path: str, data_dir) -> bool:
 
 
 def event_csv_row(r: dict) -> list:
-    """单事件 → CSV 行（与任务15 列定义一致）。"""
+    """单事件 → CSV 行（与任务15 列定义一致；T-502：全部单元格过公式注入防护）。"""
+    from .csvsafe import safe_cell
     return [
-        r["ts"], f"#{r['camera_id']}", TYPE_TEXT.get(r["type"], r["type"]),
-        f"L{r['level']}", r["track_id"], r["detail"],
-        STATUS_TEXT.get(r.get("status") or "new", r.get("status") or "new"),
-        r.get("handled_by") or "", r.get("handled_ts") or "",
+        safe_cell(r["ts"]), safe_cell(f"#{r['camera_id']}"),
+        safe_cell(TYPE_TEXT.get(r["type"], r["type"])),
+        safe_cell(f"L{r['level']}"), safe_cell(r["track_id"]), safe_cell(r["detail"]),
+        safe_cell(STATUS_TEXT.get(r.get("status") or "new", r.get("status") or "new")),
+        safe_cell(r.get("handled_by") or ""), safe_cell(r.get("handled_ts") or ""),
     ]
 
 

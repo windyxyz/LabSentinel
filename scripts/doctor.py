@@ -145,7 +145,7 @@ def run_checks(root: Path, port: int) -> list[dict]:
             # 2026-10-30 审阅：服务正在写库时 integrity_check 会撞 busy——这是"忙"不是"坏"，
             # 原实现误报 FAIL（退出码 2）并建议删库重播种，纯属误导
             if "locked" in str(e).lower() or "busy" in str(e).lower():
-                results.append(check("数据库", True, f"数据库被占用（服务正在运行），跳过完整性检查",
+                results.append(check("数据库", True, "数据库被占用（服务正在运行），跳过完整性检查",
                                      "", level="PASS"))
             else:
                 results.append(check("数据库", False, f"打不开: {e}",

@@ -15,32 +15,40 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException  # StaticFiles 抛的是 starlette 版
+from starlette.exceptions import (
+    HTTPException as StarletteHTTPException,  # StaticFiles 抛的是 starlette 版
+)
 
+from . import (
+    alert_config,
+    backups,
+    escalation,
+    genai,
+    go2rtc,
+    keepawake,
+    mqtt_bridge,
+    plugins,
+    retention,
+)
 from .alerts import dispatcher
 from .api import init, router, ws_events
-from . import go2rtc
-from . import retention
-from . import backups
-from . import escalation
-from . import keepawake
-from . import genai
-from . import mqtt_bridge
-from . import plugins
-from . import alert_config
 from .config import settings
-from .logging_setup import setup_file_logging  # 任务61：导入阶段挂文件日志（尽早捕获启动错误）
+from .logging_setup import (
+    setup_file_logging,  # 任务61：导入阶段挂文件日志（尽早捕获启动错误）
+)
 from .pipeline import CameraManager
 from .store import Store
 
 setup_file_logging()  # LS_LOG_FILE=0 关闭；失败静默（console 照常）
 
 # 任务95：启动配置校验（默认只告警；LS_STRICT_CONFIG=1 时 FAIL 拒绝启动）
-from .validate import validate_settings, fail_count as _vc_fail, warn_count as _vc_warn
+from .validate import fail_count as _vc_fail
+from .validate import validate_settings
+
 _v_results = validate_settings()
 for _v in _v_results:
     _lg = logging.getLogger("app.validate")
@@ -120,6 +128,7 @@ async def lifespan(app: FastAPI):
 
 
 from .version import read_version as _read_version
+
 app = FastAPI(title="LabSentinel", version=_read_version(), lifespan=lifespan)
 app.include_router(router)
 
@@ -305,8 +314,8 @@ async def events_ws(ws: WebSocket):
 @app.websocket("/ws/webrtc/{cid}")
 async def webrtc_ws(ws: WebSocket, cid: int):
     """T-102：WebRTC 信令鉴权代理——浏览器只连 8000，go2rtc :1984 仅回环可达。"""
-    from .api import _ws_auth_check
     from . import webrtc_proxy
+    from .api import _ws_auth_check
     if not _ws_auth_check(ws):
         await ws.close(code=4401)
         return

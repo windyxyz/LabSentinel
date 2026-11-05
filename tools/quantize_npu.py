@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """用 AMD Quark 把 YOLO ONNX 量化为 NPU（XDNA2/Ryzen AI）可用的 XINT8 模型。
 
 !!! 必须用 npu-venv（Python 3.12）运行，m0-venv 里没有 amd-quark：
@@ -17,7 +16,6 @@ import argparse
 import os
 import re
 import sys
-import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

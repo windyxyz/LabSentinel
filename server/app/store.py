@@ -1,9 +1,9 @@
 """SQLite 存储（stdlib sqlite3；全部使用字面量 SQL + 参数占位符）。"""
+import contextlib
 import json
 import logging
 import os
 import sqlite3
-import contextlib
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
