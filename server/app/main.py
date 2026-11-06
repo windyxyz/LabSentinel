@@ -65,6 +65,19 @@ if settings.strict_config and _vc_fail(_v_results) > 0:
 # 请求 ID（任务63）：中间件写入，日志过滤器读取（见 logging_setup 的格式 [req=...]）
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
+# T-621（§9.4）：API 版本化——/api/v1/meta 文案单一来源（前端/移动端运行时拉取）
+_v1 = APIRouter(prefix="/api/v1")
+from . import constants as _constants  # noqa: E402
+
+
+@_v1.get("/meta")
+def api_meta():
+    """类型/级别/状态文案单一来源（前端/移动端运行时拉取，消除手工同步）。"""
+    from .export import STATUS_TEXT as _st
+    return {"types": _constants.TYPE_TEXT, "statuses": _st,
+            "levels": {"1": "提示", "2": "警告", "3": "严重"},
+            "version": __import__("app.version", fromlist=["read_version"]).read_version()}
+
 
 def _client_request_id(request: Request) -> str:
     rid = request.headers.get("X-Request-ID", "")
@@ -142,34 +155,7 @@ async def lifespan(app: FastAPI):
 
 from .version import read_version as _read_version
 
-app = FastAPI(title="LabSentinel", version=_read_version(), lifespan=lifespan)
-app.include_router(router, prefix="/api")  # 兼容别名（弃用期两个版本）
-app.include_router(router, prefix="/api/v1", include_in_schema=False)  # T-621 正式前缀
-# T-621（§9.4）：API 版本化——/api/v1 为正式契约前缀（/api 保留为别名，弃用期两个版本）
-_v1 = APIRouter(prefix="/api/v1")
-from . import constants as _constants  # noqa: E402
-
-
-@_v1.get("/meta")
-def api_meta():
-    """类型/级别/状态文案单一来源（前端/移动端运行时拉取，消除手工同步）。"""
-    from .export import STATUS_TEXT as _st
-    return {"types": _constants.TYPE_TEXT, "statuses": _st,
-            "levels": {"1": "提示", "2": "警告", "3": "严重"},
-            "version": __import__("app.version", fromlist=["read_version"]).read_version()}
-
-
-app.include_router(_v1)
-
-# ---- T-105（S-03/P1）：Host 白名单（防 DNS Rebinding）----
-from starlette.middleware.trustedhost import TrustedHostMiddleware  # noqa: E402
-
-_allowed_hosts = [h.strip() for h in settings.trusted_hosts.split(",") if h.strip()] + ["testserver"]
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
-
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-
-
 def _same_origin(request: Request) -> bool:
     """T-105：写请求同源校验（Sec-Fetch-Site 优先，其次 Origin；无 Origin 视为非浏览器客户端放行）。"""
     sfs = request.headers.get("sec-fetch-site")
@@ -214,7 +200,6 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-@app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
     """任务63：响应头始终带 X-Request-ID（客户端合法传入则回显，否则生成 uuid4）。
     任务87：写请求（/api/* 非 GET）完成后落审计行（不含 body/headers/query）。
@@ -308,7 +293,6 @@ def _audit_db_path() -> str:
     return str(settings.db_path)
 
 
-@app.exception_handler(StarletteHTTPException)
 async def http_exc_handler(request: Request, exc: StarletteHTTPException):
     body = {"detail": exc.detail,
             "request_id": _rid(request),
@@ -316,7 +300,6 @@ async def http_exc_handler(request: Request, exc: StarletteHTTPException):
     return JSONResponse(body, status_code=exc.status_code, headers=getattr(exc, "headers", None))
 
 
-@app.exception_handler(RequestValidationError)
 async def validation_exc_handler(request: Request, exc: RequestValidationError):
     first = exc.errors()[0] if exc.errors() else {}
     loc = ".".join(str(x) for x in first.get("loc", []))
@@ -325,7 +308,6 @@ async def validation_exc_handler(request: Request, exc: RequestValidationError):
                         status_code=422)
 
 
-@app.exception_handler(Exception)
 async def unhandled_exc_handler(request: Request, exc: Exception):
     rid = _rid(request)
     # 用 app.* logger（向 root 传播 → server.log 能按 [req=...] 检索）；uvicorn.error 不向 root 传播
@@ -335,12 +317,10 @@ async def unhandled_exc_handler(request: Request, exc: Exception):
                         status_code=500)
 
 
-@app.websocket("/ws/events")
 async def events_ws(ws: WebSocket):
     await ws_events(ws)
 
 
-@app.websocket("/ws/webrtc/{cid}")
 async def webrtc_ws(ws: WebSocket, cid: int):
     """T-102：WebRTC 信令鉴权代理——浏览器只连 8000，go2rtc :1984 仅回环可达。"""
     from . import webrtc_proxy
@@ -392,7 +372,6 @@ GZIP_MIN_BYTES = 1024
 GZIP_TYPE_PREFIXES = ("text/", "image/svg+xml", "application/javascript", "application/json")
 
 
-@app.middleware("http")
 async def selective_gzip_middleware(request: Request, call_next):
     resp = await call_next(request)
     if "gzip" not in request.headers.get("accept-encoding", "").lower():
@@ -443,4 +422,32 @@ def mount_web(app: FastAPI = None) -> None:
             return {"message": "web dist not built; run npm run build（或设 LS_WEB_DIST 指向已构建目录）"}
 
 
-mount_web(app)
+def create_app() -> FastAPI:
+    """T-508：应用工厂——路由挂载/中间件/异常处理/静态托管全部在此构造。
+
+    模块级 `app` 是本工厂的产物（兼容既有 53 处 `from app.main import app`）；
+    lifespan 保持模块级函数（Starlette 要求 lifespan 在实例化时传入）。
+    可重入：每次调用返回全新实例，mount_web 等副作用只作用于新实例。
+    """
+    application = FastAPI(title="LabSentinel", version=_read_version(), lifespan=lifespan)
+    application.include_router(router, prefix="/api")  # 兼容别名（弃用期两个版本）
+    application.include_router(router, prefix="/api/v1", include_in_schema=False)  # T-621 正式前缀
+    application.include_router(_v1)
+    # ---- T-105（S-03/P1）：Host 白名单（防 DNS Rebinding）----
+    from starlette.middleware.trustedhost import TrustedHostMiddleware  # noqa: E402
+
+    _allowed_hosts = [h.strip() for h in settings.trusted_hosts.split(",") if h.strip()] \
+        + ["testserver"]
+    application.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
+    application.middleware("http")(request_id_middleware)
+    application.middleware("http")(selective_gzip_middleware)
+    application.add_exception_handler(StarletteHTTPException, http_exc_handler)
+    application.add_exception_handler(RequestValidationError, validation_exc_handler)
+    application.add_exception_handler(Exception, unhandled_exc_handler)
+    application.websocket("/ws/events")(events_ws)
+    application.websocket("/ws/webrtc/{cid}")(webrtc_ws)
+    mount_web(application)
+    return application
+
+
+app = create_app()

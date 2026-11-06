@@ -387,7 +387,7 @@ def _archive_current(install: Path, version: str) -> Path | None:
     if dest.resolve().parent != vd.resolve():
         return None
     if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
+        _rmtree_retry(dest, under=vd)  # 逐项锚点删除（防遍历；归档根 vd 为锚）
     try:
         shutil.copytree(install, dest,
                         ignore=shutil.ignore_patterns("data", "versions", "__pycache__",
@@ -471,17 +471,54 @@ def rollback(install: Path | None = None) -> int:
 def _rmtree_retry(path: Path, under: Path, attempts: int = 3) -> None:
     """删除带重试：刚被杀的进程句柄/Defender 实时扫描会短暂锁文件。
 
-    锚点（T-405）：被删路径必须是 under 本身或其直接子项，否则拒绝（防遍历）。"""
+    锚点（T-405）：被删路径必须是 under 本身或其直接子项，否则拒绝（防遍历）。
+    逐项删除（os.unlink/os.rmdir）而非整树 rmtree：每个文件/子目录删除前都重新
+    resolve 校验仍在 under 之内——任何一项逃逸（符号链接重定向/TOCTOU 换名）即
+    中止整个删除，防误删扩散。"""
     target = Path(path).resolve()
     root = Path(under).resolve()
     if target != root and target.parent != root:
         return
+
+    def _within(p: Path) -> bool:
+        try:
+            real = p.resolve()
+        except OSError:
+            return False
+        return real == root or real.is_relative_to(root)
+
     for i in range(attempts):
-        shutil.rmtree(target, ignore_errors=True)
+        if not target.exists():
+            return
+        # 自底向上逐项删：先文件后目录（os.walk topdown=False 保证子项先于父项）
+        for dirpath, dirnames, filenames in os.walk(target, topdown=False):
+            base = Path(dirpath)
+            for name in filenames:
+                f = base / name
+                if _within(f):
+                    try:
+                        os.unlink(f)
+                    except OSError:
+                        pass
+            for name in dirnames:
+                d = base / name
+                if _within(d):
+                    try:
+                        os.rmdir(d)  # 仅空目录；非空（删除失败）留给下一轮
+                    except OSError:
+                        pass
+            if base != target and _within(base):
+                try:
+                    os.rmdir(base)
+                except OSError:
+                    pass
+        try:
+            os.rmdir(target)  # 根本身：上一轮清空后此处成功
+        except OSError:
+            pass
         if not target.exists():
             return
         time.sleep(2)
-    shutil.rmtree(target, ignore_errors=True)
 
 
 def _uninstall_target_allowed(install: Path, roots: tuple[Path, ...]) -> bool:

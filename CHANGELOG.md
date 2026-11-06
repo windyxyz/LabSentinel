@@ -98,6 +98,10 @@
   WS/MQTT），evidence_key+behavior 去重防流重连重放；sidecar 状态并入
   `/api/cameras/status` 与守护逻辑；默认全 python 零侵入，sidecar 不可用自动回退
   Python worker。默认 Python 路径行为完全不变（全量回归验证）。
+- **T-508 副作用收敛 create_app 工厂**：路由挂载/中间件/异常处理/WS/静态托管全部
+  收进 `create_app()`；模块级 `app` 成为工厂产物（53 处 `from app.main import app`
+  零改动），中间件与 handler 去装饰器改显式注册；工厂可重入（二次实例化路由集合
+  与 OpenAPI 94 路径顺序逐字一致）；lifespan 语义不变；全量 565 passed。
 - **T-321（L1）黄金语料 Rust 运行器与对齐实测**：`ls-analyzer --golden` 离线模式
   （同 Python golden_run 口径：帧序号抽帧 step=round(vfps/fps)、合成基准时间戳、
   全画幅三规则；`--dump-dets` 输出检测框诊断）；三语料实测——lab-equip 与
