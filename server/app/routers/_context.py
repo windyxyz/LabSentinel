@@ -37,3 +37,27 @@ def normalize_ts_range(start_ts, end_ts):
 # request 必须带 fastapi.Request 注解，否则会被当成 query 参数暴露到契约里）
 def read_guard(request: Request):
     return _api().require_read(request)
+
+
+def admin_guard(request: Request):
+    return _api().require_admin(request)
+
+
+def triage_guard(request: Request):
+    return _api().require_triage(request)
+
+
+def face_client():
+    return _api().face_client
+
+
+def dispatcher():
+    return _api().dispatcher
+
+
+def render_alert(row):
+    return _api().render_alert(row)
+
+
+def alert_config():
+    return _api().alert_config

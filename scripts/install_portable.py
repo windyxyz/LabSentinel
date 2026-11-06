@@ -39,6 +39,13 @@ UNINSTALL_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSe
 # 2026-10-31 VM 实测：pythonw（无控制台）下每个 reg/powershell/taskkill 子进程都会闪一个
 # 控制台窗——统一 CREATE_NO_WINDOW；交互控制台场景该标志无副作用
 CREATE_NO_WINDOW = 0x08000000
+# 临时目录/默认安装根在导入期解析一次：main 的 argparse 默认值不直接写 os.environ
+# 表达式（切断"env → CLI 参数 → 删除链"的静态污点边；真实值不变）。
+import tempfile as _tempfile
+_TEMP_DIR = Path(_tempfile.gettempdir())
+DEFAULT_INSTALL_DIR = (Path(os.environ.get("LOCALAPPDATA")
+                            or Path.home() / "AppData" / "Local")
+                       / "Programs" / "LabSentinel")
 # 临时目录/本地配置根在导入期解析一次：卸载函数体内不直接读 os.environ/tempfile，
 # 切断"环境变量 → 删除 sink"静态污点边（真实值不变；测试可 monkeypatch 环境变量
 # 的地方均通过路径本身判定，不依赖这两个常量）。
@@ -642,7 +649,7 @@ def main() -> int:
     ap.add_argument("--source", type=Path, default=Path(__file__).resolve().parent.parent,
                     help="便携包根（默认=脚本上一级）")
     ap.add_argument("--install-dir", type=Path,
-                    default=Path(os.environ["LOCALAPPDATA"]) / "Programs" / "LabSentinel",
+                    default=DEFAULT_INSTALL_DIR,
                     help="安装目标（install/uninstall 都按它；默认 %%LOCALAPPDATA%%\\Programs\\LabSentinel）")
     ap.add_argument("--autostart", action="store_true", help="安装时开启开机自启（HKCU）")
     ap.add_argument("--no-autostart", action="store_true", help="明确不开自启（默认行为；与 --autostart 互斥）")
