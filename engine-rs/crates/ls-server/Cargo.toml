@@ -13,6 +13,7 @@ path = "src/main.rs"
 ls-store = { path = "../ls-store" }
 ls-dispatch = { path = "../ls-dispatch" }
 ls-core = { path = "../ls-core" }
+ls-jobs = { path = "../ls-jobs" }
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }

@@ -66,6 +66,13 @@ def _contract_cases(base: str, cid: int, eid: int):
         assert r.status_code == 200 and "total" in r.json()
         r = c.get("/api/config/summary")
         assert r.status_code == 200
+        # T-330：后台作业状态端点（L2 Rust 实现同契约）
+        r = c.get("/api/maintenance/status")
+        assert r.status_code == 200 and "disk_free_gb" in r.json()
+        r = c.get("/api/backups/status")
+        assert r.status_code == 200 and "enabled" in r.json()
+        r = c.get("/api/escalation/status")
+        assert r.status_code == 200 and "after_min" in r.json()
         # 跨站写请求一律 403
         r = c.post("/api/backups/run", headers={"Origin": "https://evil.example"})
         assert r.status_code == 403, (r.status_code, r.text)
@@ -94,6 +101,9 @@ def test_python_meets_contract(cross_db):
         assert r.status_code == 200 and r.json()["id"] == cid
         assert c.get("/api/stats/summary").status_code == 200
         assert c.get("/api/config/summary").status_code == 200
+        assert "disk_free_gb" in c.get("/api/maintenance/status").json()
+        assert "enabled" in c.get("/api/backups/status").json()
+        assert "after_min" in c.get("/api/escalation/status").json()
         assert c.post("/api/backups/run",
                       headers={"Origin": "https://evil.example"}).status_code == 403
 

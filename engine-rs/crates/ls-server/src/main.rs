@@ -33,6 +33,8 @@ pub struct AppState {
     pub web_dist: String,
     pub version: String,
     pub events_tx: broadcast::Sender<String>,
+    /// T-330：后台作业（retention / backup / escalation），启动时 start()
+    pub jobs: Arc<ls_jobs::Jobs>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -48,7 +50,12 @@ pub fn build_router(state: Shared) -> Router {
         .route("/cameras/:id/status", get(camera_status))
         .route("/stats/summary", get(stats_summary))
         .route("/config/summary", get(config_summary))
+        .route("/backups/status", get(backups_status))
         .route("/backups/run", post(backups_run))
+        .route("/maintenance/status", get(maintenance_status))
+        .route("/maintenance/preview", get(maintenance_preview))
+        .route("/maintenance/cleanup", post(maintenance_cleanup))
+        .route("/escalation/status", get(escalation_status))
         .route("/events/count", get(events_count))
         .with_state(state.clone());
     let ws = Router::new()
@@ -357,8 +364,53 @@ async fn config_summary(State(st): State<Shared>) -> Json<Value> {
     )
 }
 
-async fn backups_run() -> Json<Value> {
-    Json(json!({"started": true, "note": "由 ls-jobs 托管"}))
+async fn backups_run(State(st): State<Shared>) -> Response {
+    if !st.jobs.trigger_backup() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"detail": "备份正在进行中"})),
+        )
+            .into_response();
+    }
+    Json(json!({"started": true})).into_response()
+}
+
+async fn backups_status(State(st): State<Shared>) -> Json<Value> {
+    Json(st.jobs.backup_status())
+}
+
+async fn maintenance_status(State(st): State<Shared>) -> Response {
+    let jobs = Arc::clone(&st.jobs);
+    match tokio::task::spawn_blocking(move || jobs.maintenance_status()).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        _ => server_err(),
+    }
+}
+
+async fn maintenance_preview(State(st): State<Shared>) -> Response {
+    let jobs = Arc::clone(&st.jobs);
+    match tokio::task::spawn_blocking(move || jobs.preview_cleanup()).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        _ => server_err(),
+    }
+}
+
+async fn maintenance_cleanup(State(st): State<Shared>) -> Response {
+    let jobs = Arc::clone(&st.jobs);
+    match tokio::task::spawn_blocking(move || jobs.run_cleanup()).await {
+        Ok(Ok(stats)) => match serde_json::to_value(stats) {
+            Ok(v) => Json(v).into_response(),
+            Err(_) => server_err(),
+        },
+        _ => server_err(),
+    }
+}
+
+async fn escalation_status(State(st): State<Shared>) -> Response {
+    match st.jobs.escalation_status() {
+        Ok(v) => Json(v).into_response(),
+        Err(_) => server_err(),
+    }
 }
 
 async fn ws_events(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
@@ -421,6 +473,10 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8000);
+    let jobs = Arc::new(ls_jobs::Jobs::new(
+        std::path::PathBuf::from(&db_path),
+        ls_jobs::JobsConfig::from_env(std::path::Path::new(&db_path)),
+    ));
     let st = Arc::new(AppState {
         db_path,
         admin_token: token,
@@ -430,8 +486,10 @@ async fn main() {
         web_dist: "web/dist".into(),
         version,
         events_tx: broadcast::channel(256).0,
+        jobs,
     });
-    let app = build_router(st);
+    let app = build_router(st.clone());
+    st.jobs.start();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();
@@ -454,6 +512,10 @@ mod tests {
             web_dist: String::new(),
             version: "0.2.0".into(),
             events_tx: broadcast::channel(16).0,
+            jobs: Arc::new(ls_jobs::Jobs::new(
+                std::path::PathBuf::from(db),
+                ls_jobs::JobsConfig::default_for_db(std::path::Path::new(db)),
+            )),
         })
     }
 
@@ -465,25 +527,27 @@ mod tests {
         serde_json::from_slice(&b).unwrap()
     }
 
+    /// 测试用最小 schema（单条字面量脚本；与 ls-store roundtrip 同口径）。
+    fn seed_schema(path: &std::path::Path) {
+        let c = rusqlite::Connection::open(path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
+             INSERT INTO schema_version VALUES(13,'x');
+             CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, \
+             type TEXT, level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT, \
+             status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, escalated_ts TEXT);
+             CREATE TABLE cameras(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, \
+             type TEXT, status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
+             analyzer TEXT DEFAULT 'python');",
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn live_and_system_contract() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("t.db");
-        // 最小 schema（与 ls-store roundtrip 同；逐条字面量语句，无批量拼接）
-        let c = rusqlite::Connection::open(&db).unwrap();
-        for stmt in [
-            "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, applied_at TEXT)",
-            "INSERT INTO schema_version VALUES(12,'x')",
-            "CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, \
-             type TEXT, level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT, \
-             status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT)",
-            "CREATE TABLE cameras(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, \
-             type TEXT, status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
-             analyzer TEXT DEFAULT 'python')",
-        ] {
-            c.execute(stmt, []).unwrap();
-        }
-        drop(c);
+        seed_schema(&db);
         let app = build_router(test_state(db.to_str().unwrap()));
         let r = app
             .clone()
@@ -510,7 +574,48 @@ mod tests {
             .unwrap();
         let j = body_json(r2).await;
         assert_eq!(j["version"], "0.2.0");
-        assert_eq!(j["schema_version"], 12);
+        assert_eq!(j["schema_version"], 13);
+    }
+
+    #[tokio::test]
+    async fn maintenance_and_backup_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        seed_schema(&db);
+        let app = build_router(test_state(db.to_str().unwrap()));
+        for (uri, method) in [
+            ("/api/maintenance/status", "GET"),
+            ("/api/maintenance/preview", "GET"),
+            ("/api/backups/status", "GET"),
+            ("/api/escalation/status", "GET"),
+        ] {
+            let r = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("host", "127.0.0.1")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "{uri}");
+        }
+        let r = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/backups/run")
+                    .header("host", "127.0.0.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(body_json(r).await["started"], true);
     }
 
     #[tokio::test]

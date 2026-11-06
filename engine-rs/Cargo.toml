@@ -9,6 +9,7 @@ members = [
     "crates/ls-infer",
     "crates/ls-store",
     "crates/ls-dispatch",
+    "crates/ls-jobs",
     "crates/ls-server",
 ]
 

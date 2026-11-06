@@ -78,6 +78,15 @@
   （只升不降 + 旧 CalVer 兼容）、url 仅 https + LS_UPDATE_URL_HOSTS 白名单。
 - T-204（B-07/08/09）：int8 条目报 model_int8 / LS_BACKUP_INCLUDE_MEDIA 生效 /
   backups.trigger_async 原子触发（手动与定时共用，消除竞态）。
+- **T-330（L2）后台作业 Rust 化**：新增 `ls-jobs` crate——retention（过期事件/证据
+  文件/审计/投递记录/图片记录/孤儿媒体/磁盘紧急三档，所有删除均锚定 data_dir 真实
+  路径）、备份（rusqlite 热快照 + 与 `scripts/backup_data.py` 完全同格式的 zip/manifest，
+  Python verify 实测可直接读取，verify/restore 保守语义）、escalation（超时未处置
+  提醒，静默/渠道过滤/限流/投递记录/重试复用 ls-dispatch）；ls-server 托管三作业调度
+  并新增 `/api/maintenance/{status,preview,cleanup}`、`/api/backups/{status,run}`、
+  `/api/escalation/status`，L3 契约测试对 Python/Rust 双实现同套断言通过。
+  ls-dispatch 补通用 Webhook HMAC-SHA256 签名（X-LS-Signature）与 alert_silences
+  `global` 口径；ls-store 暴露只读连接供维护作业分页查询。
 - **L2/L3/L4 Rust 替换 Python 运行时（核心目标）**：
   - ls-store（T-332）：rusqlite 打开 Python 同库（schema v12 双向兼容，ADR-0008）；
   - ls-dispatch（T-329）：8 渠道等价语义、域名白名单、静默/过滤/限流/重试/死信；

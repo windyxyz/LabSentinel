@@ -200,7 +200,7 @@ mod tests {
         }
         ing.stop();
         assert!(
-            frames >= 8 && frames <= 12,
+            (8..=12).contains(&frames),
             "2s@5fps 应抽 ~10 帧，实得 {frames}"
         );
         let _ = std::fs::remove_file(&v);

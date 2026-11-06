@@ -60,6 +60,12 @@ impl Store {
         Ok(Store { conn })
     }
 
+    /// 只读连接访问（T-330 维护作业：retention/escalation 需要游标分页与多表清理，
+    /// 逐方法封装会让 ls-store 膨胀；SQL 仍由本 crate 之外的作业层集中维护）。
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// 双向兼容自检：schema_version 表存在且 ≥ 当前代码期望。
     pub fn schema_version(&self) -> rusqlite::Result<i64> {
         self.conn.query_row(

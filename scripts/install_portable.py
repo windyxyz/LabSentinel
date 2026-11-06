@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -471,8 +472,42 @@ def _rmtree_retry(path: Path, under: Path, attempts: int = 3) -> None:
     shutil.rmtree(target, ignore_errors=True)
 
 
+def _validated_uninstall_target(install: Path) -> Path | None:
+    """卸载目标校验（T-405，防任意路径删除）：必须绝对路径且无 `..` 分量、非盘符根、
+    相对盘符至少两级目录，且不得指向系统目录/用户主目录/LOCALAPPDATA 等本身。
+    返回 resolve() 后的路径；校验失败返回 None（调用方拒绝执行任何删除）。"""
+    raw = Path(install)
+    if not raw.is_absolute() or ".." in raw.parts:
+        return None
+    p = raw.resolve()
+    anchor = Path(p.anchor)
+    if p == anchor:
+        return None
+    try:
+        rel = p.relative_to(anchor)
+    except ValueError:
+        return None
+    if len(rel.parts) < 2:
+        return None
+    blocked = {Path.home().resolve(), anchor}
+    for key in ("WINDIR", "LOCALAPPDATA", "APPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+        v = os.environ.get(key)
+        if v:
+            try:
+                blocked.add(Path(v).resolve())
+            except OSError:
+                pass
+    return None if p in blocked else p
+
+
 def do_uninstall(install: Path, purge: bool) -> int:
-    dbg = Path(os.environ["TEMP"]) / "ls_uninstall_trace.log"
+    target = _validated_uninstall_target(install)
+    if target is None:
+        log("[拒绝] 卸载目标非法（须为绝对路径的二级以上目录，且非系统/用户主目录本身）"
+            "——未执行任何删除")
+        return 2
+    install = target
+    dbg = Path(tempfile.gettempdir()) / "ls_uninstall_trace.log"
     def trace(msg: str) -> None:
         # utf-8+replace：residue 可能含中文文件名，ascii 会让卸载器崩在调试日志上（实测）
         with open(dbg, "a", encoding="utf-8", errors="replace") as f:
@@ -545,8 +580,8 @@ def do_uninstall(install: Path, purge: bool) -> int:
         # 哨兵守卫的延迟 rd：只删仍带 PENDING_DELETE 的目录（防 rd 晚到误删重装的新目录）。
         # 注意：不能把 if exist/rd/ping 用 & 串在 cmd /c 的命令行里——内嵌引号会触发 cmd /c 的
         # 引用陷阱（rc=0 但整条静默不执行，03:2x 实测）；必须落到临时批处理文件里原生解析。
-        tmp_cmd = Path(os.environ["TEMP"]) / "ls_uninstall_cleanup.cmd"
-        dbg = Path(os.environ["TEMP"]) / "ls_uninstall_cleanup.log"
+        tmp_cmd = Path(tempfile.gettempdir()) / "ls_uninstall_cleanup.cmd"
+        dbg = Path(tempfile.gettempdir()) / "ls_uninstall_cleanup.log"
         dbg.write_text(f"spawn {datetime.now():%H:%M:%S} dir={install}\n", encoding="ascii")
         cmdtext = (
             "@echo off\n"

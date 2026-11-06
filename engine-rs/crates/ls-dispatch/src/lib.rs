@@ -101,7 +101,8 @@ pub fn match_silence(silences: &[Silence], ev: &DispatchEvent, now: &str) -> Opt
             continue;
         }
         let hit = match s.scope.as_str() {
-            "all" => true,
+            // Python 用 "global"；旧版本文档写过 "all"，两者都接受
+            "global" | "all" => true,
             "camera" => s.target == ev.camera_id.to_string(),
             "level" => s.target == ev.level.to_string(),
             "type" => s.target == ev.type_,
@@ -257,9 +258,16 @@ pub fn deliver(ch: Channel, cfg: &ChannelConfig, text: &str) -> Delivery {
     let body = build_body(ch, text).to_string();
     let mut error = None;
     for attempt in 0..4u32 {
-        let resp = ureq::post(&cfg.url)
-            .set("Content-Type", "application/json")
-            .send_string(&body);
+        let mut req = ureq::post(&cfg.url).set("Content-Type", "application/json");
+        if ch == Channel::Webhook {
+            let ts = unix_secs().to_string();
+            req = req.set("X-LS-Event", "alert").set("X-LS-Timestamp", &ts);
+            if !cfg.secret.is_empty() {
+                let sig = format!("sha256={}", hmac_sha256_hex(&cfg.secret, body.as_bytes()));
+                req = req.set("X-LS-Signature", &sig);
+            }
+        }
+        let resp = req.send_string(&body);
         let (status, resp_body) = match resp {
             Ok(r) => {
                 let st = r.status();
@@ -288,6 +296,83 @@ pub fn deliver(ch: Channel, cfg: &ChannelConfig, text: &str) -> Delivery {
         attempts: 4,
         error,
     }
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// 对原始请求体字节做 HMAC-SHA256（Python GenericWebhookChannel 同口径）。
+fn hmac_sha256_hex(secret: &str, body: &[u8]) -> String {
+    use hmac::Mac;
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC 接受任意长度密钥");
+    mac.update(body);
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn env_str(key: &str) -> String {
+    std::env::var(key).unwrap_or_default()
+}
+
+/// 从环境变量构造已配置渠道（与 Python settings 同名）。
+///
+/// T-330 只接线 URL 型渠道（企微/钉钉/飞书/Server酱/通用 Webhook）；
+/// PushPlus/Qmsg/邮件需要额外凭据字段与 SMTP 客户端，由后续 L2 波次补齐。
+pub fn channels_from_env() -> Vec<(Channel, ChannelConfig)> {
+    let mut out = Vec::new();
+    let mut push = |ch: Channel, url: &str, allow_http: bool, secret: &str| {
+        let url = url.trim();
+        if url.is_empty() {
+            return;
+        }
+        out.push((
+            ch,
+            ChannelConfig {
+                url: url.to_string(),
+                secret: secret.trim().to_string(),
+                allow_http,
+                ..Default::default()
+            },
+        ));
+    };
+    push(Channel::Wecom, &env_str("LS_WECOM_WEBHOOK"), false, "");
+    push(
+        Channel::Dingtalk,
+        &env_str("LS_DINGTALK_WEBHOOK"),
+        false,
+        "",
+    );
+    push(Channel::Feishu, &env_str("LS_FEISHU_WEBHOOK"), false, "");
+    let sendkey = env_str("LS_SERVERCHAN_SENDKEY");
+    if !sendkey.trim().is_empty() {
+        push(
+            Channel::Serverchan,
+            &format!("https://sctapi.ftqq.com/{}.send", sendkey.trim()),
+            false,
+            "",
+        );
+    }
+    let allow_http = matches!(
+        env_str("LS_WEBHOOK_ALLOW_HTTP")
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    push(
+        Channel::Webhook,
+        &env_str("LS_WEBHOOK_URL"),
+        allow_http,
+        &env_str("LS_WEBHOOK_SECRET"),
+    );
+    out
 }
 
 #[cfg(test)]
