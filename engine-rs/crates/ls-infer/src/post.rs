@@ -65,17 +65,28 @@ pub fn pick_class(
 }
 
 /// NMS（与 Python `_nms` 同序：分高优先、IoU<=thres 保留）。
-pub fn nms(mut dets: Vec<Det>, iou_thres: f32) -> Vec<Det> {
-    dets.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+/// 分母 +1e-9 与 Python 等价（防零；框对 IoU 恰在阈值时的判定路径一致）。
+pub fn nms(dets: Vec<Det>, iou_thres: f32) -> Vec<Det> {
+    // 稳定排序 + 分数降序：与 numpy argsort()[::-1] 的"同分保持原始序"语义一致
+    //（argsort 稳定升序后反转 → 同分对中原始靠后者在前；这里按 (score, Reverse(idx)) 排）
+    let mut order: Vec<usize> = (0..dets.len()).collect();
+    order.sort_by(|&a, &b| {
+        dets[b]
+            .score
+            .partial_cmp(&dets[a].score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.cmp(&a))
     });
     let mut keep: Vec<Det> = Vec::new();
-    for d in dets {
-        let suppressed = keep.iter().any(|k| iou(&k.box_, &d.box_) > iou_thres);
+    let mut kept_idx: Vec<usize> = Vec::new();
+    for &i in &order {
+        let d = &dets[i];
+        let suppressed = kept_idx
+            .iter()
+            .any(|&k| iou(&dets[k].box_, &d.box_) > iou_thres);
         if !suppressed {
-            keep.push(d);
+            keep.push(*d);
+            kept_idx.push(i);
         }
     }
     keep
@@ -87,7 +98,7 @@ fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let ix = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
     let iy = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
     let inter = ix * iy;
-    let denom = area_a + area_b - inter;
+    let denom = area_a + area_b - inter + 1e-9;
     if denom <= 0.0 {
         0.0
     } else {
