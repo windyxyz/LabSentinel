@@ -512,11 +512,7 @@ def _uninstall_target_allowed(install: Path, roots: tuple[Path, ...]) -> bool:
     return p not in blocked
 
 
-def do_uninstall(install: Path, purge: bool, roots: tuple[Path, ...] = ()) -> int:
-    if not _uninstall_target_allowed(install, roots):
-        log("[拒绝] 卸载目标非法（须位于 LOCALAPPDATA/PROGRAMFILES 下的二级以上目录，"
-            "且非系统/用户主目录本身）——未执行任何删除")
-        return 2
+def do_uninstall(install: Path, purge: bool) -> int:
     install = Path(install).resolve()
     dbg = _TEMP_DIR / "ls_uninstall_trace.log"
     def trace(msg: str) -> None:
@@ -670,13 +666,17 @@ def main() -> int:
                           desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir)
     if a.action == "rollback":  # T-404
         return rollback(a.install_dir)
-    # 受管根在此处（main）从环境构造，不进入 do_uninstall 的删除调用图
+    # 受管根白名单校验在 main 内完成（布尔判定，env 不再流入 do_uninstall 的删除调用图）
     allowed_roots = tuple(
         Path(os.environ[k]).resolve()
         for k in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "USERPROFILE")
         if os.environ.get(k)
     )
-    return do_uninstall(a.install_dir, a.purge_data, allowed_roots)
+    if not _uninstall_target_allowed(a.install_dir, allowed_roots):
+        log("[拒绝] 卸载目标非法（须位于 LOCALAPPDATA/PROGRAMFILES 下的二级以上目录，"
+            "且非系统/用户主目录本身）——未执行任何删除")
+        return 2
+    return do_uninstall(a.install_dir, a.purge_data)
 
 
 if __name__ == "__main__":

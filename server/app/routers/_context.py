@@ -89,3 +89,19 @@ def folder_row_out(row):
 
 def csv_cell(value):
     return _api()._csv_cell(value)
+
+
+def check_ai_verdict(v):
+    return _api()._check_ai_verdict(v)
+
+
+def event_row(row):
+    return _api()._event_row(row)
+
+
+def event_statuses():
+    return _api().EVENT_STATUSES
+
+
+def normalize_ts_range(start_ts, end_ts):
+    return _api()._normalize_ts_range(start_ts, end_ts)
