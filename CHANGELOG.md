@@ -40,6 +40,16 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-621（§9.4）：API 版本化——`/api/v1` 为正式前缀（`/api` 保留别名两个版本）；
+  `/api/v1/meta` 输出类型/级别/状态文案单一来源（客户端运行时拉取）。
+- T-610（Q-10）：Linux 分发三件套——`deploy/docker/Dockerfile`（CPU+OpenVINO）、
+  `Dockerfile.cuda`（TensorRT/CUDA + 独立哈希锁 requirements-cuda.lock）、
+  `compose.yaml`（go2rtc 共享回环）、`deploy/systemd/labsentinel.service`（加固 unit）、
+  `docs/部署指南-Linux.md`（含 §13.7 验收清单）。
+- T-335：Rust CI（rust.yml：双平台 cargo test + clippy -D warnings + fmt check，
+  workspace 零告警——修 12 处手写代码告警、生成代码在 ls-proto 内豁免）。
+- T-334：`tools/README-ENGINE-BOUNDARY.md`——Python 训练链与 Rust 引擎的唯一交付契约
+  （onnx + classes.txt + model.json 角色声明），禁止运行时代码回调 Python。
 - T-601/T-602（S6）：平台适配层 app/platform/*——power（Win 委托 keepawake / mac caffeinate /
   linux systemd-inhibit）、devices（DirectShow / V4L2 / AVFoundation）、binaries
   （tools/<os>-<arch> → PATH）、paths（LOCALAPPDATA / Application Support / XDG）、

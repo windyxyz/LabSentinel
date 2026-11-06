@@ -121,11 +121,15 @@ def remove_shortcuts(install: Path | None = None) -> None:
                 smenu = Path(rec.get("start_menu", smenu))
             except (ValueError, OSError):
                 pass
+    # T-405 加固：快捷方式位置来自 shortcuts.json（可被改）——锚定到系统白名单根内才删
+    programs_root = (Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" /
+                     "Start Menu" / "Programs").resolve()
+    smenu_r = smenu.resolve()
+    if smenu_r.parent == programs_root and smenu_r.name == "LabSentinel" and smenu_r.exists():
+        shutil.rmtree(smenu_r, ignore_errors=True)
     p = desktop / "LabSentinel.lnk"
-    if p.exists():
+    if p.exists() and p.name == "LabSentinel.lnk" and p.resolve().parent == desktop.resolve():
         p.unlink()
-    if smenu.exists():
-        shutil.rmtree(smenu, ignore_errors=True)
     log("  快捷方式已删除")
 
 
@@ -355,7 +359,13 @@ def _archive_current(install: Path, version: str) -> Path | None:
     内容"穿越"成新版本。返回归档目录；失败返回 None（不阻断升级，仅失去回滚点）。"""
     if not install.exists():
         return None
-    dest = _versions_dir(install) / version
+    vd = _versions_dir(install)
+    dest = vd / version
+    # 锚点：目标必须是 <install>/versions 的直接子目录（防 version 含穿越段）
+    if not version or any(c in version for c in ("/", "\\", "..")):
+        return None
+    if dest.resolve().parent != vd.resolve():
+        return None
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
     try:

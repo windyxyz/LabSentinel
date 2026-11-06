@@ -55,7 +55,13 @@ pub struct Ingest {
 impl Ingest {
     pub fn new(cfg: IngestConfig) -> Self {
         let frame_bytes = (cfg.width as usize) * (cfg.height as usize) * 3;
-        Ingest { cfg, child: None, stdout: None, frame_index: 0, frame_bytes }
+        Ingest {
+            cfg,
+            child: None,
+            stdout: None,
+            frame_index: 0,
+            frame_bytes,
+        }
     }
 
     fn build_cmd(&self) -> Command {
@@ -67,10 +73,16 @@ impl Ingest {
         if self.cfg.file_loop {
             c.arg("-stream_loop").arg("-1");
         }
-        c.arg("-i").arg(&self.cfg.source)
+        c.arg("-i")
+            .arg(&self.cfg.source)
             .args(["-an", "-sn", "-dn"])
-            .args(["-vf", &format!("fps={},scale={}:{}",
-                    self.cfg.analysis_fps, self.cfg.width, self.cfg.height)])
+            .args([
+                "-vf",
+                &format!(
+                    "fps={},scale={}:{}",
+                    self.cfg.analysis_fps, self.cfg.width, self.cfg.height
+                ),
+            ])
             .args(["-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]);
         c
     }
@@ -92,7 +104,7 @@ impl Ingest {
         let n = self.frame_bytes;
         let mut data = vec![0u8; n];
         let mut got = 0usize;
-        let mut handle = self.stdout.as_mut().unwrap();
+        let handle = self.stdout.as_mut().unwrap();
         while got < n {
             match handle.read(&mut data[got..]) {
                 Ok(0) => break, // EOF
@@ -159,9 +171,19 @@ mod tests {
         let dir = std::env::temp_dir().join("ls-ingest-test");
         std::fs::create_dir_all(&dir).unwrap();
         let v = dir.join("t.mp4");
-        let st = Command::new("ffmpeg").args(["-y", "-f", "lavfi",
-            "-i", "testsrc=duration=2:size=320x240:rate=10",
-            "-pix_fmt", "yuv420p"]).arg(&v).output().unwrap();
+        let st = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=2:size=320x240:rate=10",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&v)
+            .output()
+            .unwrap();
         assert!(st.status.success());
         let mut ing = Ingest::new(IngestConfig {
             source: v.to_string_lossy().to_string(),
@@ -177,7 +199,10 @@ mod tests {
             frames += 1;
         }
         ing.stop();
-        assert!(frames >= 8 && frames <= 12, "2s@5fps 应抽 ~10 帧，实得 {frames}");
+        assert!(
+            frames >= 8 && frames <= 12,
+            "2s@5fps 应抽 ~10 帧，实得 {frames}"
+        );
         let _ = std::fs::remove_file(&v);
     }
 }

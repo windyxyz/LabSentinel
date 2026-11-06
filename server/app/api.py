@@ -52,7 +52,7 @@ from .stats import timeline as stats_timeline_query
 from .stats import weekly as stats_weekly_query
 from .store import EVENT_STATUSES, Store, ro_uri
 
-router = APIRouter(prefix="/api")
+router = APIRouter()  # T-621：前缀由 main 挂载（/api 别名 + /api/v1 正式）
 
 store: Store | None = None
 manager: CameraManager | None = None

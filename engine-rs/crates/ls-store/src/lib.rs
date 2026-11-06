@@ -23,6 +23,20 @@ pub struct Event {
     pub status: String,
 }
 
+/// T-325：rules 行（id, behavior, zone_id, time_start, time_end, cooldown_s）
+pub type RuleRow = (i64, String, i64, String, String, i64);
+
+/// T-332：add_event 入参（避免 8 参函数；与 Python add_event 同语义）
+pub struct NewEvent<'a> {
+    pub camera_id: i64,
+    pub type_: &'a str,
+    pub level: i64,
+    pub track_id: i64,
+    pub detail: &'a str,
+    pub snapshot: Option<&'a str>,
+    pub ts: &'a str,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Camera {
     pub id: i64,
@@ -49,24 +63,33 @@ impl Store {
     /// 双向兼容自检：schema_version 表存在且 ≥ 当前代码期望。
     pub fn schema_version(&self) -> rusqlite::Result<i64> {
         self.conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )
     }
 
     pub fn integrity_check(&self) -> rusqlite::Result<String> {
-        self.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        self.conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
     }
 
     // ---- events ----
-    pub fn add_event(&self, camera_id: i64, type_: &str, level: i64, track_id: i64,
-                     detail: &str, snapshot: Option<&str>, ts: &str) -> rusqlite::Result<i64> {
+    pub fn add_event(&self, ev: &NewEvent) -> rusqlite::Result<i64> {
         self.conn.execute(
             "INSERT INTO events(ts,camera_id,type,level,track_id,detail,snapshot) VALUES(?,?,?,?,?,?,?)",
-            params![ts, camera_id, type_, level, track_id, detail, snapshot])?;
+            params![ev.ts, ev.camera_id, ev.type_, ev.level, ev.track_id, ev.detail,
+                    ev.snapshot])?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn events(&self, limit: i64, offset: i64, camera_id: Option<i64>,
-                  status: Option<&str>) -> rusqlite::Result<Vec<Event>> {
+    pub fn events(
+        &self,
+        limit: i64,
+        offset: i64,
+        camera_id: Option<i64>,
+        status: Option<&str>,
+    ) -> rusqlite::Result<Vec<Event>> {
         let mut sql = String::from("SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new') FROM events WHERE 1=1");
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(cid) = camera_id {
@@ -97,28 +120,43 @@ impl Store {
     }
 
     pub fn count_events(&self) -> rusqlite::Result<i64> {
-        self.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        self.conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
     }
 
-    pub fn set_event_status(&self, id: i64, status: &str, handled_by: Option<&str>,
-                            handled_ts: Option<&str>) -> rusqlite::Result<usize> {
+    pub fn set_event_status(
+        &self,
+        id: i64,
+        status: &str,
+        handled_by: Option<&str>,
+        handled_ts: Option<&str>,
+    ) -> rusqlite::Result<usize> {
         self.conn.execute(
             "UPDATE events SET status=?, handled_by=?, handled_ts=? WHERE id=?",
-            params![status, handled_by, handled_ts, id])
+            params![status, handled_by, handled_ts, id],
+        )
     }
 
     pub fn delete_events_older_than(&self, cutoff: &str) -> rusqlite::Result<usize> {
-        self.conn.execute("DELETE FROM events WHERE ts < ?", params![cutoff])
+        self.conn
+            .execute("DELETE FROM events WHERE ts < ?", params![cutoff])
     }
 
     // ---- cameras ----
     pub fn cameras(&self) -> rusqlite::Result<Vec<Camera>> {
         let mut stmt = self.conn.prepare(
             "SELECT id,name,source,type,status,COALESCE(group_name,''),COALESCE(analyzer,'python') FROM cameras ORDER BY id")?;
-        let rows = stmt.query_map([], |r| Ok(Camera {
-            id: r.get(0)?, name: r.get(1)?, source: r.get(2)?, type_: r.get(3)?,
-            status: r.get(4)?, group_name: r.get(5)?, analyzer: r.get(6)?,
-        }))?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Camera {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                source: r.get(2)?,
+                type_: r.get(3)?,
+                status: r.get(4)?,
+                group_name: r.get(5)?,
+                analyzer: r.get(6)?,
+            })
+        })?;
         rows.collect()
     }
 
@@ -128,30 +166,45 @@ impl Store {
     }
 
     pub fn set_camera_status(&self, id: i64, status: &str) -> rusqlite::Result<usize> {
-        self.conn.execute("UPDATE cameras SET status=? WHERE id=?", params![status, id])
+        self.conn.execute(
+            "UPDATE cameras SET status=? WHERE id=?",
+            params![status, id],
+        )
     }
 
     /// L3 控制面：新增摄像头（与 Python store.add_camera 同列/默认值）
     pub fn conn_add_camera(&self, name: &str, source: &str, type_: &str) -> rusqlite::Result<i64> {
         self.conn.execute(
             "INSERT INTO cameras(name,source,type,group_name) VALUES(?,?,?,'')",
-            params![name, source, type_])?;
+            params![name, source, type_],
+        )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     // ---- 配置（供 L3 控制面读） ----
     pub fn zones(&self, camera_id: i64) -> rusqlite::Result<Vec<(i64, String, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id,name,polygon FROM zones WHERE camera_id=? ORDER BY id")?;
-        let rows = stmt.query_map(params![camera_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id,name,polygon FROM zones WHERE camera_id=? ORDER BY id")?;
+        let rows = stmt.query_map(params![camera_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
         rows.collect()
     }
 
-    pub fn rules(&self, camera_id: i64) -> rusqlite::Result<Vec<(i64, String, i64, String, String, i64)>> {
+    pub fn rules(&self, camera_id: i64) -> rusqlite::Result<Vec<RuleRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id,behavior,COALESCE(zone_id,0),time_start,time_end,COALESCE(cooldown_s,0) FROM rules WHERE camera_id=? AND enabled=1")?;
-        let rows = stmt.query_map(params![camera_id], |r| Ok((
-            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+        let rows = stmt.query_map(params![camera_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?;
         rows.collect()
     }
 
@@ -164,19 +217,32 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn update_delivery(&self, id: i64, status: &str, attempts: i64,
-                           error: Option<&str>) -> rusqlite::Result<usize> {
+    pub fn update_delivery(
+        &self,
+        id: i64,
+        status: &str,
+        attempts: i64,
+        error: Option<&str>,
+    ) -> rusqlite::Result<usize> {
         self.conn.execute(
             "UPDATE alert_deliveries SET status=?, attempts=?, error=?, updated_ts=? WHERE id=?",
-            params![status, attempts, error, chrono_now(), id])
+            params![status, attempts, error, chrono_now(), id],
+        )
     }
 }
 
 fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
-        id: r.get(0)?, ts: r.get(1)?, camera_id: r.get(2)?, type_: r.get(3)?,
-        level: r.get(4)?, track_id: r.get(5)?, detail: r.get(6)?,
-        snapshot: r.get(7)?, video: r.get(8)?, status: r.get(9)?,
+        id: r.get(0)?,
+        ts: r.get(1)?,
+        camera_id: r.get(2)?,
+        type_: r.get(3)?,
+        level: r.get(4)?,
+        track_id: r.get(5)?,
+        detail: r.get(6)?,
+        snapshot: r.get(7)?,
+        video: r.get(8)?,
+        status: r.get(9)?,
     })
 }
 
@@ -184,12 +250,21 @@ fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
 fn chrono_now() -> String {
     // Windows/Linux 通用：SystemTime → 秒 → 手写 civil-from-days（1970 起）
     let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
     let (y, m, d) = civil_from_days(days);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", y, m, d,
-            rem / 3600, (rem % 3600) / 60, rem % 60)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
 /// Howard Hinnant 的 civil_from_days（公历，days since 1970-01-01）
@@ -239,12 +314,22 @@ mod tests {
         drop(conn);
         let s = Store::open(p.to_str().unwrap()).unwrap();
         assert_eq!(s.schema_version().unwrap(), 12);
-        let eid = s.add_event(1, "enter", 2, 7, "Rust 写入", None,
-                              "2026-01-01T00:00:01").unwrap();
+        let eid = s
+            .add_event(&NewEvent {
+                camera_id: 1,
+                type_: "enter",
+                level: 2,
+                track_id: 7,
+                detail: "Rust 写入",
+                snapshot: None,
+                ts: "2026-01-01T00:00:01",
+            })
+            .unwrap();
         let got = s.event_by_id(eid).unwrap().unwrap();
         assert_eq!(got.detail, "Rust 写入");
         assert_eq!(got.status, "new");
-        s.set_event_status(eid, "acked", Some("rust"), Some("2026-01-01T00:00:02")).unwrap();
+        s.set_event_status(eid, "acked", Some("rust"), Some("2026-01-01T00:00:02"))
+            .unwrap();
         assert_eq!(s.event_by_id(eid).unwrap().unwrap().status, "acked");
         assert_eq!(s.count_events().unwrap(), 1);
         let d = s.add_delivery(eid, "wecom").unwrap();

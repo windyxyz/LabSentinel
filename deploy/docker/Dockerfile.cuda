@@ -1,0 +1,40 @@
+# T-610：GPU 变体（NVIDIA CUDA，需 nvidia-container-toolkit）。
+# 与 CPU 变体同构，仅基础镜像/依赖来源与 LS_BACKEND_ORDER 不同（T-603 registry: cuda/tensorrt）。
+FROM node:20-bookworm-slim AS web
+WORKDIR /w
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --registry=https://registry.npmmirror.com
+COPY web/ ./
+RUN npm run build
+
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3-pip ffmpeg libgl1 libglib2.0-0 curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 10001 -d /data labsentinel
+WORKDIR /app/server
+# CUDA 变体用 requirements-cuda.lock（onnxruntime-gpu），由 T-002 锁生成流程产出
+COPY server/requirements-cuda.lock ./
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements-cuda.lock
+COPY server/app ./app
+COPY --from=web /w/dist /app/web
+COPY VERSION /app/VERSION
+ENV LS_DATA_DIR=/data \
+    LS_DB_PATH=/data/labsentinel.db \
+    LS_SNAPSHOT_DIR=/data/snapshots \
+    LS_VIDEO_DIR=/data/videos \
+    LS_ANNOTATION_POOL_DIR=/data/annotation_pool \
+    LS_WEB_DIST=/app/web \
+    LS_BACKEND_ORDER=tensorrt,cuda,cpu \
+    LS_HOST=127.0.0.1 \
+    PYTHONUTF8=1 \
+    NVIDIA_VISIBLE_DEVICES=all
+RUN mkdir -p /data/snapshots /data/videos /data/annotation_pool \
+    && chown -R labsentinel:labsentinel /data /app
+USER labsentinel
+VOLUME ["/data"]
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s \
+  CMD curl -fsS http://127.0.0.1:8000/api/health/ready || exit 1
+CMD ["python3.12", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]

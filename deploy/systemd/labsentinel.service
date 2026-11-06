@@ -1,0 +1,31 @@
+[Unit]
+Description=LabSentinel 实验室安全监控
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=labsentinel
+Group=labsentinel
+WorkingDirectory=/opt/labsentinel/server
+Environment=LS_DATA_DIR=/var/lib/labsentinel/data
+Environment=LS_DB_PATH=/var/lib/labsentinel/data/labsentinel.db
+Environment=LS_SNAPSHOT_DIR=/var/lib/labsentinel/data/snapshots
+Environment=LS_VIDEO_DIR=/var/lib/labsentinel/data/videos
+Environment=LS_ANNOTATION_POOL_DIR=/var/lib/labsentinel/data/annotation_pool
+Environment=LS_BACKEND_ORDER=openvino,cpu
+Environment=LS_HOST=127.0.0.1
+EnvironmentFile=-/etc/labsentinel/config.env
+ExecStart=/opt/labsentinel/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+StateDirectory=labsentinel
+# 安全加固（T-601）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/labsentinel
+
+[Install]
+WantedBy=multi-user.target

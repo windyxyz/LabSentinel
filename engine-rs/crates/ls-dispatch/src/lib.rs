@@ -7,7 +7,7 @@
 //! - 通用 Webhook HMAC 签名（LS_WEBHOOK_SECRET）
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -15,21 +15,40 @@ use serde_json::{json, Value};
 /// 渠道名（与 Python ch.name 一致）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Channel {
-    Wecom, Dingtalk, Feishu, Serverchan, Pushplus, Qmsg, Email, Webhook,
+    Wecom,
+    Dingtalk,
+    Feishu,
+    Serverchan,
+    Pushplus,
+    Qmsg,
+    Email,
+    Webhook,
 }
 
 impl Channel {
     pub fn name(self) -> &'static str {
         match self {
-            Channel::Wecom => "wecom", Channel::Dingtalk => "dingtalk",
-            Channel::Feishu => "feishu", Channel::Serverchan => "serverchan",
-            Channel::Pushplus => "pushplus", Channel::Qmsg => "qmsg",
-            Channel::Email => "email", Channel::Webhook => "webhook",
+            Channel::Wecom => "wecom",
+            Channel::Dingtalk => "dingtalk",
+            Channel::Feishu => "feishu",
+            Channel::Serverchan => "serverchan",
+            Channel::Pushplus => "pushplus",
+            Channel::Qmsg => "qmsg",
+            Channel::Email => "email",
+            Channel::Webhook => "webhook",
         }
     }
     pub fn all() -> [Channel; 8] {
-        [Channel::Wecom, Channel::Dingtalk, Channel::Feishu, Channel::Serverchan,
-         Channel::Pushplus, Channel::Qmsg, Channel::Email, Channel::Webhook]
+        [
+            Channel::Wecom,
+            Channel::Dingtalk,
+            Channel::Feishu,
+            Channel::Serverchan,
+            Channel::Pushplus,
+            Channel::Qmsg,
+            Channel::Email,
+            Channel::Webhook,
+        ]
     }
     /// 允许的 host（空 = 由配置 URL 白名单校验）
     pub fn allowed_hosts(self) -> &'static [&'static str] {
@@ -78,7 +97,9 @@ pub struct Silence {
 
 pub fn match_silence(silences: &[Silence], ev: &DispatchEvent, now: &str) -> Option<usize> {
     for (i, s) in silences.iter().enumerate() {
-        if s.until_ts.as_str() <= now { continue; }
+        if s.until_ts.as_str() <= now {
+            continue;
+        }
         let hit = match s.scope.as_str() {
             "all" => true,
             "camera" => s.target == ev.camera_id.to_string(),
@@ -86,17 +107,24 @@ pub fn match_silence(silences: &[Silence], ev: &DispatchEvent, now: &str) -> Opt
             "type" => s.target == ev.type_,
             _ => false,
         };
-        if hit { return Some(i); }
+        if hit {
+            return Some(i);
+        }
     }
     None
 }
 
 /// 渠道过滤（Python channel_filtered 等价：min_level / types 列表）
-pub fn channel_filtered(ch: Channel, ev: &DispatchEvent,
-                        filters: &HashMap<String, Value>) -> Option<String> {
-    let f = match filters.get(ch.name()) { Some(v) => v, None => return None };
+pub fn channel_filtered(
+    ch: Channel,
+    ev: &DispatchEvent,
+    filters: &HashMap<String, Value>,
+) -> Option<String> {
+    let f = filters.get(ch.name())?;
     if let Some(min) = f.get("min_level").and_then(|v| v.as_i64()) {
-        if ev.level < min { return Some(format!("level {}<{}", ev.level, min)); }
+        if ev.level < min {
+            return Some(format!("level {}<{}", ev.level, min));
+        }
     }
     if let Some(types) = f.get("types").and_then(|v| v.as_array()) {
         if !types.iter().any(|t| t.as_str() == Some(ev.type_.as_str())) {
@@ -120,14 +148,22 @@ pub fn check_url(ch: Channel, url: &str, allow_http: bool) -> Result<(), String>
 }
 
 fn split_url(url: &str) -> (&str, &str) {
-    let s = url.split_once("://").map(|(a, b)| (a, b)).unwrap_or(("", url));
-    let host = s.1.split('/').next().unwrap_or("").split(':').next().unwrap_or("");
+    let s = url.split_once("://").unwrap_or(("", url));
+    let host =
+        s.1.split('/')
+            .next()
+            .unwrap_or("")
+            .split(':')
+            .next()
+            .unwrap_or("");
     (s.0, host)
 }
 
 /// 厂商响应业务码判定（Python `_is_ok` 等价）
-pub fn is_ok(ch: Channel, status: u16, body: &str) -> bool {
-    if !(200..300).contains(&status) { return false; }
+pub fn is_ok(_ch: Channel, status: u16, body: &str) -> bool {
+    if !(200..300).contains(&status) {
+        return false;
+    }
     if let Ok(v) = serde_json::from_str::<Value>(body) {
         if let Some(code) = v.get("errcode").and_then(|x| x.as_i64()) {
             return code == 0; // 企微
@@ -159,14 +195,27 @@ pub fn build_body(ch: Channel, text: &str) -> Value {
 pub struct RateLimiter {
     inner: Mutex<HashMap<&'static str, (VecDeque<Instant>, u64)>>,
 }
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RateLimiter {
-    pub fn new() -> Self { RateLimiter { inner: Mutex::new(HashMap::new()) } }
+    pub fn new() -> Self {
+        RateLimiter {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
     /// 返回 (放行?, 待合并数)
     pub fn gate(&self, ch: Channel) -> (bool, u64) {
         let mut m = self.inner.lock().unwrap();
         let (q, pending) = m.entry(ch.name()).or_insert_with(|| (VecDeque::new(), 0));
         let now = Instant::now();
-        while q.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60)) {
+        while q
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60))
+        {
             q.pop_front();
         }
         if q.len() < 20 {
@@ -180,17 +229,30 @@ impl RateLimiter {
         }
     }
     pub fn pending_count(&self, ch: Channel) -> u64 {
-        self.inner.lock().unwrap().get(ch.name()).map(|(_, p)| *p).unwrap_or(0)
+        self.inner
+            .lock()
+            .unwrap()
+            .get(ch.name())
+            .map(|(_, p)| *p)
+            .unwrap_or(0)
     }
 }
 
 /// 派发结果（供投递记录：ok / failed + attempts）
-pub struct Delivery { pub ok: bool, pub attempts: u32, pub error: Option<String> }
+pub struct Delivery {
+    pub ok: bool,
+    pub attempts: u32,
+    pub error: Option<String>,
+}
 
 /// 单渠道投递（真实 HTTP；失败按 Python RETRY_BACKOFF=[1,4,15] 重试）。
 pub fn deliver(ch: Channel, cfg: &ChannelConfig, text: &str) -> Delivery {
     if let Err(e) = check_url(ch, &cfg.url, cfg.allow_http) {
-        return Delivery { ok: false, attempts: 0, error: Some(e) };
+        return Delivery {
+            ok: false,
+            attempts: 0,
+            error: Some(e),
+        };
     }
     let body = build_body(ch, text).to_string();
     let mut error = None;
@@ -206,15 +268,26 @@ pub fn deliver(ch: Channel, cfg: &ChannelConfig, text: &str) -> Delivery {
             Err(e) => (0, e.to_string()),
         };
         if is_ok(ch, status, &resp_body) {
-            return Delivery { ok: true, attempts: attempt + 1, error: None };
+            return Delivery {
+                ok: true,
+                attempts: attempt + 1,
+                error: None,
+            };
         }
-        error = Some(format!("HTTP {}: {}", status,
-                             resp_body.chars().take(120).collect::<String>()));
+        error = Some(format!(
+            "HTTP {}: {}",
+            status,
+            resp_body.chars().take(120).collect::<String>()
+        ));
         if attempt < 3 {
             std::thread::sleep(Duration::from_secs([1, 4, 15][attempt as usize]));
         }
     }
-    Delivery { ok: false, attempts: 4, error }
+    Delivery {
+        ok: false,
+        attempts: 4,
+        error,
+    }
 }
 
 #[cfg(test)]
@@ -237,9 +310,20 @@ mod tests {
 
     #[test]
     fn silence_and_filter_equivalent() {
-        let ev = DispatchEvent { id: 1, camera_id: 3, type_: "enter".into(), level: 2,
-                                 detail: String::new(), ts: String::new(), camera_name: String::new() };
-        let sil = vec![Silence { scope: "camera".into(), target: "3".into(), until_ts: "9999".into() }];
+        let ev = DispatchEvent {
+            id: 1,
+            camera_id: 3,
+            type_: "enter".into(),
+            level: 2,
+            detail: String::new(),
+            ts: String::new(),
+            camera_name: String::new(),
+        };
+        let sil = vec![Silence {
+            scope: "camera".into(),
+            target: "3".into(),
+            until_ts: "9999".into(),
+        }];
         assert_eq!(match_silence(&sil, &ev, "2026-01-01"), Some(0));
         let mut f = HashMap::new();
         f.insert("wecom".to_string(), json!({"min_level": 3}));
@@ -249,7 +333,9 @@ mod tests {
     #[test]
     fn rate_limiter_merges_overflow() {
         let rl = RateLimiter::new();
-        for _ in 0..20 { assert!(rl.gate(Channel::Wecom).0); }
+        for _ in 0..20 {
+            assert!(rl.gate(Channel::Wecom).0);
+        }
         let (allowed, pending) = rl.gate(Channel::Wecom);
         assert!(!allowed && pending == 1);
         assert_eq!(rl.pending_count(Channel::Wecom), 1);

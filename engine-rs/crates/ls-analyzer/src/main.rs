@@ -4,6 +4,7 @@
 //! 数据面（ingest/infer/track）当前为骨架：状态机与事件流通道已就绪，
 //! 检测数据源由 T-325（ls-infer/ort）与 T-326（ls-ingest）填充。
 //! 启动即打印 "READY port=<p>" 行，供父进程健康判定。
+#![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,8 +15,8 @@ use tonic::{Request, Response, Status};
 
 use ls_proto::analyzer::analyzer_server::{Analyzer, AnalyzerServer};
 use ls_proto::analyzer::{
-    Ack, AnalyzerStatus, CameraRef, CameraStatus, Config, Empty, EventCandidate, EvidenceRequest,
-    EvidenceResult, EventsRequest, Jpeg,
+    Ack, AnalyzerStatus, CameraRef, CameraStatus, Config, Empty, EventCandidate, EventsRequest,
+    EvidenceRequest, EvidenceResult, Jpeg,
 };
 
 #[derive(Clone)]
@@ -70,7 +71,10 @@ fn constant_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 #[tonic::async_trait]
@@ -80,7 +84,10 @@ impl Analyzer for AnalyzerImpl {
         let cfg = request.into_inner();
         let mut st = self.state.lock().unwrap();
         st.config_version = cfg.version;
-        Ok(Response::new(Ack { ok: true, message: format!("version={}", cfg.version) }))
+        Ok(Response::new(Ack {
+            ok: true,
+            message: format!("version={}", cfg.version),
+        }))
     }
 
     async fn start_camera(&self, request: Request<CameraRef>) -> Result<Response<Ack>, Status> {
@@ -89,10 +96,16 @@ impl Analyzer for AnalyzerImpl {
         let mut st = self.state.lock().unwrap();
         st.cams.insert(
             cid,
-            CamState { state: "running", fps_now: 0.0 },
+            CamState {
+                state: "running",
+                fps_now: 0.0,
+            },
         );
         // 数据面接入后此处 spawn 摄像头任务；事件经 event_txs 广播
-        Ok(Response::new(Ack { ok: true, message: String::new() }))
+        Ok(Response::new(Ack {
+            ok: true,
+            message: String::new(),
+        }))
     }
 
     async fn stop_camera(&self, request: Request<CameraRef>) -> Result<Response<Ack>, Status> {
@@ -101,9 +114,15 @@ impl Analyzer for AnalyzerImpl {
         let mut st = self.state.lock().unwrap();
         st.cams.insert(
             cid,
-            CamState { state: "stopped", fps_now: 0.0 },
+            CamState {
+                state: "stopped",
+                fps_now: 0.0,
+            },
         );
-        Ok(Response::new(Ack { ok: true, message: String::new() }))
+        Ok(Response::new(Ack {
+            ok: true,
+            message: String::new(),
+        }))
     }
 
     type EventsStream = tokio_stream::wrappers::ReceiverStream<Result<EventCandidate, Status>>;
@@ -115,7 +134,9 @@ impl Analyzer for AnalyzerImpl {
         self.check_auth(&request)?;
         let (tx, rx) = mpsc::channel(64);
         self.state.lock().unwrap().event_txs.push(tx);
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     async fn status(&self, request: Request<Empty>) -> Result<Response<AnalyzerStatus>, Status> {
@@ -179,9 +200,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("127.0.0.1:{port}").parse()?;
     let svc = AnalyzerServer::new(AnalyzerImpl::new(token));
     println!("READY port={port}");
-    Server::builder()
-        .add_service(svc)
-        .serve(addr)
-        .await?;
+    Server::builder().add_service(svc).serve(addr).await?;
     Ok(())
 }

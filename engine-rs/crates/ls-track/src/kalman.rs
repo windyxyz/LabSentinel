@@ -76,7 +76,7 @@ pub fn project(mean: [f32; STATE_DIM], cov: &Mat8) -> ([f32; 4], [[f32; 4]; 4]) 
     ];
     let mut proj_mean = [0.0f32; 4];
     proj_mean.copy_from_slice(&mean[..4]); // H = [I4 | 0]
-    // H·cov·Hᵀ = cov 的左上 4x4 子阵
+                                           // H·cov·Hᵀ = cov 的左上 4x4 子阵
     let mut proj_cov = [[0.0f32; 4]; 4];
     for i in 0..4 {
         for j in 0..4 {
@@ -87,7 +87,11 @@ pub fn project(mean: [f32; STATE_DIM], cov: &Mat8) -> ([f32; 4], [[f32; 4]; 4]) 
 }
 
 /// 更新步：Kalman 增益经 4x4 Cholesky 求解（与 scipy cho_factor/cho_solve 等价路径）。
-pub fn update(mean: [f32; STATE_DIM], cov: &Mat8, measurement: [f32; 4]) -> ([f32; STATE_DIM], Mat8) {
+pub fn update(
+    mean: [f32; STATE_DIM],
+    cov: &Mat8,
+    measurement: [f32; 4],
+) -> ([f32; STATE_DIM], Mat8) {
     let (proj_mean, proj_cov) = project(mean, cov);
     // K = (cov·Hᵀ)·S⁻¹，其中 S=proj_cov（4x4）；解 S·X = (cov·Hᵀ)ᵀ 再转置
     let ph = covariance_times_h(cov); // 8x4 = cov·Hᵀ
@@ -137,7 +141,10 @@ fn covariance_times_h(cov: &Mat8) -> [[f32; 4]; STATE_DIM] {
     out
 }
 
-fn add(a: &[[f32; STATE_DIM]; STATE_DIM], b: &[[f32; STATE_DIM]; STATE_DIM]) -> [[f32; STATE_DIM]; STATE_DIM] {
+fn add(
+    a: &[[f32; STATE_DIM]; STATE_DIM],
+    b: &[[f32; STATE_DIM]; STATE_DIM],
+) -> [[f32; STATE_DIM]; STATE_DIM] {
     let mut m = [[0.0f32; STATE_DIM]; STATE_DIM];
     for i in 0..STATE_DIM {
         for j in 0..STATE_DIM {
@@ -157,7 +164,10 @@ fn transpose(a: &[[f32; STATE_DIM]; STATE_DIM]) -> [[f32; STATE_DIM]; STATE_DIM]
     m
 }
 
-fn mat_mul(a: [[f32; STATE_DIM]; STATE_DIM], b: [[f32; STATE_DIM]; STATE_DIM]) -> [[f32; STATE_DIM]; STATE_DIM] {
+fn mat_mul(
+    a: [[f32; STATE_DIM]; STATE_DIM],
+    b: [[f32; STATE_DIM]; STATE_DIM],
+) -> [[f32; STATE_DIM]; STATE_DIM] {
     let mut m = [[0.0f32; STATE_DIM]; STATE_DIM];
     for i in 0..STATE_DIM {
         for j in 0..STATE_DIM {

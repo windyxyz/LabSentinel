@@ -408,7 +408,11 @@ impl ByteTrack {
 
         // 预测：对 tracked+lost 全部（multi_predict 语义）
         for (i, is_tracked) in pool.iter() {
-            let t = if *is_tracked { &mut self.tracked[*i] } else { &mut self.lost[*i] };
+            let t = if *is_tracked {
+                &mut self.tracked[*i]
+            } else {
+                &mut self.lost[*i]
+            };
             STrack::multi_predict(t);
         }
         let pool_tlbrs: Vec<[f32; 4]> = pool
@@ -428,7 +432,11 @@ impl ByteTrack {
 
         for (itracked, idet) in matches {
             let (i, is_t) = pool[itracked];
-            let t = if is_t { &mut self.tracked[i] } else { &mut self.lost[i] };
+            let t = if is_t {
+                &mut self.tracked[i]
+            } else {
+                &mut self.lost[i]
+            };
             if t.state == TrackState::Tracked {
                 t.update(&dets_high[idet], frame_id, &mut self.external_counter);
                 if is_t {
@@ -469,7 +477,11 @@ impl ByteTrack {
         let (matches2, u_track2, _u_det2) = linear_assignment_thresh(cost2, dets_second.len(), 0.5);
         for (itracked, idet) in matches2 {
             let (i, is_t) = r_tracked[itracked];
-            let t = if is_t { &mut self.tracked[i] } else { &mut self.lost[i] };
+            let t = if is_t {
+                &mut self.tracked[i]
+            } else {
+                &mut self.lost[i]
+            };
             if t.state == TrackState::Tracked {
                 t.update(&dets_second[idet], frame_id, &mut self.external_counter);
                 if is_t {
@@ -484,7 +496,11 @@ impl ByteTrack {
         }
         for &k in u_track2.iter() {
             let (i, is_t) = r_tracked[k];
-            let t = if is_t { &mut self.tracked[i] } else { &mut self.lost[i] };
+            let t = if is_t {
+                &mut self.tracked[i]
+            } else {
+                &mut self.lost[i]
+            };
             if t.state != TrackState::Lost {
                 t.state = TrackState::Lost;
             }
@@ -492,8 +508,10 @@ impl ByteTrack {
 
         // 第三轮：unconfirmed vs 剩余高分
         let remaining: Vec<Detection> = u_detection.iter().map(|&i| dets_high[i]).collect();
-        let unconf_tlbrs: Vec<[f32; 4]> =
-            unconfirmed_idx.iter().map(|&i| self.tracked[i].tlbr()).collect();
+        let unconf_tlbrs: Vec<[f32; 4]> = unconfirmed_idx
+            .iter()
+            .map(|&i| self.tracked[i].tlbr())
+            .collect();
         let rem_tlbrs: Vec<[f32; 4]> = remaining.iter().map(|d| d.box_).collect();
         let cost3 = fuse_score(iou_cost_matrix(&unconf_tlbrs, &rem_tlbrs), &remaining);
         let (matches3, u_unconf, u_det3) = linear_assignment_thresh(cost3, remaining.len(), 0.7);
@@ -511,9 +529,16 @@ impl ByteTrack {
             if remaining[k].score < self.det_thresh {
                 continue;
             }
-            let mut track = STrack::new(remaining[k].box_, remaining[k].score,
-                                        self.cfg.minimum_consecutive_frames);
-            track.activate(frame_id, &mut self.internal_counter, &mut self.external_counter);
+            let mut track = STrack::new(
+                remaining[k].box_,
+                remaining[k].score,
+                self.cfg.minimum_consecutive_frames,
+            );
+            track.activate(
+                frame_id,
+                &mut self.internal_counter,
+                &mut self.external_counter,
+            );
             self.tracked.push(track);
         }
 
@@ -549,7 +574,7 @@ impl ByteTrack {
         self.lost = still_lost;
         self.lost.extend(to_lost);
         self.removed = to_removed;
-        self.tracked = still_tracked;  // refind 的轨迹已在 drain lost 时并回
+        self.tracked = still_tracked; // refind 的轨迹已在 drain lost 时并回
         remove_duplicate_tracks(&mut self.tracked, &mut self.lost);
 
         let out: Vec<([f32; 4], i64)> = self
@@ -602,12 +627,18 @@ mod tests {
     #[test]
     fn single_box_stable_id() {
         let mut bt = ByteTrack::new(ByteTrackConfig::default());
-        let det = Detection { box_: [100.0, 100.0, 300.0, 500.0], score: 0.9 };
+        let det = Detection {
+            box_: [100.0, 100.0, 300.0, 500.0],
+            score: 0.9,
+        };
         let out = bt.update(&[det]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, 1);
         for _ in 0..10 {
-            let out = bt.update(&[Detection { box_: [102.0, 100.0, 302.0, 500.0], score: 0.9 }]);
+            let out = bt.update(&[Detection {
+                box_: [102.0, 100.0, 302.0, 500.0],
+                score: 0.9,
+            }]);
             assert_eq!(out.len(), 1);
             assert_eq!(out[0].1, 1, "同一物体持续出现 → external_id 不变");
         }
@@ -615,13 +646,23 @@ mod tests {
 
     #[test]
     fn occlusion_gap_keeps_id() {
-        let mut bt = ByteTrack::new(ByteTrackConfig { lost_track_buffer: 30, frame_rate: 30, ..Default::default() });
-        let det = Detection { box_: [100.0, 100.0, 300.0, 500.0], score: 0.9 };
+        let mut bt = ByteTrack::new(ByteTrackConfig {
+            lost_track_buffer: 30,
+            frame_rate: 30,
+            ..Default::default()
+        });
+        let det = Detection {
+            box_: [100.0, 100.0, 300.0, 500.0],
+            score: 0.9,
+        };
         bt.update(&[det]);
         for _ in 0..10 {
             bt.update(&[]); // 遮挡 10 帧
         }
-        let out = bt.update(&[Detection { box_: [110.0, 100.0, 310.0, 500.0], score: 0.9 }]);
+        let out = bt.update(&[Detection {
+            box_: [110.0, 100.0, 310.0, 500.0],
+            score: 0.9,
+        }]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, 1, "lost_track_buffer 内重现 → 同 id");
     }

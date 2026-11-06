@@ -24,7 +24,11 @@ pub fn letterbox_geom(w: u32, h: u32, s: u32) -> LetterboxGeom {
     let r = (s / h).min(s / w);
     let nw = (w * r).floor();
     let nh = (h * r).floor();
-    LetterboxGeom { r, dx: ((s - nw) / 2.0).floor(), dy: ((s - nh) / 2.0).floor() }
+    LetterboxGeom {
+        r,
+        dx: ((s - nw) / 2.0).floor(),
+        dy: ((s - nh) / 2.0).floor(),
+    }
 }
 
 /// YOLO 输出行 (cx, cy, w, h, cls...) → 原图 xyxy（反 letterbox）。
@@ -38,14 +42,23 @@ pub fn decode_row(cx: f32, cy: f32, bw: f32, bh: f32, g: &LetterboxGeom) -> [f32
 }
 
 /// 类别最优分（多列取 max）+ 阈值筛选；与 Python `detect_class` 的 best/m 语义一致。
-pub fn pick_class(rows: &[Vec<f32>], class_cols: &[usize], conf: f32,
-                  g: &LetterboxGeom) -> Vec<Det> {
+pub fn pick_class(
+    rows: &[Vec<f32>],
+    class_cols: &[usize],
+    conf: f32,
+    g: &LetterboxGeom,
+) -> Vec<Det> {
     let mut out = Vec::new();
     for row in rows {
-        let best = class_cols.iter().filter_map(|&i| row.get(4 + i).copied())
+        let best = class_cols
+            .iter()
+            .filter_map(|&i| row.get(4 + i).copied())
             .fold(0.0f32, f32::max);
         if best > conf {
-            out.push(Det { box_: decode_row(row[0], row[1], row[2], row[3], g), score: best });
+            out.push(Det {
+                box_: decode_row(row[0], row[1], row[2], row[3], g),
+                score: best,
+            });
         }
     }
     out
@@ -53,7 +66,11 @@ pub fn pick_class(rows: &[Vec<f32>], class_cols: &[usize], conf: f32,
 
 /// NMS（与 Python `_nms` 同序：分高优先、IoU<=thres 保留）。
 pub fn nms(mut dets: Vec<Det>, iou_thres: f32) -> Vec<Det> {
-    dets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    dets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut keep: Vec<Det> = Vec::new();
     for d in dets {
         let suppressed = keep.iter().any(|k| iou(&k.box_, &d.box_) > iou_thres);
@@ -71,7 +88,11 @@ fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let iy = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
     let inter = ix * iy;
     let denom = area_a + area_b - inter;
-    if denom <= 0.0 { 0.0 } else { inter / denom }
+    if denom <= 0.0 {
+        0.0
+    } else {
+        inter / denom
+    }
 }
 
 #[cfg(test)]
@@ -101,9 +122,18 @@ mod tests {
     #[test]
     fn nms_suppresses_overlap_keeps_distinct() {
         let dets = vec![
-            Det { box_: [0.0, 0.0, 100.0, 100.0], score: 0.9 },
-            Det { box_: [5.0, 5.0, 105.0, 105.0], score: 0.8 },  // 高重叠 → 抑制
-            Det { box_: [300.0, 300.0, 400.0, 400.0], score: 0.7 }, // 独立 → 保留
+            Det {
+                box_: [0.0, 0.0, 100.0, 100.0],
+                score: 0.9,
+            },
+            Det {
+                box_: [5.0, 5.0, 105.0, 105.0],
+                score: 0.8,
+            }, // 高重叠 → 抑制
+            Det {
+                box_: [300.0, 300.0, 400.0, 400.0],
+                score: 0.7,
+            }, // 独立 → 保留
         ];
         let kept = nms(dets, 0.5);
         assert_eq!(kept.len(), 2);

@@ -45,10 +45,11 @@ impl ZoneState {
         } else {
             self.hysteresis.exit_frames
         };
-        let s = self
-            .state
-            .entry(track_id)
-            .or_insert(TrackState { inside: false, streak: 0, pending: None });
+        let s = self.state.entry(track_id).or_insert(TrackState {
+            inside: false,
+            streak: 0,
+            pending: None,
+        });
         if inside == s.inside {
             s.streak = 0;
             s.pending = None;
@@ -75,7 +76,11 @@ impl ZoneState {
 
     /// 当前判定为在区域内的 track（与 Python `inside_ids` 对齐；顺序不保证）。
     pub fn inside_ids(&self) -> Vec<i64> {
-        self.state.iter().filter(|(_, s)| s.inside).map(|(k, _)| *k).collect()
+        self.state
+            .iter()
+            .filter(|(_, s)| s.inside)
+            .map(|(k, _)| *k)
+            .collect()
     }
 
     /// 状态表大小（与 Python `size` 对齐）。
@@ -98,7 +103,7 @@ impl ZoneState {
             self.state.remove(&tid);
             removed += 1;
         }
-        let cap = max_size.unwrap_or(5000).max(0);
+        let cap = max_size.unwrap_or(5000);
         while self.state.len() > cap {
             // 与 Python cap 淘汰对齐：按插入序淘汰任意非 active 项（含在场待去抖项），
             // active 项绝不淘汰（保住在场/离场语义）
@@ -126,7 +131,10 @@ mod tests {
     #[test]
     fn doc_acceptance_sequence() {
         // 76 文档验收序列：[in,out,in,in,out,out,out] → 恰好 1 enter + 1 exit
-        let mut st = ZoneState::new(Hysteresis { enter_frames: 2, exit_frames: 3 });
+        let mut st = ZoneState::new(Hysteresis {
+            enter_frames: 2,
+            exit_frames: 3,
+        });
         let seq = [true, false, true, true, false, false, false];
         let got: Vec<Option<ZoneChange>> = seq.iter().map(|&v| st.update(1, v)).collect();
         let want = vec![
@@ -146,7 +154,10 @@ mod tests {
 
     #[test]
     fn threshold_one_matches_legacy() {
-        let mut st = ZoneState::new(Hysteresis { enter_frames: 1, exit_frames: 1 });
+        let mut st = ZoneState::new(Hysteresis {
+            enter_frames: 1,
+            exit_frames: 1,
+        });
         assert_eq!(st.update(1, true), Some(ZoneChange::Enter));
         assert_eq!(st.update(1, false), Some(ZoneChange::Exit));
         assert_eq!(st.update(1, false), None);
@@ -155,7 +166,10 @@ mod tests {
 
     #[test]
     fn retain_keeps_inside_drops_exited() {
-        let mut st = ZoneState::new(Hysteresis { enter_frames: 1, exit_frames: 1 });
+        let mut st = ZoneState::new(Hysteresis {
+            enter_frames: 1,
+            exit_frames: 1,
+        });
         for tid in 0..100i64 {
             st.update(tid, true);
         }

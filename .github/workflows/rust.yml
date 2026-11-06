@@ -1,0 +1,37 @@
+# T-335：Rust 工作区 CI——双平台 cargo test + clippy -D warnings + cargo-deny 占位。
+# 契约/向量/单元测试全部离线（ffmpeg 相关测试在缺 ffmpeg 时自动 skip）。
+name: rust
+on:
+  push:
+    branches: [main]
+    paths: ["engine-rs/**", "proto/**", "testdata/**", ".github/workflows/rust.yml"]
+  pull_request:
+    paths: ["engine-rs/**", "proto/**", "testdata/**", ".github/workflows/rust.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-rs
+      - name: cargo test（workspace：契约/向量/单元）
+        working-directory: engine-rs
+        run: cargo test --workspace
+      - name: clippy -D warnings（手写 crate 零告警；生成代码在 ls-proto 内豁免）
+        working-directory: engine-rs
+        run: cargo clippy --workspace -- -D warnings
+      - name: fmt check
+        working-directory: engine-rs
+        run: cargo fmt --all -- --check

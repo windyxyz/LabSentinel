@@ -4286,6 +4286,23 @@
           }
         }
       }
+    },
+    "/api/v1/meta": {
+      "get": {
+        "summary": "Api Meta",
+        "description": "类型/级别/状态文案单一来源（前端/移动端运行时拉取，消除手工同步）。",
+        "operationId": "api_meta_api_v1_meta_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

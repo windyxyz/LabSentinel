@@ -66,11 +66,15 @@ fn byte_track_matches_supervision_shared_vectors() {
                 .map(|r| (r[4] as i64, [r[0], r[1], r[2], r[3]]))
                 .collect();
             want.sort_by_key(|g| g.0);
-            assert_eq!(got.len(), want.len(),
+            assert_eq!(
+                got.len(),
+                want.len(),
                 "用例 {} 帧 {}: 轨迹数不一致（got={:?} want={:?}）",
-                case.name, fi,
+                case.name,
+                fi,
                 got.iter().map(|g| g.0).collect::<Vec<_>>(),
-                want.iter().map(|w| w.0).collect::<Vec<_>>());
+                want.iter().map(|w| w.0).collect::<Vec<_>>()
+            );
             for (g, w) in got.iter().zip(want.iter()) {
                 assert_eq!(g.0, w.0, "用例 {} 帧 {}: external_id 不一致", case.name, fi);
                 // 坐标不做逐位断言：Python 向量的 box 是 sv.Detections 原始检测框（id 对齐契约），

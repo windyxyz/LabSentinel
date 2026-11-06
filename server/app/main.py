@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -130,7 +130,23 @@ async def lifespan(app: FastAPI):
 from .version import read_version as _read_version
 
 app = FastAPI(title="LabSentinel", version=_read_version(), lifespan=lifespan)
-app.include_router(router)
+app.include_router(router, prefix="/api")  # 兼容别名（弃用期两个版本）
+app.include_router(router, prefix="/api/v1", include_in_schema=False)  # T-621 正式前缀
+# T-621（§9.4）：API 版本化——/api/v1 为正式契约前缀（/api 保留为别名，弃用期两个版本）
+_v1 = APIRouter(prefix="/api/v1")
+from . import constants as _constants  # noqa: E402
+
+
+@_v1.get("/meta")
+def api_meta():
+    """类型/级别/状态文案单一来源（前端/移动端运行时拉取，消除手工同步）。"""
+    from .export import STATUS_TEXT as _st
+    return {"types": _constants.TYPE_TEXT, "statuses": _st,
+            "levels": {"1": "提示", "2": "警告", "3": "严重"},
+            "version": __import__("app.version", fromlist=["read_version"]).read_version()}
+
+
+app.include_router(_v1)
 
 # ---- T-105（S-03/P1）：Host 白名单（防 DNS Rebinding）----
 from starlette.middleware.trustedhost import TrustedHostMiddleware  # noqa: E402
