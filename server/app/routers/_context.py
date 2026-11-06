@@ -61,3 +61,31 @@ def render_alert(row):
 
 def alert_config():
     return _api().alert_config
+
+
+def manager():
+    return _api().manager
+
+
+def system_version():
+    return _api()._system_version()
+
+
+def unlink_data_file(path):
+    return _api()._unlink_data_file(path)
+
+
+def folder_media_path(row):
+    return _api()._folder_media_path(row)
+
+
+def folder_readable_path(row):
+    return _api()._folder_readable_path(row)
+
+
+def folder_row_out(row):
+    return _api()._folder_row_out(row)
+
+
+def csv_cell(value):
+    return _api()._csv_cell(value)
