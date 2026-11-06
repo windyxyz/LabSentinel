@@ -538,6 +538,18 @@ def prometheus_metrics():
             if s.get("frame_age_s") is not None:
                 lines.append(f'labsentinel_camera_frame_age_seconds{{camera_id="{cid}"}} {s["frame_age_s"]}')
         lines.append(f"labsentinel_cameras_running {running}")
+        # T-336：迁移期观测——按分析器实现（python|rust）打标签，切换前后对比事件率/fps
+        for impl in ("python", "rust"):
+            n = sum(1 for c in cams if (c.get("analyzer") or settings.analyzer_default) == impl)
+            lines.append(f'labsentinel_cameras{{analyzer="{impl}"}} {n}')
+        eng_state = "not_loaded"
+        try:
+            from . import engine as _e
+            eng_state = str(_e.PRELOAD.get("state") or "not_loaded")
+        except Exception:  # noqa: BLE001
+            pass
+        lines.append(f'labsentinel_engine_state{{state="{eng_state}"}} 1')
+        lines.append(f"labsentinel_events_total {store.count_events()}")
     except Exception:  # noqa: BLE001
         pass
     try:

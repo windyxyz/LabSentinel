@@ -121,12 +121,19 @@ def remove_shortcuts(install: Path | None = None) -> None:
                 smenu = Path(rec.get("start_menu", smenu))
             except (ValueError, OSError):
                 pass
-    # T-405 加固：快捷方式位置来自 shortcuts.json（可被改）——锚定到系统白名单根内才删
+    # T-405 加固：快捷方式位置来自 shortcuts.json（可被改）——锚定到系统白名单根内才删。
+    # 不用 rmtree：只删该目录下的 .lnk 文件再删空目录（结构上不可能递归删用户数据）。
     programs_root = (Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" /
                      "Start Menu" / "Programs").resolve()
     smenu_r = smenu.resolve()
-    if smenu_r.parent == programs_root and smenu_r.name == "LabSentinel" and smenu_r.exists():
-        shutil.rmtree(smenu_r, ignore_errors=True)
+    if smenu_r.parent == programs_root and smenu_r.name == "LabSentinel" and smenu_r.is_dir():
+        for f in smenu_r.iterdir():
+            if f.is_file() and f.suffix.lower() == ".lnk":
+                f.unlink(missing_ok=True)
+        try:
+            smenu_r.rmdir()
+        except OSError:
+            pass
     p = desktop / "LabSentinel.lnk"
     if p.exists() and p.name == "LabSentinel.lnk" and p.resolve().parent == desktop.resolve():
         p.unlink()
@@ -448,14 +455,20 @@ def rollback(install: Path | None = None) -> int:
         return 1
 
 
-def _rmtree_retry(path: Path, attempts: int = 3) -> None:
-    """删除带重试：刚被杀的进程句柄/Defender 实时扫描会短暂锁文件。"""
+def _rmtree_retry(path: Path, under: Path, attempts: int = 3) -> None:
+    """删除带重试：刚被杀的进程句柄/Defender 实时扫描会短暂锁文件。
+
+    锚点（T-405）：被删路径必须是 under 本身或其直接子项，否则拒绝（防遍历）。"""
+    target = Path(path).resolve()
+    root = Path(under).resolve()
+    if target != root and target.parent != root:
+        return
     for i in range(attempts):
-        shutil.rmtree(path, ignore_errors=True)
-        if not path.exists():
+        shutil.rmtree(target, ignore_errors=True)
+        if not target.exists():
             return
         time.sleep(2)
-    shutil.rmtree(path, ignore_errors=True)
+    shutil.rmtree(target, ignore_errors=True)
 
 
 def do_uninstall(install: Path, purge: bool) -> int:
@@ -561,7 +574,7 @@ def do_uninstall(install: Path, purge: bool) -> int:
         data_real = data.resolve()
         lac = Path(os.environ["LOCALAPPDATA"]).resolve()
         if data_real.parent == lac and data_real.name == "LabSentinel":
-            _rmtree_retry(data)
+            _rmtree_retry(data, under=data.parent)
             log("  数据已删除（--purge-data）" + ("" if not data.exists() else "（部分文件仍被占用，重试后未清空）"))
         else:
             log(f"  [提示] 数据目录位置异常（{data}），跳过自动删除，请人工确认后手动删除")
@@ -580,7 +593,7 @@ def do_uninstall(install: Path, purge: bool) -> int:
         if p.resolve().parent != install_real:
             continue  # 必须是安装根的直接子项（防符号链接/重定向逃逸）
         if p.is_dir():
-            _rmtree_retry(p)
+            _rmtree_retry(p, under=install)
         else:
             p.unlink(missing_ok=True)
     log("[卸载] 完成（runtime 残留将自动删除，最长约 60 秒）")

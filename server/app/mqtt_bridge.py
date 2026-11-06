@@ -43,8 +43,9 @@ def _client_id() -> str:
     return f"labsentinel-{socket.gethostname()}-{os.urandom(2).hex()}"
 
 
-def build_payload(event: dict, camera_name: str | None) -> str:
-    """payload v1（只加不减契约）。不含 token/本地绝对路径；zones v1 恒空列表（占位）。"""
+def build_payload(event: dict, camera_name: str | None,
+                  zones: list[str] | None = None) -> str:
+    """payload v1（只加不减契约）。不含 token/本地绝对路径；T-710：zones 填事件关联区域名。"""
     return json.dumps({
         "v": PAYLOAD_VERSION,
         "device_type": "lab-monitor",
@@ -56,7 +57,7 @@ def build_payload(event: dict, camera_name: str | None) -> str:
         "level": event.get("level"),
         "track_id": event.get("track_id"),
         "detail": event.get("detail"),
-        "zones": [],
+        "zones": zones or [],
         # T-208（B-14）：派发前行里 snapshot 已 pop，has_snapshot 布尔由 _dispatch_row 写入；
         # 兼容直传完整行的调用方（或字段）
         "has_snapshot": bool(event.get("has_snapshot") or event.get("snapshot")),
@@ -69,13 +70,14 @@ def topic_for(event: dict) -> str:
     return f"{settings.mqtt_topic_prefix}/events/{event.get('camera_id')}/{event.get('type')}"
 
 
-def publish_event(event: dict, camera_name: str | None = None) -> bool:
+def publish_event(event: dict, camera_name: str | None = None,
+                  zones: list[str] | None = None) -> bool:
     """事件落库/派发后调用（WS 广播之后）。入队即返回；异常吞掉计数，绝不抛。"""
     if not settings.mqtt_enabled:
         return False
     try:
         _q.put_nowait({"topic": topic_for(event),
-                       "payload": build_payload(event, camera_name)})
+                       "payload": build_payload(event, camera_name, zones)})
         return True
     except queue.Full:
         _stats["dropped"] += 1  # 满丢最旧策略简化为丢最新+计数：主链路优先

@@ -40,6 +40,12 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-710：MQTT payload v1 `zones` 填事件关联区域名（原恒空占位）；dispatcher 从 detail 反查。
+- T-336：/api/metrics 增 `labsentinel_cameras{analyzer=...}`、`engine_state`、
+  `events_total` ——迁移期按分析器实现对比 fps/事件率，支撑灰度决策。
+- T-611：Windows 服务模式交付配置 `deploy/windows/labsentinel-service.xml`（WinSW，
+  LocalService，ProgramData 数据目录；Session 0 无 USB 限制已注明）。
+- T-709：值班大屏 `/wall`（多路 WebRTC 网格 ≤9 + 实时事件滚动，kiosk 模式文档）。
 - T-621（§9.4）：API 版本化——`/api/v1` 为正式前缀（`/api` 保留别名两个版本）；
   `/api/v1/meta` 输出类型/级别/状态文案单一来源（客户端运行时拉取）。
 - T-610（Q-10）：Linux 分发三件套——`deploy/docker/Dockerfile`（CPU+OpenVINO）、

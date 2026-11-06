@@ -547,9 +547,18 @@ class AlertDispatcher:
             # T-208（B-14）：派发前行里 snapshot 已被 pop（只回布尔）——has_snapshot
             # 由 _dispatch_row 写入；camera_name 走 ConfigCache（避免每事件查库）
             from . import configcache, mqtt_bridge
+            zones = []
+            if self.store is not None:
+                try:  # T-710：事件关联的区域名（detail 含区域名的反查）
+                    zs = configcache.zones(self.store, event_row.get("camera_id", 0))
+                    detail = event_row.get("detail") or ""
+                    zones = [z["name"] for z in zs if z["name"] and z["name"] in detail]
+                except Exception:  # noqa: BLE001
+                    zones = []
             mqtt_bridge.publish_event(event_row,
                                       camera_name=configcache.camera_name(self.store, event_row.get("camera_id", 0))
-                                      if self.store is not None else None)
+                                      if self.store is not None else None,
+                                      zones=zones)
         except Exception:  # noqa: BLE001
             pass
         text = render_alert(event_row)

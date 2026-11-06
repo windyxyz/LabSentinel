@@ -1,0 +1,34 @@
+<!-- T-611：Windows 服务模式（WinSW 包装，LocalService 账户）。
+     安装（管理员）：
+       winsw.exe install deploy\windows\labsentinel-service.xml
+       winsw.exe start
+     限制：Session 0 无法访问 USB 摄像头——服务模式仅建议 RTSP/文件夹源。
+     数据目录改 %ProgramData%\LabSentinel（服务账户可写，与用户模式数据隔离）。 -->
+<service>
+  <id>labsentinel</id>
+  <name>LabSentinel 实验室安全监控</name>
+  <description>本地实验室安全行为监控（Rust 控制面 / Python 分析器）</description>
+  <executable>%BASE%\runtime\python.exe</executable>
+  <arguments>-m uvicorn app.main:app --host 127.0.0.1 --port 8000</arguments>
+  <workingdirectory>%BASE%\server</workingdirectory>
+  <logpath>%ProgramData%\LabSentinel\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10485760</sizeThreshold>
+    <keepFiles>4</keepFiles>
+  </log>
+  <env name="LS_DATA_DIR" value="%ProgramData%\LabSentinel\data"/>
+  <env name="LS_DB_PATH" value="%ProgramData%\LabSentinel\data\labsentinel.db"/>
+  <env name="LS_SNAPSHOT_DIR" value="%ProgramData%\LabSentinel\data\snapshots"/>
+  <env name="LS_VIDEO_DIR" value="%ProgramData%\LabSentinel\data\videos"/>
+  <env name="LS_ANNOTATION_POOL_DIR" value="%ProgramData%\LabSentinel\data\annotation_pool"/>
+  <env name="LS_BACKEND_ORDER" value="directml,openvino,cpu"/>
+  <env name="LS_HOST" value="127.0.0.1"/>
+  <env name="PYTHONUTF8" value="1"/>
+  <onfailure action="restart" delay="10 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>30 sec</stoptimeout>
+  <serviceaccount>
+    <username>NT AUTHORITY\LocalService</username>
+    <allowservicelogon>true</allowservicelogon>
+  </serviceaccount>
+</service>

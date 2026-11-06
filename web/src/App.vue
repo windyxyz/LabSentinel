@@ -8,6 +8,7 @@ import Events from './views/Events.vue'
 import Reports from './views/Reports.vue'
 import AlertSettings from './views/AlertSettings.vue'
 import Face from './views/Face.vue'
+import Wall from './views/Wall.vue'
 
 // 图标为 Fluent 风格线性 SVG（16px），不依赖图标字体/库
 const tabs = [
@@ -29,10 +30,13 @@ const tabs = [
     icon: '<circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 13.8c.9-2.7 3-4 5.5-4s4.6 1.3 5.5 4"/>' },
 ]
 const active = ref('dash')
+// T-709：值班大屏路由（无 vue-router 的轻量判定）——/wall 全屏无导航
+const isWall = window.location.pathname.replace(/\/+$/, '') === '/wall' 
 </script>
 
 <template>
-  <div class="layout">
+  <Wall v-if="isWall" />
+  <div v-else class="layout">
     <nav>
       <h1>LabSentinel</h1>
       <a v-for="t in tabs" :key="t.key" :class="{ active: active === t.key }" @click="active = t.key">
