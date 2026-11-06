@@ -8,6 +8,7 @@
 //! 启动即打印 "READY port=<p>" 行，供父进程健康判定。
 #![allow(clippy::result_large_err)]
 
+mod golden;
 mod pipeline;
 
 use std::collections::HashMap;
@@ -561,6 +562,55 @@ impl Analyzer for AnalyzerImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // T-321（L1）：黄金语料离线运行器（--golden <video> --out <jsonl>，独立于 gRPC 服务）
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.iter().any(|a| a == "--golden") {
+        let mut fps = 5.0f32;
+        let mut model = None;
+        let mut no_model = false;
+        let mut dump_dets = None;
+        let mut it = std::env::args().skip(1);
+        let mut video = None;
+        let mut out = None;
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--video" => {
+                    video = Some(std::path::PathBuf::from(it.next().ok_or("--video 缺值")?))
+                }
+                "--out" => out = Some(std::path::PathBuf::from(it.next().ok_or("--out 缺值")?)),
+                "--fps" => fps = it.next().ok_or("--fps 缺值")?.parse()?,
+                "--model" => {
+                    model = Some(std::path::PathBuf::from(it.next().ok_or("--model 缺值")?))
+                }
+                "--no-model" => no_model = true,
+                "--dump-dets" => {
+                    dump_dets = Some(std::path::PathBuf::from(
+                        it.next().ok_or("--dump-dets 缺值")?,
+                    ))
+                }
+                "--golden" => {}
+                other if video.is_none() && !other.starts_with('-') => {
+                    video = Some(std::path::PathBuf::from(other)) // 位置参数 = 视频路径
+                }
+                other => {
+                    return Err(format!(
+                        "未知参数 {other}（--golden 模式：--video/--out/--fps/--model/--no-model）"
+                    )
+                    .into())
+                }
+            }
+        }
+        let args = golden::GoldenArgs {
+            video: video.ok_or("--golden 需要 --video")?,
+            out: out.ok_or("--golden 需要 --out")?,
+            fps,
+            model,
+            no_model,
+            dump_dets,
+        };
+        golden::run_golden(&args)?;
+        return Ok(());
+    }
     let mut port: u16 = 59001;
     let mut token = String::new();
     let mut args = std::env::args().skip(1);

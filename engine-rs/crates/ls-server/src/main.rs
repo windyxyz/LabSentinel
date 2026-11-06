@@ -464,6 +464,13 @@ async fn main() {
                 .is_some_and(|v| v == "ok");
             std::process::exit(if ok { 0 } else { 1 });
         }
+        // T-332：跨语言 DB 兼容驱动——对指定库写一条事件/投递并读回（exit 0=成功）。
+        // 由 server/tests/test_store_bidirectional.py 调用，实现三路径兼容验收。
+        if a == "--selftest-db" {
+            let db = args.next().expect("--selftest-db <path>");
+            let code = ls_store::selftest::run(&db);
+            std::process::exit(code);
+        }
     }
     let db_path =
         std::env::var("LS_DB_PATH").unwrap_or_else(|_| "server/data/labsentinel.db".into());

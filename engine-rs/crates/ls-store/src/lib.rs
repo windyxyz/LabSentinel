@@ -287,6 +287,82 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// T-332：跨语言 DB 兼容自检（`labsentinel-server --selftest-db <path>`）。
+/// 对既有库做一轮完整读写（事件/处置/投递/摄像头/区域/规则），全部成功返回 0。
+pub mod selftest {
+    use super::Store;
+    use crate::NewEvent;
+
+    pub fn run(db_path: &str) -> i32 {
+        let Ok(s) = Store::open(db_path) else {
+            eprintln!("[selftest-db] 打开失败: {db_path}");
+            return 1;
+        };
+        let Ok(ver) = s.schema_version() else {
+            eprintln!("[selftest-db] schema_version 读取失败");
+            return 1;
+        };
+        if ver < 12 {
+            eprintln!("[selftest-db] schema v{ver} < 12（需先由 Python 建全量迁移库）");
+            return 1;
+        }
+        let Ok(cams) = s.cameras() else {
+            eprintln!("[selftest-db] cameras 读取失败");
+            return 1;
+        };
+        let cid = cams.first().map(|c| c.id).unwrap_or(1);
+        let eid = match s.add_event(&NewEvent {
+            camera_id: cid,
+            type_: "enter",
+            level: 2,
+            track_id: 7,
+            detail: "rust-selftest",
+            snapshot: None,
+            ts: "2026-01-01T00:00:01",
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[selftest-db] add_event 失败: {e}");
+                return 1;
+            }
+        };
+        match s.event_by_id(eid) {
+            Ok(Some(ev)) if ev.detail == "rust-selftest" => {}
+            _ => {
+                eprintln!("[selftest-db] event_by_id 读回不一致");
+                return 1;
+            }
+        }
+        if s.set_event_status(eid, "acked", Some("rust"), Some("2026-01-01T00:00:02"))
+            .map(|n| n == 0)
+            .unwrap_or(true)
+        {
+            eprintln!("[selftest-db] set_event_status 失败");
+            return 1;
+        }
+        let Ok(Some(ev)) = s.event_by_id(eid) else {
+            eprintln!("[selftest-db] 处置后读回失败");
+            return 1;
+        };
+        if ev.status != "acked" {
+            eprintln!("[selftest-db] 处置状态未持久化: {}", ev.status);
+            return 1;
+        }
+        let _ = s.zones(cid);
+        let _ = s.rules(cid);
+        match s.integrity_check() {
+            Ok(v) if v == "ok" => {
+                println!("[selftest-db] OK schema=v{ver} event={eid}");
+                0
+            }
+            other => {
+                eprintln!("[selftest-db] integrity_check 未过: {other:?}");
+                1
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -98,7 +98,21 @@
   WS/MQTT），evidence_key+behavior 去重防流重连重放；sidecar 状态并入
   `/api/cameras/status` 与守护逻辑；默认全 python 零侵入，sidecar 不可用自动回退
   Python worker。默认 Python 路径行为完全不变（全量回归验证）。
-- **T-325 推理层落地（tract 纯 Rust）**：`ls-infer` 新增 feature=tract——YOLO11n
+- **T-321（L1）黄金语料 Rust 运行器与对齐实测**：`ls-analyzer --golden` 离线模式
+  （同 Python golden_run 口径：帧序号抽帧 step=round(vfps/fps)、合成基准时间戳、
+  全画幅三规则；`--dump-dets` 输出检测框诊断）；三语料实测——lab-equip 与
+  lab-walk-v2 事件一致率 **100%**，lab-walk-24076 为 87.5%（18 事件合计 94.4%），
+  唯一差异为 conf 阈值边界的单帧插值漏检（逐条复核入档
+  docs/验证记录-S7-L1黄金语料对齐.md）；检测框对齐 **IoU min=0.9959 / p50=0.9994，
+  58/58 ≥0.99**（§13.8 L1 框对齐标准达标），score 差 max=0.0045；
+  tools/detect_compare.py 双实现同帧 IoU 对比工具入库。
+- **T-332 三路径 DB 双向兼容自动化**：`labsentinel-server --selftest-db`（ls-store
+  selftest 模块，对既有库完整读写自检）；test_store_bidirectional.py 重写为真跨语言
+  三路径（Python 全量迁移库→Rust 读写→Python 复核 / 最小合法库→Rust→Python /
+  WAL 并发可见性）。
+- **T-329 告警派发 Rust 集成测试**：本地 HTTP 桩验证 HMAC 签名（与 Python hmac
+  同算法同输出）、失败重试 1+3 次、2xx 即成功语义（Webhook）、厂商业务码判定、
+  URL 白名单 SSRF 阻断；Rust workspace 47 tests 全绿。
   ONNX 全 CPU 推理（letterbox 114 灰边 + 双线性 + BGR→RGB + NCHW 与 Python 对齐，
   解码/NMS 复用 post.rs），**不依赖 libclang/ORT 动态库**；`ls-analyzer` 按实例注入
   模型路径（LS_MODEL_FP32）替换 NullDetector，SidecarAnalyzer 向子进程显式传递
