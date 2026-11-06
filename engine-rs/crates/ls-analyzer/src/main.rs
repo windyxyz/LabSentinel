@@ -195,7 +195,7 @@ fn make_detector(path: Option<&PathBuf>) -> Box<dyn Detector> {
     let conf = env_f32("LS_CONF_THRES", 0.40);
     let iou = env_f32("LS_IOU_THRES", 0.50);
     let min_area = env_f32("LS_MIN_BOX_AREA", 1200.0);
-    match YoloModel::load(path, imgsz, conf, iou, min_area) {
+    match YoloModel::load(path, imgsz, conf, iou, min_area, None) {
         Ok(model) => {
             println!(
                 "[ls-analyzer] 模型已加载: {}（imgsz={imgsz} conf={conf} iou={iou}）",

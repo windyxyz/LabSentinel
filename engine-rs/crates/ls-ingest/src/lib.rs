@@ -81,15 +81,23 @@ impl Ingest {
         c.arg("-i")
             .arg(&self.cfg.source)
             .args(["-an", "-sn", "-dn"])
-            .args([
-                "-vf",
-                &format!(
-                    "fps={},scale={}:{}",
-                    self.cfg.analysis_fps, self.cfg.width, self.cfg.height
-                ),
-            ])
+            .args(["-vf", &self.filter_chain()])
             .args(["-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]);
         c
+    }
+
+    /// 视频滤镜链：analysis_fps > 0 时 `fps,scale`（与 Python CameraWorker 语义一致，
+    /// 由 ffmpeg 抽帧）；`analysis_fps == 0` 时仅 `scale`——**纯顺序解码**（与 cv2
+    /// 逐帧读取一致，帧号与 PTS 不经 fps 滤镜重排；黄金语料对齐模式使用）。
+    fn filter_chain(&self) -> String {
+        if self.cfg.analysis_fps > 0.0 {
+            format!(
+                "fps={},scale={}:{}",
+                self.cfg.analysis_fps, self.cfg.width, self.cfg.height
+            )
+        } else {
+            format!("scale={}:{}", self.cfg.width, self.cfg.height)
+        }
     }
 
     /// 启动（或断流后重启）ffmpeg；指数退避由调用方驱动 `spawn` 的 Err。

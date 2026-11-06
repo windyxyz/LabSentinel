@@ -114,9 +114,10 @@ pub fn run_golden(args: &GoldenArgs) -> Result<usize, String> {
 
     let mut ing = ls_ingest::Ingest::new(ls_ingest::IngestConfig {
         source: args.video.to_string_lossy().to_string(),
-        // 黄金语料对齐 Python 逐帧口径：不交给 ffmpeg fps 滤镜抽帧（否则双重抽帧），
-        // 拿全部原始帧后由本循环按 step 取（step = round(vfps/analysis_fps)）。
-        analysis_fps: vfps as f32,
+        // 黄金语料对齐 Python（cv2）逐帧口径：analysis_fps=0 → 不加 ffmpeg fps 滤镜，
+        // 纯顺序解码（帧号/PTS 不重排），由本循环按 step = round(vfps/analysis_fps) 抽帧。
+        // 注：fps 滤镜对 VFR/首帧 PTS≠0 的视频会重排帧序，与 cv2 顺序解码错位。
+        analysis_fps: 0.0,
         width: 1280,
         height: 720,
         file_loop: false,
@@ -200,7 +201,7 @@ fn make_golden_detector(args: &GoldenArgs) -> Result<Box<dyn pipeline::Detector>
     if !path.is_file() {
         return Err(format!("模型不存在: {}", path.display()));
     }
-    let model = ls_infer::yolo::YoloModel::load(&path, 640, 0.40, 0.50, 1200.0)
+    let model = ls_infer::yolo::YoloModel::load(&path, 640, 0.40, 0.50, 1200.0, None)
         .map_err(|e| format!("模型加载失败: {e}"))?;
     Ok(Box::new(GoldenDetector { model }))
 }

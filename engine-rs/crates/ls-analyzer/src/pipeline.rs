@@ -153,6 +153,27 @@ impl CameraPipeline {
     pub fn process(&mut self, dets: &[PersonDetection], frame_ts: &str) -> Vec<Candidate> {
         self.frame_index += 1;
         let now = parse_ts(frame_ts).unwrap_or_else(Local::now);
+        let mut out = Vec::new();
+
+        // 与 Python `_analyze` 对齐：空检测帧**不调 ByteTrack**（track 状态冻结，
+        // lost_time 不累积、frame_id 不推进），只对在场 track 补离场观测并回收状态。
+        if dets.is_empty() {
+            let mut exits: Vec<(i64, i64)> = Vec::new();
+            for (zid, st) in self.zone_states.iter_mut() {
+                for tid in st.inside_ids() {
+                    if st.update(tid, false) == Some(ZoneChange::Exit) {
+                        exits.push((*zid, tid));
+                    }
+                }
+                st.retain(&[], None);
+            }
+            for (zid, tid) in exits {
+                let detail = format!("离开安全区「{}」", self.zone_name(zid));
+                self.try_fire(Some(zid), "exit", tid, &detail, 2, &now, frame_ts, &mut out);
+            }
+            return out;
+        }
+
         let track_dets: Vec<TrackDetection> = dets
             .iter()
             .map(|d| TrackDetection {
@@ -162,7 +183,6 @@ impl CameraPipeline {
             .collect();
         let active = self.tracker.update(&track_dets);
         let active_ids: HashSet<i64> = active.iter().map(|(_, id)| *id).collect();
-        let mut out = Vec::new();
 
         // 本帧未再出现的在场 track：补离场观测（单帧漏检不立即翻转为 exit——迟滞生效）
         let mut exits: Vec<(i64, i64)> = Vec::new();
@@ -176,11 +196,6 @@ impl CameraPipeline {
                 if st.update(tid, false) == Some(ZoneChange::Exit) {
                     exits.push((*zid, tid));
                 }
-            }
-        }
-        if dets.is_empty() {
-            for st in self.zone_states.values_mut() {
-                st.retain(&[], None);
             }
         }
         for (zid, tid) in exits {

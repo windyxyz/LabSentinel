@@ -7,12 +7,17 @@ license.workspace = true
 
 [features]
 # 纯 Rust ONNX 推理（tract）：覆盖 Conv/SiLU/Concat/Resize/Split 等 YOLO11 算子，
-# 不依赖 C++/libclang/ONNX Runtime 动态库——本机 windows-gnu 目标可直接构建。
+# 不依赖 C++/动态库——windows-gnu 目标可直接构建。
 tract = ["dep:tract-onnx"]
+# ort 后端（T-325 原定方案；T-328 验收口径）：load-dynamic 运行时加载
+# onnxruntime.dll（ORT_DYLIB_PATH），与 Python 同后端 → 黄金语料事件一致率 ≥98%。
+# rc.10+ 绑定层为纯 Rust（无 bindgen/libclang）；default-features=false 关闭二进制下载。
+ort = ["dep:ort"]
 
 [dependencies]
 serde = { workspace = true }
 tract-onnx = { version = "0.23", optional = true }
+ort = { version = "2.0.0-rc.15", optional = true, default-features = false, features = ["load-dynamic"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
