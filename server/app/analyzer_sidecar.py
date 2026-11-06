@@ -29,6 +29,11 @@ class SidecarAnalyzer(AnalyzerBackend):
         self._token = ""
         self._stub = None
         self._started = False
+        # T-331：同一 sidecar 托管多路 → 本地累积全量配置快照，按版本整体下发
+        self._cams: dict[int, dict] = {}
+        self._zones: dict[int, dict] = {}
+        self._rules: dict[int, dict] = {}
+        self._cfg_version = 0
 
     # ---- 进程生命周期 ----
     def start(self) -> None:
@@ -63,6 +68,9 @@ class SidecarAnalyzer(AnalyzerBackend):
     def stop(self) -> None:
         self._started = False
         self._stub = None
+        self._cams.clear()
+        self._zones.clear()
+        self._rules.clear()
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
             try:
@@ -82,10 +90,52 @@ class SidecarAnalyzer(AnalyzerBackend):
         return sidecar_port
 
     # ---- AnalyzerBackend 接口 ----
+    def _proto_config(self):
+        """把当前累积快照转成 proto Config（T-331：Rust 数据面需要源码/区域/规则）。"""
+        from . import analyzer_pb2 as pb
+        from .config import settings
+        cams = [
+            pb.CameraConfig(id=c["id"], name=c.get("name") or "",
+                            type=c.get("type") or "file",
+                            source=c.get("source") or "",
+                            analysis_fps=float(settings.analysis_fps),
+                            file_loop=bool(settings.file_loop))
+            for c in self._cams.values()
+        ]
+        zones = []
+        for z in self._zones.values():
+            pts = [pb.Point(x=int(p[0]), y=int(p[1]))
+                   for p in (z.get("polygon") or []) if len(p) >= 2]
+            if len(pts) >= 3:
+                zones.append(pb.ZoneConfig(id=z["id"], camera_id=z["camera_id"],
+                                           name=z.get("name") or "", points=pts))
+        rules = [
+            pb.RuleConfig(
+                id=r["id"], camera_id=r["camera_id"],
+                zone_id=int(r.get("zone_id") or 0),
+                behavior=r.get("behavior") or "",
+                level=int(r.get("level") or 2),
+                cooldown_s=int(r.get("cooldown_s") or 0),
+                time_start=r.get("time_start") or "00:00",
+                time_end=r.get("time_end") or "23:59",
+                weekdays=str(r.get("days_of_week") or ""),
+                threshold=int(r.get("threshold") or 0),
+                enabled=bool(r.get("enabled", True)),
+            )
+            for r in self._rules.values()
+        ]
+        return pb.Config(version=self._cfg_version, cameras=cams, zones=zones, rules=rules)
+
     def start_camera(self, camera: dict, zones: list[dict], rules: list[dict]) -> None:
         self.start()
+        self._cams[int(camera["id"])] = camera
+        for z in zones or []:
+            self._zones[int(z["id"])] = z
+        for r in rules or []:
+            self._rules[int(r["id"])] = r
+        self._cfg_version += 1
         from . import analyzer_pb2 as pb
-        self._stub.ApplyConfig(pb.Config(version=1, cameras=[], zones=[], rules=[]),
+        self._stub.ApplyConfig(self._proto_config(),
                                metadata=(("x-ls-token", self._token),))
         self._stub.StartCamera(pb.CameraRef(camera_id=camera["id"]),
                                metadata=(("x-ls-token", self._token),))

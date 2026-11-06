@@ -87,6 +87,12 @@
   `/api/escalation/status`，L3 契约测试对 Python/Rust 双实现同套断言通过。
   ls-dispatch 补通用 Webhook HMAC-SHA256 签名（X-LS-Signature）与 alert_silences
   `global` 口径；ls-store 暴露只读连接供维护作业分页查询。
+- **T-331（L2）分析器数据面接线**：ls-analyzer 落地单路管线——ApplyConfig 全量快照 →
+  StartCamera 启动 ffmpeg 取流（ls-ingest）→ Detector（T-325 前为 NullDetector）→
+  ByteTrack → ZoneState 进出迟滞 → 规则（时段/星期/日历/冷却）→ EventCandidate gRPC
+  事件流；Status 实时返回 fps/帧龄/重连/错误。Python SidecarAnalyzer 改为下发真实
+  摄像头/区域/规则快照（原为空配置占位）。管线单测 5 例 + gRPC 端到端（合成视频
+  fps>0 → stop→stopped）实测通过。
 - **L2/L3/L4 Rust 替换 Python 运行时（核心目标）**：
   - ls-store（T-332）：rusqlite 打开 Python 同库（schema v12 双向兼容，ADR-0008）；
   - ls-dispatch（T-329）：8 渠道等价语义、域名白名单、静默/过滤/限流/重试/死信；

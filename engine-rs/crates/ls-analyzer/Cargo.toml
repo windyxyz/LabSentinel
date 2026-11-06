@@ -13,6 +13,8 @@ path = "src/main.rs"
 ls-proto = { path = "../ls-proto" }
 ls-core = { path = "../ls-core" }
 ls-track = { path = "../ls-track" }
+ls-ingest = { path = "../ls-ingest" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tonic = "0.13"
 prost = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }

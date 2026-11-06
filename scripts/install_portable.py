@@ -472,10 +472,23 @@ def _rmtree_retry(path: Path, under: Path, attempts: int = 3) -> None:
     shutil.rmtree(target, ignore_errors=True)
 
 
+def _allowed_install_roots() -> list[Path]:
+    """允许卸载的根目录（用户态安装位置）；自定义盘符目录请手动删除。"""
+    roots = []
+    for key in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "USERPROFILE"):
+        v = os.environ.get(key)
+        if v:
+            try:
+                roots.append(Path(v).resolve())
+            except OSError:
+                pass
+    return roots
+
+
 def _validated_uninstall_target(install: Path) -> Path | None:
     """卸载目标校验（T-405，防任意路径删除）：必须绝对路径且无 `..` 分量、非盘符根、
-    相对盘符至少两级目录，且不得指向系统目录/用户主目录/LOCALAPPDATA 等本身。
-    返回 resolve() 后的路径；校验失败返回 None（调用方拒绝执行任何删除）。"""
+    相对盘符至少两级目录，且必须位于 LOCALAPPDATA/PROGRAMFILES/USERPROFILE 之下
+    （系统目录/用户主目录本身已在 blocked 集中排除）。返回 resolve() 后的路径。"""
     raw = Path(install)
     if not raw.is_absolute() or ".." in raw.parts:
         return None
@@ -489,22 +502,20 @@ def _validated_uninstall_target(install: Path) -> Path | None:
         return None
     if len(rel.parts) < 2:
         return None
-    blocked = {Path.home().resolve(), anchor}
-    for key in ("WINDIR", "LOCALAPPDATA", "APPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
-        v = os.environ.get(key)
-        if v:
-            try:
-                blocked.add(Path(v).resolve())
-            except OSError:
-                pass
-    return None if p in blocked else p
+    roots = _allowed_install_roots()
+    if not roots or not any(p.is_relative_to(root) for root in roots):
+        return None
+    blocked = {Path.home().resolve(), anchor, *roots}
+    if p in blocked:
+        return None
+    return p
 
 
 def do_uninstall(install: Path, purge: bool) -> int:
     target = _validated_uninstall_target(install)
     if target is None:
-        log("[拒绝] 卸载目标非法（须为绝对路径的二级以上目录，且非系统/用户主目录本身）"
-            "——未执行任何删除")
+        log("[拒绝] 卸载目标非法（须位于 LOCALAPPDATA/PROGRAMFILES 下的二级以上目录，"
+            "且非系统/用户主目录本身）——未执行任何删除")
         return 2
     install = target
     dbg = Path(tempfile.gettempdir()) / "ls_uninstall_trace.log"
@@ -566,9 +577,10 @@ def do_uninstall(install: Path, purge: bool) -> int:
     set_autostart(install, False)
     remove_uninstall_registry()  # 任务120：控制面板卸载项同步清除
     trace("shortcuts+autostart done")
-    # 数据目录按默认布局从 install 派生（<install>/../..\LabSentinel = %LOCALAPPDATA%\LabSentinel）；
-    # 自定义安装目录时该派生不成立，purge 会在下方与固定位置一致性校验后跳过自动删除
-    data = install.parent.parent / "LabSentinel"
+    # 数据目录固定位置：%LOCALAPPDATA%\LabSentinel（不随自定义安装目录漂移；
+    # 这样 purge 的删除目标与用户传入的安装路径完全解耦，只由本地配置根决定）
+    lac = Path(os.environ["LOCALAPPDATA"]).resolve()
+    data = lac / "LabSentinel"
     # 2026-10-30 审阅：二次卸载/上次 rd 已成功时 install 可能已不存在——防御性容错
     trace("hybrid done residue=" + (
         ",".join(sorted(q.name for q in install.iterdir())) if install.exists() else "(目录已不存在)"))
