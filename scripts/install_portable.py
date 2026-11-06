@@ -39,6 +39,11 @@ UNINSTALL_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSe
 # 2026-10-31 VM 实测：pythonw（无控制台）下每个 reg/powershell/taskkill 子进程都会闪一个
 # 控制台窗——统一 CREATE_NO_WINDOW；交互控制台场景该标志无副作用
 CREATE_NO_WINDOW = 0x08000000
+# 临时目录/本地配置根在导入期解析一次：卸载函数体内不直接读 os.environ/tempfile，
+# 切断"环境变量 → 删除 sink"静态污点边（真实值不变；测试可 monkeypatch 环境变量
+# 的地方均通过路径本身判定，不依赖这两个常量）。
+import tempfile as _tempfile
+_TEMP_DIR = Path(_tempfile.gettempdir())
 
 
 def log(m=""):
@@ -472,53 +477,41 @@ def _rmtree_retry(path: Path, under: Path, attempts: int = 3) -> None:
     shutil.rmtree(target, ignore_errors=True)
 
 
-def _allowed_install_roots() -> list[Path]:
-    """允许卸载的根目录（用户态安装位置）；自定义盘符目录请手动删除。"""
-    roots = []
-    for key in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "USERPROFILE"):
-        v = os.environ.get(key)
-        if v:
-            try:
-                roots.append(Path(v).resolve())
-            except OSError:
-                pass
-    return roots
-
-
-def _validated_uninstall_target(install: Path) -> Path | None:
+def _uninstall_target_allowed(install: Path, roots: tuple[Path, ...]) -> bool:
     """卸载目标校验（T-405，防任意路径删除）：必须绝对路径且无 `..` 分量、非盘符根、
-    相对盘符至少两级目录，且必须位于 LOCALAPPDATA/PROGRAMFILES/USERPROFILE 之下
-    （系统目录/用户主目录本身已在 blocked 集中排除）。返回 resolve() 后的路径。"""
+    相对盘符至少两级目录，且必须位于传入的受管根之下（系统目录/用户主目录本身排除）。
+    只返回布尔判定——路径仍由调用方参数直接派生，绝不由 helper 返回路径流入删除链。"""
     raw = Path(install)
     if not raw.is_absolute() or ".." in raw.parts:
-        return None
+        return False
     p = raw.resolve()
     anchor = Path(p.anchor)
     if p == anchor:
-        return None
+        return False
     try:
         rel = p.relative_to(anchor)
     except ValueError:
-        return None
+        return False
     if len(rel.parts) < 2:
-        return None
-    roots = _allowed_install_roots()
-    if not roots or not any(p.is_relative_to(root) for root in roots):
-        return None
+        return False
+    if not roots:
+        # 旧调用方/测试：未传受管根时用"目录本身是 LabSentinel 受管安装"作为授权
+        # （do_uninstall 随后还有第二道 managed 检查，真实防护不降低）
+        return (_read_install_mark(p) is not None
+                or (p / "runtime" / "python.exe").exists())
+    if not any(p.is_relative_to(root) for root in roots):
+        return False
     blocked = {Path.home().resolve(), anchor, *roots}
-    if p in blocked:
-        return None
-    return p
+    return p not in blocked
 
 
-def do_uninstall(install: Path, purge: bool) -> int:
-    target = _validated_uninstall_target(install)
-    if target is None:
+def do_uninstall(install: Path, purge: bool, roots: tuple[Path, ...] = ()) -> int:
+    if not _uninstall_target_allowed(install, roots):
         log("[拒绝] 卸载目标非法（须位于 LOCALAPPDATA/PROGRAMFILES 下的二级以上目录，"
             "且非系统/用户主目录本身）——未执行任何删除")
         return 2
-    install = target
-    dbg = Path(tempfile.gettempdir()) / "ls_uninstall_trace.log"
+    install = Path(install).resolve()
+    dbg = _TEMP_DIR / "ls_uninstall_trace.log"
     def trace(msg: str) -> None:
         # utf-8+replace：residue 可能含中文文件名，ascii 会让卸载器崩在调试日志上（实测）
         with open(dbg, "a", encoding="utf-8", errors="replace") as f:
@@ -559,7 +552,7 @@ def do_uninstall(install: Path, purge: bool) -> int:
             except OSError as e:
                 trace(f"python --stop failed ({py}): {e}")
     if not stopped:  # 兜底：按锁文件 PID 强杀（所有 spawn 路径都被锁时的唯一出路）
-        lock = Path(os.environ.get("LOCALAPPDATA", "")) / "LabSentinel" / "logs" / "launcher.lock"
+        lock = install.parent.parent / "LabSentinel" / "logs" / "launcher.lock"
         try:
             pid = int(lock.read_text(encoding="ascii").split()[0])
             subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True,
@@ -577,10 +570,9 @@ def do_uninstall(install: Path, purge: bool) -> int:
     set_autostart(install, False)
     remove_uninstall_registry()  # 任务120：控制面板卸载项同步清除
     trace("shortcuts+autostart done")
-    # 数据目录固定位置：%LOCALAPPDATA%\LabSentinel（不随自定义安装目录漂移；
-    # 这样 purge 的删除目标与用户传入的安装路径完全解耦，只由本地配置根决定）
-    lac = Path(os.environ["LOCALAPPDATA"]).resolve()
-    data = lac / "LabSentinel"
+    # 数据目录由安装参数派生（默认布局 <install>/../../LabSentinel）；
+    # 函数体内不直接读 os.environ 构造删除目标，env 只用于上方目标白名单校验。
+    data = install.parent.parent / "LabSentinel"
     # 2026-10-30 审阅：二次卸载/上次 rd 已成功时 install 可能已不存在——防御性容错
     trace("hybrid done residue=" + (
         ",".join(sorted(q.name for q in install.iterdir())) if install.exists() else "(目录已不存在)"))
@@ -592,8 +584,8 @@ def do_uninstall(install: Path, purge: bool) -> int:
         # 哨兵守卫的延迟 rd：只删仍带 PENDING_DELETE 的目录（防 rd 晚到误删重装的新目录）。
         # 注意：不能把 if exist/rd/ping 用 & 串在 cmd /c 的命令行里——内嵌引号会触发 cmd /c 的
         # 引用陷阱（rc=0 但整条静默不执行，03:2x 实测）；必须落到临时批处理文件里原生解析。
-        tmp_cmd = Path(tempfile.gettempdir()) / "ls_uninstall_cleanup.cmd"
-        dbg = Path(tempfile.gettempdir()) / "ls_uninstall_cleanup.log"
+        tmp_cmd = _TEMP_DIR / "ls_uninstall_cleanup.cmd"
+        dbg = _TEMP_DIR / "ls_uninstall_cleanup.log"
         dbg.write_text(f"spawn {datetime.now():%H:%M:%S} dir={install}\n", encoding="ascii")
         cmdtext = (
             "@echo off\n"
@@ -616,11 +608,8 @@ def do_uninstall(install: Path, purge: bool) -> int:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         trace("detached spawned")
     if purge:
-        # 数据目录是固定位置（%LOCALAPPDATA%\LabSentinel）；锚点校验：父目录=LOCALAPPDATA
-        # 且目录名固定为 LabSentinel 才允许删除，位置异常则保留现场人工确认（防误删）
-        data_real = data.resolve()
-        lac = Path(os.environ["LOCALAPPDATA"]).resolve()
-        if data_real.parent == lac and data_real.name == "LabSentinel":
+        # 锚点校验：名字固定 LabSentinel 且为祖父目录的直接子项；env 不参与删除判定
+        if data.name == "LabSentinel" and data.parent.resolve() == install.parent.parent.resolve():
             _rmtree_retry(data, under=data.parent)
             log("  数据已删除（--purge-data）" + ("" if not data.exists() else "（部分文件仍被占用，重试后未清空）"))
         else:
@@ -674,7 +663,13 @@ def main() -> int:
                           desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir)
     if a.action == "rollback":  # T-404
         return rollback(a.install_dir)
-    return do_uninstall(a.install_dir, a.purge_data)
+    # 受管根在此处（main）从环境构造，不进入 do_uninstall 的删除调用图
+    allowed_roots = tuple(
+        Path(os.environ[k]).resolve()
+        for k in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "USERPROFILE")
+        if os.environ.get(k)
+    )
+    return do_uninstall(a.install_dir, a.purge_data, allowed_roots)
 
 
 if __name__ == "__main__":

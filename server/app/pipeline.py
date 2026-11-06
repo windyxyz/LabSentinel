@@ -507,6 +507,11 @@ class CameraManager:
         self.rules = RuleEngine(store)
         self.workers: dict[int, CameraWorker] = {}
         self._mgmt_lock = threading.Lock()  # 2026-10-30 审阅：start/stop/status 与 API 线程互斥
+        # T-331（L3 灰度）：analyzer=rust 的路由走 SidecarAnalyzer + 事件流入库桥，
+        # 不再创建 Python CameraWorker；bridge 缺省 None（旧部署/CI 零侵入）。
+        self.sidecar = None
+        self.event_bridge = None
+        self._rust_cams: set[int] = set()
         # 任务114：守护状态——desired=应该是运行中（用户主动 stop 移出）；sup=每路守护状态
         self._desired_running: set[int] = set()
         self._sup: dict[int, dict] = {}
@@ -557,6 +562,9 @@ class CameraManager:
             for cid in list(self._desired_running):
                 st = self._sup.setdefault(cid, self._sup_new_state())
                 if st["state"] == "given_up":
+                    continue
+                if cid in self._rust_cams:  # T-331：Rust 路由守护由 sidecar 进程自管
+                    st["state"] = "running"
                     continue
                 w = self.workers.get(cid)
                 if w is not None and w.is_alive():
@@ -617,8 +625,39 @@ class CameraManager:
         return {"restart_count": st["restarts"], "last_restart_ts": st["last_restart_ts"],
                 "supervisor_state": st["state"]}
 
+    def bind_sidecar(self, analyzer, bridge) -> None:
+        """T-331：注入 Rust 分析器与事件落库桥（lifespan 显式调用；失败由调用方回退）。"""
+        self.sidecar = analyzer
+        self.event_bridge = bridge
+
+    def _rust_enabled(self, camera: dict) -> bool:
+        impl = camera.get("analyzer") or settings.analyzer_default
+        return impl == "rust" and self.sidecar is not None and self.event_bridge is not None
+
+    def _rust_start(self, camera: dict) -> bool:
+        """启动一路 Rust 分析：全量配置快照 → sidecar → 事件桥。失败回退 Python worker。"""
+        cid = camera["id"]
+        try:
+            if not self.event_bridge.start():
+                return False
+            zones = configcache.zones(self.store, cid)
+            all_rules = [r for r in configcache.rules(self.store)
+                         if r["camera_id"] == cid]
+            self.sidecar.start_camera(camera, zones, all_rules)
+            self.store.set_camera_status(cid, "running")
+            with self._mgmt_lock:
+                self._rust_cams.add(cid)
+            return True
+        except Exception as e:  # noqa: BLE001  Rust 侧不可用 → 回退 Python，服务不中断
+            print(f"[cam-{cid}] Rust 分析器启动失败，回退 Python worker: {e!r}")
+            return False
+
     def start_camera(self, camera: dict):
         cid = camera["id"]
+        # T-331：rust 灰度路不走 Python worker（folder 源暂不在 Rust 数据面支持范围）
+        if self._rust_enabled(camera) and camera.get("type") != "folder":
+            if self._rust_start(camera):
+                return
         with self._mgmt_lock:
             # 任务114：只守护持续型源；file 播完/坏路径正常退出，不应无限重播/重启
             if camera.get("type") != "file":
@@ -643,10 +682,18 @@ class CameraManager:
     def stop_camera(self, cid):
         with self._mgmt_lock:
             self._desired_running.discard(cid)  # 任务114：用户主动停止不自动拉起
+            rust = cid in self._rust_cams
+            self._rust_cams.discard(cid)
             st = self._sup.get(cid)
             if st is not None:
                 st.update({"state": "stopped", "restarts": 0, "next_attempt_ts": 0.0})
             w = self.workers.pop(cid, None)
+        if rust and self.sidecar is not None:
+            try:
+                self.sidecar.stop_camera(cid)
+                self.store.set_camera_status(cid, "stopped")
+            except Exception as e:  # noqa: BLE001
+                print(f"[cam-{cid}] Rust 分析器停止异常: {e!r}")
         if w:
             w.stop()
 
@@ -665,8 +712,15 @@ class CameraManager:
 
     def stop_all(self):
         self.stop_supervisor()  # 任务114：进程退出先停守护线程
-        for cid in list(self.workers):
+        for cid in list(self.workers) + list(self._rust_cams):
             self.stop_camera(cid)
+        if self.event_bridge is not None:
+            self.event_bridge.stop()
+        if self.sidecar is not None:
+            try:
+                self.sidecar.stop()
+            except Exception:  # noqa: BLE001
+                pass
         with self._mgmt_lock:
             self._desired_running.clear()
 
@@ -682,6 +736,7 @@ class CameraManager:
         cams = []
         with self._mgmt_lock:  # 2026-10-30 审阅：API 线程遍历时 stop_camera 可能 pop，先快照
             items = list(self.workers.items())
+            rust_ids = list(self._rust_cams)
         for cid, w in items:
             lfw = w.last_frame_ts
             entry = {
@@ -700,4 +755,25 @@ class CameraManager:
                 entry.update(w.folder_status())
             entry.update(self.supervisor_info(cid))  # 任务114：restart_count/守护状态
             cams.append(entry)
+        # T-331：Rust 路由状态来自 sidecar Status（fps/帧龄/重连/错误）
+        if rust_ids and self.sidecar is not None:
+            try:
+                rows = {r.camera_id: r for r in self.sidecar.status()}
+            except Exception as e:  # noqa: BLE001
+                rows = {}
+                print(f"[status] Rust 分析器状态读取失败: {e!r}")
+            for cid in rust_ids:
+                r = rows.get(cid)
+                cams.append({
+                    "id": cid, "fps": round(r.analysis_fps_now, 1) if r else 0.0,
+                    "status": r.state if r else "error",
+                    "last_frame_ts": None,
+                    "frame_age_s": round(r.frame_age_s, 1) if r else None,
+                    "last_error": r.last_error if r else "sidecar 状态不可用",
+                    "last_error_ts": None,
+                    "reconnect_count": r.reconnect_count if r else 0,
+                    "opened_at": None, "frames_total": 0,
+                    "kind": "video", "analyzer": "rust",
+                    **self.supervisor_info(cid),
+                })
         return {"cameras": cams}

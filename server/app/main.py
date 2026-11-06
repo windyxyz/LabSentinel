@@ -96,6 +96,19 @@ async def lifespan(app: FastAPI):
     alert_config.load(store)  # 任务140：网页端告警配置（DB 覆盖 .env，保存即生效）
     dispatcher.bind_store(store)  # 任务13：投递记录/死信需要写库
     manager = CameraManager(store)
+    # T-331（L3 灰度）：仅当存在 analyzer=rust 的摄像头时才拉起 sidecar/事件桥；
+    # 默认全 python 保持零侵入（sidecar exe 缺失时 _rust_start 自动回退 Python worker）。
+    try:
+        _need_rust = any((c.get("analyzer") or settings.analyzer_default) == "rust"
+                         for c in store.cameras())
+        if _need_rust:
+            from .analyzer_sidecar import SidecarAnalyzer
+            from .sidecar_events import SidecarEventBridge
+            _analyzer = SidecarAnalyzer()
+            _bridge = SidecarEventBridge(store, dispatcher, _analyzer)
+            manager.bind_sidecar(_analyzer, _bridge)
+    except Exception as e:  # noqa: BLE001  灰度初始化失败不得阻断服务启动
+        print(f"[sidecar] 初始化跳过（保持 Python worker）: {e!r}")
     init(store, manager)
     from . import engine
     engine.preload_async()  # B-28：后台预热推理引擎；失败不阻断启动，见 /api/system components

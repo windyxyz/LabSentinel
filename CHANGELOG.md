@@ -87,6 +87,13 @@
   `/api/escalation/status`，L3 契约测试对 Python/Rust 双实现同套断言通过。
   ls-dispatch 补通用 Webhook HMAC-SHA256 签名（X-LS-Signature）与 alert_silences
   `global` 口径；ls-store 暴露只读连接供维护作业分页查询。
+- **T-331 灰度切换闭环（L3 完全替代 Python worker 的最后一环）**：`analyzer=rust`
+  的摄像头由 `CameraManager` 路由到 `SidecarAnalyzer`（全量 zones/rules 快照下发），
+  不再创建 Python CameraWorker；新增 `sidecar_events.py` 订阅 gRPC Events 流 →
+  `store.add_event` → 快照落盘 → `dispatcher.dispatch` 完整派发链（静默/过滤/投递/
+  WS/MQTT），evidence_key+behavior 去重防流重连重放；sidecar 状态并入
+  `/api/cameras/status` 与守护逻辑；默认全 python 零侵入，sidecar 不可用自动回退
+  Python worker。默认 Python 路径行为完全不变（全量回归验证）。
 - **T-325 推理层落地（tract 纯 Rust）**：`ls-infer` 新增 feature=tract——YOLO11n
   ONNX 全 CPU 推理（letterbox 114 灰边 + 双线性 + BGR→RGB + NCHW 与 Python 对齐，
   解码/NMS 复用 post.rs），**不依赖 libclang/ORT 动态库**；`ls-analyzer` 按实例注入
