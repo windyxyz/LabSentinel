@@ -87,6 +87,10 @@
   `/api/escalation/status`，L3 契约测试对 Python/Rust 双实现同套断言通过。
   ls-dispatch 补通用 Webhook HMAC-SHA256 签名（X-LS-Signature）与 alert_silences
   `global` 口径；ls-store 暴露只读连接供维护作业分页查询。
+- **T-505 第一步（纯搬移打样）**：`api.py` 的 stats/export 段（10 路由）原样移入
+  `app/routers/stats.py`，共享状态经 `routers/_context.py` 惰性代理（无导入期循环依赖）；
+  `include_router` 挂在原位置 → **OpenAPI 快照与路径顺序逐字不变**（`--check` 通过），
+  鉴权依赖保持 `Request` 注解避免参数集合漂移。为后续按组拆分建立可复用模板。
 - **T-331 灰度切换闭环（L3 完全替代 Python worker 的最后一环）**：`analyzer=rust`
   的摄像头由 `CameraManager` 路由到 `SidecarAnalyzer`（全量 zones/rules 快照下发），
   不再创建 Python CameraWorker；新增 `sidecar_events.py` 订阅 gRPC Events 流 →
