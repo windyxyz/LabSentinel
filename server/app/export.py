@@ -80,7 +80,8 @@ def _register_cn_font():
     """注册中文字体（默认微软雅黑；LS_PDF_FONT 可配）。失败时回退 Helvetica（中文会缺字）。"""
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-    font_path = settings.pdf_font or r"C:\Windows\Fonts\msyh.ttc"
+    from .platform.fonts import cjk_font_path
+    font_path = cjk_font_path(settings.pdf_font) or ""
     name = "CN"
     try:
         pdfmetrics.registerFont(TTFont(name, font_path, subfontIndex=0))

@@ -267,9 +267,10 @@ class PluginManager:
         try:
             lf = open(log_path, "ab")
             lf.write(f"\n===== start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n".encode())
-            proc = subprocess.Popen(
+            from .platform.process import spawn_hidden  # T-601/X-06：跨平台（POSIX start_new_session）
+            proc = spawn_hidden(
                 argv, cwd=str(d), env=self._build_env(d, mf),
-                stdout=lf, stderr=subprocess.STDOUT, creationflags=CREATE_NO_WINDOW)
+                stdout=lf, stderr=subprocess.STDOUT)
             lf.close()  # 子进程已继承句柄；父进程不保留，防 fd 泄漏
         except OSError as e:
             try:

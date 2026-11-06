@@ -105,6 +105,23 @@ def require_admin(request: Request):
     request.state.actor = "admin" if settings.admin_token else "anonymous(auth-off)"
 
 
+def require_triage(request: Request):
+    """T-620/Q-11：事件处置守卫——管理令牌或设备令牌（可处置不可改配置）。"""
+    if not settings.admin_token:
+        request.state.actor = "anonymous(auth-off)"
+        return
+    provided = request.headers.get("X-Admin-Token")
+    if _token_ok(provided):
+        request.state.actor = "admin"
+        return
+    from . import devices
+    dev = devices.verify(store, provided or "") if store is not None else None
+    if dev is None:
+        request.state.actor = "rejected"
+        raise HTTPException(401, "需要管理令牌或已配对设备令牌")
+    request.state.actor = f"device:{dev['name']}"
+
+
 def _media_sig_ok(request: Request) -> bool:
     """T-108：短期签名媒体 URL（HMAC over path|exp），有效期 LS_MEDIA_SIGN_TTL_S。
     密钥 = admin_token 派生（未设令牌时用 .env 无关的进程内随机密钥）。"""
@@ -261,7 +278,9 @@ def _engine_backend_peek() -> str:
     from . import engine as _eng_mod
     if _eng_mod._engine is not None:
         return _eng_mod._engine.backend
-    return _eng_mod.PRELOAD.get("backend") or settings.backend_order.split(",")[0].strip()
+    from .engine import default_backend_order
+    order = settings.backend_order or default_backend_order()  # T-603：空=平台默认
+    return _eng_mod.PRELOAD.get("backend") or order.split(",")[0].strip()
 
 
 @router.get("/system")
@@ -396,6 +415,45 @@ def backups_run():
     if not backups.trigger_async():  # T-204（B-09）：原子触发，并发第二次 409
         raise HTTPException(409, "备份正在进行中")
     return {"started": True}
+
+
+# ---- 设备配对（T-620/Q-11）----
+@router.post("/pairing", dependencies=[Depends(require_admin)])
+def create_pairing():
+    """生成一次性配对码（6 位数字，5 分钟有效，管理员操作）。"""
+    from . import devices
+    code = devices.new_pairing_code()
+    return {"code": code, "expires_in_s": 300,
+            "claim": "POST /api/pairing/claim {code, device_name, platform}"}
+
+
+@router.post("/pairing/claim")
+def claim_pairing(body: dict):
+    """客户端用配对码换设备令牌（只返回一次；服务端只存 hash）。"""
+    from . import devices
+    code = str(body.get("code") or "").strip()
+    name = str(body.get("device_name") or "device")[:64]
+    platform = str(body.get("platform") or "")[:32]
+    if store is None:
+        raise HTTPException(503, "服务未就绪")
+    token = devices.claim(store, code, name, platform)
+    if token is None:
+        raise HTTPException(400, "配对码无效或已过期")
+    return {"token": token, "note": "令牌仅显示一次，请保存到安全存储"}
+
+
+@router.get("/devices", dependencies=[Depends(require_admin)])
+def list_devices():
+    from . import devices
+    return devices.list_devices(store)
+
+
+@router.delete("/devices/{did}", dependencies=[Depends(require_admin)])
+def revoke_device(did: int):
+    from . import devices
+    if not devices.revoke(store, did):
+        raise HTTPException(404, "device not found")
+    return {"ok": True}
 
 
 # ---- 操作审计（任务87，仅管理员）----
@@ -1624,7 +1682,7 @@ def _triage_one(eid: int, status: str, handled_by: str) -> str:
     return "updated"
 
 
-@router.post("/events/{eid}/status", dependencies=[Depends(require_admin)])
+@router.post("/events/{eid}/status", dependencies=[Depends(require_triage)])  # T-620
 def set_event_status(eid: int, body: dict):
     """事件处置（任务12）：status ∈ acked|false_positive|ignored。
 

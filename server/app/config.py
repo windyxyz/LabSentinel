@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     face_cool_s: int = 30  # 同一 track 两次识别的最小间隔（秒）
 
     # 推理
-    backend_order: str = "directml,vitisai,cpu"  # 依次尝试
+    backend_order: str = ""  # T-603：空=按平台默认（win:directml,openvino,cpu / mac:coreml,cpu / linux:tensorrt,cuda,openvino,rocm,cpu）
     imgsz: int = 640
     conf_thres: float = 0.40
     iou_thres: float = 0.50

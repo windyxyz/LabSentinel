@@ -34,7 +34,9 @@ def test_system_200_and_preload_error_when_model_missing(tmp_path, monkeypatch):
         assert r.status_code == 200
         body = r.json()
         assert "components" in body and "engine" in body["components"]
-        assert body["backend"] == settings.backend_order.split(",")[0].strip()  # 回退配置首项
+        from app.engine import default_backend_order
+        want0 = (settings.backend_order or default_backend_order()).split(",")[0].strip()
+        assert body["backend"] == want0  # T-603：空配置=平台默认首项
         # 同步等待后台预热结果
         eng_mod.PRELOAD.update(state="idle", backend=None, error=None)
         eng_mod.preload_async()

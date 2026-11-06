@@ -36,14 +36,37 @@ class Detection:
         return max(0, x2 - x1) * max(0, y2 - y1)
 
 
+#: T-603（X-01）：推理后端注册表——(providers, 是否设备串行)
+BACKENDS: dict[str, tuple[list[str], bool]] = {
+    "directml": (["DmlExecutionProvider", "CPUExecutionProvider"], True),
+    "vitisai": (["VitisAIExecutionProvider", "CPUExecutionProvider"], True),
+    "cuda": (["CUDAExecutionProvider", "CPUExecutionProvider"], False),
+    "tensorrt": (["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"], False),
+    "openvino": (["OpenVINOExecutionProvider", "CPUExecutionProvider"], False),
+    "coreml": (["CoreMLExecutionProvider", "CPUExecutionProvider"], True),
+    "rocm": (["ROCMExecutionProvider", "CPUExecutionProvider"], False),
+    "cpu": (["CPUExecutionProvider"], False),
+}
+
+#: 平台默认尝试顺序（LS_BACKEND_ORDER 可覆盖）
+DEFAULT_ORDER = {"win32": ["directml", "openvino", "cpu"],
+                 "darwin": ["coreml", "cpu"],
+                 "linux": ["tensorrt", "cuda", "openvino", "rocm", "cpu"]}
+
+
+def default_backend_order() -> str:
+    import sys as _sys
+    return ",".join(DEFAULT_ORDER.get(_sys.platform if _sys.platform in DEFAULT_ORDER else "linux",
+                                      ["cpu"]))
+
+
 def _providers_for(name: str) -> list[str]:
     avail = set(ort.get_available_providers())
-    mapping = {
-        "directml": ["DmlExecutionProvider", "CPUExecutionProvider"],
-        "vitisai": ["VitisAIExecutionProvider", "CPUExecutionProvider"],
-        "cpu": ["CPUExecutionProvider"],
-    }
-    return mapping[name] if set(mapping[name]) & avail else mapping["cpu"]
+    spec = BACKENDS.get(name)
+    if spec is None:
+        return BACKENDS["cpu"][0]
+    providers, _serial = spec
+    return providers if set(providers) & avail else BACKENDS["cpu"][0]
 
 
 class Engine:
@@ -55,7 +78,9 @@ class Engine:
         self.backend = None
         self.sess = None
         self.input_name = None
-        self._accel = False  # directml/vitisai 后端为 True，run 走全局串行锁
+        # T-603：加速/需串行的后端由注册表 serialize 位决定（DML/VitisAI/CoreML）
+        self._accel = BACKENDS.get(str(self.backend or ""), ([], False))[1] and str(self.backend) in (
+            "directml", "vitisai", "coreml")
         self._init_session(model_path, prefer)
 
     def _run(self, blob):
@@ -67,7 +92,8 @@ class Engine:
 
     def _init_session(self, model_path=None, prefer=None):
         attempts = []
-        order = [prefer] if prefer else [b.strip() for b in settings.backend_order.split(",")]
+        order_str = settings.backend_order or default_backend_order()  # T-603：空=平台默认
+        order = [prefer] if prefer else [b.strip() for b in order_str.split(",") if b.strip()]
         for name in order:
             model = str(model_path) if model_path else str(
                 settings.model_int8 if name == "vitisai" else settings.model_fp32)

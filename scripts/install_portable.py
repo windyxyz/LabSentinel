@@ -260,13 +260,30 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
             pass  # runtime 损坏/非可执行（如测试假包）：升级按无服务继续
         time.sleep(1)  # 等句柄释放
     install.mkdir(parents=True, exist_ok=True)
+    # T-404：升级 = 旧版本归档到 versions/<ver> + 升级前备份 DB；安装根始终镜像 current
+    old_version = ""
+    try:
+        old_version = (install / "app" / "VERSION").read_text("ascii").strip()
+    except OSError:
+        pass
+    if upgrading and old_version:
+        archived = _archive_current(install, old_version)
+        log(f"  [版本] 旧版本 {old_version} "
+            + (f"已归档 -> {archived}" if archived else "归档失败（继续升级，无该版本回滚点）"))
+        _backup_db_before_upgrade(install)
     shutil.copytree(src, install, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "data",
                                                   "PENDING_DELETE"))
     ver_file = install / "app" / "VERSION"
     if not ver_file.exists():
         ver_file.write_text(VERSION_DEFAULT, encoding="ascii")
-    log(f"  版本：{ver_file.read_text(encoding='ascii').strip()}"
+    new_version = ver_file.read_text(encoding="ascii").strip()
+    try:  # T-404：current 标记（回滚据此选目标）
+        (install / CURRENT_MARK).write_text(new_version, encoding="ascii")
+    except OSError:
+        pass
+    _write_install_mark(install, new_version)  # T-405
+    log(f"  版本：{new_version}"
         + ("（用户数据在数据目录，升级不受影响）" if upgrading else ""))
     if shortcuts:
         make_shortcuts(install, desktop=desktop_dir, start_menu=start_menu_dir)
@@ -293,6 +310,134 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
     return 0
 
 
+VERSIONS_DIRNAME = "versions"
+CURRENT_MARK = "current.txt"
+INSTALL_MARK = ".labsentinel-install.json"
+
+
+def _versions_dir(install: Path) -> Path:
+    return install / VERSIONS_DIRNAME
+
+
+def _write_install_mark(install: Path, version: str) -> None:
+    """T-405：安装标记（GUID/版本/时间）——卸载只删标记内受管文件，非空未标记目录拒绝安装。"""
+    import json as _json
+    import uuid as _uuid
+    data = {"guid": str(_uuid.uuid4()), "version": version,
+            "installed_at": datetime.now().isoformat(timespec="seconds")}
+    try:
+        (install / INSTALL_MARK).write_text(_json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_install_mark(install: Path) -> dict | None:
+    import json as _json
+    try:
+        return _json.loads((install / INSTALL_MARK).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _try_link(src, dst):
+    """copy_function：优先硬链接（同盘零拷贝归档），跨盘/权限失败回退复制。"""
+    try:
+        os.link(src, dst)
+        return dst
+    except OSError:
+        return shutil.copy2(src, dst)
+
+
+def _archive_current(install: Path, version: str) -> Path | None:
+    """T-404：把当前安装树归入 versions/<ver>/。
+
+    必须用普通复制（不硬链接）：升级 copytree 会就地覆写同名文件，硬链接会让归档
+    内容"穿越"成新版本。返回归档目录；失败返回 None（不阻断升级，仅失去回滚点）。"""
+    if not install.exists():
+        return None
+    dest = _versions_dir(install) / version
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    try:
+        shutil.copytree(install, dest,
+                        ignore=shutil.ignore_patterns("data", "versions", "__pycache__",
+                                                      "*.pyc", "PENDING_DELETE"))
+        return dest
+    except OSError:
+        return None
+
+
+def _backup_db_before_upgrade(install: Path) -> None:
+    """T-404：升级前自动备份数据库（失败只警告，不阻断）。"""
+    data_root = Path(os.environ["LOCALAPPDATA"]) / "LabSentinel"
+    db = data_root / "data" / "labsentinel.db"
+    if not db.exists():
+        return
+    try:
+        out = data_root / "data" / "backups" / (
+            f"pre-upgrade-{datetime.now():%Y%m%d-%H%M%S}.zip")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        script = install / "scripts" / "backup_data.py"
+        if script.exists():
+            subprocess.run([str(install / "runtime" / "python.exe"), str(script),
+                            "backup", "--data-dir", str(data_root / "data"),
+                            "--out", str(out), "--no-media"],
+                           capture_output=True, timeout=120,
+                           creationflags=CREATE_NO_WINDOW)
+            log(f"  [备份] 升级前数据已备份：{out}")
+        else:
+            import sqlite3 as _sq
+            dst = db.with_suffix(".db.pre-upgrade.bak")
+            src = _sq.connect(str(db))
+            bak = _sq.connect(str(dst))
+            with bak:
+                src.backup(bak)
+            bak.close()
+            src.close()
+            log(f"  [备份] 升级前数据已备份：{dst}")
+    except Exception as e:  # noqa: BLE001
+        log(f"  [警告] 升级前备份失败（继续升级）：{e}")
+
+
+def _force_copy(src, dst):
+    """回滚复制：先删目标再复制（归档用硬链接，直接覆盖同 inode 会 WinError 32）。"""
+    try:
+        if os.path.exists(dst):
+            os.unlink(dst)
+    except OSError:
+        pass
+    return shutil.copy2(src, dst)
+
+
+def rollback(install: Path | None = None) -> int:
+    """T-404：回滚到 versions/ 中除当前外的最近一版（复制回安装根，数据目录不动）。"""
+    install = install or Path(os.environ["LOCALAPPDATA"]) / "Programs" / "LabSentinel"
+    cur_file = install / CURRENT_MARK
+    try:
+        current = cur_file.read_text("ascii").strip()
+    except OSError:
+        current = ""
+    vd = _versions_dir(install)
+    if not vd.exists():
+        log("[失败] 无版本归档（versions/ 不存在）——无法回滚")
+        return 2
+    cands = sorted([d for d in vd.iterdir() if d.is_dir() and d.name != current],
+                   key=lambda d: d.name, reverse=True)
+    if not cands:
+        log("[失败] 没有可回滚的旧版本")
+        return 2
+    target = cands[0]
+    log(f"[回滚] {current or '?'} -> {target.name}（数据目录不动）")
+    try:
+        shutil.copytree(target, install, dirs_exist_ok=True, copy_function=_force_copy)
+        cur_file.write_text(target.name, encoding="ascii")
+        log(f"[回滚] 完成：当前版本 {target.name}")
+        return 0
+    except OSError as e:
+        log(f"[失败] 回滚复制失败：{e}")
+        return 1
+
+
 def _rmtree_retry(path: Path, attempts: int = 3) -> None:
     """删除带重试：刚被杀的进程句柄/Defender 实时扫描会短暂锁文件。"""
     for i in range(attempts):
@@ -311,6 +456,16 @@ def do_uninstall(install: Path, purge: bool) -> int:
             f.write(f"{datetime.now():%H:%M:%S}.{datetime.now().microsecond // 1000:03d} {msg}\n")
     trace(f"uninstall entry dir={install} purge={purge}")
     log(f"[卸载] {install}")
+    # T-405（S-12）：非 LabSentinel 安装目录拒绝卸载（防 rd /s 误删用户目录）。
+    # 判定：有安装标记 或 有 runtime/python.exe 视为受管；空目录允许（清理残留）。
+    if install.exists():
+        managed = (_read_install_mark(install) is not None
+                   or (install / "runtime" / "python.exe").exists()
+                   or not any(install.iterdir()))
+        if not managed:
+            log(f"[拒绝] {install} 不是 LabSentinel 受管安装目录（无 {INSTALL_MARK}、"
+                "无 runtime\\python.exe）——为防误删，未执行任何删除")
+            return 2
     # 2026-10-31 VM 验收修复：停止是卸载的先决步骤但绝不能让它炸掉整个卸载——
     # 实测 exe 缺失（上次卸载残留）+ runtime 处于 PENDING_DELETE 时 spawn python 会
     # PermissionError，原实现直接 traceback 中断，残留半删状态。现在三级降级+全 try。
@@ -423,8 +578,8 @@ def do_uninstall(install: Path, purge: bool) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="LabSentinel 便携版安装/卸载（无管理员）")
-    ap.add_argument("action", choices=["install", "uninstall"])
+    ap = argparse.ArgumentParser(description="LabSentinel 便携版安装/卸载/回滚（无管理员）")
+    ap.add_argument("action", choices=["install", "uninstall", "rollback"])
     ap.add_argument("--source", type=Path, default=Path(__file__).resolve().parent.parent,
                     help="便携包根（默认=脚本上一级）")
     ap.add_argument("--install-dir", type=Path,
@@ -447,6 +602,8 @@ def main() -> int:
         return do_install(a.source, a.autostart, a.install_dir, silent=a.silent,
                           shortcuts=not a.no_shortcuts, dry_run=a.dry_run, force=a.force,
                           desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir)
+    if a.action == "rollback":  # T-404
+        return rollback(a.install_dir)
     return do_uninstall(a.install_dir, a.purge_data)
 
 

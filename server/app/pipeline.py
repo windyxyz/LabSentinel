@@ -62,6 +62,17 @@ def capture_source(camera: dict):
     return src
 
 
+def open_capture(camera: dict):
+    """T-604（X-03）：按平台选摄像头后端——Win DirectShow / Linux V4L2 / macOS AVFoundation。"""
+    from . import platform as plat
+    src = capture_source(camera)
+    if camera.get("type") == "usb" and isinstance(src, int):
+        api = (cv2.CAP_DSHOW if plat.is_windows()
+               else cv2.CAP_V4L2 if plat.is_linux() else cv2.CAP_AVFOUNDATION)
+        return cv2.VideoCapture(src, api)
+    return cv2.VideoCapture(src)
+
+
 class CameraWorker(threading.Thread):
     def __init__(self, camera: dict, store: Store, rules: RuleEngine):
         super().__init__(daemon=True, name=f"cam-{camera['id']}")
@@ -114,7 +125,7 @@ class CameraWorker(threading.Thread):
     # ---- 主循环 ----
     def run(self):
         cid = self.camera["id"]
-        cap = cv2.VideoCapture(capture_source(self.camera))
+        cap = open_capture(self.camera)
         retries = 0
         while not cap.isOpened():
             self._set_error(f"打开失败: {self.camera.get('source', '')}")
@@ -129,7 +140,7 @@ class CameraWorker(threading.Thread):
             self.reconnect_count += 1
             if self.stop_flag.wait(RETRY_INTERVAL_S):
                 return
-            cap = cv2.VideoCapture(capture_source(self.camera))
+            cap = open_capture(self.camera)
         self._clear_error()
         self.opened_at = time.time()
         self.store.set_camera_status(cid, "running")
@@ -168,7 +179,7 @@ class CameraWorker(threading.Thread):
                     for attempt in range(MAX_OPEN_RETRIES):
                         if self.stop_flag.wait(RETRY_INTERVAL_S):
                             return
-                        cap = cv2.VideoCapture(capture_source(self.camera))
+                        cap = open_capture(self.camera)
                         if cap.isOpened():
                             reopened = True
                             break
@@ -246,8 +257,13 @@ class CameraWorker(threading.Thread):
         self._recs = [r for r in self._recs if not r.done.is_set()]
 
     def _open_writer(self, path: str, fps: float):
-        """优先 H.264（浏览器可直接播），失败退回 mp4v（ffplay 可播）。"""
-        for fourcc, api in (("avc1", cv2.CAP_MSMF), ("avc1", 0), ("mp4v", 0)):
+        """T-605（X-04）：H.264 优先（浏览器直播），失败退回 mp4v。
+
+        编码后端按平台：Windows MSMF；macOS AVFoundation；Linux 默认 FFmpeg 后端（avc1 需 openh264）。"""
+        from . import platform as plat
+        h264_api = (cv2.CAP_MSMF if plat.is_windows()
+                    else cv2.CAP_AVFOUNDATION if plat.is_macos() else 0)
+        for fourcc, api in (("avc1", h264_api), ("avc1", 0), ("mp4v", 0)):
             try:
                 vw = (cv2.VideoWriter(path, api, cv2.VideoWriter_fourcc(*fourcc), fps, (1280, 720))
                       if api else cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*fourcc), fps, (1280, 720)))

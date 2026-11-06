@@ -227,6 +227,18 @@ def _mig_011(c: sqlite3.Connection):
               "ON alert_deliveries(channel, status)")
 
 
+def _mig_013(c: sqlite3.Connection):
+    """v13（T-620）：设备配对令牌（只存 hash，可吊销；权限=读+处置）。"""
+    c.execute("""CREATE TABLE IF NOT EXISTS devices(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      platform TEXT DEFAULT '',
+      token_hash TEXT NOT NULL UNIQUE,
+      created_ts TEXT NOT NULL,
+      last_seen_ts TEXT,
+      revoked INTEGER DEFAULT 0)""")
+
+
 def _mig_012(c: sqlite3.Connection):
     """v12（T-310/T-327）：按摄像头灰度选择分析器（python|rust）。"""
     cols = {r[1] for r in c.execute("PRAGMA table_info(cameras)")}
@@ -248,6 +260,7 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (10, "新增 app_settings 表（网页端告警渠道配置，任务140）", _mig_010),
     (11, "查询索引：events.snapshot / alert_deliveries(status, channel)（T-309/PF-09）", _mig_011),
     (12, "cameras 增加 analyzer 列（T-310/T-327：python|rust 按摄像头灰度）", _mig_012),
+    (13, "新增 devices 设备令牌表（T-620 配对：token_hash/平台/吊销）", _mig_013),
 ]
 SCHEMA_VERSION_LATEST = max(v for v, _d, _f in MIGRATIONS)
 
@@ -676,6 +689,35 @@ class Store:
         return d.weekday() >= 5  # 5=周六 6=周日
 
     # ---- events ----
+    # ---- 设备令牌（T-620）----
+    def add_device(self, name: str, platform: str, token_hash: str) -> int:
+        from datetime import datetime as _dt
+        with self._lock, self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO devices(name,platform,token_hash,created_ts) VALUES(?,?,?,?)",
+                (name, platform, token_hash, _dt.now().isoformat(timespec="seconds")))
+            return cur.lastrowid
+
+    def devices(self) -> list[dict]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT id,name,platform,created_ts,last_seen_ts,revoked FROM devices ORDER BY id")]
+
+    def device_by_hash(self, token_hash: str) -> dict | None:
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM devices WHERE token_hash=?", (token_hash,)).fetchone()
+            return dict(r) if r else None
+
+    def touch_device(self, device_id: int) -> None:
+        from datetime import datetime as _dt
+        with self._lock, self._conn() as c:
+            c.execute("UPDATE devices SET last_seen_ts=? WHERE id=?",
+                      (_dt.now().isoformat(timespec="seconds"), device_id))
+
+    def revoke_device(self, device_id: int) -> bool:
+        with self._lock, self._conn() as c:
+            return c.execute("UPDATE devices SET revoked=1 WHERE id=?", (device_id,)).rowcount > 0
+
     def add_event(self, camera_id, type_, level, track_id, detail, snapshot=None,
                   ts: str | None = None) -> int:
         """ts 可注入（T-321 确定性模式：事件时间取视频帧时间，非墙钟）。"""

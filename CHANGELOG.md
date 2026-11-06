@@ -40,6 +40,20 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-601/T-602（S6）：平台适配层 app/platform/*——power（Win 委托 keepawake / mac caffeinate /
+  linux systemd-inhibit）、devices（DirectShow / V4L2 / AVFoundation）、binaries
+  （tools/<os>-<arch> → PATH）、paths（LOCALAPPDATA / Application Support / XDG）、
+  process（spawn_hidden / is_our_process / kill_tree）、fonts（内置 Noto 优先）。
+  pipeline 摄像头打开与视频编码按平台选后端（T-604/T-605）；plugins 用 spawn_hidden。
+- T-603（X-01）：推理后端注册表（directml/vitisai/cuda/tensorrt/openvino/coreml/rocm/cpu）
+  + 平台默认尝试顺序（LS_BACKEND_ORDER 空=平台默认）。
+- T-620（Q-11）：设备配对与三级令牌——POST /api/pairing 一次性 6 位码（5min）→
+  /api/pairing/claim 换设备令牌（只存 hash）；设备令牌可处置事件不可改配置；
+  GET/DELETE /api/devices 列表与吊销；迁移 v13。
+- T-404/T-405（R8.3）：安装器版本化——升级归档 versions/<ver>（普通复制，避免硬链接
+  被覆盖穿越）+ current.txt + 升级前自动备份 DB + install_portable rollback 子命令；
+  安装标记 .labsentinel-install.json；卸载拒绝非受管非空目录（防 rd 误删）。
+- T-407/T-408：SBOM（CycloneDX python/web）与签名更新清单 latest.json（minisign 占位）生成脚本。
 - T-107（S-06）：SecretStore——告警密钥入库存密文（Windows DPAPI / POSIX Fernet，
   enc:v1:base64），历史明文兼容自动升级；备份中不再扩散可解密密钥。实测 DPAPI 往返。
 - T-108（S-07）：短期签名媒体 URL（/api/media/sign HMAC 5 分钟）——前端 mediaUrl
