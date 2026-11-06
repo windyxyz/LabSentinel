@@ -10,6 +10,13 @@
 | `download_datasets.py` / `check_model_ready.py` | 标准库 | 数据准备与就绪自检 |
 | `camera_soak.py` / `e2e_smoke.py` / `golden_run.py` | 标准库/httpx | 压测与回归（Python 实现参照） |
 
+## 推理后端（T-325）
+`ls-infer` 采用 **tract 纯 Rust ONNX 运行时**（feature=`tract`）：无需 ONNX Runtime 动态库/
+libclang，windows-gnu 目标直接构建；预处理（letterbox 114 灰边 + BGR→RGB + /255 + NCHW）
+与 `server/app/engine.py` 对齐，解码/NMS 复用 `post.rs` 的共享实现。原计划的 ort 绑定方案
+因本机缺 libclang 暂缓，后续可作为同一 `Detector` 接口的替换实现接入（需 libclang/预生成绑定）。
+模型路径由 `LS_MODEL_FP32` 传入；缺失时 `ls-analyzer` 自动回退空检测（数据面/状态机照常）。
+
 ## 交付契约（Python → Rust 引擎，唯一接口）
 模型目录（`models/` 或 `m0-spike/`）中是**文件契约**，Rust `ls-infer` 只认这三件：
 

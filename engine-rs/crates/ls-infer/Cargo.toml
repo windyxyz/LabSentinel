@@ -1,12 +1,18 @@
 [package]
 name = "ls-infer"
-description = "LabSentinel 推理：YOLO 后处理（decode/NMS 纯 Rust，与 Python 共享检测向量）+ ort 推理（feature=ort，load-dynamic）"
+description = "LabSentinel 推理：YOLO 后处理（decode/NMS 纯 Rust，与 Python 共享检测向量）+ tract 纯 Rust 推理（feature=tract，无需 libclang/ORT 运行时）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# 纯 Rust ONNX 推理（tract）：覆盖 Conv/SiLU/Concat/Resize/Split 等 YOLO11 算子，
+# 不依赖 C++/libclang/ONNX Runtime 动态库——本机 windows-gnu 目标可直接构建。
+tract = ["dep:tract-onnx"]
+
 [dependencies]
 serde = { workspace = true }
+tract-onnx = { version = "0.23", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

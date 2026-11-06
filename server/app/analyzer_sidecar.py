@@ -43,10 +43,24 @@ class SidecarAnalyzer(AnalyzerBackend):
             raise FileNotFoundError(f"sidecar 不存在: {self._exe}")
         self._token = secrets.token_urlsafe(24)
         self._port = self._port or self._free_port()
+        from .config import settings
+        # T-325：Rust 检测层继承同一模型/阈值/迟滞参数（pydantic settings 不导出到
+        # os.environ，必须显式传给子进程）
+        child_env = {
+            **os.environ,
+            "LS_MODEL_FP32": str(settings.model_fp32),
+            "LS_IMGSZ": str(settings.imgsz),
+            "LS_CONF_THRES": str(settings.conf_thres),
+            "LS_IOU_THRES": str(settings.iou_thres),
+            "LS_MIN_BOX_AREA": str(settings.min_box_area),
+            "LS_ZONE_ENTER_FRAMES": str(settings.zone_enter_frames),
+            "LS_ZONE_EXIT_FRAMES": str(settings.zone_exit_frames),
+        }
         self._proc = subprocess.Popen(
             [str(self._exe), "--port", str(self._port), "--token", self._token],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=child_env,
         )
         deadline = time.time() + 15
         while time.time() < deadline:

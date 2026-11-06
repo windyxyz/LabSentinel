@@ -6,7 +6,12 @@
 
 use std::io::Read;
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// 可被控制线程共享的 ffmpeg 子进程句柄（stop 时强杀 → 读管道 EOF → 阻塞的
+/// `read_frame` 立即返回，避免停止摄像头时数据面线程卡在管道上）。
+pub type ChildSlot = Arc<Mutex<Option<Child>>>;
 
 /// 取流配置（与 Python CameraWorker 语义对齐）。
 #[derive(Clone, Debug)]
@@ -46,7 +51,7 @@ pub struct Frame {
 
 pub struct Ingest {
     cfg: IngestConfig,
-    child: Option<Child>,
+    child: Option<ChildSlot>,
     stdout: Option<ChildStdout>,
     frame_index: u64,
     frame_bytes: usize,
@@ -89,11 +94,30 @@ impl Ingest {
 
     /// 启动（或断流后重启）ffmpeg；指数退避由调用方驱动 `spawn` 的 Err。
     pub fn spawn(&mut self) -> std::io::Result<()> {
+        self.spawn_with_slot(Arc::new(Mutex::new(None)))
+    }
+
+    /// 用外部持有的 slot 启动：控制线程可 `Ingest::kill_slot(&slot)` 强杀。
+    pub fn spawn_with_slot(&mut self, slot: ChildSlot) -> std::io::Result<()> {
+        Ingest::kill_slot(&slot); // 清理上次退出的进程
         let mut c = self.build_cmd().spawn()?;
         self.stdout = c.stdout.take();
-        self.child = Some(c);
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(c);
+        }
+        self.child = Some(slot);
         self.frame_index = 0;
         Ok(())
+    }
+
+    /// 强杀 slot 里的 ffmpeg（可从任意线程调用；已空则 no-op）。
+    pub fn kill_slot(slot: &ChildSlot) {
+        if let Ok(mut guard) = slot.lock() {
+            if let Some(mut c) = guard.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
     }
 
     /// 读一帧；Ok(None)=流结束（ffmpeg 退出），Err=IO 错误。调用方决定重连。
@@ -127,16 +151,18 @@ impl Ingest {
 
     /// 进程是否仍在运行
     pub fn alive(&mut self) -> bool {
-        matches!(self.child.as_mut().map(|c| c.try_wait()), Some(Ok(None)))
+        self.child.as_ref().is_some_and(|slot| {
+            slot.lock()
+                .map(|mut g| g.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))))
+                .unwrap_or(false)
+        })
     }
 
     pub fn stop(&mut self) {
         self.stdout = None;
-        if let Some(c) = self.child.as_mut() {
-            let _ = c.kill();
-            let _ = c.wait();
+        if let Some(slot) = self.child.take() {
+            Ingest::kill_slot(&slot);
         }
-        self.child = None;
     }
 
     /// 重连退避：0.5s×2^n，上限 30s（n = 连续失败次数）

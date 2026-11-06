@@ -87,6 +87,18 @@
   `/api/escalation/status`，L3 契约测试对 Python/Rust 双实现同套断言通过。
   ls-dispatch 补通用 Webhook HMAC-SHA256 签名（X-LS-Signature）与 alert_silences
   `global` 口径；ls-store 暴露只读连接供维护作业分页查询。
+- **T-325 推理层落地（tract 纯 Rust）**：`ls-infer` 新增 feature=tract——YOLO11n
+  ONNX 全 CPU 推理（letterbox 114 灰边 + 双线性 + BGR→RGB + NCHW 与 Python 对齐，
+  解码/NMS 复用 post.rs），**不依赖 libclang/ORT 动态库**；`ls-analyzer` 按实例注入
+  模型路径（LS_MODEL_FP32）替换 NullDetector，SidecarAnalyzer 向子进程显式传递
+  模型/阈值/迟滞参数。真实检测闭环实测：lab-walk 演示视频 → YOLO → ByteTrack →
+  区域规则 → gRPC EventCandidate（enter 事件）；模型缺失自动回退空检测，CI 零阻塞。
+  76 文档原定 ort 绑定因本机缺 libclang 暂缓，同一 Detector 接口后续可替换。
+- **本波修复的真 bug**：① ls-track 矩形 KM 指派填充 0 抢列/越界 panic（真实检测
+  触发，改大代价填充 + 只接受真实行列，补 1×3/2×3 回归）；② 事件广播持 state 锁
+  blocking_send 慢订阅者死锁（改克隆列表 + try_send）；③ stop_camera 时数据面线程
+  阻塞在 ffmpeg 管道 read 无法退出（共享 ChildSlot 强杀 → EOF）；④ 测试用例共享
+  进程级 LS_MODEL_FP32 竞态导致 fps 测试加载 CPU 模型超时（改按实例注入）。
 - **T-331（L2）分析器数据面接线**：ls-analyzer 落地单路管线——ApplyConfig 全量快照 →
   StartCamera 启动 ffmpeg 取流（ls-ingest）→ Detector（T-325 前为 NullDetector）→
   ByteTrack → ZoneState 进出迟滞 → 规则（时段/星期/日历/冷却）→ EventCandidate gRPC

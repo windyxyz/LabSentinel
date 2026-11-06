@@ -225,9 +225,12 @@ fn linear_sum_assignment(cost: &[Vec<f32>]) -> Vec<(usize, usize)> {
         return vec![];
     }
     const INF: f32 = f32::INFINITY;
-    let mut a = vec![vec![0.0f32; n]; n];
+    // 非方阵填充：用大代价（而非 0）占位——否则虚拟行会以 0 代价抢走真实列，
+    // 与 scipy linear_sum_assignment 的矩形语义不一致（真实检测回归发现）。
+    const PAD: f32 = 1e6;
+    let mut a = vec![vec![PAD; n]; n];
     for i in 0..cost.len() {
-        for j in 0..cost[0].len() {
+        for j in 0..cost[i].len() {
             a[i][j] = cost[i][j];
         }
     }
@@ -314,7 +317,8 @@ fn linear_assignment_thresh(
     let mut ua: Vec<usize> = (0..rows).collect();
     let mut ub: Vec<usize> = (0..cols).collect();
     for (i, j) in indices {
-        if clamped[i][j] <= thresh {
+        // KM 输出含方阵填充区（i>=rows 或 j>=cols），只接受真实行列
+        if i < rows && j < cols && clamped[i][j] <= thresh {
             matches.push((i, j));
         }
     }
@@ -665,5 +669,20 @@ mod tests {
         }]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, 1, "lost_track_buffer 内重现 → 同 id");
+    }
+
+    #[test]
+    fn rectangular_assignment_ignores_padding() {
+        // 1 行 × 3 列：真实匹配应为代价最小的 (0,1)；填充区不得越界/抢列
+        let cost = vec![vec![0.9f32, 0.1, 0.8]];
+        let (m, ua, ub) = linear_assignment_thresh(cost, 3, 0.3);
+        assert_eq!(m, vec![(0, 1)]);
+        assert!(ua.is_empty());
+        assert_eq!(ub, vec![0, 2]);
+        // 2 行 × 3 列：两行各取最近列，不 panic
+        let cost = vec![vec![0.1, 0.9, 0.9], vec![0.9, 0.1, 0.9]];
+        let (m, _, _) = linear_assignment_thresh(cost, 3, 0.3);
+        assert_eq!(m.len(), 2);
+        assert!(m.iter().all(|(i, _)| *i < 2));
     }
 }

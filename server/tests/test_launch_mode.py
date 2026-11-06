@@ -139,7 +139,9 @@ def test_remove_uninstall_registry(tmp_path, monkeypatch):
 
 def test_uninstall_stop_fallback_taskkill(tmp_path, monkeypatch):
     """exe 缺失 + runtime python spawn 抛 PermissionError → taskkill 兜底，卸载不中断。"""
-    src = tmp_path / "pkg"
+    # 安装目录必须位于 LOCALAPPDATA 白名单内（卸载器防误删校验；真实默认位置同理）
+    la = tmp_path / "localappdata"
+    src = la / "Programs" / "LabSentinel"
     (src / "runtime").mkdir(parents=True)
     (src / "runtime" / "python.exe").write_bytes(b"x")
     (src / "runtime" / "pythonw.exe").write_bytes(b"x")
