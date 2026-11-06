@@ -6,11 +6,29 @@ export const adminToken = {
   set: (v) => v ? localStorage.setItem('admin_token', v) : localStorage.removeItem('admin_token'),
 }
 
-// 105 回归补丁 P0-2：读保护开启时 <img>/<video>/<a download> 裸 URL 不带请求头会 401——
-// 媒体/下载地址统一走这里，有令牌时追加 ?token=（URL token 会进历史/代理日志，服务端文档已注明）
+// T-108（S-07）：签名媒体 URL——令牌不再进 URL/日志。按路径缓存签名参数（页面内复用），
+// 首次同步返回带旧 ?token= 的兼容 URL，签名到达后触发自定义事件让视图刷新（异步收尾）。
+const _sigCache = new Map()
 export function mediaUrl(path) {
   const t = adminToken.get()
   if (!t) return path
+  const base = path.split('?')[0]
+  const extra = path.includes('?') ? '&' + path.split('?').slice(1).join('&') : ''
+  const hit = _sigCache.get(base)
+  if (hit && Number(hit.exp) > Date.now() / 1000 + 5) {
+    return base + (extra ? '?' + extra.slice(1) : '') + (extra ? '&' : '?') + 'exp=' + hit.exp + '&sig=' + hit.sig
+  }
+  // 异步批量签名（并发同路径只发一次）
+  if (!_sigCache.has(base)) {
+    _sigCache.set(base, { exp: 0, sig: '' })
+    req('GET', '/api/media/sign?path=' + encodeURIComponent(base))
+      .then((r) => {
+        _sigCache.set(base, { exp: r.exp, sig: r.sig })
+        window.dispatchEvent(new CustomEvent('ls-media-signed', { detail: { base } }))
+      })
+      .catch(() => _sigCache.delete(base))
+  }
+  // 签名未到达前回退旧 ?token=（LS_ALLOW_URL_TOKEN=0 时这类 URL 会 401，签名到达后自愈）
   return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(t)
 }
 

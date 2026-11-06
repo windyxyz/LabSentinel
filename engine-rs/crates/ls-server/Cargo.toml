@@ -1,0 +1,26 @@
+[package]
+name = "ls-server"
+description = "LabSentinel 控制面（L3/T-331）：axum 单二进制 HTTP/WS 服务，路由与 JSON 契约 1:1 对齐 OpenAPI 快照；含鉴权/CSRF/Host/WS 事件广播/静态 SPA"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "labsentinel-server"
+path = "src/main.rs"
+
+[dependencies]
+ls-store = { path = "../ls-store" }
+ls-dispatch = { path = "../ls-dispatch" }
+ls-core = { path = "../ls-core" }
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+http-body-util = "0.1"
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
+tempfile = "3"
+rusqlite = { version = "0.31", features = ["bundled"] }

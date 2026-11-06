@@ -56,7 +56,12 @@ class AlertConfigError(ValueError):
 def _serialize(field: str, value) -> str:
     if field in BOOL_FIELDS:
         return "1" if value else "0"
-    return str(value)
+    text = str(value)
+    # T-107（S-06）：敏感字段入库存密文（明文只在内存 settings 中）
+    if field in SECRET_FIELDS and text:
+        from .secretstore import protect
+        return protect(text, settings.data_dir)
+    return text
 
 
 def _deserialize(field: str, raw: str):
@@ -64,6 +69,9 @@ def _deserialize(field: str, raw: str):
         return raw.strip() in ("1", "true", "True", "yes", "on")
     if field in INT_FIELDS:
         return int(raw)
+    if field in SECRET_FIELDS:
+        from .secretstore import unprotect
+        return unprotect(raw, settings.data_dir)  # 兼容历史明文
     return raw
 
 

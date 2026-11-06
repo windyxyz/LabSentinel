@@ -5,6 +5,44 @@
     "version": "0.2.0"
   },
   "paths": {
+    "/api/media/sign": {
+      "get": {
+        "summary": "Sign Media Url",
+        "description": "T-108：给媒体路径签发 5 分钟短期 URL 参数（前端批量签名，令牌不进 URL/日志）。",
+        "operationId": "sign_media_url_api_media_sign_get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/health/live": {
       "get": {
         "summary": "Health Live",

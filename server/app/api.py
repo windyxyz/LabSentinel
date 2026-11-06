@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import time
@@ -104,21 +105,62 @@ def require_admin(request: Request):
     request.state.actor = "admin" if settings.admin_token else "anonymous(auth-off)"
 
 
-def require_read(request: Request):
-    """读操作守卫：仅 LS_AUTH_READ_PROTECTED=true 时生效。
+def _media_sig_ok(request: Request) -> bool:
+    """T-108：短期签名媒体 URL（HMAC over path|exp），有效期 LS_MEDIA_SIGN_TTL_S。
+    密钥 = admin_token 派生（未设令牌时用 .env 无关的进程内随机密钥）。"""
+    import hashlib
+    import hmac as _hmac
+    exp = request.query_params.get("exp", "")
+    sig = request.query_params.get("sig", "")
+    try:
+        if int(exp) < int(time.time()):
+            return False
+    except (ValueError, TypeError):
+        return False
+    secret = (settings.admin_token or _MEDIA_FALLBACK_KEY).encode()
+    base_path = request.url.path
+    want = _hmac.new(secret, f"{base_path}|{exp}".encode(), hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(sig, want)
 
-    105 回归补丁 P0-2：`<img>/<video>/<a download>` 裸 URL 不带 X-Admin-Token 头，读保护开启后
-    截图/视频/导出全 401——接受 `?token=` 查询参数作为回退（与 header 同用 hmac.compare_digest）。
-    T-113：结果写入 state.actor。
+
+_MEDIA_FALLBACK_KEY = secrets.token_urlsafe(32)
+
+
+def require_read(request: Request):
+    """读操作守卫：仅 LS_AUTH_READ_PROTECTED=true 时生效（T-113 写 state.actor）。
+
+    105 回归补丁 P0-2：`<img>/<video>/<a download>` 裸 URL 不带请求头——
+    T-108 起优先用签名 URL（`?exp=&sig=` HMAC，不落令牌明文）；`?token=` 保留兼容
+    （LS_ALLOW_URL_TOKEN=0 关闭；弃用期两个版本后移除）。
     """
     if not settings.auth_read_protected:
         request.state.actor = "anonymous(auth-off)"
         return
-    provided = request.headers.get("X-Admin-Token") or request.query_params.get("token")
-    if not _read_token_ok(provided):  # admin_token 空时恒 True（鉴权未启用）
+    if _media_sig_ok(request):
+        request.state.actor = "read(signed)"
+        return
+    provided = request.headers.get("X-Admin-Token")
+    if settings.allow_url_token:
+        provided = provided or request.query_params.get("token")
+    if not _read_token_ok(provided):
         request.state.actor = "rejected"
-        raise HTTPException(401, "需要管理令牌（X-Admin-Token 头或 ?token= 查询参数）")
+        raise HTTPException(401, "需要管理令牌或签名媒体 URL")
     request.state.actor = "read"
+
+
+@router.get("/media/sign", dependencies=[Depends(require_read)])
+def sign_media_url(path: str):
+    """T-108：给媒体路径签发 5 分钟短期 URL 参数（前端批量签名，令牌不进 URL/日志）。"""
+    import hashlib
+    import hmac as _hmac
+    if not path.startswith("/api/"):
+        raise HTTPException(400, "只能签名 /api/ 媒体路径")
+    if "?" in path or "#" in path or " " in path:
+        raise HTTPException(400, "path 只能含路径（查询串自行拼接在签名后）")
+    exp = str(int(time.time()) + settings.media_sign_ttl_s)
+    secret = (settings.admin_token or _MEDIA_FALLBACK_KEY).encode()
+    sig = _hmac.new(secret, f"{path}|{exp}".encode(), hashlib.sha256).hexdigest()
+    return {"exp": exp, "sig": sig}
 
 
 def init(s: Store, m: CameraManager):
@@ -301,8 +343,8 @@ def model_status():
 
     models = {"ppe": _file_info(settings.ppe_model or settings.model_fp32),
               "fp32": _file_info(settings.model_fp32)}
-    if settings.ppe_model:
-        models["int8"] = _file_info(settings.model_fp32)
+    if "vitisai" in settings.backend_order.split(","):  # T-204（B-07）：int8 条目应报 VitisAI 模型
+        models["int8"] = _file_info(settings.model_int8)
 
     # classes 文件（与 PpeEngine 一致：模型同目录 <stem>.classes.txt）
     classes_file = None
@@ -351,10 +393,8 @@ def backups_status():
 @router.post("/backups/run", dependencies=[Depends(require_admin)])
 def backups_run():
     from . import backups
-    if backups._running.is_set():
+    if not backups.trigger_async():  # T-204（B-09）：原子触发，并发第二次 409
         raise HTTPException(409, "备份正在进行中")
-    import threading
-    threading.Thread(target=backups.run_backup, daemon=True).start()
     return {"started": True}
 
 

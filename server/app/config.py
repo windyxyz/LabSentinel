@@ -42,7 +42,10 @@ class Settings(BaseSettings):
     weekend_is_holiday: bool = True  # LS_WEEKEND_IS_HOLIDAY；false=周末不按假期算（任务112）
     # 版本更新检查（任务117）：只查静态清单并提示，绝不下载/安装/执行
     update_manifest_url: str = ""  # LS_UPDATE_MANIFEST_URL；默认空=关闭更新检查
-    update_allow_http: bool = False  # LS_UPDATE_ALLOW_HTTP；自建局域网 http 清单显式开
+    update_allow_http: bool = False
+    update_url_hosts: str = ""  # T-110：更新链接 host 白名单（空=只要求 https）
+    media_sign_ttl_s: int = 300  # T-108：签名媒体 URL 有效期
+    allow_url_token: bool = True  # T-108：兼容旧 ?token= 开关（发布说明标注弃用期）  # LS_UPDATE_ALLOW_HTTP；自建局域网 http 清单显式开
     update_timeout_s: float = 5.0  # LS_UPDATE_TIMEOUT_S
     # 本地 VLM 误报预分类（任务124，Frigate genai 蓝本；默认关闭零开销）
     genai_provider: str = "none"  # LS_GENAI_PROVIDER：none|ollama|openai_compat

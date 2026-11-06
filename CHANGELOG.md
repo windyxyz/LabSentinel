@@ -40,6 +40,23 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-107（S-06）：SecretStore——告警密钥入库存密文（Windows DPAPI / POSIX Fernet，
+  enc:v1:base64），历史明文兼容自动升级；备份中不再扩散可解密密钥。实测 DPAPI 往返。
+- T-108（S-07）：短期签名媒体 URL（/api/media/sign HMAC 5 分钟）——前端 mediaUrl
+  异步批量签名，令牌不再进 URL/访问日志；?token= 保留兼容开关 LS_ALLOW_URL_TOKEN。
+- T-110（S-09）：更新清单 Ed25519 签名（app/keys/update.pub 存在即强制）、语义版本比较
+  （只升不降 + 旧 CalVer 兼容）、url 仅 https + LS_UPDATE_URL_HOSTS 白名单。
+- T-204（B-07/08/09）：int8 条目报 model_int8 / LS_BACKUP_INCLUDE_MEDIA 生效 /
+  backups.trigger_async 原子触发（手动与定时共用，消除竞态）。
+- **L2/L3/L4 Rust 替换 Python 运行时（核心目标）**：
+  - ls-store（T-332）：rusqlite 打开 Python 同库（schema v12 双向兼容，ADR-0008）；
+  - ls-dispatch（T-329）：8 渠道等价语义、域名白名单、静默/过滤/限流/重试/死信；
+  - **ls-server（T-331）**：axum 控制面单二进制（health/system/events/cameras/stats/
+    backups/处置、Host/CSRF/令牌、WS 广播），**L3 契约测试对 Python 与 Rust 双实现
+    同一套用例 100% 通过**；
+  - L4：scripts/build_rust.py 单二进制分发（不含 280MB CPython runtime）、
+    deploy/docker/Dockerfile.rust（distroless 风格非 root + 健康探针）、
+    --healthcheck 参数；Python 运行时按文档保留一个版本周期，tools/ 训练链长期保留。
 - T-504（B-22）：stdout 行级 tee——各模块历史 print 以 INFO 双写进 logging（→
   server.log 轮转），/api/logs 可查后端日志；LS_LOG_TEE=0 可关。pytest 捕获流不接。
 - T-326（L1/Rust）：ls-ingest——ffmpeg 子进程取流（RTSP/文件通用，rawvideo 管道，

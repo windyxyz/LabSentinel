@@ -71,9 +71,11 @@ def run_backup() -> tuple[bool, str]:
     import subprocess
     import sys
     try:
+        # T-204（B-08）：LS_BACKUP_INCLUDE_MEDIA 生效（原恒 --no-media）
+        media_args = [] if settings.backup_include_media else ["--no-media"]
         r = subprocess.run(
             [sys.executable, str(script), "backup",
-             "--data-dir", str(settings.data_dir), "--out", str(out), "--no-media"],
+             "--data-dir", str(settings.data_dir), "--out", str(out), *media_args],
             capture_output=True, text=True, timeout=300)
         if r.returncode != 0:
             return False, f"backup_data.py exit {r.returncode}: {r.stderr.strip()[:200]}"
@@ -84,6 +86,30 @@ def run_backup() -> tuple[bool, str]:
         return False, f"备份异常: {e}"
 
 
+def trigger_async() -> bool:
+    """T-204（B-09）：手动/定时共用的原子触发——检查与置位在同一把锁内，
+    线程内 finally 清除（原 API 检查与启动间有竞态且不置 _running）。"""
+    global _TRIGGER_LOCK
+    with _TRIGGER_LOCK:
+        if _running.is_set():
+            return False
+        _running.set()
+
+    def _job():
+        try:
+            ok, msg = run_backup()
+            print(f"[auto-backup] {'✓' if ok else '✗'} {msg}")
+        finally:
+            _running.clear()
+
+    import threading as _th
+    _th.Thread(target=_job, daemon=True, name="backup-trigger").start()
+    return True
+
+
+_TRIGGER_LOCK = threading.Lock()
+
+
 def _loop():
     interval_h = settings.backup_interval_h
     check_s = min(_CHECK_S, max(60, int(interval_h * 3600 / 4))) if interval_h > 0 else _CHECK_S
@@ -91,13 +117,8 @@ def _loop():
         try:
             files = auto_files()
             if _needs_backup(files, time.time(), interval_h):
-                if not _running.is_set():
-                    _running.set()
-                    try:
-                        ok, msg = run_backup()
-                        print(f"[auto-backup] {'✓' if ok else '✗'} {msg}")
-                    finally:
-                        _running.clear()
+                if trigger_async():
+                    print("[auto-backup] 已触发")
         except Exception as e:  # noqa: BLE001
             print(f"[auto-backup] 异常: {e}")
         _stop.wait(check_s)
