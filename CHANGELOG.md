@@ -40,6 +40,13 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-404：安装器新增 upgrade 子命令（zip/目录、防穿越解包）+ 健康检查失败
+  自动回滚（数据目录不动、升级前 DB 备份）；VM 演练测试齐备。
+- T-335：engine-rs/deny.toml（许可证白名单/来源/公告）+ rust.yml
+  cargo-deny/audit/5 目标交叉编译矩阵。
+- T-410：release.yml 构建后 Windows zip 冒烟 + 隔离 install/uninstall 冒烟。
+- T-409：release_check 增 manifest 来源/依赖锁 ASCII/无明文源/NOTICE 覆盖/签名 5 项。
+- T-327 验收：scripts/soak_mixed_gray.py 混合灰度 soak + sidecar 崩溃恢复演练。
 - T-505：16 处 API 请求体改 Pydantic 模型（extra=forbid）——形状/枚举/长度约束
   自动 422（此前 400），跨实体校验保持 400/404；`/events/{id}/status` 非法状态
   Python/Rust 两实现同步 422。前端请求字段全部兼容。

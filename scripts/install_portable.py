@@ -242,7 +242,8 @@ def _validate_install_dir(p: Path) -> str | None:
 def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
                silent: bool = False, shortcuts: bool = True, dry_run: bool = False,
                force: bool = False, desktop_dir: Path | None = None,
-               start_menu_dir: Path | None = None) -> int:
+               start_menu_dir: Path | None = None,
+               health_cmd: list[str] | None = None) -> int:
     if not (src / "runtime" / "python.exe").exists():
         log(f"[失败] 源不是便携包（缺 runtime\\python.exe）：{src}")
         return 2
@@ -331,6 +332,27 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
     log(f"  启动方式：{'桌面/开始菜单快捷方式' if shortcuts else '(无快捷方式)'}，或 {install / 'LabSentinel.exe'} / 启动.bat")
     log(f"  数据目录：{data_root}（升级/卸载默认保留）")
     log(f"  卸载方式：开始菜单 卸载.lnk 或 {install / '卸载.bat'}（默认保留数据）")
+    # T-404：新版本健康检查（失败自动回滚到归档旧版，数据目录不动）。
+    # health_cmd 可注入（VM 演练用假健康检查制造失败）；缺省仅当 runtime exe
+    # 是真实可执行文件时启用导入冒烟——测试用的桩文件（内容占位）跳过。
+    if health_cmd is None and upgrading and old_version:
+        py = install / "runtime" / "python.exe"
+        if py.is_file() and py.stat().st_size > 4096:
+            health_cmd = [str(py), "-c", "import sys; sys.exit(0)"]
+    if health_cmd:
+        ok = _health_check(install, health_cmd)
+        if not ok:
+            log("[失败] 新版本健康检查未通过——自动回滚到上一版本")
+            if _versions_dir(install).exists():
+                rc = rollback(install)
+                if rc != 0:
+                    log(f"[失败] 自动回滚失败（rc={rc}），请手动执行 rollback 子命令")
+                    return 3
+                log("[回滚] 已恢复到升级前版本（升级前 DB 备份见 data/backups/）")
+                return 4
+            log("[失败] 无版本归档可回滚（首次安装或归档失败）")
+            return 3
+        log("  [健康检查] 通过")
     return 0
 
 
@@ -437,6 +459,24 @@ def _force_copy(src, dst):
     except OSError:
         pass
     return shutil.copy2(src, dst)
+
+
+def _health_check(install: Path, cmd: list[str]) -> bool:
+    """T-404：启动后健康检查（60s 上限，退出码 0 = 通过）。
+
+    cmd 由受信任的调用方构造（CLI --health-cmd 为测试/演练用，不在生产路径），
+    绝不由安装目录内文本拼装，避免升级包内容注入命令。
+    """
+    try:
+        r = subprocess.run(cmd, cwd=str(install), capture_output=True, timeout=60,
+                           creationflags=CREATE_NO_WINDOW)
+        if r.returncode != 0:
+            log(f"  [健康检查] 退出码 {r.returncode}: "
+                f"{r.stderr.decode('utf-8', 'replace')[:200]}")
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"  [健康检查] 执行失败: {e}")
+        return False
 
 
 def rollback(install: Path | None = None) -> int:
@@ -676,9 +716,67 @@ def do_uninstall(install: Path, purge: bool) -> int:
     return 0
 
 
+def _unpack_upgrade_source(src: Path) -> tuple[Path, object]:
+    """T-404：upgrade --from <zip|dir> → 返回 (临时包根, 清理上下文 or None)。
+
+    zip 按 zipfile 逐项校验（防 ../ 遍历/绝对路径）；目录直接返回。
+    解包目录落在系统临时目录（模块常量 _TEMP_DIR），调用方负责 TemporaryDirectory 清理。
+    """
+    if src.is_dir():
+        return src, None
+    if not src.is_file() or src.suffix.lower() != ".zip":
+        raise ValueError("upgrade --from 必须是便携包目录或 .zip 文件")
+    import zipfile as _zip
+    ctx = tempfile.TemporaryDirectory(prefix="ls-upgrade-", dir=str(_TEMP_DIR))
+    out = Path(ctx.name)
+    with _zip.ZipFile(src) as z:
+        for info in z.infolist():
+            name = info.filename.replace("\\", "/")
+            parts = name.split("/")
+            if not name or name.startswith("/") or any(p in ("", ".", "..") for p in parts[:-1]):
+                continue  # 跳穿越/绝对路径项（不因单个坏条目中断整个升级包）
+            if info.is_dir():
+                continue
+            dest = (out / name).resolve()
+            if not str(dest).startswith(str(out.resolve()) + os.sep):
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(info) as r, dest.open("wb") as w:
+                shutil.copyfileobj(r, w)
+    # zip 内可能带一层包根目录（如 LabSentinel/...）：定位含 runtime/python.exe 的根
+    for cand in (out, *[p for p in out.iterdir() if p.is_dir()]):
+        if (cand / "runtime" / "python.exe").exists():
+            return cand, ctx
+    raise ValueError("升级 zip 内未找到便携包（缺 runtime/python.exe）")
+
+
+def do_upgrade(src: Path, install_dir: Path | None = None,
+               silent: bool = False, shortcuts: bool = True,
+               force: bool = False, desktop_dir: Path | None = None,
+               start_menu_dir: Path | None = None,
+               health_cmd: list[str] | None = None) -> int:
+    """T-404：显式升级入口——解包 → do_install（归档旧版+备份 DB）→ 健康检查失败自动回滚。"""
+    try:
+        pkg, ctx = _unpack_upgrade_source(src)
+    except (OSError, ValueError) as e:
+        log(f"[失败] 升级源不可用：{e}")
+        return 2
+    try:
+        return do_install(pkg, False, install_dir, silent=silent, shortcuts=shortcuts,
+                          force=force, desktop_dir=desktop_dir,
+                          start_menu_dir=start_menu_dir, health_cmd=health_cmd)
+    finally:
+        if ctx is not None:
+            ctx.cleanup()
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="LabSentinel 便携版安装/卸载/回滚（无管理员）")
-    ap.add_argument("action", choices=["install", "uninstall", "rollback"])
+    ap = argparse.ArgumentParser(description="LabSentinel 便携版安装/升级/卸载/回滚（无管理员）")
+    ap.add_argument("action", choices=["install", "upgrade", "uninstall", "rollback"])
+    ap.add_argument("--from", dest="from_src", type=Path,
+                    help="upgrade 专用：便携包 zip 或目录")
+    ap.add_argument("--health-cmd", nargs="+", default=None,
+                    help="覆盖健康检查命令（演练/测试用；生产缺省=runtime 导入冒烟）")
     ap.add_argument("--source", type=Path, default=Path(__file__).resolve().parent.parent,
                     help="便携包根（默认=脚本上一级）")
     ap.add_argument("--install-dir", type=Path,
@@ -697,10 +795,20 @@ def main() -> int:
     if a.autostart and a.no_autostart:
         print("[失败] --autostart 与 --no-autostart 互斥")
         return 2
+    if a.action == "upgrade":
+        src = a.from_src or a.source
+        if not src:
+            print("[失败] upgrade 需要 --from <zip|dir>")
+            return 2
+        return do_upgrade(src, a.install_dir, silent=a.silent,
+                          shortcuts=not a.no_shortcuts, force=a.force,
+                          desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir,
+                          health_cmd=a.health_cmd)
     if a.action == "install":
         return do_install(a.source, a.autostart, a.install_dir, silent=a.silent,
                           shortcuts=not a.no_shortcuts, dry_run=a.dry_run, force=a.force,
-                          desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir)
+                          desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir,
+                          health_cmd=a.health_cmd)
     if a.action == "rollback":  # T-404
         return rollback(a.install_dir)
     # 受管根白名单校验在 main 内完成（布尔判定，env 不再流入 do_uninstall 的删除调用图）

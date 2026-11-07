@@ -47,6 +47,22 @@ jobs:
           npm run build
       - name: portable build（含锁文件全新安装 + 冒烟断言）
         run: python scripts/build_portable.py --zip
+      # T-410：Windows 冒烟进 CI——用刚产出的 zip 真实启动→健康/前端/DB 断言→停止；
+      # 随后 install/uninstall 到隔离临时目录，验证安装标记与安全卸载。
+      - name: T-410 portable zip 冒烟（隔离启动/健康/停止）
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem Resources/dist/LabSentinel-portable-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          python scripts/smoke_portable.py --zip $zip.FullName --timeout 90
+      - name: T-410 install/uninstall 冒烟（隔离目录）
+        shell: pwsh
+        run: |
+          $pkg = Get-Item Resources/dist/portable/LabSentinel
+          $dir = Join-Path $env:RUNNER_TEMP "ls-install-smoke"
+          python scripts/install_portable.py install --source $pkg.FullName --install-dir $dir --no-shortcuts --no-autostart
+          if ($LASTEXITCODE -ne 0) { throw "install 失败" }
+          python scripts/install_portable.py uninstall --install-dir $dir
+          if ($LASTEXITCODE -ne 0) { throw "uninstall 失败" }
       - name: Rust L4 单二进制构建（T-333：无 CPython runtime 的第二产物）
         run: |
           python scripts/build_rust.py --zip

@@ -47,6 +47,68 @@ def test_install_archive_and_rollback(tmp_path, monkeypatch):
     assert (install / ip.CURRENT_MARK).read_text("ascii").strip() == "0.1.0"
 
 
+def test_upgrade_health_fail_auto_rollback_and_success(tmp_path, monkeypatch):
+    """T-404 VM 演练等价：v1 安装 → 写数据 → v2 健康检查故意失败 → 自动回到 v1
+    且数据完好 → 再升级正常 v2 → 成功；升级前 DB 备份存在。"""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LA"))
+    (tmp_path / "LA").mkdir()
+    src1 = _fake_package(tmp_path / "pkg1", "0.1.0")
+    src2 = _fake_package(tmp_path / "pkg2", "0.2.0")
+    install = tmp_path / "LA" / "Programs" / "LabSentinel"
+    data_dir = tmp_path / "LA" / "LabSentinel" / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "labsentinel.db").write_bytes(b"DB-BEFORE-UPGRADE")
+    (data_dir / "backups").mkdir()
+
+    assert ip.do_install(src1, autostart=False, install_dir=install,
+                         shortcuts=False, silent=True) == 0
+    # 故意失败的健康检查（真子进程，退出码 1）
+    fail = [sys.executable, "-c", "import sys; sys.exit(1)"]
+    rc = ip.do_upgrade(src2, install, shortcuts=False, silent=True, health_cmd=fail)
+    assert rc == 4, "健康检查失败应自动回滚并返回 4"
+    assert (install / "app" / "VERSION").read_text("ascii").strip() == "0.1.0"
+    assert (install / ip.CURRENT_MARK).read_text("ascii").strip() == "0.1.0"
+    assert (data_dir / "labsentinel.db").read_bytes() == b"DB-BEFORE-UPGRADE"
+    assert list((data_dir / "backups").glob("pre-upgrade-*.zip")) or \
+        (data_dir / "labsentinel.db.pre-upgrade.bak").exists(), "升级前 DB 备份"
+
+    # 再升级正常 v2（健康检查通过）
+    ok = [sys.executable, "-c", "import sys; sys.exit(0)"]
+    assert ip.do_upgrade(src2, install, shortcuts=False, silent=True, health_cmd=ok) == 0
+    assert (install / "app" / "VERSION").read_text("ascii").strip() == "0.2.0"
+    assert (install / ip.CURRENT_MARK).read_text("ascii").strip() == "0.2.0"
+    assert (data_dir / "labsentinel.db").read_bytes() == b"DB-BEFORE-UPGRADE"
+
+    # 卸载只删受管文件：用户自放文件保留
+    (install / "user.txt").write_text("mine", encoding="utf-8")
+    assert ip.do_uninstall(install, purge=False) == 0
+    assert (install / "user.txt").exists()
+
+
+def test_upgrade_from_zip_with_path_traversal_guard(tmp_path, monkeypatch):
+    """T-404：upgrade --from <zip> 解包（含一层包根），穿越条目被跳过。"""
+    import zipfile as _zip
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LA"))
+    (tmp_path / "LA").mkdir()
+    src1 = _fake_package(tmp_path / "pkg1", "0.1.0")
+    src2 = _fake_package(tmp_path / "pkg2", "0.2.0")
+    install = tmp_path / "LA" / "Programs" / "LabSentinel"
+    assert ip.do_install(src1, autostart=False, install_dir=install,
+                         shortcuts=False, silent=True) == 0
+    zp = tmp_path / "upgrade.zip"
+    with _zip.ZipFile(zp, "w") as z:
+        for p in src2.rglob("*"):
+            if p.is_file():
+                z.write(p, f"LabSentinel/{p.relative_to(src2)}")
+        z.writestr("../../evil.txt", "bad")
+        z.writestr("LabSentinel/../escape.txt", "bad")
+    ok = [sys.executable, "-c", "import sys; sys.exit(0)"]
+    assert ip.do_upgrade(zp, install, shortcuts=False, silent=True, health_cmd=ok) == 0
+    assert (install / "app" / "VERSION").read_text("ascii").strip() == "0.2.0"
+    assert not (tmp_path / "evil.txt").exists()
+    assert not (install.parent / "escape.txt").exists()
+
+
 def test_uninstall_refuses_foreign_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LA"))
     (tmp_path / "LA").mkdir()

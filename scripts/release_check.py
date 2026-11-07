@@ -241,6 +241,81 @@ def check_zip(res, zip_path: Path | None) -> None:
                 "必需条目缺失按 58 报告处理" if rc != 0 else "")
 
 
+def check_t409(res) -> None:
+    """T-409：发布门禁强化——manifest 来源、依赖锁 ASCII、无 http:// 下载源、
+    NOTICE 覆盖许可证、签名产物核验提示。"""
+    # 1) manifest git_commit == HEAD 且 git_dirty=false（有 manifest 时）
+    manifest = ROOT / "Resources" / "dist" / "RELEASE-MANIFEST.json"
+    if manifest.is_file():
+        try:
+            m = json.loads(manifest.read_text(encoding="utf-8"))
+            head = _git_out(["rev-parse", "--short", "HEAD"])
+            dirty = m.get("git_dirty", True)
+            commit = str(m.get("git_commit", ""))
+            ok = (not dirty) and bool(head) and commit.startswith(head)
+            results_add(res, "manifest 来源（T-409）",
+                        "PASS" if ok else "WARN",
+                        f"git_commit={commit} HEAD={head} git_dirty={dirty}",
+                        "发布产物须来自干净树且 commit 与 HEAD 一致" if not ok else "")
+        except (OSError, ValueError) as e:
+            results_add(res, "manifest 来源（T-409）", "WARN", f"manifest 解析失败: {e}", "")
+    # 2) requirements*.txt/lock 纯 ASCII（GBK 机器 pip 解码兼容）
+    bad_ascii = []
+    for req in sorted((ROOT / "server").glob("requirements*.txt")) + \
+            sorted((ROOT / "server").glob("requirements*.lock")):
+        try:
+            req.read_bytes().decode("ascii")
+        except UnicodeDecodeError:
+            bad_ascii.append(str(req.relative_to(ROOT)))
+    results_add(res, "依赖锁 ASCII（T-409）",
+                "FAIL" if bad_ascii else "PASS",
+                "非 ASCII: " + ", ".join(bad_ascii) if bad_ascii else "全部 requirements/lock 纯 ASCII",
+                "GBK 机器 pip 解码会崩，转纯 ASCII" if bad_ascii else "")
+    # 3) 无 http:// 明文下载源（本机地址例外）
+    http_hits = []
+    for p in (ROOT / "scripts" / "assets.lock.json", ROOT / "scripts" / "fetch_assets.py",
+              ROOT / "scripts" / "deploy.py"):
+        if not p.is_file():
+            continue
+        for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if re.search(r"[\"']http://(?!127\.0\.0\.1|localhost)", line):
+                http_hits.append(f"{p.relative_to(ROOT)}:{i}")
+    results_add(res, "下载源 HTTPS（T-409）",
+                "FAIL" if http_hits else "PASS",
+                "明文源: " + ", ".join(http_hits) if http_hits else "无 http:// 明文下载源",
+                "改用 https" if http_hits else "")
+    # 4) NOTICE 覆盖主要第三方组件许可证
+    notice = ROOT / "NOTICE"
+    if not notice.is_file():
+        results_add(res, "NOTICE 覆盖（T-409）", "FAIL", "NOTICE 缺失", "补齐第三方声明")
+    else:
+        text = notice.read_text(encoding="utf-8", errors="replace")
+        missing = [x for x in ("opencv", "onnxruntime", "fastapi", "supervision")
+                   if x.lower() not in text.lower()]
+        results_add(res, "NOTICE 覆盖（T-409）",
+                    "WARN" if missing else "PASS",
+                    "NOTICE 未提及: " + ", ".join(missing) if missing else "主要第三方组件均有声明",
+                    "补齐 SBOM 组件许可证" if missing else "")
+    # 5) 签名产物（证书办妥前草稿发布豁免 → WARN 不阻断）
+    sums = ROOT / "Resources" / "dist" / "SHA256SUMS.txt"
+    if sums.is_file():
+        has_sig = (ROOT / "Resources" / "dist" / "SHA256SUMS.txt.minisig").is_file()
+        results_add(res, "产物签名（T-409）", "PASS" if has_sig else "WARN",
+                    "SHA256SUMS 已 minisign 签名" if has_sig else "SHA256SUMS 未签名（草稿发布可豁免）",
+                    "证书就绪后 minisign -Sm" if not has_sig else "")
+
+
+def _git_out(args: list[str]) -> str:
+    """只读 git 查询；非仓库/不可用时返回空串（调用方按 WARN 判定）。"""
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True,
+                           text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:  # noqa: BLE001  只读查询失败不致命
+        return ""
+
+
 def main() -> int:
     global ROOT
     ap = argparse.ArgumentParser(description="发布前终检（任务74，只读）")
@@ -255,6 +330,7 @@ def main() -> int:
     check_secrets(res)
     check_todos(res)
     check_required_files(res)
+    check_t409(res)
     check_zip(res, a.zip)
     if a.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))

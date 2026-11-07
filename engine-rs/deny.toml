@@ -1,0 +1,62 @@
+# T-335：cargo-deny 配置（许可证/公告/来源/依赖审计）
+# 用法：cd engine-rs && cargo deny check
+# CI：rust.yml 的 audit job（taiki-e/install-action@cargo-deny, cargo-audit）
+
+[graph]
+# workspace 内 dev/build 目标也纳入许可证检查（CI 与发布一致性）
+all-features = false
+
+[advisories]
+# 已知漏洞数据库（RustSec）；yanked crate 只警告不阻断（离线环境可复现优先）
+yanked = "warn"
+ignore = []
+
+[licenses]
+# 白名单：宽松许可证 + 弱 copyleft（MPL-2.0）；GPL 类显式拒绝。
+# 项目本身 AGPL-3.0 可接受 GPL 依赖，但按 76 文档 §11 要求仍显式审查后拒绝。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "0BSD",
+    "Unlicense",
+    # 老式非 SPDX 双许可写法（旧 crate 的 license 字段；cargo-deny 按字符串放行）
+    "MIT/Apache-2.0",
+    "MIT OR Apache-2.0",
+    "Apache-2.0 OR MIT",
+    "Unlicense OR MIT",
+    "Unlicense/MIT",
+    "BSD-2-Clause OR Apache-2.0 OR MIT",
+    "MIT AND BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+]
+# 例外：个别 crate 的许可证字段用非 SPDX 文本或双许可歧义，显式澄清后放行
+# （新增前必须在 PR 说明并链接上游 Cargo.toml/LICENSE）。
+exceptions = []
+
+[licenses.private]
+# 本工作区 crate（AGPL-3.0）不参与第三方许可证白名单
+ignore = true
+
+[bans]
+# 同名多版本默认警告（避免体积膨胀/符号冲突），阻断循环依赖与通配符版本
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

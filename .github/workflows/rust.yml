@@ -1,4 +1,5 @@
-# T-335：Rust 工作区 CI——双平台 cargo test + clippy -D warnings + cargo-deny 占位。
+# T-335：Rust 工作区 CI——双平台 cargo test + clippy -D warnings + fmt
+# + cargo-deny（许可证/公告/来源）+ cargo-audit + 交叉编译检查矩阵。
 # 契约/向量/单元测试全部离线（ffmpeg 相关测试在缺 ffmpeg 时自动 skip）。
 name: rust
 on:
@@ -22,7 +23,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine-rs
@@ -31,7 +32,53 @@ jobs:
         run: cargo test --workspace
       - name: clippy -D warnings（手写 crate 零告警；生成代码在 ls-proto 内豁免）
         working-directory: engine-rs
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: fmt check
         working-directory: engine-rs
         run: cargo fmt --all -- --check
+
+  audit:
+    # T-335：许可证白名单/已知漏洞/yanked/source 单一门禁（Linux 即可，跨平台无关）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@cargo-audit
+      - name: cargo deny check（licenses / advisories / bans / sources）
+        working-directory: engine-rs
+        run: cargo deny check
+      - name: cargo audit（RustSec 公告）
+        working-directory: engine-rs
+        run: cargo audit
+
+  cross:
+    # T-335：交叉编译矩阵——目标只做 check（不链接），GNU Windows 与 Linux 双目标
+    # + macOS/ARM Linux 需对应链接器，故以 `cargo check --target` 覆盖语法/依赖可移植性。
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-pc-windows-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-rs
+      - name: cargo check --target ${{ matrix.target }}
+        working-directory: engine-rs
+        # 交叉目标缺系统链接器/openssl，只做前端检查；ls-proto 生成代码在 host 构建
+        run: cargo check --workspace --target ${{ matrix.target }}
+        env:
+          # 关闭需要原生构建脚本链接的 ort 动态加载路径（纯 Rust 绑定无需 libclang）
+          CARGO_FEATURE_ORT: ""
