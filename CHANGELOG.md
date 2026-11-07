@@ -40,6 +40,8 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-329：Rust 告警渠道 8 通道全量接线——补 PushPlus（业务码 200 修齐）/Qmsg
+  （表单+key 编码）/Email（lettre rustls，ssl/starttls/私网 none）；HTTP 超时 5s。
 - T-326：Rust 分析器（gray=rust 路径）补齐**视频存证**——事件帧快照、事件前后
   2s 片段（ffmpeg libx264/yuv420p，mpeg4 兜底）、LatestFrame 实时帧；sidecar
   stdout 持续排水（防管道写满整进程阻塞断流）。Python 侧修复存证视频慢放

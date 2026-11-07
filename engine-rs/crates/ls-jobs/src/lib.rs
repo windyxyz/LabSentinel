@@ -269,7 +269,7 @@ impl Jobs {
                     send_text.push_str(&format!("\n（上一窗口合并 {pending} 条）"));
                 }
                 let did = store.add_delivery(row.id, ch.name()).ok();
-                let d = ls_dispatch::deliver(*ch, ch_cfg, &send_text);
+                let d = ls_dispatch::deliver(*ch, ch_cfg, ev.level, &send_text);
                 if let Some(id) = did {
                     let _ = store.update_delivery(
                         id,

@@ -99,7 +99,7 @@ fn hmac_signature_matches_known_vectors() {
         allow_http: true,
         ..Default::default()
     };
-    let d = deliver(Channel::Webhook, &cfg, "what do ya want for nothing?");
+    let d = deliver(Channel::Webhook, &cfg, 2, "what do ya want for nothing?");
     assert!(d.ok, "桩返回 errcode=0 应成功");
     let reqs = stub.requests.lock().unwrap();
     assert_eq!(reqs.len(), 1);
@@ -131,7 +131,7 @@ fn business_code_and_retry_semantics() {
         allow_http: true,
         ..Default::default()
     };
-    let d = deliver(Channel::Webhook, &cfg, "hi");
+    let d = deliver(Channel::Webhook, &cfg, 2, "hi");
     assert!(!d.ok);
     assert_eq!(d.attempts, 4, "失败重试 1+3 次");
     assert_eq!(stub.requests.lock().unwrap().len(), 4);
@@ -144,7 +144,7 @@ fn business_code_and_retry_semantics() {
         allow_http: true,
         ..Default::default()
     };
-    let d2 = deliver(Channel::Webhook, &cfg2, "hi");
+    let d2 = deliver(Channel::Webhook, &cfg2, 2, "hi");
     assert!(d2.ok && d2.attempts == 1);
     // 厂商渠道的业务码判定（请求需打真实域名，此处只测 is_ok 纯函数）
     assert!(is_ok(Channel::Wecom, 200, "{\"errcode\":0}"));
@@ -161,4 +161,139 @@ fn url_whitelist_blocks_ssrf_and_http() {
     assert!(check_url(Channel::Webhook, "http://192.168.1.5/hook", true).is_ok());
     // 厂商渠道 host 白名单不受 allow_http 影响
     assert!(check_url(Channel::Dingtalk, "https://evil.example/x", true).is_err());
+}
+
+// ---- T-329 尾巴：PushPlus / Qmsg / Email 渠道 ----
+
+#[test]
+fn pushplus_payload_and_is_ok_200() {
+    // PushPlus 业务码 200 也算成功（Python _is_ok errcode/code ∈ (0,200)）
+    assert!(is_ok(Channel::Pushplus, 200, r#"{"code":200,"msg":"ok"}"#));
+    assert!(is_ok(Channel::Pushplus, 200, r#"{"code":0}"#));
+    assert!(!is_ok(Channel::Pushplus, 200, r#"{"code":400}"#));
+    // payload：token + 模板标题 + content + template=txt
+    let cfg = ChannelConfig {
+        url: "https://www.pushplus.plus/send".into(),
+        token: "TK".into(),
+        ..Default::default()
+    };
+    let body = ls_dispatch::build_body(Channel::Pushplus, 2, "内容", &cfg);
+    assert_eq!(body["token"], "TK");
+    assert_eq!(body["title"], "LabSentinel 级别2告警");
+    assert_eq!(body["content"], "内容");
+    assert_eq!(body["template"], "txt");
+    // 标题模板可被 LS_ALERT_TEMPLATE_TITLE 覆盖（{level} 占位符替换）
+    std::env::set_var("LS_ALERT_TEMPLATE_TITLE", "实验室报警 L{level}");
+    let body = ls_dispatch::build_body(Channel::Pushplus, 3, "x", &cfg);
+    std::env::remove_var("LS_ALERT_TEMPLATE_TITLE");
+    assert_eq!(body["title"], "实验室报警 L3");
+}
+
+#[test]
+fn qmsg_payload_and_whitelist() {
+    // Qmsg host 白名单放行（key 的路径段编码由 channels_from_env 生成）
+    assert!(check_url(Channel::Qmsg, "https://qmsg.zendee.cn/send/AB%2Bcd", false).is_ok());
+    assert!(check_url(Channel::Qmsg, "https://evil.example/send/k", false).is_err());
+    let cfg = ChannelConfig {
+        url: "https://qmsg.zendee.cn/send/AB%2Bcd".into(),
+        qq: "12345".into(),
+        ..Default::default()
+    };
+    let body = ls_dispatch::build_body(Channel::Qmsg, 2, "hi", &cfg);
+    assert_eq!(body["msg"], "hi");
+}
+
+#[test]
+fn email_private_net_guard() {
+    use ls_dispatch::EmailConfig;
+    // security=none 仅私网：公网地址直接拒绝、不产生 SMTP 连接
+    let cfg = ChannelConfig {
+        email: EmailConfig {
+            host: "8.8.8.8".into(),
+            port: 25,
+            user: "bot@lab.local".into(),
+            pass: "p".into(),
+            to: "guard@lab.local".into(),
+            security: "none".into(),
+        },
+        ..Default::default()
+    };
+    let d = deliver(Channel::Email, &cfg, 2, "测试");
+    assert!(!d.ok);
+    assert!(d.error.as_deref().unwrap().contains("私网"));
+    // 回环地址：guard 放行（连不上本地端口 → send failed 而非 guard 拒绝）
+    let cfg = ChannelConfig {
+        email: EmailConfig {
+            host: "127.0.0.1".into(),
+            port: 59999,
+            user: "bot@lab.local".into(),
+            pass: "p".into(),
+            to: "x@lab.local".into(),
+            security: "none".into(),
+        },
+        ..Default::default()
+    };
+    let d = deliver(Channel::Email, &cfg, 2, "测试");
+    assert!(!d.ok && d.error.as_deref().unwrap().contains("send failed"));
+}
+
+#[test]
+fn email_message_shape() {
+    // 信头语义：From=user、To、主题 [LabSentinel] 级别N告警（lettre 构造）
+    use ls_dispatch::EmailConfig;
+    let cfg = EmailConfig {
+        host: "smtp.lab.local".into(),
+        port: 465,
+        user: "bot@lab.local".into(),
+        pass: "p".into(),
+        to: "duty@lab.local".into(),
+        security: "ssl".into(),
+    };
+    let msg = ls_dispatch::build_email(3, "正文", &cfg).expect("构造成功");
+    let raw = msg.formatted();
+    let headers = String::from_utf8_lossy(&raw);
+    assert!(headers.contains("From: bot@lab.local"));
+    assert!(headers.contains("To: duty@lab.local"));
+    // 非ASCII 主题 lettre 按 RFC 2047 编码（Python compat32 原样发，客户端解码后等价）
+    assert!(headers.contains("Subject: [LabSentinel]"));
+    assert!(headers.to_ascii_lowercase().contains("=?utf-8?"));
+    // 正文按 MIME 编码传输（Python MIMEText utf-8 同为 base64，内容语义等价）
+    assert!(headers.to_ascii_lowercase().contains("base64"));
+}
+
+#[test]
+fn email_unconfigured_short_circuit() {
+    let cfg = ChannelConfig::default();
+    let d = deliver(Channel::Email, &cfg, 2, "x");
+    assert!(!d.ok && d.attempts == 0);
+    assert!(d.error.as_deref().unwrap().contains("未配置"));
+}
+
+#[test]
+fn channels_from_env_full_wire() {
+    // 8 渠道全量接线：PushPlus/Qmsg/Email 凭据进 ChannelConfig
+    std::env::set_var("LS_PUSHPLUS_TOKEN", "pp-tok");
+    std::env::set_var("LS_QMSG_KEY", "qk+特殊/");
+    std::env::set_var("LS_QMSG_QQ", "777");
+    std::env::set_var("LS_SMTP_HOST", "smtp.lab.local");
+    std::env::set_var("LS_ALERT_EMAIL_TO", "to@lab.local");
+    std::env::set_var("LS_SMTP_PORT", "587");
+    std::env::set_var("LS_SMTP_SECURITY", "starttls");
+    let chs = ls_dispatch::channels_from_env();
+    std::env::remove_var("LS_PUSHPLUS_TOKEN");
+    std::env::remove_var("LS_QMSG_KEY");
+    std::env::remove_var("LS_QMSG_QQ");
+    std::env::remove_var("LS_SMTP_HOST");
+    std::env::remove_var("LS_ALERT_EMAIL_TO");
+    std::env::remove_var("LS_SMTP_PORT");
+    std::env::remove_var("LS_SMTP_SECURITY");
+    let get = |name: &str| chs.iter().find(|(c, _)| c.name() == name).map(|(_, c)| c);
+    let pp = get("pushplus").expect("pushplus 接线");
+    assert_eq!(pp.token, "pp-tok");
+    let qm = get("qmsg").expect("qmsg 接线");
+    assert_eq!(qm.qq, "777");
+    assert!(qm.url.ends_with("/send/qk%2B%E7%89%B9%E6%AE%8A%2F"));
+    let em = get("email").expect("email 接线");
+    assert_eq!(em.email.port, 587);
+    assert_eq!(em.email.security, "starttls");
 }

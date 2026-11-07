@@ -11,6 +11,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+// T-329：邮件渠道（Transport trait 供 SmtpTransport::send）
+use lettre::Transport;
 
 /// 渠道名（与 Python ch.name 一致）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -73,6 +75,22 @@ pub struct ChannelConfig {
     pub token: String,
     pub key: String,
     pub allow_http: bool,
+    /// T-329：Qmsg 接收 QQ 号（key 走 url 路径段）
+    pub qq: String,
+    /// T-329：邮件渠道（SMTP）
+    pub email: EmailConfig,
+}
+
+/// SMTP 邮件渠道配置（Python EmailChannel 同名字段；口令只进内存）
+#[derive(Clone, Default)]
+pub struct EmailConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub pass: String,
+    pub to: String,
+    /// ssl（默认 465）| starttls（587）| none（仅私网，T-210 F-08）
+    pub security: String,
 }
 
 /// 事件行（派发所需字段，不含本地绝对路径）
@@ -170,7 +188,7 @@ pub fn is_ok(_ch: Channel, status: u16, body: &str) -> bool {
             return code == 0; // 企微
         }
         if let Some(code) = v.get("code").and_then(|x| x.as_i64()) {
-            return code == 0; // 飞书/PushPlus
+            return code == 0 || code == 200; // 飞书=0 / PushPlus=200（Python `_is_ok` 同 (0,200)）
         }
         if let Some(ok) = v.get("success").and_then(|x| x.as_bool()) {
             return ok;
@@ -179,14 +197,31 @@ pub fn is_ok(_ch: Channel, status: u16, body: &str) -> bool {
     true // 无业务码：HTTP 2xx 即成功
 }
 
-/// 构造请求体（与 Python 各渠道 payload 等价）
-pub fn build_body(ch: Channel, text: &str) -> Value {
+/// 告警标题（Python alert_title 等价：LS_ALERT_TEMPLATE_TITLE 模板，{level} 替换；
+/// 未知占位符按 Python SafeDict 语义原样保留）
+pub fn alert_title(level: i64) -> String {
+    let tpl = env_str("LS_ALERT_TEMPLATE_TITLE");
+    let tpl = if tpl.is_empty() {
+        "LabSentinel 级别{level}告警".to_string()
+    } else {
+        tpl
+    };
+    tpl.replace("{level}", &level.to_string())
+}
+
+/// 构造请求体（与 Python 各渠道 payload 等价；PushPlus 带 token + 模板标题）
+pub fn build_body(ch: Channel, level: i64, text: &str, cfg: &ChannelConfig) -> Value {
     match ch {
         Channel::Wecom => json!({"msgtype": "text", "text": {"content": text}}),
         Channel::Dingtalk => json!({"msgtype": "text", "text": {"content": text}}),
         Channel::Feishu => json!({"msg_type": "text", "content": {"text": text}}),
         Channel::Serverchan => json!({"text": "LabSentinel", "desp": text}),
-        Channel::Pushplus => json!({"content": text, "template": "txt"}),
+        Channel::Pushplus => json!({
+            "token": cfg.token,
+            "title": alert_title(level),
+            "content": text,
+            "template": "txt",
+        }),
         Channel::Qmsg => json!({"msg": text}),
         Channel::Email | Channel::Webhook => json!({"text": text}),
     }
@@ -247,7 +282,11 @@ pub struct Delivery {
 }
 
 /// 单渠道投递（真实 HTTP；失败按 Python RETRY_BACKOFF=[1,4,15] 重试）。
-pub fn deliver(ch: Channel, cfg: &ChannelConfig, text: &str) -> Delivery {
+/// Email 渠道不走 HTTP，转 `deliver_email`（由派发层路由）。
+pub fn deliver(ch: Channel, cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
+    if ch == Channel::Email {
+        return deliver_email(cfg, level, text);
+    }
     if let Err(e) = check_url(ch, &cfg.url, cfg.allow_http) {
         return Delivery {
             ok: false,
@@ -255,25 +294,31 @@ pub fn deliver(ch: Channel, cfg: &ChannelConfig, text: &str) -> Delivery {
             error: Some(e),
         };
     }
-    let body = build_body(ch, text).to_string();
     let mut error = None;
     for attempt in 0..4u32 {
-        let mut req = ureq::post(&cfg.url).set("Content-Type", "application/json");
-        if ch == Channel::Webhook {
-            let ts = unix_secs().to_string();
-            req = req.set("X-LS-Event", "alert").set("X-LS-Timestamp", &ts);
-            if !cfg.secret.is_empty() {
-                let sig = format!("sha256={}", hmac_sha256_hex(&cfg.secret, body.as_bytes()));
-                req = req.set("X-LS-Signature", &sig);
+        // Python httpx timeout=5 同口径
+        let req = ureq::post(&cfg.url).timeout(Duration::from_secs(5));
+        let (status, resp_body) = match ch {
+            // Qmsg：表单 qq+msg（Python data= dict 同口径）
+            Channel::Qmsg => resp_body(req.send_form(&[("qq", cfg.qq.as_str()), ("msg", text)])),
+            _ => {
+                let body = build_body(ch, level, text, cfg).to_string();
+                let req = req.set("Content-Type", "application/json");
+                let req = if ch == Channel::Webhook {
+                    let ts = unix_secs().to_string();
+                    let r = req.set("X-LS-Event", "alert").set("X-LS-Timestamp", &ts);
+                    if !cfg.secret.is_empty() {
+                        let sig =
+                            format!("sha256={}", hmac_sha256_hex(&cfg.secret, body.as_bytes()));
+                        r.set("X-LS-Signature", &sig)
+                    } else {
+                        r
+                    }
+                } else {
+                    req
+                };
+                resp_body(req.send_string(&body))
             }
-        }
-        let resp = req.send_string(&body);
-        let (status, resp_body) = match resp {
-            Ok(r) => {
-                let st = r.status();
-                (st, r.into_string().unwrap_or_default())
-            }
-            Err(e) => (0, e.to_string()),
         };
         if is_ok(ch, status, &resp_body) {
             return Delivery {
@@ -298,11 +343,128 @@ pub fn deliver(ch: Channel, cfg: &ChannelConfig, text: &str) -> Delivery {
     }
 }
 
+fn resp_body(r: Result<ureq::Response, ureq::Error>) -> (u16, String) {
+    match r {
+        Ok(resp) => {
+            let st = resp.status();
+            (st, resp.into_string().unwrap_or_default())
+        }
+        Err(e) => (0, e.to_string()),
+    }
+}
+
 fn unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// 邮件正文/信头构造（Python EmailChannel 同口径：MIME plain utf-8、
+/// 主题 `[LabSentinel] 级别{level}告警`、From=smtp_user、To=alert_email_to）。
+pub fn build_email(level: i64, text: &str, cfg: &EmailConfig) -> Result<lettre::Message, String> {
+    let from = if cfg.user.is_empty() {
+        "labsentinel@localhost".to_string()
+    } else {
+        cfg.user.clone()
+    };
+    lettre::Message::builder()
+        .from(from.parse().map_err(|e| format!("from 地址非法: {e}"))?)
+        .to(cfg.to.parse().map_err(|e| format!("to 地址非法: {e}"))?)
+        .subject(format!("[LabSentinel] 级别{level}告警"))
+        .body(text.to_string())
+        .map_err(|e| format!("邮件构造失败: {e}"))
+}
+
+/// T-210（F-08）：security=none 仅允许私网/回环 SMTP（明文口令风险）。
+/// Python ipaddress.is_private 的 IPv4 语义 + IPv6 ULA fc00::/7。
+fn is_private_host(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(mut addrs) = (host, 0u16).to_socket_addrs() else {
+        return false; // 解析失败按不允许处理（与 Python gethostbyname 抛错路径等价）
+    };
+    addrs.any(|a| match a.ip() {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    })
+}
+
+/// 邮件渠道投递（单次尝试，与 Python 无重试同口径；超时 10s）。
+pub fn deliver_email(cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
+    let ec = &cfg.email;
+    if ec.host.is_empty() || ec.to.is_empty() {
+        return Delivery {
+            ok: false,
+            attempts: 0,
+            error: Some("email 未配置（host/to 缺失）".into()),
+        };
+    }
+    let email = match build_email(level, text, ec) {
+        Ok(m) => m,
+        Err(e) => {
+            return Delivery {
+                ok: false,
+                attempts: 0,
+                error: Some(e),
+            }
+        }
+    };
+    let build = |f: Result<
+        lettre::transport::smtp::SmtpTransportBuilder,
+        lettre::transport::smtp::Error,
+    >| { f.map(|b| b.port(ec.port)).map_err(|e| format!("{e}")) };
+    let builder = match ec.security.to_ascii_lowercase().as_str() {
+        "ssl" => build(lettre::SmtpTransport::relay(&ec.host)),
+        "starttls" => build(lettre::SmtpTransport::starttls_relay(&ec.host)),
+        "none" => {
+            if !is_private_host(&ec.host) {
+                return Delivery {
+                    ok: false,
+                    attempts: 0,
+                    error: Some("LS_SMTP_SECURITY=none 仅允许私网 SMTP（明文口令风险）".into()),
+                };
+            }
+            Ok(lettre::SmtpTransport::builder_dangerous(&ec.host).port(ec.port))
+        }
+        other => {
+            return Delivery {
+                ok: false,
+                attempts: 0,
+                error: Some(format!("未知 LS_SMTP_SECURITY: {other}")),
+            }
+        }
+    };
+    let builder = match builder {
+        Ok(b) => b,
+        Err(e) => {
+            return Delivery {
+                ok: false,
+                attempts: 0,
+                error: Some(format!("SMTP 传输构造失败: {e}")),
+            }
+        }
+    };
+    let builder = if !ec.user.is_empty() {
+        builder.credentials(lettre::transport::smtp::authentication::Credentials::new(
+            ec.user.clone(),
+            ec.pass.clone(),
+        ))
+    } else {
+        builder
+    };
+    let transport = builder.timeout(Some(Duration::from_secs(10))).build();
+    match transport.send(&email) {
+        Ok(_) => Delivery {
+            ok: true,
+            attempts: 1,
+            error: None,
+        },
+        Err(e) => Delivery {
+            ok: false,
+            attempts: 1,
+            error: Some(format!("send failed: {e}")),
+        },
+    }
 }
 
 /// 对原始请求体字节做 HMAC-SHA256（Python GenericWebhookChannel 同口径）。
@@ -324,41 +486,88 @@ fn env_str(key: &str) -> String {
 
 /// 从环境变量构造已配置渠道（与 Python settings 同名）。
 ///
-/// T-330 只接线 URL 型渠道（企微/钉钉/飞书/Server酱/通用 Webhook）；
-/// PushPlus/Qmsg/邮件需要额外凭据字段与 SMTP 客户端，由后续 L2 波次补齐。
+/// T-329：8 渠道全量接线——PushPlus（token）/Qmsg（key+qq）/Email（SMTP）。
 pub fn channels_from_env() -> Vec<(Channel, ChannelConfig)> {
     let mut out = Vec::new();
-    let mut push = |ch: Channel, url: &str, allow_http: bool, secret: &str| {
-        let url = url.trim();
-        if url.is_empty() {
-            return;
-        }
-        out.push((
-            ch,
-            ChannelConfig {
-                url: url.to_string(),
-                secret: secret.trim().to_string(),
-                allow_http,
-                ..Default::default()
-            },
-        ));
-    };
-    push(Channel::Wecom, &env_str("LS_WECOM_WEBHOOK"), false, "");
-    push(
+    push_url(
+        &mut out,
+        Channel::Wecom,
+        &env_str("LS_WECOM_WEBHOOK"),
+        false,
+        "",
+    );
+    push_url(
+        &mut out,
         Channel::Dingtalk,
         &env_str("LS_DINGTALK_WEBHOOK"),
         false,
         "",
     );
-    push(Channel::Feishu, &env_str("LS_FEISHU_WEBHOOK"), false, "");
+    push_url(
+        &mut out,
+        Channel::Feishu,
+        &env_str("LS_FEISHU_WEBHOOK"),
+        false,
+        "",
+    );
     let sendkey = env_str("LS_SERVERCHAN_SENDKEY");
     if !sendkey.trim().is_empty() {
-        push(
+        push_url(
+            &mut out,
             Channel::Serverchan,
             &format!("https://sctapi.ftqq.com/{}.send", sendkey.trim()),
             false,
             "",
         );
+    }
+    let pushplus = env_str("LS_PUSHPLUS_TOKEN");
+    if !pushplus.trim().is_empty() {
+        out.push((
+            Channel::Pushplus,
+            ChannelConfig {
+                url: "https://www.pushplus.plus/send".into(),
+                token: pushplus.trim().to_string(),
+                ..Default::default()
+            },
+        ));
+    }
+    let (qkey, qqq) = (env_str("LS_QMSG_KEY"), env_str("LS_QMSG_QQ"));
+    if !qkey.trim().is_empty() && !qqq.trim().is_empty() {
+        out.push((
+            Channel::Qmsg,
+            ChannelConfig {
+                url: format!("https://qmsg.zendee.cn/send/{}", percent_encode(&qkey)),
+                qq: qqq.trim().to_string(),
+                ..Default::default()
+            },
+        ));
+    }
+    let eh = env_str("LS_SMTP_HOST");
+    let eto = env_str("LS_ALERT_EMAIL_TO");
+    if !eh.trim().is_empty() && !eto.trim().is_empty() {
+        let port = env_str("LS_SMTP_PORT").trim().parse::<u16>().unwrap_or(465); // Python settings.smtp_port 默认 465
+        let security = {
+            let s = env_str("LS_SMTP_SECURITY").trim().to_ascii_lowercase();
+            if s.is_empty() {
+                "ssl".to_string()
+            } else {
+                s
+            }
+        };
+        out.push((
+            Channel::Email,
+            ChannelConfig {
+                email: EmailConfig {
+                    host: eh.trim().to_string(),
+                    port,
+                    user: env_str("LS_SMTP_USER").trim().to_string(),
+                    pass: env_str("LS_SMTP_PASS"),
+                    to: eto.trim().to_string(),
+                    security,
+                },
+                ..Default::default()
+            },
+        ));
     }
     let allow_http = matches!(
         env_str("LS_WEBHOOK_ALLOW_HTTP")
@@ -366,12 +575,49 @@ pub fn channels_from_env() -> Vec<(Channel, ChannelConfig)> {
             .as_str(),
         "1" | "true" | "yes" | "on"
     );
-    push(
+    push_url(
+        &mut out,
         Channel::Webhook,
         &env_str("LS_WEBHOOK_URL"),
         allow_http,
         &env_str("LS_WEBHOOK_SECRET"),
     );
+    out
+}
+
+fn push_url(
+    out: &mut Vec<(Channel, ChannelConfig)>,
+    ch: Channel,
+    url: &str,
+    allow_http: bool,
+    secret: &str,
+) {
+    let url = url.trim();
+    if url.is_empty() {
+        return;
+    }
+    out.push((
+        ch,
+        ChannelConfig {
+            url: url.to_string(),
+            secret: secret.trim().to_string(),
+            allow_http,
+            ..Default::default()
+        },
+    ));
+}
+
+/// Qmsg key 的路径段编码（Python `quote(key, safe='')` 等价：RFC 3986 保留集外全编码）。
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
     out
 }
 
