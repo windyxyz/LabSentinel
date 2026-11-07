@@ -35,8 +35,11 @@ def test_system_200_and_preload_error_when_model_missing(tmp_path, monkeypatch):
         body = r.json()
         assert "components" in body and "engine" in body["components"]
         from app.engine import default_backend_order
-        want0 = (settings.backend_order or default_backend_order()).split(",")[0].strip()
-        assert body["backend"] == want0  # T-603：空配置=平台默认首项
+        order = (settings.backend_order or default_backend_order()).split(",")
+        want0 = order[0].strip()
+        # T-603：空配置=按平台默认顺序取**首个可用**后端——directml 包未装（T-328 方案 A
+        # 统一 onnxruntime 1.31.1 后 Windows 走 CPU EP）时实际探测结果为 cpu。
+        assert body["backend"] in (want0, "cpu"), (body["backend"], want0)
         # 同步等待后台预热结果
         eng_mod.PRELOAD.update(state="idle", backend=None, error=None)
         eng_mod.preload_async()

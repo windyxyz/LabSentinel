@@ -135,17 +135,28 @@ pub fn run_golden(args: &GoldenArgs) -> Result<usize, String> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=r_frame_rate",
+            "stream=r_frame_rate,width,height",
             "-of",
             "csv=p=0",
         ])
         .arg(&args.video)
         .output()
         .map_err(|e| format!("ffprobe 不可用: {e}"))?;
-    let rate = String::from_utf8_lossy(&probe.stdout);
-    let (num, den) = rate
-        .trim()
-        .split_once('/')
+    // csv 输出：<width>,<height>,<rate>（ffprobe 按内部字段序输出）
+    let line = String::from_utf8_lossy(&probe.stdout);
+    let first = line.lines().next().ok_or("ffprobe 输出为空")?;
+    let mut it = first.trim().split(',');
+    let src_w: u32 = it
+        .next()
+        .and_then(|v| v.trim().parse().ok())
+        .ok_or("ffprobe 输出异常（宽）")?;
+    let src_h: u32 = it
+        .next()
+        .and_then(|v| v.trim().parse().ok())
+        .ok_or("ffprobe 输出异常（高）")?;
+    let (num, den) = it
+        .next()
+        .and_then(|r| r.trim().split_once('/'))
         .ok_or("ffprobe 输出异常（帧率）")?;
     let vfps: f64 = num.trim().parse::<f64>().map_err(|e| e.to_string())?
         / den.trim().parse::<f64>().map_err(|e| e.to_string())?;
@@ -160,12 +171,13 @@ pub fn run_golden(args: &GoldenArgs) -> Result<usize, String> {
 
     let mut ing = ls_ingest::Ingest::new(ls_ingest::IngestConfig {
         source: args.video.to_string_lossy().to_string(),
-        // 黄金语料对齐 Python（cv2）逐帧口径：analysis_fps=0 → 不加 ffmpeg fps 滤镜，
-        // 纯顺序解码（帧号/PTS 不重排），由本循环按 step = round(vfps/analysis_fps) 抽帧。
-        // 注：fps 滤镜对 VFR/首帧 PTS≠0 的视频会重排帧序，与 cv2 顺序解码错位。
+        // 黄金语料对齐 Python（cv2）两级缩放口径：analysis_fps=0 → ffmpeg **纯解码**
+        //（无 fps/scale 滤镜，帧序/PTS/源分辨率不重排），输出源分辨率原始帧；
+        // 第一级 720p 缩放由本循环用 resize_u8_linear_cv2（cv2 逐位复刻）完成——
+        // ffmpeg swscale 与 cv2.resize 的插值差是此前 conf 偏差的第三级根因。
         analysis_fps: 0.0,
-        width: 1280,
-        height: 720,
+        width: src_w,
+        height: src_h,
         file_loop: false,
         rtsp_transport_tcp: true,
     });
@@ -186,8 +198,22 @@ pub fn run_golden(args: &GoldenArgs) -> Result<usize, String> {
             continue; // 与 Python golden_run 同口径：按帧序号抽帧
         }
         analyzed += 1;
+        // 第一级缩放（对齐 Python golden_run 的 cv2.resize(frame, (1280, 720))）：
+        // 源帧 != 720p 时用 cv2 逐位复刻缩放；已是 720p 则原样。
+        let work = if frame.width == 1280 && frame.height == 720 {
+            frame
+        } else {
+            let resized =
+                ls_infer::yolo::resize_u8_linear_cv2(&frame.data, frame.width, frame.height, 1280, 720, 3);
+            ls_ingest::Frame {
+                width: 1280,
+                height: 720,
+                data: resized,
+                index: frame.index,
+            }
+        };
         let dets: Vec<PersonDetection> = detector
-            .detect(&frame)
+            .detect(&work)
             .into_iter()
             .map(|d| PersonDetection {
                 box_: d.box_,

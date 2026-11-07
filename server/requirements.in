@@ -6,7 +6,10 @@ uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 pydantic>=2.7
 pydantic-settings>=2.2
-onnxruntime-directml>=1.17 ; sys_platform == "win32"
+# T-328/L1：Windows 与 Linux/CUDA 统一 onnxruntime 1.31.1（与 Rust ort 后端同引擎
+# 版本——黄金语料事件一致率 >=98% 的前提）。directml 包无 1.31 wheel（停在 1.24.4），
+# Windows 推理回落 CPU EP（Engine 注册表自动降级 directml->cpu）。
+onnxruntime==1.31.1 ; sys_platform == "win32"
 onnxruntime>=1.17 ; sys_platform != "win32"
 opencv-python-headless>=4.9
 supervision==0.25.1

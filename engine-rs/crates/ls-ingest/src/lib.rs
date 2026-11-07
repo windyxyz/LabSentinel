@@ -80,23 +80,26 @@ impl Ingest {
         }
         c.arg("-i")
             .arg(&self.cfg.source)
-            .args(["-an", "-sn", "-dn"])
-            .args(["-vf", &self.filter_chain()])
-            .args(["-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]);
+            .args(["-an", "-sn", "-dn"]);
+        if let Some(vf) = self.filter_chain() {
+            c.args(["-vf", &vf]);
+        }
+        c.args(["-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]);
         c
     }
 
     /// 视频滤镜链：analysis_fps > 0 时 `fps,scale`（与 Python CameraWorker 语义一致，
-    /// 由 ffmpeg 抽帧）；`analysis_fps == 0` 时仅 `scale`——**纯顺序解码**（与 cv2
-    /// 逐帧读取一致，帧号与 PTS 不经 fps 滤镜重排；黄金语料对齐模式使用）。
-    fn filter_chain(&self) -> String {
+    /// 由 ffmpeg 抽帧+缩放）；`analysis_fps == 0` 时**纯解码**（无 -vf：帧序/PTS/原始
+    /// 分辨率都不经 swscale 重排，输出源分辨率——黄金语料逐位对齐模式，调用方自行缩放）。
+    /// 返回 None = 不加 -vf。
+    fn filter_chain(&self) -> Option<String> {
         if self.cfg.analysis_fps > 0.0 {
-            format!(
+            Some(format!(
                 "fps={},scale={}:{}",
                 self.cfg.analysis_fps, self.cfg.width, self.cfg.height
-            )
+            ))
         } else {
-            format!("scale={}:{}", self.cfg.width, self.cfg.height)
+            None
         }
     }
 
