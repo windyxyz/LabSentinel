@@ -48,10 +48,12 @@ pub fn predict(mean: [f64; STATE_DIM], cov: &Mat8) -> ([f64; STATE_DIM], Mat8) {
         (STD_WEIGHT_POSITION * h).powi(2),
         1e-2f64.powi(2),
         (STD_WEIGHT_POSITION * h).powi(2),
-        (10.0 * STD_WEIGHT_VELOCITY * h).powi(2),
-        (10.0 * STD_WEIGHT_VELOCITY * h).powi(2),
+        // supervision predict() 的 std_vel 无 10× 系数（10× 仅在 initiate）——
+        // 误带 10× 会把速度方差放大 100 倍，速度增益被压小、预测框滞后（L1 f52 实测）
+        (STD_WEIGHT_VELOCITY * h).powi(2),
+        (STD_WEIGHT_VELOCITY * h).powi(2),
         1e-5f64.powi(2),
-        (10.0 * STD_WEIGHT_VELOCITY * h).powi(2),
+        (STD_WEIGHT_VELOCITY * h).powi(2),
     ]);
     let mut new_mean = [0.0f64; STATE_DIM];
     for i in 0..STATE_DIM {

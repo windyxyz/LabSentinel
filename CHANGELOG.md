@@ -40,6 +40,10 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-324/L1：Rust ByteTrack（ls-track）对齐 supervision 0.25.1 至**黄金语料逐帧一致**
+  （322/322 帧：轨迹 + KF 状态）——修 KF 预测 Q 速度项 10× 误系数、removed 列表
+  滞后一帧账本 quirk、补齐 `update_with_detections` 末段独立 match-back（f64 IoU +
+  LAP 阈 0.5）；回放测试转正为回归门禁（testdata/vectors/real-big.json）。
 - T-710：MQTT payload v1 `zones` 填事件关联区域名（原恒空占位）；dispatcher 从 detail 反查。
 - T-336：/api/metrics 增 `labsentinel_cameras{analyzer=...}`、`engine_state`、
   `events_total` ——迁移期按分析器实现对比 fps/事件率，支撑灰度决策。

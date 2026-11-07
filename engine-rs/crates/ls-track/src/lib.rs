@@ -66,11 +66,12 @@ impl STrack {
         }
     }
 
-    fn tlwh(&self) -> [f32; 4] {
+    /// Python `tlwh` 属性的 float64 版本（mean 全程 f64 运算；mean 为空时取 f32 观测升格）
+    fn tlwh_f64(&self) -> [f64; 4] {
         match self.mean {
-            None => self.raw_tlwh,
+            None => self.raw_tlwh.map(f64::from),
             Some(m) => {
-                let mut ret = [m[0] as f32, m[1] as f32, m[2] as f32, m[3] as f32];
+                let mut ret = [m[0], m[1], m[2], m[3]];
                 ret[2] *= ret[3];
                 ret[0] -= ret[2] / 2.0;
                 ret[1] -= ret[3] / 2.0;
@@ -79,8 +80,8 @@ impl STrack {
         }
     }
 
-    fn tlbr(&self) -> [f32; 4] {
-        let t = self.tlwh();
+    fn tlbr_f64(&self) -> [f64; 4] {
+        let t = self.tlwh_f64();
         [t[0], t[1], t[0] + t[2], t[1] + t[3]]
     }
 
@@ -120,7 +121,21 @@ impl STrack {
         let m = self.mean.take().unwrap();
         let c = self.covariance.take().unwrap();
         let tlwh64: [f64; 4] = tlbr_to_tlwh(det.box_).map(|v| v as f64);
+        if std::env::var("LS_DEBUG_STATE").is_ok() {
+            let diag: Vec<f64> = (0..8).map(|i| c.0[i][i]).collect();
+            eprintln!(
+                "[kf] f={frame_id} pre_mean={:.4},{:.4},{:.6},{:.4} pre_cov_diag={diag:?} det_tlwh={tlwh64:?}",
+                m[0], m[1], m[2], m[3],
+            );
+        }
         let (nm, nc) = kalman::update(m, &c, tlwh_to_xyah_f64(tlwh64));
+        if std::env::var("LS_DEBUG_STATE").is_ok() {
+            let diag: Vec<f64> = (0..8).map(|i| nc.0[i][i]).collect();
+            eprintln!(
+                "[kf] f={frame_id} post_mean={:.4},{:.4},{:.6},{:.4} post_cov_diag={diag:?}",
+                nm[0], nm[1], nm[2], nm[3],
+            );
+        }
         self.mean = Some(nm);
         self.covariance = Some(nc);
         self.state = TrackState::Tracked;
@@ -201,7 +216,8 @@ pub fn tlwh_to_xyah(t: [f32; 4]) -> [f32; 4] {
     [t[0] + t[2] / 2.0, t[1] + t[3] / 2.0, t[2] / t[3], t[3]]
 }
 
-fn box_iou(a: [f32; 4], b: [f32; 4]) -> f32 {
+/// box_iou_batch 的 f64 版本（标准公式，分母 ≤0 → 0，对齐 nan_to_num）。
+fn box_iou_f64(a: [f64; 4], b: [f64; 4]) -> f64 {
     let area_a = (a[2] - a[0]) * (a[3] - a[1]);
     let area_b = (b[2] - b[0]) * (b[3] - b[1]);
     let tl_x = a[0].max(b[0]);
@@ -210,16 +226,17 @@ fn box_iou(a: [f32; 4], b: [f32; 4]) -> f32 {
     let br_y = (a[3]).min(b[3]);
     let inter = (br_x - tl_x).max(0.0) * (br_y - tl_y).max(0.0);
     let denom = area_a + area_b - inter;
-    if denom <= 0.0 {
+    if denom <= 0.0 || !inter.is_finite() {
         0.0
     } else {
         inter / denom
     }
 }
 
-fn iou_cost_matrix(a: &[[f32; 4]], b: &[[f32; 4]]) -> Vec<Vec<f32>> {
+/// matching.iou_distance 的 dtype 流：f64 框 → f64 IoU → **f32 降级** → 1−iou（f32）。
+fn iou_cost_matrix_f64(a: &[[f64; 4]], b: &[[f64; 4]]) -> Vec<Vec<f32>> {
     a.iter()
-        .map(|x| b.iter().map(|y| 1.0 - box_iou(*x, *y)).collect())
+        .map(|x| b.iter().map(|y| 1.0 - box_iou_f64(*x, *y) as f32).collect())
         .collect()
 }
 
@@ -236,35 +253,57 @@ fn fuse_score(mut cost: Vec<Vec<f32>>, dets: &[f32]) -> Vec<Vec<f32>> {
     cost
 }
 
+/// KM 数值域（f32=关联轮次路径 / f64=回配路径，对齐 numpy dtype 流）
+trait KmFloat: Copy + PartialOrd + std::ops::Add<Output = Self> + std::ops::Sub<Output = Self> {
+    const INF: Self;
+    const PAD: Self;
+    const CLAMP_EPS: Self;
+    fn zero() -> Self;
+}
+impl KmFloat for f32 {
+    const INF: Self = f32::INFINITY;
+    const PAD: Self = 1e6;
+    const CLAMP_EPS: Self = 1e-4;
+    fn zero() -> Self {
+        0.0
+    }
+}
+impl KmFloat for f64 {
+    const INF: Self = f64::INFINITY;
+    const PAD: Self = 1e6;
+    const CLAMP_EPS: Self = 1e-4;
+    fn zero() -> Self {
+        0.0
+    }
+}
+
 /// Kuhn-Munkres 最优指派（方阵化 padding，O(n³)），等价 scipy linear_sum_assignment。
-fn linear_sum_assignment(cost: &[Vec<f32>]) -> Vec<(usize, usize)> {
+fn linear_sum_assignment<T: KmFloat>(cost: &[Vec<T>]) -> Vec<(usize, usize)> {
     let n = cost.len().max(cost.first().map(|r| r.len()).unwrap_or(0));
     if n == 0 {
         return vec![];
     }
-    const INF: f32 = f32::INFINITY;
     // 非方阵填充：用大代价（而非 0）占位——否则虚拟行会以 0 代价抢走真实列，
     // 与 scipy linear_sum_assignment 的矩形语义不一致（真实检测回归发现）。
-    const PAD: f32 = 1e6;
-    let mut a = vec![vec![PAD; n]; n];
+    let mut a = vec![vec![T::PAD; n]; n];
     for i in 0..cost.len() {
         for j in 0..cost[i].len() {
             a[i][j] = cost[i][j];
         }
     }
-    let mut u = vec![0.0f32; n + 1];
-    let mut v = vec![0.0f32; n + 1];
+    let mut u = vec![T::zero(); n + 1];
+    let mut v = vec![T::zero(); n + 1];
     let mut p = vec![0usize; n + 1];
     let mut way = vec![0usize; n + 1];
     for i in 1..=n {
         p[0] = i;
         let mut j0 = 0usize;
-        let mut minv = vec![INF; n + 1];
+        let mut minv = vec![T::INF; n + 1];
         let mut used = vec![false; n + 1];
         loop {
             used[j0] = true;
             let i0 = p[j0];
-            let mut delta = INF;
+            let mut delta = T::INF;
             let mut j1 = 0usize;
             for j in 1..=n {
                 if !used[j] {
@@ -281,10 +320,10 @@ fn linear_sum_assignment(cost: &[Vec<f32>]) -> Vec<(usize, usize)> {
             }
             for j in 0..=n {
                 if used[j] {
-                    u[p[j]] += delta;
-                    v[j] -= delta;
+                    u[p[j]] = u[p[j]] + delta;
+                    v[j] = v[j] - delta;
                 } else {
-                    minv[j] -= delta;
+                    minv[j] = minv[j] - delta;
                 }
             }
             j0 = j1;
@@ -311,10 +350,10 @@ fn linear_sum_assignment(cost: &[Vec<f32>]) -> Vec<(usize, usize)> {
 }
 
 /// matching.linear_assignment：钳制 + 最优指派 + 阈值截断。
-fn linear_assignment_thresh(
-    cost: Vec<Vec<f32>>,
+fn linear_assignment_thresh<T: KmFloat>(
+    cost: Vec<Vec<T>>,
     cols: usize,
-    thresh: f32,
+    thresh: T,
 ) -> (Vec<(usize, usize)>, Vec<usize>, Vec<usize>) {
     let rows = cost.len();
     // cols 由调用方显式传入：空池时 cost 形状 (0,0)，first() 推不出列数
@@ -326,7 +365,7 @@ fn linear_assignment_thresh(
     for row in clamped.iter_mut() {
         for c in row.iter_mut() {
             if *c > thresh {
-                *c = thresh + 1e-4;
+                *c = thresh + T::CLAMP_EPS;
             }
         }
     }
@@ -427,9 +466,7 @@ impl ByteTrack {
         let mut activated: Vec<usize> = vec![];
         let mut refind: Vec<usize> = vec![];
 
-        // L1：输入检测序 → track external_id（supervision 语义：输出=输入检测框原样，
-        // IoU>=0.5 回填 id；未关联检测被丢弃）
-        let mut det_assign: Vec<Option<i64>> = vec![None; detections.len()];
+        // L1：输出=输入检测框原样 × 回配 tracker_id（见 update() 末段 match-back）
         let mut dets_high: Vec<(usize, Detection)> = vec![];
         let mut dets_second: Vec<(usize, Detection)> = vec![];
         for (di, d) in detections.iter().enumerate() {
@@ -465,30 +502,38 @@ impl ByteTrack {
             };
             STrack::multi_predict(t);
         }
-        let pool_tlbrs: Vec<[f32; 4]> = pool
+        let pool_tlbrs: Vec<[f64; 4]> = pool
             .iter()
             .map(|(i, is_t)| {
                 if *is_t {
-                    self.tracked[*i].tlbr()
+                    self.tracked[*i].tlbr_f64()
                 } else {
-                    self.lost[*i].tlbr()
+                    self.lost[*i].tlbr_f64()
                 }
             })
             .collect();
-        let det_tlbrs: Vec<[f32; 4]> = dets_high.iter().map(|(_, d)| d.box_).collect();
+        let det_tlbrs: Vec<[f64; 4]> = dets_high
+            .iter()
+            .map(|(_, d)| d.box_.map(f64::from))
+            .collect();
         let det_scores: Vec<f32> = dets_high.iter().map(|(_, d)| d.score).collect();
-        let cost = fuse_score(iou_cost_matrix(&pool_tlbrs, &det_tlbrs), &det_scores);
+        let cost = fuse_score(iou_cost_matrix_f64(&pool_tlbrs, &det_tlbrs), &det_scores);
+        let cost_dbg: Vec<Vec<f32>> = cost
+            .iter()
+            .map(|r| r.iter().map(|v| (v * 1000.0).round() / 1000.0).collect())
+            .collect();
         let (matches, u_track, u_detection) =
             linear_assignment_thresh(cost, dets_high.len(), self.cfg.minimum_matching_threshold);
         if std::env::var("LS_DEBUG_MATCH").is_ok() {
             eprintln!(
-                "[match] frame={frame_id} pool={:?} dets={:?} matches={matches:?} u_track={u_track:?} u_det={u_detection:?}",
+                "[match] frame={frame_id} pool={:?} dets={:?} matches={matches:?} u_track={u_track:?} u_det={u_detection:?} pool_tlbrs={pool_tlbrs:?} det_tlbrs={det_tlbrs:?} cost={:?}",
                 pool.iter().map(|(i, tr)| {
                     let t = if *tr { &self.tracked[*i] } else { &self.lost[*i] };
                     (t.external_track_id, t.state as i32)
                 })
                 .collect::<Vec<_>>(),
                 dets_high.iter().map(|(i, d)| (*i, d.score)).collect::<Vec<_>>(),
+                cost_dbg,
             );
         }
 
@@ -501,13 +546,11 @@ impl ByteTrack {
             };
             if t.state == TrackState::Tracked {
                 t.update(&dets_high[idet].1, frame_id, &mut self.external_counter);
-                det_assign[dets_high[idet].0] = Some(t.external_track_id);
                 if is_t {
                     activated.push(i);
                 }
             } else {
                 t.re_activate(&dets_high[idet].1, frame_id);
-                det_assign[dets_high[idet].0] = Some(t.external_track_id);
                 if is_t {
                     refind.push(i);
                 }
@@ -526,18 +569,21 @@ impl ByteTrack {
                 }
             })
             .collect();
-        let r_tlbrs: Vec<[f32; 4]> = r_tracked
+        let r_tlbrs: Vec<[f64; 4]> = r_tracked
             .iter()
             .map(|(i, is_t)| {
                 if *is_t {
-                    self.tracked[*i].tlbr()
+                    self.tracked[*i].tlbr_f64()
                 } else {
-                    self.lost[*i].tlbr()
+                    self.lost[*i].tlbr_f64()
                 }
             })
             .collect();
-        let second_tlbrs: Vec<[f32; 4]> = dets_second.iter().map(|(_, d)| d.box_).collect();
-        let cost2 = iou_cost_matrix(&r_tlbrs, &second_tlbrs);
+        let second_tlbrs: Vec<[f64; 4]> = dets_second
+            .iter()
+            .map(|(_, d)| d.box_.map(f64::from))
+            .collect();
+        let cost2 = iou_cost_matrix_f64(&r_tlbrs, &second_tlbrs);
         let (matches2, u_track2, _u_det2) = linear_assignment_thresh(cost2, dets_second.len(), 0.5);
         for (itracked, idet) in matches2 {
             let (i, is_t) = r_tracked[itracked];
@@ -548,13 +594,11 @@ impl ByteTrack {
             };
             if t.state == TrackState::Tracked {
                 t.update(&dets_second[idet].1, frame_id, &mut self.external_counter);
-                det_assign[dets_second[idet].0] = Some(t.external_track_id);
                 if is_t {
                     activated.push(i);
                 }
             } else {
                 t.re_activate(&dets_second[idet].1, frame_id);
-                det_assign[dets_second[idet].0] = Some(t.external_track_id);
                 if is_t {
                     refind.push(i);
                 }
@@ -575,13 +619,16 @@ impl ByteTrack {
         // 第三轮：unconfirmed vs 剩余高分
         let remaining: Vec<(usize, Detection)> =
             u_detection.iter().map(|&i| dets_high[i]).collect();
-        let unconf_tlbrs: Vec<[f32; 4]> = unconfirmed_idx
+        let unconf_tlbrs: Vec<[f64; 4]> = unconfirmed_idx
             .iter()
-            .map(|&i| self.tracked[i].tlbr())
+            .map(|&i| self.tracked[i].tlbr_f64())
             .collect();
-        let rem_tlbrs: Vec<[f32; 4]> = remaining.iter().map(|(_, d)| d.box_).collect();
+        let rem_tlbrs: Vec<[f64; 4]> = remaining
+            .iter()
+            .map(|(_, d)| d.box_.map(f64::from))
+            .collect();
         let rem_scores: Vec<f32> = remaining.iter().map(|(_, d)| d.score).collect();
-        let cost3 = fuse_score(iou_cost_matrix(&unconf_tlbrs, &rem_tlbrs), &rem_scores);
+        let cost3 = fuse_score(iou_cost_matrix_f64(&unconf_tlbrs, &rem_tlbrs), &rem_scores);
         if std::env::var("LS_DEBUG_MATCH").is_ok() {
             eprintln!(
                 "[round3] frame={frame_id} unconf={:?} rem={:?} cost3={:?}",
@@ -609,7 +656,6 @@ impl ByteTrack {
         for (itracked, idet) in matches3 {
             let i = unconfirmed_idx[itracked];
             self.tracked[i].update(&remaining[idet].1, frame_id, &mut self.external_counter);
-            det_assign[remaining[idet].0] = Some(self.tracked[i].external_track_id);
             activated.push(i);
         }
         for &k in u_unconf.iter() {
@@ -639,9 +685,6 @@ impl ByteTrack {
                     track.external_track_id, track.is_activated, remaining[k].1.box_
                 );
             }
-            if track.is_activated {
-                det_assign[remaining[k].0] = Some(track.external_track_id);
-            }
             self.tracked.push(track);
         }
 
@@ -653,15 +696,19 @@ impl ByteTrack {
         }
 
         // 状态收敛（对应 Python 末段 tracked/lost/removed 重组 + joint/sub 语义）：
-        // tracked 里转 Lost/Removed 的移出；lost 里 re_activate 成 Tracked 的移回
+        // tracked 里转 Lost/Removed 的移出；lost 里 re_activate 成 Tracked 的移回。
+        // Python 账本 quirk（core.py 末段）：`lost = sub(lost, removed_OLD)` 用的是
+        // **上一帧**的 removed 列表，`removed = 本帧 removed_stracks` 在其后才赋值——
+        // 本帧超时标记 Removed 的 lost 轨**滞留一帧**（下帧仍在 pool 可 re_activate），
+        // 这是 lost 轨多一帧重配窗口的语义，须逐位复刻。
         let mut still_tracked: Vec<STrack> = vec![];
         let mut to_lost: Vec<STrack> = vec![];
-        let mut to_removed: Vec<STrack> = vec![];
+        let mut removed_now: Vec<STrack> = vec![];
         for t in self.tracked.drain(..) {
             match t.state {
                 TrackState::Tracked => still_tracked.push(t),
                 TrackState::Lost => to_lost.push(t),
-                TrackState::Removed => to_removed.push(t),
+                TrackState::Removed => removed_now.push(t),
                 TrackState::New => still_tracked.push(t),
             }
         }
@@ -670,24 +717,55 @@ impl ByteTrack {
             match t.state {
                 TrackState::Tracked => still_tracked.push(t), // refind
                 TrackState::Lost => still_lost.push(t),
-                TrackState::Removed => to_removed.push(t),
+                // 超时标记的滞留轨：仍留在 lost（下帧才被 removed_OLD sub 出），
+                // 同时记入本帧 removed（对应 Python Step 5 每帧重收超时轨）
+                TrackState::Removed => {
+                    removed_now.push(t.clone());
+                    still_lost.push(t);
+                }
                 TrackState::New => still_lost.push(t),
             }
         }
         self.lost = still_lost;
         self.lost.extend(to_lost);
-        self.removed = to_removed;
+        // lost = sub(lost, removed_OLD)：清掉上一帧滞留到期的轨
+        let old_removed = std::mem::take(&mut self.removed);
+        let old_ids: Vec<i64> = old_removed.iter().map(|t| t.internal_track_id).collect();
+        self.lost
+            .retain(|t| !old_ids.contains(&t.internal_track_id));
+        self.removed = removed_now;
         self.tracked = still_tracked; // refind 的轨迹已在 drain lost 时并回
         remove_duplicate_tracks(&mut self.tracked, &mut self.lost);
 
-        // supervision update_with_detections：返回**输入检测框原样** × tracker_id
-        //（IoU>=0.5 匹配回填；未关联检测丢弃——Kalman 框仅内部使用）
-        let out: Vec<([f32; 4], i64)> = detections
+        // supervision update_with_detections 末段 match-back（**独立于关联轮次的重指派**）：
+        // 输入全部检测 × 激活轨迹（后验框）→ f64 IoU → LAP(thr 0.5) → 命中检测取轨迹
+        // external_id，未命中检测丢弃。f81 实测：后验框被 Kalman 拉大时，回配会否决
+        // 关联轮次的配对（IoU<0.5 被钳制拒收）——必须逐位复刻本段，不能沿用轮次记账。
+        let out_tracks: Vec<&STrack> = self.tracked.iter().filter(|t| t.is_activated).collect();
+        let mut assign: Vec<Option<i64>> = vec![None; detections.len()];
+        if !out_tracks.is_empty() && !detections.is_empty() {
+            let det_boxes: Vec<[f64; 4]> =
+                detections.iter().map(|d| d.box_.map(f64::from)).collect();
+            let tr_boxes: Vec<[f64; 4]> = out_tracks.iter().map(|t| t.tlbr_f64()).collect();
+            let cost: Vec<Vec<f64>> = det_boxes
+                .iter()
+                .map(|db| {
+                    tr_boxes
+                        .iter()
+                        .map(|tb| 1.0 - box_iou_f64(*db, *tb))
+                        .collect()
+                })
+                .collect();
+            let (matches, _, _) = linear_assignment_thresh(cost, out_tracks.len(), 0.5);
+            for (di, ti) in matches {
+                assign[di] = Some(out_tracks[ti].external_track_id);
+            }
+        }
+        detections
             .iter()
-            .zip(det_assign.iter())
-            .filter_map(|(d, id)| id.as_ref().map(|id| (d.box_, *id)))
-            .collect();
-        out
+            .zip(assign.iter())
+            .filter_map(|(d, id)| id.map(|id| (d.box_, id)))
+            .collect()
     }
 }
 
@@ -698,9 +776,10 @@ fn remove_duplicate_tracks(tracks_a: &mut Vec<STrack>, tracks_b: &mut Vec<STrack
     let mut dup_b: Vec<usize> = vec![];
     for (ia, ta) in tracks_a.iter().enumerate() {
         for (ib, tb) in tracks_b.iter().enumerate() {
-            // Python：iou_distance < 0.15 才算重复（即 IoU > 0.85）——
+            // Python：iou_distance（f64 框→f32 降级）< 0.15 才算重复（f64 空间比较）——
             // 原实现写反成 IoU>=0.15 就去重，导致拥挤场景大量轨迹被误删（L1 黄金语料实测）
-            if box_iou(ta.tlbr(), tb.tlbr()) < 0.85 {
+            let dist = 1.0 - box_iou_f64(ta.tlbr_f64(), tb.tlbr_f64()) as f32;
+            if (dist as f64) >= 0.15 {
                 continue;
             }
             let time_a = ta.frame_id.saturating_sub(ta.start_frame);

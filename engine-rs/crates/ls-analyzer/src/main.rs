@@ -884,12 +884,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// L1 轨迹对齐（回放诊断，测试专用入口）：消费 export_real_track_vector.py 的
-    /// 真值向量（检测+轨迹），pipeline 回放后逐帧 diff（id 精确 + 框容差 0.5px）。
-    /// 语料/向量缺失自动 skip。分歧帧数随 ls-track 语义修复持续下降。
-    /// L1 对齐收敛（>=98%）后移除 ignore 作为回归门禁。
+    /// L1 轨迹对齐回归门禁：消费 export_real_track_vector.py 的真值向量（检测+轨迹
+    /// +KF 状态快照），pipeline 回放后逐帧 diff（id 精确 + 框容差 0.5px）。
+    /// 2026-11-07 收敛：322/322 帧逐位一致（轨迹 + KF 状态），此测试为常跑门禁——
+    /// 任何 ls-track 语义/精度回归都会在此爆掉。语料/向量缺失自动 skip。
     #[test]
-    #[ignore = "L1 轨迹对齐收敛中（diff_frames>0），达标后转正为回归门禁"]
     fn replay_real_track_vector() {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let vector = repo.join("testdata/vectors/real-big.json");
@@ -1007,7 +1006,7 @@ mod tests {
                 });
                 if let Some(pos) = hit {
                     rs_left.remove(pos);
-                } else {
+                    // 命中：py 行同步移出 py_left；未命中则留在 py_left（=真 PY-only）
                     py_left.retain(|(id, _)| id != py_id);
                 }
             }
@@ -1027,6 +1026,82 @@ mod tests {
             "[replay] frames={} diff_frames={diff_frames}",
             pipe.track_log.len()
         );
+
+        // 状态级诊断：逐非空帧比对 (tracked/lost 的 (external_id, mean_x))，
+        // 定位 KF 内部状态的最早分歧帧（轨迹输出一致 ≠ KF 状态一致）
+        let mut first_state_div: Option<(usize, String)> = None;
+        for (i, snap) in pipe.state_log.iter().enumerate() {
+            let Some(py_state) = frames[i]["state"].as_object() else {
+                continue; // 空帧无状态 dump
+            };
+            let py_list = |key: &str| -> Vec<(i64, f64)> {
+                py_state
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|r| {
+                                let a = r.as_array()?;
+                                Some((a[0].as_i64()?, a[1].as_f64()?))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            // 直接逐列表对比（tracked 与 lost）
+            let py_tracked = py_list("tracked");
+            let py_lost = py_list("lost");
+            let rs_tracked: Vec<(i64, f64)> = snap.0.clone();
+            let rs_lost: Vec<(i64, f64)> = snap.1.clone();
+            let diff = |py: &[(i64, f64)], rs: &[(i64, f64)], name: &str| -> Option<String> {
+                for (pid, px) in py {
+                    match rs.iter().find(|(rid, _)| rid == pid) {
+                        Some((_, rx)) if (rx - px).abs() > 0.15 => {
+                            return Some(format!("{name} id={pid} py_x={px} rs_x={rx}"));
+                        }
+                        Some(_) => {}
+                        None => return Some(format!("{name} id={pid} py_x={px} 仅Python有")),
+                    }
+                }
+                for (rid, rx) in rs {
+                    if !py.iter().any(|(pid, _)| pid == rid) {
+                        return Some(format!("{name} id={rid} rs_x={rx} 仅Rust有"));
+                    }
+                }
+                None
+            };
+            if let Some(msg) = diff(&py_tracked, &rs_tracked, "tracked")
+                .or_else(|| diff(&py_lost, &rs_lost, "lost"))
+            {
+                if first_state_div.is_none() {
+                    first_state_div = Some((i + 1, msg));
+                }
+            }
+        }
+        match first_state_div {
+            Some((f, msg)) => println!("[replay] KF 状态最早分歧 frame={f}: {msg}"),
+            None => println!("[replay] KF 状态逐帧一致（±0.15px）"),
+        }
+        if std::env::var("LS_DEBUG_STATE").is_ok() {
+            for (i, snap) in pipe.state_log.iter().enumerate().take(10) {
+                if frames[i]["state"].is_null() {
+                    continue;
+                }
+                let fmt = |v: &[(i64, f64)]| -> String {
+                    v.iter()
+                        .map(|(id, x)| format!("({id}, {x:.4})"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                eprintln!(
+                    "[state] f{} tracked=[{}] lost=[{}]",
+                    i + 1,
+                    fmt(&snap.0),
+                    fmt(&snap.1)
+                );
+            }
+        }
+
         if let Some((f, py, rs)) = first {
             panic!("轨迹分歧 first frame={f}: PY-only={py:?} RS-only={rs:?}（按 supervision 语义继续收敛）");
         }
