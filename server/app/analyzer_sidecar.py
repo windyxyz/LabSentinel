@@ -55,6 +55,10 @@ class SidecarAnalyzer(AnalyzerBackend):
             "LS_MIN_BOX_AREA": str(settings.min_box_area),
             "LS_ZONE_ENTER_FRAMES": str(settings.zone_enter_frames),
             "LS_ZONE_EXIT_FRAMES": str(settings.zone_exit_frames),
+            # T-326：存证写盘目录/抽帧率（relpath 相对 data_dir 回传）
+            "LS_VIDEO_DIR": str(settings.video_dir),
+            "LS_DATA_DIR": str(settings.data_dir),
+            "LS_EVIDENCE_FPS": str(settings.evidence_fps),
         }
         self._proc = subprocess.Popen(
             [str(self._exe), "--port", str(self._port), "--token", self._token],
@@ -72,12 +76,37 @@ class SidecarAnalyzer(AnalyzerBackend):
         else:
             self.stop()
             raise TimeoutError("sidecar 15s 未就绪")
+        # stdout 持续排水：READY 后若无人读管道，sidecar 的后续打印（模型加载/
+        # 存证落盘）会写满管道缓冲 → 子进程整进程阻塞 → gRPC 流全部断连。
+        # 排水线程保留最近日志行供诊断（有界）。
+        import collections
+        import threading as _th
+        self._out_log: collections.deque[str] = collections.deque(maxlen=50)
+        self._out_thread = _th.Thread(target=self._drain_stdout, daemon=True,
+                                      name="sidecar-stdout")
+        self._out_thread.start()
         import grpc
         channel = grpc.insecure_channel(f"127.0.0.1:{self._port}")
         grpc.channel_ready_future(channel).result(timeout=10)
         from . import analyzer_pb2_grpc
         self._stub = analyzer_pb2_grpc.AnalyzerStub(channel)
         self._started = True
+
+    def _drain_stdout(self) -> None:
+        """sidecar stdout 排水线程（进程存活期间持续读取）。"""
+        proc = self._proc
+        try:
+            for raw in proc.stdout:
+                line = raw.decode("utf-8", "replace").rstrip()
+                self._out_log.append(line)
+                if line.startswith("[ls-analyzer]"):
+                    print(f"[sidecar-out] {line}")
+        except (ValueError, OSError):
+            pass  # 进程退出/管道关闭
+
+    def out_log(self) -> list[str]:
+        """最近 sidecar 输出（诊断用）。"""
+        return list(getattr(self, "_out_log", ()))
 
     def stop(self) -> None:
         self._started = False
@@ -160,6 +189,28 @@ class SidecarAnalyzer(AnalyzerBackend):
         from . import analyzer_pb2 as pb
         self._stub.StopCamera(pb.CameraRef(camera_id=camera_id),
                               metadata=(("x-ls-token", self._token),))
+
+    def finalize_evidence(self, event_id: int, camera_id: int, evidence_key: str,
+                          pre_seconds: int = 2, post_seconds: int = 2,
+                          timeout: float = 15.0) -> dict | None:
+        """T-326：事件 id 回传 → Rust 补齐事件前后片段视频（阻塞至写盘完成）。
+
+        返回 EvidenceResult 字段 dict（ok / video_relpath / message）；
+        sidecar 不可用或 RPC 失败返回 None（事件不受影响，仅无视频存证）。"""
+        if self._stub is None:
+            return None
+        from . import analyzer_pb2 as pb
+        try:
+            resp = self._stub.FinalizeEvidence(
+                pb.EvidenceRequest(event_id=event_id, camera_id=camera_id,
+                                   evidence_key=evidence_key,
+                                   pre_seconds=pre_seconds, post_seconds=post_seconds),
+                timeout=timeout, metadata=(("x-ls-token", self._token),))
+            return {"ok": resp.ok, "video_relpath": resp.video_relpath,
+                    "message": resp.message}
+        except Exception as e:  # noqa: BLE001  存证失败不拖累事件链
+            log.warning("finalize_evidence(ev=%s) 失败: %s", event_id, e)
+            return None
 
     def status(self) -> list[AnalyzerStatusRow]:
         if self._stub is None:

@@ -371,6 +371,32 @@ class Store:
         return cid
 
     # ---- 摄像头分组（任务111）----
+    def set_camera_analyzer(self, cid: int, impl: str) -> bool:
+        """T-336：设置单路分析器实现（python|rust）；灰度切换/一键回退的落点。"""
+        if impl not in ("python", "rust"):
+            raise ValueError("analyzer 仅支持 python|rust")
+        with self._lock, self._conn() as c:
+            ok = c.execute("UPDATE cameras SET analyzer=? WHERE id=?",
+                           (impl, cid)).rowcount > 0
+        if ok:
+            self._bump()
+        return ok
+
+    def events_count(self, camera_id: int, start_ts: str | None = None,
+                     end_ts: str | None = None) -> int:
+        """T-336：窗口内事件数（事件率异常检测基线/当前窗口共用）。"""
+        where, args = ["camera_id=?"], [camera_id]
+        if start_ts is not None:
+            where.append("ts >= ?")
+            args.append(start_ts)
+        if end_ts is not None:
+            where.append("ts <= ?")
+            args.append(end_ts)
+        with self._lock, self._conn() as c:
+            row = c.execute(f"SELECT COUNT(*) FROM events WHERE {' AND '.join(where)}",
+                            args).fetchone()
+        return int(row[0]) if row else 0
+
     def set_camera_group(self, cid, name: str) -> bool:
         with self._lock, self._conn() as c:
             ok = c.execute("UPDATE cameras SET group_name=? WHERE id=?",

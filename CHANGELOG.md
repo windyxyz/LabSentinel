@@ -40,6 +40,12 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-326：Rust 分析器（gray=rust 路径）补齐**视频存证**——事件帧快照、事件前后
+  2s 片段（ffmpeg libx264/yuv420p，mpeg4 兜底）、LatestFrame 实时帧；sidecar
+  stdout 持续排水（防管道写满整进程阻塞断流）。Python 侧修复存证视频慢放
+  （writer 帧率误用源帧率，30fps 源 3× 慢放）。
+- T-336：设置页**一键切换/回退单路分析器**（python↔rust，`PUT /api/cameras/{id}/analyzer`，
+  运行中自动重启）；分析器切换后 24h 内事件率偏离前 7 日日均 ±50% 时 WARNING。
 - T-324/L1：Rust ByteTrack（ls-track）对齐 supervision 0.25.1 至**黄金语料逐帧一致**
   （322/322 帧：轨迹 + KF 状态）——修 KF 预测 Q 速度项 10× 误系数、removed 列表
   滞后一帧账本 quirk、补齐 `update_with_detections` 末段独立 match-back（f64 IoU +

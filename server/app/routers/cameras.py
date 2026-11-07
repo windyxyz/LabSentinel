@@ -100,6 +100,26 @@ def add_camera(body: CameraCreate):
     return ctx.store().camera(cid)
 
 
+@router.put("/cameras/{cid}/analyzer", dependencies=[Depends(ctx.admin_guard)])
+def set_camera_analyzer(cid: int, body: dict):
+    """T-336：迁移期一键切换/回退单路分析器（python|rust）。运行中自动重启生效。"""
+    impl = str(body.get("analyzer") or "")
+    if impl not in ("python", "rust"):
+        raise HTTPException(400, "analyzer 仅支持 python|rust")
+    cam = ctx.store().camera(cid)
+    if cam is None:
+        raise HTTPException(404, "camera not found")
+    if (cam.get("analyzer") or "python") == impl:
+        return {"id": cid, "analyzer": impl, "restarted": False}
+    ctx.store().set_camera_analyzer(cid, impl)
+    restarted = False
+    if cam["status"] == "running":
+        ctx.manager().stop_camera(cid)
+        ctx.manager().start_camera(ctx.store().camera(cid))
+        restarted = True
+    return {"id": cid, "analyzer": impl, "restarted": restarted}
+
+
 @router.post("/cameras/{cid}/start", dependencies=[Depends(ctx.admin_guard)])
 def start_camera(cid: int):
     cam = ctx.store().camera(cid)

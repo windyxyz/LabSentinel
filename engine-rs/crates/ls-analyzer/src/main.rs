@@ -8,6 +8,7 @@
 //! 启动即打印 "READY port=<p>" 行，供父进程健康判定。
 #![allow(clippy::result_large_err)]
 
+mod evidence;
 mod golden;
 mod pipeline;
 
@@ -69,6 +70,8 @@ struct AppStateInner {
     running: HashMap<i64, Arc<AtomicBool>>,
     /// 每路 ffmpeg 进程句柄（控制面 stop_camera 可直接强杀，打断阻塞读）
     ffmpeg: HashMap<i64, ls_ingest::ChildSlot>,
+    /// T-326：每路证据环形缓冲/活动录像（数据面写、FinalizeEvidence 处理器读）
+    evidence: HashMap<i64, Arc<evidence::Evidence>>,
     /// 模型路径（空串=不启用检测；按实例注入，避免进程级环境变量竞态）
     model_path: Option<PathBuf>,
     /// 每个事件流订阅者的发送端（数据面线程 try_send 非阻塞广播）
@@ -86,6 +89,8 @@ struct CameraJob {
     stop: Arc<AtomicBool>,
     /// 外部可强杀 ffmpeg 的共享句柄：stop_camera 立刻杀进程 → 读管道 EOF
     ffmpeg: ls_ingest::ChildSlot,
+    /// T-326：存证状态（环 + 活动录像）
+    evidence: Option<Arc<evidence::Evidence>>,
     /// 模型路径（None=空检测）
     model_path: Option<PathBuf>,
     cam: Arc<Mutex<CamState>>,
@@ -112,6 +117,7 @@ impl AnalyzerImpl {
                 cams: HashMap::new(),
                 running: HashMap::new(),
                 ffmpeg: HashMap::new(),
+                evidence: HashMap::new(),
                 model_path,
                 event_txs: vec![],
             })),
@@ -245,6 +251,13 @@ fn spawn_camera(state: AppState, cid: i64) {
         let ffmpeg: ls_ingest::ChildSlot = Arc::new(Mutex::new(None));
         st.running.insert(cid, Arc::clone(&stop));
         st.ffmpeg.insert(cid, Arc::clone(&ffmpeg));
+        // T-326：每路证据状态（in_fps=分析帧率——apply_config 已强制 >0）
+        let ev = Arc::new(evidence::Evidence::default());
+        ev.new_ring(
+            spec.analysis_fps.max(0.1) as f64,
+            env_f32("LS_EVIDENCE_FPS", 10.0) as f64,
+        );
+        st.evidence.insert(cid, Arc::clone(&ev));
         CameraJob {
             spec,
             zones,
@@ -252,6 +265,7 @@ fn spawn_camera(state: AppState, cid: i64) {
             calendar: st.calendar.clone(),
             stop,
             ffmpeg,
+            evidence: Some(ev),
             model_path: st.model_path.clone(),
             cam,
         }
@@ -265,7 +279,7 @@ fn update_cam(cam: &Arc<Mutex<CamState>>, f: impl FnOnce(&mut CamState)) {
     }
 }
 
-fn broadcast(state: &AppState, ev: Candidate) {
+fn broadcast(state: &AppState, ev: Candidate, snapshot_jpeg: Vec<u8>) {
     let msg = EventCandidate {
         camera_id: ev.camera_id,
         zone_id: ev.zone_id,
@@ -273,7 +287,7 @@ fn broadcast(state: &AppState, ev: Candidate) {
         level: ev.level as i32,
         track_id: ev.track_id,
         detail: ev.detail,
-        snapshot_jpeg: Vec::new(), // T-325：检测层接入后由解码器输出 JPEG
+        snapshot_jpeg,
         ts_iso: ev.ts_iso,
         evidence_key: ev.evidence_key,
     };
@@ -332,10 +346,28 @@ fn run_camera(state: AppState, job: CameraJob) {
             match ing.read_frame() {
                 Ok(Some(frame)) => {
                     failures = 0;
+                    // T-326：先喂证据环（与 Python `_feed_recordings` 先于 `_analyze` 同序，
+                    // 保证事件帧已在环内），事件帧再编码快照
+                    let ev_snapshot: Option<Vec<u8>> = job.evidence.as_ref().and_then(|ev| {
+                        ev.feed(frame.index, || {
+                            evidence::encode_jpeg_bgr(&frame.data, frame.width, frame.height)
+                                .unwrap_or_default()
+                        })
+                    });
                     let dets = detector.detect(&frame);
                     let ts = pipeline::frame_ts_for(frame.index, job.spec.analysis_fps);
-                    for ev in pipe.process(&dets, &ts) {
-                        broadcast(&state, ev);
+                    let cands = pipe.process(&dets, &ts);
+                    if !cands.is_empty() {
+                        // 事件帧快照：优先复用本帧抽帧结果，未命中 stride 则直接现编
+                        //（不再走 feed——stride 计数每帧只允许推进一次）
+                        let snap = match ev_snapshot {
+                            Some(j) if !j.is_empty() => j,
+                            _ => evidence::encode_jpeg_bgr(&frame.data, frame.width, frame.height)
+                                .unwrap_or_default(),
+                        };
+                        for ev in cands {
+                            broadcast(&state, ev, snap.clone());
+                        }
                     }
                     window_frames += 1;
                     let elapsed = window_start.elapsed();
@@ -367,6 +399,9 @@ fn run_camera(state: AppState, job: CameraJob) {
             break;
         }
         if job.spec.type_ == "file" && !job.spec.file_loop {
+            if let Some(ev) = &job.evidence {
+                ev.flush(); // T-326：未补齐录像置 done（部分帧落盘）
+            }
             update_cam(&job.cam, |c| c.state = "stopped".into());
             return;
         }
@@ -377,6 +412,9 @@ fn run_camera(state: AppState, job: CameraJob) {
         }
     }
     ing.stop();
+    if let Some(ev) = &job.evidence {
+        ev.flush(); // T-326：未补齐录像置 done（部分帧落盘）
+    }
     update_cam(&job.cam, |c| c.state = "stopped".into());
 }
 
@@ -488,6 +526,10 @@ impl Analyzer for AnalyzerImpl {
         if let Some(slot) = st.ffmpeg.remove(&cid) {
             Ingest::kill_slot(&slot);
         }
+        // T-326：未补齐的录像立即置 done（在途 RPC 写部分帧落盘），证据条目释放
+        if let Some(ev) = st.evidence.remove(&cid) {
+            ev.flush();
+        }
         if let Some(cam) = st.cams.get(&cid) {
             update_cam(cam, |c| c.state = "stopped".into());
         }
@@ -540,9 +582,22 @@ impl Analyzer for AnalyzerImpl {
 
     async fn latest_frame(&self, request: Request<CameraRef>) -> Result<Response<Jpeg>, Status> {
         self.check_auth(&request)?;
-        let _cid = request.into_inner().camera_id;
-        // T-325：解码层提供 JPEG 编码后填充
-        Ok(Response::new(Jpeg { data: vec![] }))
+        let cid = request.into_inner().camera_id;
+        // T-326：证据环最新帧即实时快照（evidence_fps 抽帧粒度）
+        let jpeg = {
+            let st = lock(&self.state);
+            st.evidence
+                .get(&cid)
+                .and_then(|ev| {
+                    ev.ring
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .and_then(|ring| ring.latest().map(|f| f.data.clone()))
+                })
+                .unwrap_or_default()
+        };
+        Ok(Response::new(Jpeg { data: jpeg }))
     }
 
     async fn finalize_evidence(
@@ -550,13 +605,134 @@ impl Analyzer for AnalyzerImpl {
         request: Request<EvidenceRequest>,
     ) -> Result<Response<EvidenceResult>, Status> {
         self.check_auth(&request)?;
-        let _req = request.into_inner();
-        // T-326 存证 remux 填充；当前返回 not-implemented 语义（ok=false）
-        Ok(Response::new(EvidenceResult {
-            ok: false,
-            video_relpath: String::new(),
-            message: "evidence remux not implemented until T-326".to_string(),
-        }))
+        let req = request.into_inner();
+        let post_s = if req.post_seconds > 0 {
+            req.post_seconds as f64
+        } else {
+            evidence::VIDEO_POST_S
+        };
+        // 每路证据状态（stop_camera 移除条目但在途 Arc 仍有效——部分帧落盘语义）
+        let ev = {
+            let st = lock(&self.state);
+            st.evidence.get(&req.camera_id).cloned()
+        };
+        let Some(ev) = ev else {
+            return Ok(Response::new(EvidenceResult {
+                ok: false,
+                video_relpath: String::new(),
+                message: "camera not running（无证据环）".into(),
+            }));
+        };
+        // 并发上限（与 Python MAX_CONCURRENT_RECORDINGS 一致，超限拒收）
+        {
+            let recs = ev.recs.lock().unwrap_or_else(|e| e.into_inner());
+            let live = recs
+                .iter()
+                .filter(|r| !r.done.load(Ordering::SeqCst))
+                .count();
+            if live >= evidence::MAX_CONCURRENT_RECORDINGS {
+                return Ok(Response::new(EvidenceResult {
+                    ok: false,
+                    video_relpath: String::new(),
+                    message: "recording limit reached".into(),
+                }));
+            }
+        }
+        // pre 帧 = 环快照（事件帧应已在队尾）；登记活动录像等数据面补 post 帧
+        let rec = {
+            let pre: Vec<Vec<u8>> = ev
+                .ring
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|ring| ring.snapshot().into_iter().map(|f| f.data).collect())
+                .unwrap_or_default();
+            let rec = Arc::new(evidence::ActiveRec::new(pre));
+            ev.recs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Arc::clone(&rec));
+            rec
+        };
+        // 等待补齐（超时 = post + 3s；到点按已有帧落盘，有比没有强）
+        let deadline = Instant::now() + Duration::from_secs_f64(post_s + 3.0);
+        while !rec.done.load(Ordering::SeqCst) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let frames: Vec<Vec<u8>> =
+            std::mem::take(&mut *rec.frames.lock().unwrap_or_else(|e| e.into_inner()));
+        let elapsed = rec.elapsed().as_secs_f64();
+        // 回收已完成条目
+        ev.recs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|r| !Arc::ptr_eq(r, &rec));
+        if frames.is_empty() {
+            return Ok(Response::new(EvidenceResult {
+                ok: false,
+                video_relpath: String::new(),
+                message: "no evidence frames".into(),
+            }));
+        }
+        // 写盘帧率 = 实测喂帧率（帧数/实际耗时）：推理/取流低于配置帧率时保证
+        // 播放速度正确（debug 构建/CPU 高负载下实际 ~1fps，用配置值会加速播放）。
+        let cfg_fps = ev
+            .ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.out_fps())
+            .unwrap_or(5.0);
+        let fps = if elapsed > 0.2 {
+            (frames.len() as f64 / elapsed).clamp(1.0, cfg_fps * 1.5)
+        } else {
+            cfg_fps
+        };
+        // 写盘目录：LS_VIDEO_DIR（Python 子进程环境注入）；relpath 相对 LS_DATA_DIR
+        let Some(video_dir) = std::env::var("LS_VIDEO_DIR").ok().filter(|s| !s.is_empty()) else {
+            return Ok(Response::new(EvidenceResult {
+                ok: false,
+                video_relpath: String::new(),
+                message: "LS_VIDEO_DIR not set".into(),
+            }));
+        };
+        let video_dir = PathBuf::from(video_dir);
+        std::fs::create_dir_all(&video_dir).map_err(|e| Status::internal(e.to_string()))?;
+        let file = format!("ev_{}.mp4", req.event_id);
+        let out = video_dir.join(&file);
+        let frames_len = frames.len();
+        let out2 = out.clone();
+        let enc = tokio::task::spawn_blocking(move || evidence::encode_mp4(&frames, fps, &out2))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        match enc {
+            Ok(()) => {
+                let relpath = evidence::video_relpath(
+                    &video_dir,
+                    std::env::var("LS_DATA_DIR")
+                        .ok()
+                        .map(PathBuf::from)
+                        .as_deref(),
+                    &file,
+                );
+                println!(
+                    "[ls-analyzer] ev#{} 存证 {} 帧 → {}",
+                    req.event_id,
+                    frames_len,
+                    out.display()
+                );
+                Ok(Response::new(EvidenceResult {
+                    ok: true,
+                    video_relpath: relpath,
+                    message: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(EvidenceResult {
+                ok: false,
+                video_relpath: String::new(),
+                message: e,
+            })),
+        }
     }
 }
 

@@ -2,6 +2,7 @@
 
 取流 → (限频)检测 → ByteTrack 跟踪 → 区域进出判定 → 规则/冷却 → 事件入库+告警+截图+视频存证。
 """
+import datetime as dt
 import queue
 import re
 import threading
@@ -155,7 +156,9 @@ class CameraWorker(threading.Thread):
         if not isinstance(file_fps, (int, float)) or not math.isfinite(file_fps) \
                 or file_fps <= 0 or file_fps > 240:
             file_fps = 30.0
-        self._rec_fps = file_fps
+        # T-326 口径修正：录像帧只有 evidence_fps 抽帧率，writer 帧率必须一致——
+        # 原用源帧率会让存证视频慢放（30fps 源 × 10fps 帧 = 3× 慢）
+        self._rec_fps = min(max(1.0, float(settings.evidence_fps)), file_fps)
         self._init_ring(file_fps)
         recorder = threading.Thread(target=self._recorder_loop, daemon=True, name=f"cam-{cid}-rec")
         recorder.start()
@@ -515,6 +518,10 @@ class CameraManager:
         # 任务114：守护状态——desired=应该是运行中（用户主动 stop 移出）；sup=每路守护状态
         self._desired_running: set[int] = set()
         self._sup: dict[int, dict] = {}
+        # T-336：分析器实现切换观测（内存态；重启丢失仅影响回溯窗口的起点）
+        self._analyzer_seen: dict[int, str] = {}
+        self._switch_at: dict[int, float] = {}  # cid -> 切换墙钟
+        self._switch_warned: set[int] = set()
         self._sup_clock = time.monotonic  # 测试可注入
         self._sup_stop = threading.Event()
         self._sup_thread: threading.Thread | None = None
@@ -549,6 +556,7 @@ class CameraManager:
     def supervise_tick(self) -> None:
         """守护一轮（只在守护线程/测试里调用，不在 API/帧循环里做）。"""
         now = self._sup_clock()
+        self._anomaly_check()
         starts: list[int] = []
         with self._mgmt_lock:
             # 启动成功（worker 存活 >5s）→ 重置退避计数
@@ -654,6 +662,7 @@ class CameraManager:
 
     def start_camera(self, camera: dict):
         cid = camera["id"]
+        self._note_analyzer(cid, camera)
         # T-331：rust 灰度路不走 Python worker（folder 源暂不在 Rust 数据面支持范围）
         if self._rust_enabled(camera) and camera.get("type") != "folder":
             if self._rust_start(camera):
@@ -678,6 +687,47 @@ class CameraManager:
                 w = CameraWorker(camera, self.store, self.rules)
             self.workers[cid] = w
             w.start()
+
+    def _note_analyzer(self, cid: int, camera: dict) -> None:
+        """T-336：记录本路分析器实现变化（切换时刻），供事件率异常检测定位基线。"""
+        impl = camera.get("analyzer") or settings.analyzer_default
+        seen = self._analyzer_seen.get(cid)
+        if seen is not None and seen != impl:
+            self._switch_at[cid] = time.time()
+            self._switch_warned.discard(cid)
+            print(f"[cam-{cid}] 分析器切换 {seen} → {impl}（进入 24h 事件率观测）")
+        self._analyzer_seen[cid] = impl
+
+    def _anomaly_check(self) -> None:
+        """T-336：切换实现后 24h 内，事件数率偏离切换前 7 日日均 ±50% 时 WARNING。"""
+        now = time.time()
+        for cid, switch_at in list(self._switch_at.items()):
+            if cid in self._switch_warned:
+                continue
+            elapsed_h = (now - switch_at) / 3600.0
+            if elapsed_h > 24.0:  # 超出观测窗，关闭
+                self._switch_at.pop(cid, None)
+                continue
+            if elapsed_h < 1.0:  # 样本不足 1h 不判
+                continue
+            try:
+                sw_iso = dt.datetime.fromtimestamp(switch_at).isoformat(timespec="seconds")
+                cur = self.store.events_count(cid, start_ts=sw_iso)
+                cur_24h = cur / elapsed_h * 24.0
+                base_from = dt.datetime.fromtimestamp(switch_at - 7 * 86400)                     .isoformat(timespec="seconds")
+                base = self.store.events_count(cid, start_ts=base_from, end_ts=sw_iso) / 7.0
+            except Exception as e:  # noqa: BLE001  观测失败不影响守护
+                print(f"[cam-{cid}] 事件率观测查询失败: {e!r}")
+                continue
+            if base < 0.5:  # 基线近零：±50% 判据无意义（不误报低频路）
+                continue
+            dev = (cur_24h - base) / base
+            if abs(dev) > 0.5:
+                self._switch_warned.add(cid)
+                print(f"WARNING: [cam-{cid}] 分析器切换后事件率异常——"
+                      f"折算 24h {cur_24h:.1f} 件 vs 前 7 日日均 {base:.1f} 件"
+                      f"（偏离 {dev * 100:+.0f}%），请核查或一键回退"
+                      f"（PUT /api/cameras/{cid}/analyzer）")
 
     def stop_camera(self, cid):
         with self._mgmt_lock:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import queue
 import threading
 from pathlib import Path
 
@@ -37,6 +38,10 @@ class SidecarEventBridge:
         self._ingested = 0
         self._last_error = ""
         self._last_ts = ""
+        # T-326：存证收尾独立线程（finalize 阻塞 ~post 秒，不能拖慢事件流循环的派发）
+        self._ev_q: queue.Queue[tuple[int, int, str]] = queue.Queue()
+        self._ev_thread: threading.Thread | None = None
+        self._last_ts = ""
 
     def start(self) -> bool:
         """启动订阅线程（sidecar 不可用时返回 False，由调用方回退 Python worker）。"""
@@ -51,6 +56,9 @@ class SidecarEventBridge:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="sidecar-events", daemon=True)
         self._thread.start()
+        self._ev_thread = threading.Thread(target=self._evidence_loop, name="sidecar-evidence",
+                                           daemon=True)
+        self._ev_thread.start()
         return True
 
     def stop(self) -> None:
@@ -59,6 +67,10 @@ class SidecarEventBridge:
         if t is not None and t.is_alive():
             t.join(timeout=3.0)
         self._thread = None
+        t2 = self._ev_thread
+        if t2 is not None and t2.is_alive():
+            t2.join(timeout=1.0)  # finalize 阻塞最长 ~15s，只等 1s 让进程退出不被拖住
+        self._ev_thread = None
 
     def status(self) -> dict:
         with self._lock:
@@ -135,6 +147,25 @@ class SidecarEventBridge:
                 self._last_ts = ts
                 self._last_error = ""
             print(f"[sidecar] event#{eid} cam-{cand.camera_id} {cand.behavior} L{cand.level}")
+            # T-326：Rust 侧补齐事件前后片段视频——入队由存证线程处理
+            #（与 Python worker「先入库后写视频」同口径；失败只影响存证不影响事件）
+            self._ev_q.put((eid, cand.camera_id, cand.evidence_key))
         except Exception as e:  # noqa: BLE001  单事件失败不影响后续
             self._last_error = f"入库/派发失败: {e}"
             log.warning("%s", self._last_error)
+
+    def _evidence_loop(self) -> None:
+        """存证收尾线程：finalize（阻塞至 Rust 写盘完成）→ 回填 events.video。"""
+        while not self._stop.is_set():
+            try:
+                eid, camera_id, key = self._ev_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                res = self.analyzer.finalize_evidence(eid, camera_id, key)
+                if res and res.get("ok") and res.get("video_relpath"):
+                    from .config import settings as _settings
+                    self.store.set_event_video(
+                        eid, str(Path(_settings.data_dir) / res["video_relpath"]))
+            except Exception as e:  # noqa: BLE001  单事件失败不影响后续
+                log.warning("存证收尾失败(ev=%s): %s", eid, e)

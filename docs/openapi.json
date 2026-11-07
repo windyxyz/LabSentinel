@@ -1339,6 +1339,56 @@
         }
       }
     },
+    "/api/cameras/{cid}/analyzer": {
+      "put": {
+        "summary": "Set Camera Analyzer",
+        "description": "T-336：迁移期一键切换/回退单路分析器（python|rust）。运行中自动重启生效。",
+        "operationId": "set_camera_analyzer_api_cameras__cid__analyzer_put",
+        "parameters": [
+          {
+            "name": "cid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Cid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/cameras/{cid}/start": {
       "post": {
         "summary": "Start Camera",

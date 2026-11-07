@@ -66,6 +66,7 @@ export const api = {
   pluginAction: (id, action) => req('POST', `/api/plugins/${id}/${action}`),
   pluginLogs: (id, tail = 200) => req('GET', `/api/plugins/${id}/logs?tail=${tail}`),
   eventsTimeline: (params = {}) => req('GET', '/api/events/timeline?' + new URLSearchParams(params)),
+  setCameraAnalyzer: (id, analyzer) => req('PUT', `/api/cameras/${id}/analyzer`, { analyzer }),
   startCamera: (id) => req('POST', `/api/cameras/${id}/start`),
   delCamera: (id) => req('DELETE', `/api/cameras/${id}`),
   // 任务121：图片文件夹自动识别
