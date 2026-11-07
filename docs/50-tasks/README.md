@@ -7,7 +7,7 @@
 
 ### 项目概况
 
-**LabSentinel/实验室哨兵**：开源实验室安全行为监控系统。服务端 FastAPI + ONNX Runtime 推理（人员检测/ByteTrack 跟踪/安全区规则/事件告警），Web 端 Vue3。项目愿景见 [../00-vision.md](../00-vision.md)，术语表见 [../../GLOSSARY.md](../../GLOSSARY.md)。
+**LabSentinel/实验室哨兵**：开源实验室安全行为监控系统。服务端 FastAPI + ONNX Runtime 推理（人员检测/ByteTrack 跟踪/安全区规则/事件告警），Web 端 Vue3。项目愿景见 [../00-vision.md](../00-vision.md)，术语表见 [../GLOSSARY.md](../GLOSSARY.md)。
 
 ### 关键路径（Windows 机器）
 

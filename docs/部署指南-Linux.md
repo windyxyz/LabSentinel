@@ -11,7 +11,7 @@ mkdir -p models && cp yolo11n.onnx models/
 
 # 2) 首启令牌（Q-02）：写入环境变量文件
 cat > .env <<'EOF'
-LS_ADMIN_TOKEN=<用 python -c "import secrets;print(secrets.token_urlsafe(24))" 生成>
+LS_ADMIN_TOKEN=<占位：用 python -c "import secrets;print(secrets.token_urlsafe(24))" 生成>
 EOF
 
 # 3) 起服务（cpu + go2rtc 两个容器，go2rtc 共享回环）
@@ -45,7 +45,7 @@ python3.12 -m venv /opt/labsentinel/venv
 /opt/labsentinel/venv/bin/pip install --require-hashes --no-deps \
   -r /opt/labsentinel/server/requirements-linux.lock
 sudo mkdir -p /etc/labsentinel && sudo tee /etc/labsentinel/config.env >/dev/null <<'EOF'
-LS_ADMIN_TOKEN=<令牌>
+LS_ADMIN_TOKEN=<占位：填第一步生成的管理令牌>
 EOF
 sudo cp deploy/systemd/labsentinel.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now labsentinel
