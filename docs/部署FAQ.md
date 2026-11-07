@@ -206,7 +206,7 @@ python scripts/collect_diagnostics.py --out diag.zip --data-dir server/data
 ## 4. 模型与推理
 
 **Q：多路摄像头时 worker 全部静默死亡，甚至整机死机**
-→ **DirectML 会话跨线程并发 Run 不线程安全**（本项目最大事故，详见 51-loadtest-report.md §3）。
+→ **DirectML 会话跨线程并发 Run 不线程安全**（本项目最大事故，详见历史压测报告）。
 已修复：`engine.py` 模块级 `_ACCEL_LOCK` 全局串行 + worker 单帧异常自愈。
 规则：**任何推理必须走 `Engine._run()`，代码出现 `sess.run` 即不合格**；训练/压测/批量推理禁止并行。
 
@@ -225,7 +225,7 @@ python scripts/collect_diagnostics.py --out diag.zip --data-dir server/data
 ## 5. 训练
 
 **Q：训练命令与安全**
-→ 限线程+过夜，完整前置条件与看门狗见 [50-tasks/训练安全规程.md](50-tasks/训练安全规程.md)。速记：
+→ 限线程+过夜，完整前置条件与看门狗见历史训练安全规程。速记：
 ```bash
 D:/LabSentinel/m0-venv/Scripts/python.exe tools/train_ppe.py --data Resources/datasets/merged/data.yaml \
     --epochs 24 --batch 8 --workers 2 --name ppe_v2

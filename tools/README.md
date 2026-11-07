@@ -1,7 +1,7 @@
 # tools/ · 训练/量化可复现工具链（任务 06）
 
 LAB PPE 模型的完整复现流水线：**下载数据集 → 微调训练 → 导出 ONNX → NPU 量化**。
-任务规格见 [../docs/50-tasks/06-training-toolchain.md](../docs/50-tasks/06-training-toolchain.md)，
+任务规格见历史任务包（已清理），
 M0 实测背景见 [../docs/40-roadmap.md](../docs/40-roadmap.md) 的「实测环境与注意事项」。
 
 ## 一、两个 Python 环境（勿重建、勿改包版本）
@@ -62,7 +62,7 @@ $NPY tools/quantize_npu.py
 
 PPE 引擎按**类别名**匹配（`LS_PPE_CLASS_NAMES`），names 顺序变了引擎才会失效，因此导出脚本会打印并核对顺序。
 
-## 四、已知坑（搬自 docs/50-tasks/README.md 铁律，与本工具链相关的全部）
+## 四、已知坑（搬自历史任务包铁律，与本工具链相关的全部）
 
 1. **网络**：pip 一律加 `-i https://pypi.tuna.tsinghua.edu.cn/simple`；npm 加 `--registry=https://registry.npmmirror.com`；GitHub 下载权重用镜像前缀 `https://ghfast.top/https://github.com/...`，断点续传 `curl -C -`；Roboflow/HuggingFace 等外网 API 走本地代理 `HTTPS_PROXY=http://127.0.0.1:7890`（roboflow 包自动遵循该环境变量）。
 2. **onnxruntime 家族互斥**：CPU 版与 `onnxruntime-directml` 不可同装（互装会损坏）；`npu-venv` 里 CPU 版与 `onnxruntime-vitisai` 同理互杀。各 venv 已装对，**不要动**。⚠️ 实测坑：ultralytics 导出 ONNX 时会 AutoUpdate 自动 pip 装 CPU 版 onnxruntime（它不认 directml 变体）——`export_onnx.py` 已内置 `YOLO_AUTOINSTALL=false` 防御；若 venv 已被污染，恢复方法：`pip uninstall -y onnxruntime onnxruntime-directml` 后 `pip install onnxruntime-directml==1.24.4 -i https://pypi.tuna.tsinghua.edu.cn/simple`（两个一起卸再重装 directml 版）。
@@ -131,15 +131,15 @@ python tools/preannotate.py --images datasets/frames --out datasets/labels \
 ### 7.4 评估 `eval_report.py`（飞轮④）
 
 ```bash
-# v1 基线（当前 10 类模型在 merged test 集，491 图，已落盘 docs/52-model-eval.md）
+# v1 基线（当前 10 类模型在 merged test 集，491 图，已落盘历史模型评估记录（已清理））
 python tools/eval_report.py --model m0-spike/yolo11n_ppe.onnx \
     --data datasets/merged/data.yaml --classes m0-spike/yolo11n_ppe.classes.txt \
-    --label "v1" --report docs/52-model-eval.md
+    --label "v1" --report docs/model-eval-v1.md
 
 # v2 训完后对比（同一 test 集再跑一次，追加到同一文件）
 python tools/eval_report.py --model m0-spike/yolo11n_ppe_v2.onnx \
     --data datasets/merged/data.yaml --classes m0-spike/yolo11n_ppe_v2.classes.txt \
-    --label "v2(11类,merged)" --report docs/52-model-eval.md
+    --label "v2(11类,merged)" --report docs/model-eval-v1.md
 ```
 
 逐类 GT/TP/FP/检出率/平均置信度表；多版本追加同一文件即成对比报告。`--limit N` 冒烟、`--split valid` 换划分。

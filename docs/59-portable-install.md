@@ -112,7 +112,7 @@ runtime\python.exe scripts\backup_data.py restore --zip backup.zip --data-dir <�
 
 ## 发布产物清单 / 校验和验证（任务 52/58）
 
-正式发布时由 GitHub Actions（`.github/workflows/portable.yml`，触发：推 `v*` 标签或手动
+正式发布时由 GitHub Actions（`.github/workflows/release.yml`，触发：推 `v*` 标签或手动
 workflow_dispatch）在 `windows-latest` 上自动执行 `python scripts/build_portable.py --zip`，
 artifact 名 `LabSentinel-portable`，内含便携包 zip 与 `SHA256SUMS.txt`（保留 14 天）。
 

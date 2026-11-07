@@ -2,7 +2,7 @@
 
 > 任务 08 交付物。本目录是一个**待补全的 Flutter 工程**：`lib/` 业务源码与 `pubspec.yaml` 已就绪；
 > 平台原生文件（`android/`、`ios/` 等子目录）需在本机装好 Flutter SDK 后用 `flutter create .` 补全。
-> 交付机器上没有 Flutter / Android SDK，构建被阻塞（探查结论见 `docs/50-tasks/08-android-client.md` 执行报告）。
+> 交付机器上没有 Flutter / Android SDK，构建被阻塞（探查结论见 历史任务包（已归档删除） 执行报告）。
 
 ## 一、环境要求
 

@@ -78,17 +78,11 @@ Windows 部署与完整生产化指南（含摄像头 RTSP 模板、告警渠道
 | [docs/摄像头接入Runbook.md](docs/摄像头接入Runbook.md) | **摄像头接入一条龙**：预检/接线/区域规则/告警验证/24h 观察/故障速查 |
 | [docs/73-mqtt-protocol.md](docs/73-mqtt-protocol.md) | **MQTT 事件总线协议**：主题/payload v1/订阅示例/版本策略（任务125） |
 | [docs/74-plugin-guide.md](docs/74-plugin-guide.md) | **插件（外挂）指南**：清单/权限/示例/安全红线（任务126，默认禁用） |
-| [docs/75-security-audit-2026-11-05.md](docs/75-security-audit-2026-11-05.md) | **安全与依赖审计**：路径/外联/令牌/插件执行/PWA 检查与修复 |
-| [docs/发布核对报告.md](docs/发布核对报告.md) | 发布前核对与终检记录（版本/校验和/阻塞项） |
 | [docs/部署FAQ.md](docs/部署FAQ.md) | 踩坑集中答疑（网络/依赖/推理/训练/告警）；启动失败先跑 `python scripts/doctor.py` 自检 |
 | [docs/68-image-folder-ingestion.md](docs/68-image-folder-ingestion.md) | **图片文件夹自动识别使用手册**：截图目录接入、关键/违规定义、配置与排障 |
-| [docs/72-project-review-2026-11-04.md](docs/72-project-review-2026-11-04.md) | **复审与 Windows 发布路线重排**（建议取舍/新队列/发布阻塞） |
-| [docs/69-splayer-next-benchmark.md](docs/69-splayer-next-benchmark.md) | SPlayer-Next/本机 OSS/监控同类项目对标（19 条建议池） |
-| [docs/71-oss-source-study.md](docs/71-oss-source-study.md) | OSS 源码级参考点（Frigate/MQTT/插件/防休眠等出处） |
 | [docs/30-architecture.md](docs/30-architecture.md) | 架构总览（线程模型、推理锁机制、扩展点） |
 | [docs/35-api-reference.md](docs/35-api-reference.md) | REST/WS API 完整契约（客户端开发唯一依据） |
 | [docs/45-model-onboarding.md](docs/45-model-onboarding.md) | 模型接入手册（换模型零改代码） |
-| [docs/50-tasks/](docs/50-tasks/README.md) | AI 协作任务包体系（子代理工作分发中心） |
 | [docs/90-data-flywheel.md](docs/90-data-flywheel.md) | 数据飞轮：模型持续变强的闭环 |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | 领域术语表 |
 

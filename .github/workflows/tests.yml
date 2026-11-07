@@ -1,5 +1,5 @@
 # 测试工作流（T-004，合并原 ci.yml）：双平台 pytest + ruff 门禁 + pip-audit + 前端构建/审计 + OpenAPI 快照校验。
-# 便携包构建仍走 portable.yml（T-402 将按 76 号文档 §8.2 重写为 release.yml）。
+# 发布/便携包构建走 release.yml（T-402 已重写；旧 portable.yml 已删除）。
 # 门禁说明：ruff 先取 E9/F821/PLE（真错误），规则集随 T-509 收紧。
 name: tests
 on:

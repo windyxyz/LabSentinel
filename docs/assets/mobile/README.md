@@ -54,5 +54,5 @@ with sync_playwright() as p:
 
 ## 截取方式
 
-见 `docs/50-tasks/34-mobile-screenshots.md` 执行报告；关键技巧：抽屉打开态先点首行、
+见历史移动端截图执行报告（已清理）；关键技巧：抽屉打开态先点首行、
 隐藏 naturalWidth=0 的破图 img、抽屉关闭后再点后续导航（遮罩会拦截点击）。

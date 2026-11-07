@@ -216,9 +216,10 @@ def check_todos(res) -> None:
 
 
 def check_required_files(res) -> None:
+    # 2026-11 文档清理：历史交接/核对报告已删除，必需文件只保留现行文档
     required = ["LICENSE", "NOTICE", "README.md", "server/.env.example",
                 "server/requirements.txt", "web/package.json",
-                "docs/55-handoff.md", "docs/运维手册.md", "docs/发布核对报告.md"]
+                "docs/运维手册.md", "docs/部署指南.md", "docs/验证记录-S7-L1黄金语料对齐.md"]
     missing = [f for f in required if not (ROOT / f).exists()]
     if missing:
         results_add(res, "必需文件", "FAIL", "缺：" + ", ".join(missing), "补齐后重跑")

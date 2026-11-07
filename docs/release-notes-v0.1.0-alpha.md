@@ -11,7 +11,7 @@
 - **Evidence-graded PPE detection**: alerts only on explicit "no lab coat" detection; low visibility never triggers a false violation.
 - **Event triage loop**: acknowledge / false-positive / ignore every alert; false-positive snapshots automatically feed the annotation pool for model iteration.
 - **Reliable alerting**: 6 channels (WeCom / DingTalk / Feishu / WeChat via ServerChan & PushPlus / QQ via Qmsg / SMTP) with 3× exponential-backoff retry, dead-letter tracking and one-click re-send.
-- **Incident-driven hardening**: a DirectML concurrent-inference defect (full system hang, 3× Kernel-Power 41) was root-caused and fixed with a process-global inference lock + regression test (docs/51-loadtest-report.md §3, docs/80-risk-register.md A1).
+- **Incident-driven hardening**: a DirectML concurrent-inference defect (full system hang, 3× Kernel-Power 41) was root-caused and fixed with a process-global inference lock + regression test (docs/80-risk-register.md A1；docs/80-risk-register.md A1).
 
 ## Features
 
@@ -46,7 +46,7 @@ ByteTrack vs simple IOU tracker on lab footage: 4 tracked events vs 15 duplicate
 ## Models & data (not distributed with the repo)
 
 - Models and datasets are **not included**; deployers download them per NOTICE (AGPL ecosystem, CC BY 4.0 datasets with attribution).
-- PPE model v1 (10-class, single dataset) ships its evaluation baseline in docs/52-model-eval.md; model v2 (11 classes, 11,420 images merged from 5 datasets) is in training — per-class comparison will be appended to the same document.
+- PPE model v1 (10-class, single dataset) ships its evaluation baseline in 历史模型评估记录; model v2 (11 classes, 11,420 images merged from 5 datasets) is in training — per-class comparison will be appended to the same document.
 - Retraining/quantization is reproducible via tools/ (tasks 06, 11).
 
 ## Security & compliance
@@ -60,7 +60,7 @@ ByteTrack vs simple IOU tracker on lab footage: 4 tracked events vs 15 duplicate
 
 - WebRTC end-to-end latency and touch UX pending validation on real cameras and devices.
 - Event videos require an OpenH264 runtime on the server for browser playback (falls back to MPEG-4 Part 2 otherwise; download documented in docs/部署FAQ.md).
-- Model domain gap on merged public datasets is being closed via the data flywheel (docs/90-data-flywheel.md); v1 baseline numbers are intentionally published unpolished (docs/52-model-eval.md).
+- Model domain gap on merged public datasets is being closed via the data flywheel (docs/90-data-flywheel.md); v1 baseline numbers are intentionally published unpolished (历史模型评估记录).
 - No CI-run model tests (CI covers pytest/web build/lint only, by design).
 - Single-user admin token auth only; multi-user is planned for M3.
 - **Not yet validated: 24h continuous run on a real RTSP camera and the model stop-loss
@@ -82,4 +82,4 @@ ByteTrack vs simple IOU tracker on lab footage: 4 tracked events vs 15 duplicate
 - Repository / Quick start: `README.md`
 - Deployment guide & FAQ: `docs/部署指南.md`, `docs/部署FAQ.md`
 - Architecture & API: `docs/30-architecture.md`, `docs/35-api-reference.md`
-- Measured data: `docs/40-roadmap.md`, `docs/51-loadtest-report.md`, `docs/52-model-eval.md`
+- Measured data: `docs/40-roadmap.md`, 历史压测记录, `历史模型评估记录`
