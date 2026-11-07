@@ -10,7 +10,7 @@
 //! 用法：cargo run -p ls-analyzer -- --golden <video> --out <jsonl> [--fps 5] [--model <onnx>]
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::NaiveDateTime;
 
@@ -77,11 +77,53 @@ fn golden_rule(id: i64, behavior: &str) -> RuleSpec {
 fn frame_ts(index: u64, step: u64, vfps: f64) -> String {
     // 第 index 个分析帧（1-based）对应原视频第 (index-1)*step+1 帧；
     // Python 的 POS_MSEC 实测 = (index-1)*step/vfps 秒（0, 0.2, 0.4...），等价复现。
+    // （VFR 视频的精确对齐走 frame_ts_pts / 逐帧 PTS 表；此函数为无 PTS 表时的回退。）
     let secs = ((index.saturating_sub(1)) as f64) * step as f64 / vfps.max(0.001);
     let base = NaiveDateTime::parse_from_str("2026-01-01T00:00:00", "%Y-%m-%dT%H:%M:%S")
         .expect("固定基准合法");
     let dt = base + chrono::TimeDelta::milliseconds((secs * 1000.0).round() as i64);
     dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn ts_from_secs(secs: f64) -> String {
+    let base = NaiveDateTime::parse_from_str("2026-01-01T00:00:00", "%Y-%m-%dT%H:%M:%S")
+        .expect("固定基准合法");
+    let dt = base + chrono::TimeDelta::milliseconds((secs * 1000.0).round() as i64);
+    dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+/// ffprobe 逐帧 PTS（秒）：与 cv2 POS_MSEC 同源（容器 PTS，VFR 准确）。
+/// 输出顺序 = 解码顺序（与 ffmpeg rawvideo 管道/Python cap.read 一致）。
+fn probe_frame_pts(video: &Path) -> Result<Vec<f64>, String> {
+    let out = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pts_time",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(video)
+        .output()
+        .map_err(|e| format!("ffprobe 不可用: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut pts = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        let v = l.split(',').next().unwrap_or("0");
+        let secs = v.parse::<f64>().unwrap_or(0.0); // "N/A"/空 → 0（首帧无 PTS）
+        pts.push(secs);
+    }
+    if pts.is_empty() {
+        return Err("ffprobe 逐帧 PTS 为空".into());
+    }
+    Ok(pts)
 }
 
 /// 跑黄金语料：返回事件条数（写 JSONL 到 out）。
@@ -111,6 +153,10 @@ pub fn run_golden(args: &GoldenArgs) -> Result<usize, String> {
         return Err("视频帧率非法".into());
     }
     let step = (vfps / args.fps.max(0.1) as f64).round().max(1.0) as u64;
+    // 逐帧 PTS（与 Python POS_MSEC 同源）；失败回退 帧序×(1/fps) 近似。
+    let pts_table = probe_frame_pts(&args.video)
+        .map_err(|e| eprintln!("[golden-rs] 逐帧 PTS 不可用（{e}），回退帧序计算"))
+        .unwrap_or_default();
 
     let mut ing = ls_ingest::Ingest::new(ls_ingest::IngestConfig {
         source: args.video.to_string_lossy().to_string(),
@@ -149,7 +195,13 @@ pub fn run_golden(args: &GoldenArgs) -> Result<usize, String> {
                 ppe: PpeStatus::Unknown,
             })
             .collect();
-        let ts = frame_ts(analyzed, step, vfps);
+        let ts = if analyzed > 0 && ((analyzed as usize - 1) * step as usize) < pts_table.len() {
+            // 分析帧 i → 原始帧 (i-1)*step+1（0-based 索引 (i-1)*step）；
+            // Python POS_MSEC = 该帧的容器 PTS，逐位同源。
+            ts_from_secs(pts_table[(analyzed as usize - 1) * step as usize])
+        } else {
+            frame_ts(analyzed, step, vfps)
+        };
         if let Some(dump) = &args.dump_dets {
             let mut df = std::io::BufWriter::new(
                 std::fs::OpenOptions::new()

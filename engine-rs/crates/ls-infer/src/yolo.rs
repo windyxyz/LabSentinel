@@ -208,10 +208,7 @@ impl YoloModel {
                     .run(ort::inputs![tensor])
                     .map_err(|e| format!("推理失败: {e}"))?;
                 // YOLO 单输出：取首个输出（SessionOutputs 可迭代，取第一个键值对）
-                let (_name, v) = outputs
-                    .iter()
-                    .next()
-                    .ok_or("模型无输出")?;
+                let (_name, v) = outputs.iter().next().ok_or("模型无输出")?;
                 let (shape, flat) = v
                     .try_extract_tensor::<f32>()
                     .map_err(|e| format!("输出类型错误: {e}"))?;
@@ -314,6 +311,7 @@ fn rows_from_shape_dims(
 }
 
 /// letterbox + BGR→RGB + /255 + NCHW（与 Python `_letterbox` 同几何）。
+/// 缩放复用 [`resize_u8_linear_cv2`]（cv2 INTER_LINEAR 定点逐位复刻）。
 pub fn letterbox_nchw(
     bgr: &[u8],
     w: u32,
@@ -332,40 +330,91 @@ pub fn letterbox_nchw(
     let nh = ((h as f32 * g.r).floor() as u32).max(1).min(s);
     let pad = 114.0f32 / 255.0;
     let mut data = vec![pad; (s as usize) * (s as usize) * 3];
-    let (sw, sh) = (w as f32, h as f32);
     let plane = (s as usize) * (s as usize);
+    // cv2.resize(INTER_LINEAR) 定点复刻：Python 先 cv2.resize(uint8) 再 /255，
+    // 这里同样先产 uint8 缩放帧，保证逐位一致（±1/255 的浮点差会传播到 conf）。
+    let resized = resize_u8_linear_cv2(bgr, w, h, nw, nh, 3);
     for y in 0..nh {
-        let sy = (((y as f32) + 0.5) * sh / nh as f32 - 0.5).max(0.0);
-        let y0 = sy.floor() as u32;
-        let y1 = (y0 + 1).min(h - 1);
-        let wy = sy - y0 as f32;
         let py = (g.dy as u32 + y) as usize;
         for x in 0..nw {
-            let sx = (((x as f32) + 0.5) * sw / nw as f32 - 0.5).max(0.0);
-            let x0 = sx.floor() as u32;
-            let x1 = (x0 + 1).min(w - 1);
-            let wx = sx - x0 as f32;
             let px = (g.dx as u32 + x) as usize;
             for c in 0..3usize {
-                let i00 = (((y0 * w + x0) * 3) as usize) + c;
-                let i10 = (((y0 * w + x1) * 3) as usize) + c;
-                let i01 = (((y1 * w + x0) * 3) as usize) + c;
-                let i11 = (((y1 * w + x1) * 3) as usize) + c;
-                let v00 = bgr[i00] as f32;
-                let v10 = bgr[i10] as f32;
-                let v01 = bgr[i01] as f32;
-                let v11 = bgr[i11] as f32;
-                let v = (v00 * (1.0 - wx) * (1.0 - wy)
-                    + v10 * wx * (1.0 - wy)
-                    + v01 * (1.0 - wx) * wy
-                    + v11 * wx * wy)
-                    / 255.0;
+                let v = resized[(y as usize * nw as usize + x as usize) * 3 + c] as f32 / 255.0;
                 let out_c = 2 - c; // BGR → RGB
                 data[out_c * plane + py * s as usize + px] = v;
             }
         }
     }
     Ok((data, g))
+}
+
+/// cv2 `resize(..., INTER_LINEAR)` 对 8U 输入的定点复刻（逐位一致）。
+///
+/// cv2 流程（modules/imgproc/src/resize.cpp）：源坐标 `f = (dst+0.5)*scale - 0.5`，
+/// 整数部分截取（负坐标截 0、越上界截 src_len-2），小数部分量化为
+/// `rint(f * 2048)`（INTER_RESIZE_COEF_BITS=11），水平/垂直各一对系数，
+/// 像素加权和 `Σ src*coef + 2^21 >> 22`（系数总积 = 2048² = 2²²）。
+/// `rint` 为 cvRound 的 round-half-to-even。输出 uint8（经 saturate）。
+pub fn resize_u8_linear_cv2(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, cn: usize) -> Vec<u8> {
+    const COEF_BITS: i32 = 11;
+    const COEF_SCALE: i32 = 1 << COEF_BITS; // 2048
+    const SHIFT: i32 = COEF_BITS * 2; // 22
+    let rint = |v: f32| -> i32 { (v.round_ties_even()) as i32 };
+    let hcoef = |dx: u32| -> (usize, i32, i32) {
+        let scale = sw as f64 / dw as f64;
+        let f = ((dx as f64 + 0.5) * scale - 0.5) as f32;
+        let mut ix = f.floor();
+        let mut fx = f - ix;
+        if ix < 0.0 {
+            fx = 0.0;
+            ix = 0.0;
+        }
+        if ix >= (sw as f32 - 1.0) {
+            fx = 0.0;
+            ix = sw as f32 - 2.0;
+        }
+        let c1 = rint(fx * COEF_SCALE as f32).clamp(0, COEF_SCALE);
+        (ix.max(0.0) as usize, COEF_SCALE - c1, c1)
+    };
+    let vcoef = |dy: u32| -> (usize, i32, i32) {
+        let scale = sh as f64 / dh as f64;
+        let f = ((dy as f64 + 0.5) * scale - 0.5) as f32;
+        let mut iy = f.floor();
+        let mut fy = f - iy;
+        if iy < 0.0 {
+            fy = 0.0;
+            iy = 0.0;
+        }
+        if iy >= (sh as f32 - 1.0) {
+            fy = 0.0;
+            iy = sh as f32 - 2.0;
+        }
+        let c1 = rint(fy * COEF_SCALE as f32).clamp(0, COEF_SCALE);
+        (iy.max(0.0) as usize, COEF_SCALE - c1, c1)
+    };
+    let mut dst = vec![0u8; (dw as usize) * (dh as usize) * cn];
+    for dy in 0..dh {
+        let (y0, cy0, cy1) = vcoef(dy);
+        let y1 = (y0 + 1).min(sh as usize - 1);
+        for dx in 0..dw {
+            let (x0, cx0, cx1) = hcoef(dx);
+            let x1 = (x0 + 1).min(sw as usize - 1);
+            for c in 0..cn {
+                let p00 = src[(y0 * sw as usize + x0) * cn + c] as i32;
+                let p01 = src[(y0 * sw as usize + x1) * cn + c] as i32;
+                let p10 = src[(y1 * sw as usize + x0) * cn + c] as i32;
+                let p11 = src[(y1 * sw as usize + x1) * cn + c] as i32;
+                let v = p00 * cy0 * cx0
+                    + p01 * cy0 * cx1
+                    + p10 * cy1 * cx0
+                    + p11 * cy1 * cx1
+                    + (1 << (SHIFT - 1));
+                let di = ((dy as usize * dw as usize) + dx as usize) * cn + c;
+                dst[di] = (v >> SHIFT).clamp(0, 255) as u8;
+            }
+        }
+    }
+    dst
 }
 
 #[cfg(test)]
