@@ -102,6 +102,16 @@
   收进 `create_app()`；模块级 `app` 成为工厂产物（53 处 `from app.main import app`
   零改动），中间件与 handler 去装饰器改显式注册；工厂可重入（二次实例化路由集合
   与 OpenAPI 94 路径顺序逐字一致）；lifespan 语义不变；全量 565 passed。
+- **ls-track 四个移植语义修复（L1 轨迹对齐）**：① Kalman 从 f32 提升到 f64
+  （supervision 全程 float64，f32 在 300+ 帧真实序列累积 2px 级误差）；②
+  remove_duplicate_tracks 阈值语义写反（Python IoU > 0.85 才去重，Rust 误成
+  IoU ≥ 0.15 就去重，拥挤场景大量轨迹被误删）；③ 空检测帧不调 ByteTrack
+  （与 Python `_analyze` 对齐，track 状态冻结）；④ update 输出改为**输入检测框
+  原样** × tracker_id（supervision 语义：IoU ≥ 0.5 匹配回填、未关联检测丢弃、
+  新建 track 首帧不输出）——zone anchor/PPE 匹配随之对齐。轨迹对齐诊断工具链
+  入库（export_real_track_vector.py + ls-analyzer --dets-from/--dump-tracks/
+  --dump-states + ByteTrack::state_snapshot），分歧帧从 4 推进到 52（真实 322 帧
+  语料，差异帧 214→183，继续收敛中）。
 - **T-328 方案 A（行为变更）：Windows 推理统一 onnxruntime 1.31.1**——requirements.in
   win32 分支由 `onnxruntime-directml>=1.17` 改为 `onnxruntime==1.31.1`（directml 包无
   1.31 wheel），Windows 推理回落 **CPU EP**（Engine 注册表自动降级，DirectML GPU 加速

@@ -203,8 +203,14 @@ pub fn run_golden(args: &GoldenArgs) -> Result<usize, String> {
         let work = if frame.width == 1280 && frame.height == 720 {
             frame
         } else {
-            let resized =
-                ls_infer::yolo::resize_u8_linear_cv2(&frame.data, frame.width, frame.height, 1280, 720, 3);
+            let resized = ls_infer::yolo::resize_u8_linear_cv2(
+                &frame.data,
+                frame.width,
+                frame.height,
+                1280,
+                720,
+                3,
+            );
             ls_ingest::Frame {
                 width: 1280,
                 height: 720,

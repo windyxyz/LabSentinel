@@ -1,20 +1,20 @@
 //! 8 维状态卡尔曼滤波（xyah）：与 supervision/tracker/byte_tracker/kalman_filter.py
-//! 逐数值对齐（T-324）。f32 运算与 numpy float32 的舍入一致（向量容差 1e-3）。
+//! 逐数值对齐（T-324）。f64 运算与 numpy float32 的舍入一致（向量容差 1e-3）。
 // 矩阵维度固定为 8x8/4x4，手写索引循环比迭代器组合更贴近论文公式、便于逐元素对齐审计
 #![allow(clippy::needless_range_loop)]
 
 pub const STATE_DIM: usize = 8; // x, y, a, h, vx, vy, va, vh
 
-const STD_WEIGHT_POSITION: f32 = 1.0 / 20.0;
-const STD_WEIGHT_VELOCITY: f32 = 1.0 / 160.0;
+const STD_WEIGHT_POSITION: f64 = 1.0 / 20.0;
+const STD_WEIGHT_VELOCITY: f64 = 1.0 / 160.0;
 
 /// 8x8 对称矩阵（行主序展平，无外部线性代数依赖——维度固定，手写足够快）。
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Mat8(pub [[f32; STATE_DIM]; STATE_DIM]);
+pub struct Mat8(pub [[f64; STATE_DIM]; STATE_DIM]);
 
 impl Mat8 {
-    pub fn diag(d: [f32; STATE_DIM]) -> Self {
-        let mut m = [[0.0f32; STATE_DIM]; STATE_DIM];
+    pub fn diag(d: [f64; STATE_DIM]) -> Self {
+        let mut m = [[0.0f64; STATE_DIM]; STATE_DIM];
         for i in 0..STATE_DIM {
             m[i][i] = d[i];
         }
@@ -22,7 +22,7 @@ impl Mat8 {
     }
 
     pub fn identity() -> Self {
-        let mut m = [[0.0f32; STATE_DIM]; STATE_DIM];
+        let mut m = [[0.0f64; STATE_DIM]; STATE_DIM];
         for i in 0..STATE_DIM {
             m[i][i] = 1.0;
         }
@@ -40,20 +40,20 @@ fn motion_mat() -> Mat8 {
 }
 
 /// mean' = F·mean；cov' = F·cov·Fᵀ + Q(h)
-pub fn predict(mean: [f32; STATE_DIM], cov: &Mat8) -> ([f32; STATE_DIM], Mat8) {
+pub fn predict(mean: [f64; STATE_DIM], cov: &Mat8) -> ([f64; STATE_DIM], Mat8) {
     let f = motion_mat();
     let h = mean[3];
     let q = Mat8::diag([
         (STD_WEIGHT_POSITION * h).powi(2),
         (STD_WEIGHT_POSITION * h).powi(2),
-        1e-2f32.powi(2),
+        1e-2f64.powi(2),
         (STD_WEIGHT_POSITION * h).powi(2),
         (10.0 * STD_WEIGHT_VELOCITY * h).powi(2),
         (10.0 * STD_WEIGHT_VELOCITY * h).powi(2),
-        1e-5f32.powi(2),
+        1e-5f64.powi(2),
         (10.0 * STD_WEIGHT_VELOCITY * h).powi(2),
     ]);
-    let mut new_mean = [0.0f32; STATE_DIM];
+    let mut new_mean = [0.0f64; STATE_DIM];
     for i in 0..STATE_DIM {
         let mut acc = 0.0;
         for j in 0..STATE_DIM {
@@ -66,18 +66,18 @@ pub fn predict(mean: [f32; STATE_DIM], cov: &Mat8) -> ([f32; STATE_DIM], Mat8) {
 }
 
 /// 观测投影：H·mean、H·cov·Hᵀ + R(h)（4x4）
-pub fn project(mean: [f32; STATE_DIM], cov: &Mat8) -> ([f32; 4], [[f32; 4]; 4]) {
+pub fn project(mean: [f64; STATE_DIM], cov: &Mat8) -> ([f64; 4], [[f64; 4]; 4]) {
     let h = mean[3];
     let r = [
         (STD_WEIGHT_POSITION * h).powi(2),
         (STD_WEIGHT_POSITION * h).powi(2),
-        1e-1f32.powi(2),
+        1e-1f64.powi(2),
         (STD_WEIGHT_POSITION * h).powi(2),
     ];
-    let mut proj_mean = [0.0f32; 4];
+    let mut proj_mean = [0.0f64; 4];
     proj_mean.copy_from_slice(&mean[..4]); // H = [I4 | 0]
                                            // H·cov·Hᵀ = cov 的左上 4x4 子阵
-    let mut proj_cov = [[0.0f32; 4]; 4];
+    let mut proj_cov = [[0.0f64; 4]; 4];
     for i in 0..4 {
         for j in 0..4 {
             proj_cov[i][j] = cov.0[i][j] + (if i == j { r[i] } else { 0.0 });
@@ -88,10 +88,10 @@ pub fn project(mean: [f32; STATE_DIM], cov: &Mat8) -> ([f32; 4], [[f32; 4]; 4]) 
 
 /// 更新步：Kalman 增益经 4x4 Cholesky 求解（与 scipy cho_factor/cho_solve 等价路径）。
 pub fn update(
-    mean: [f32; STATE_DIM],
+    mean: [f64; STATE_DIM],
     cov: &Mat8,
-    measurement: [f32; 4],
-) -> ([f32; STATE_DIM], Mat8) {
+    measurement: [f64; 4],
+) -> ([f64; STATE_DIM], Mat8) {
     let (proj_mean, proj_cov) = project(mean, cov);
     // K = (cov·Hᵀ)·S⁻¹，其中 S=proj_cov（4x4）；解 S·X = (cov·Hᵀ)ᵀ 再转置
     let ph = covariance_times_h(cov); // 8x4 = cov·Hᵀ
@@ -99,7 +99,7 @@ pub fn update(
     let x = solve_spd(&proj_cov, &ph_t); // X = S⁻¹·(PHᵀ)ᵀ
     let k = transpose4_8(&x); // K = Xᵀ (8x4)
 
-    let mut innovation = [0.0f32; 4];
+    let mut innovation = [0.0f64; 4];
     for i in 0..4 {
         innovation[i] = measurement[i] - proj_mean[i];
     }
@@ -112,7 +112,7 @@ pub fn update(
         new_mean[i] += acc;
     }
     // new_cov = cov − K·S·Kᵀ（等价 cov − K·PHᵀ，数值更稳的展开）
-    let mut kph = [[0.0f32; STATE_DIM]; STATE_DIM];
+    let mut kph = [[0.0f64; STATE_DIM]; STATE_DIM];
     for i in 0..STATE_DIM {
         for j in 0..STATE_DIM {
             let mut acc = 0.0;
@@ -122,7 +122,7 @@ pub fn update(
             kph[i][j] = acc;
         }
     }
-    let mut new_cov = [[0.0f32; STATE_DIM]; STATE_DIM];
+    let mut new_cov = [[0.0f64; STATE_DIM]; STATE_DIM];
     for i in 0..STATE_DIM {
         for j in 0..STATE_DIM {
             new_cov[i][j] = cov.0[i][j] - kph[i][j];
@@ -131,8 +131,8 @@ pub fn update(
     (new_mean, Mat8(new_cov))
 }
 
-fn covariance_times_h(cov: &Mat8) -> [[f32; 4]; STATE_DIM] {
-    let mut out = [[0.0f32; 4]; STATE_DIM];
+fn covariance_times_h(cov: &Mat8) -> [[f64; 4]; STATE_DIM] {
+    let mut out = [[0.0f64; 4]; STATE_DIM];
     for i in 0..STATE_DIM {
         for j in 0..4 {
             out[i][j] = cov.0[i][j]; // Hᵀ = [I4; 0]
@@ -142,10 +142,10 @@ fn covariance_times_h(cov: &Mat8) -> [[f32; 4]; STATE_DIM] {
 }
 
 fn add(
-    a: &[[f32; STATE_DIM]; STATE_DIM],
-    b: &[[f32; STATE_DIM]; STATE_DIM],
-) -> [[f32; STATE_DIM]; STATE_DIM] {
-    let mut m = [[0.0f32; STATE_DIM]; STATE_DIM];
+    a: &[[f64; STATE_DIM]; STATE_DIM],
+    b: &[[f64; STATE_DIM]; STATE_DIM],
+) -> [[f64; STATE_DIM]; STATE_DIM] {
+    let mut m = [[0.0f64; STATE_DIM]; STATE_DIM];
     for i in 0..STATE_DIM {
         for j in 0..STATE_DIM {
             m[i][j] = a[i][j] + b[i][j];
@@ -154,8 +154,8 @@ fn add(
     m
 }
 
-fn transpose(a: &[[f32; STATE_DIM]; STATE_DIM]) -> [[f32; STATE_DIM]; STATE_DIM] {
-    let mut m = [[0.0f32; STATE_DIM]; STATE_DIM];
+fn transpose(a: &[[f64; STATE_DIM]; STATE_DIM]) -> [[f64; STATE_DIM]; STATE_DIM] {
+    let mut m = [[0.0f64; STATE_DIM]; STATE_DIM];
     for i in 0..STATE_DIM {
         for j in 0..STATE_DIM {
             m[i][j] = a[j][i];
@@ -165,10 +165,10 @@ fn transpose(a: &[[f32; STATE_DIM]; STATE_DIM]) -> [[f32; STATE_DIM]; STATE_DIM]
 }
 
 fn mat_mul(
-    a: [[f32; STATE_DIM]; STATE_DIM],
-    b: [[f32; STATE_DIM]; STATE_DIM],
-) -> [[f32; STATE_DIM]; STATE_DIM] {
-    let mut m = [[0.0f32; STATE_DIM]; STATE_DIM];
+    a: [[f64; STATE_DIM]; STATE_DIM],
+    b: [[f64; STATE_DIM]; STATE_DIM],
+) -> [[f64; STATE_DIM]; STATE_DIM] {
+    let mut m = [[0.0f64; STATE_DIM]; STATE_DIM];
     for i in 0..STATE_DIM {
         for j in 0..STATE_DIM {
             let mut acc = 0.0;
@@ -181,8 +181,8 @@ fn mat_mul(
     m
 }
 
-fn transpose4(a: &[[f32; 4]; STATE_DIM]) -> [[f32; STATE_DIM]; 4] {
-    let mut m = [[0.0f32; STATE_DIM]; 4];
+fn transpose4(a: &[[f64; 4]; STATE_DIM]) -> [[f64; STATE_DIM]; 4] {
+    let mut m = [[0.0f64; STATE_DIM]; 4];
     for i in 0..4 {
         for j in 0..STATE_DIM {
             m[i][j] = a[j][i];
@@ -192,8 +192,8 @@ fn transpose4(a: &[[f32; 4]; STATE_DIM]) -> [[f32; STATE_DIM]; 4] {
 }
 
 /// (4x8)ᵀ → 8x4（update 步专用）
-fn transpose4_8(a: &[[f32; STATE_DIM]; 4]) -> [[f32; 4]; STATE_DIM] {
-    let mut m = [[0.0f32; 4]; STATE_DIM];
+fn transpose4_8(a: &[[f64; STATE_DIM]; 4]) -> [[f64; 4]; STATE_DIM] {
+    let mut m = [[0.0f64; 4]; STATE_DIM];
     for i in 0..4 {
         for j in 0..STATE_DIM {
             m[j][i] = a[i][j];
@@ -203,9 +203,9 @@ fn transpose4_8(a: &[[f32; STATE_DIM]; 4]) -> [[f32; 4]; STATE_DIM] {
 }
 
 /// 解 SPD 方程 S·X = B（S: 4x4 对称正定；Cholesky，对齐 scipy.linalg.cho_factor/cho_solve）。
-fn solve_spd(s: &[[f32; 4]; 4], b: &[[f32; STATE_DIM]; 4]) -> [[f32; STATE_DIM]; 4] {
+fn solve_spd(s: &[[f64; 4]; 4], b: &[[f64; STATE_DIM]; 4]) -> [[f64; STATE_DIM]; 4] {
     let n = 4usize;
-    let mut l = [[0.0f32; 4]; 4];
+    let mut l = [[0.0f64; 4]; 4];
     for i in 0..n {
         for j in 0..=i {
             let mut acc = s[i][j];
@@ -220,7 +220,7 @@ fn solve_spd(s: &[[f32; 4]; 4], b: &[[f32; STATE_DIM]; 4]) -> [[f32; STATE_DIM];
         }
     }
     // 前代 L·Y = B
-    let mut y = [[0.0f32; STATE_DIM]; 4];
+    let mut y = [[0.0f64; STATE_DIM]; 4];
     for i in 0..n {
         for col in 0..STATE_DIM {
             let mut acc = b[i][col];
@@ -231,7 +231,7 @@ fn solve_spd(s: &[[f32; 4]; 4], b: &[[f32; STATE_DIM]; 4]) -> [[f32; STATE_DIM];
         }
     }
     // 回代 Lᵀ·X = Y
-    let mut x = [[0.0f32; STATE_DIM]; 4];
+    let mut x = [[0.0f64; STATE_DIM]; 4];
     for i in (0..n).rev() {
         for col in 0..STATE_DIM {
             let mut acc = y[i][col];

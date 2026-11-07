@@ -110,6 +110,11 @@ pub struct CameraPipeline {
     /// (rule_id, track_id) -> 最近触发帧序号
     last_fire: HashMap<(i64, i64), u64>,
     frame_index: u64,
+    /// L1 对齐诊断：true 时每帧记录 ByteTrack 激活轨迹 (track_id, tlbr)
+    pub log_tracks: bool,
+    pub track_log: Vec<Vec<(i64, [f32; 4])>>,
+    /// L1 对齐诊断：每帧 (tracked, lost, unconfirmed) 的 (external_id, mean_x) 快照
+    pub state_log: Vec<ls_track::TrackStateSnap>,
 }
 
 impl CameraPipeline {
@@ -146,6 +151,9 @@ impl CameraPipeline {
             zone_states,
             last_fire: HashMap::new(),
             frame_index: 0,
+            log_tracks: false,
+            track_log: Vec::new(),
+            state_log: Vec::new(),
         }
     }
 
@@ -171,6 +179,10 @@ impl CameraPipeline {
                 let detail = format!("离开安全区「{}」", self.zone_name(zid));
                 self.try_fire(Some(zid), "exit", tid, &detail, 2, &now, frame_ts, &mut out);
             }
+            if self.log_tracks {
+                self.track_log.push(Vec::new()); // 保持帧号对齐（空帧无激活轨迹）
+                self.state_log.push(self.tracker.state_snapshot());
+            }
             return out;
         }
 
@@ -182,6 +194,10 @@ impl CameraPipeline {
             })
             .collect();
         let active = self.tracker.update(&track_dets);
+        if self.log_tracks {
+            self.track_log
+                .push(active.iter().map(|(b, id)| (*id, *b)).collect());
+        }
         let active_ids: HashSet<i64> = active.iter().map(|(_, id)| *id).collect();
 
         // 本帧未再出现的在场 track：补离场观测（单帧漏检不立即翻转为 exit——迟滞生效）
@@ -350,6 +366,9 @@ impl CameraPipeline {
                     &mut out,
                 );
             }
+        }
+        if self.log_tracks {
+            self.state_log.push(self.tracker.state_snapshot());
         }
         out
     }

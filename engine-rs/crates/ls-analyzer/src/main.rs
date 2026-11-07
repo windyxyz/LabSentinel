@@ -883,4 +883,152 @@ mod tests {
         server.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// L1 轨迹对齐（回放诊断，测试专用入口）：消费 export_real_track_vector.py 的
+    /// 真值向量（检测+轨迹），pipeline 回放后逐帧 diff（id 精确 + 框容差 0.5px）。
+    /// 语料/向量缺失自动 skip。分歧帧数随 ls-track 语义修复持续下降。
+    /// L1 对齐收敛（>=98%）后移除 ignore 作为回归门禁。
+    #[test]
+    #[ignore = "L1 轨迹对齐收敛中（diff_frames>0），达标后转正为回归门禁"]
+    fn replay_real_track_vector() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let vector = repo.join("testdata/vectors/real-big.json");
+        if !vector.is_file() {
+            eprintln!("skip: 真值向量不存在（先跑 tools/export_real_track_vector.py）");
+            return;
+        }
+        let vec_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&vector).unwrap()).unwrap();
+        let frames = vec_json["frames"].as_array().unwrap();
+
+        let camera = pipeline::CameraSpec {
+            id: 1,
+            name: "vec".into(),
+            source: String::new(),
+            type_: "file".into(),
+            analysis_fps: 5.0,
+            file_loop: false,
+        };
+        let zones = vec![pipeline::ZoneSpec {
+            id: 1,
+            camera_id: 1,
+            name: "全画幅".into(),
+            points: vec![(0, 0), (1280, 0), (1280, 719), (0, 719)],
+        }];
+        let rules = ["enter", "exit", "enter_no_ppe"]
+            .iter()
+            .enumerate()
+            .map(|(i, b)| pipeline::RuleSpec {
+                id: i as i64 + 1,
+                camera_id: 1,
+                zone_id: 1,
+                behavior: b.to_string(),
+                level: 2,
+                cooldown_s: 0,
+                time_start: "00:00".into(),
+                time_end: "23:59".into(),
+                weekdays: String::new(),
+                threshold: 0,
+                enabled: true,
+                holiday_only: false,
+            })
+            .collect();
+        let mut pipe =
+            pipeline::CameraPipeline::new(camera, zones, rules, Default::default(), 2, 3);
+        pipe.log_tracks = true;
+
+        for fr in frames {
+            let dets: Vec<pipeline::PersonDetection> = fr["dets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| {
+                    let r = row.as_array()?;
+                    if r.len() < 5 {
+                        return None;
+                    }
+                    Some(pipeline::PersonDetection {
+                        box_: [
+                            r[0].as_f64()? as f32,
+                            r[1].as_f64()? as f32,
+                            r[2].as_f64()? as f32,
+                            r[3].as_f64()? as f32,
+                        ],
+                        score: r[4].as_f64()? as f32,
+                        ppe: pipeline::PpeStatus::Unknown,
+                    })
+                })
+                .collect();
+            let fnum = fr["frame"].as_u64().unwrap_or(1);
+            let ts = pipeline::frame_ts_for(fnum, 5.0);
+            let _ = pipe.process(&dets, &ts);
+        }
+
+        // 逐帧 diff（id 精确 + 框容差 0.5px）
+        let mut diff_frames = 0usize;
+        let mut first: Option<(usize, Vec<f64>, Vec<f64>)> = None;
+        for (i, tracks) in pipe.track_log.iter().enumerate() {
+            let py_rows: Vec<(f64, [f64; 4])> = frames[i]["tracks"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|r| {
+                            let a = r.as_array().unwrap();
+                            (
+                                a[4].as_f64().unwrap(),
+                                [
+                                    a[0].as_f64().unwrap(),
+                                    a[1].as_f64().unwrap(),
+                                    a[2].as_f64().unwrap(),
+                                    a[3].as_f64().unwrap(),
+                                ],
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut py_left: Vec<(f64, [f64; 4])> = py_rows.clone();
+            let mut rs_left: Vec<(f64, [f64; 4])> = tracks
+                .iter()
+                .map(|(id, b)| {
+                    (
+                        *id as f64,
+                        [b[0] as f64, b[1] as f64, b[2] as f64, b[3] as f64],
+                    )
+                })
+                .collect();
+            for (py_id, py_box) in py_rows.iter() {
+                let hit = rs_left.iter().position(|(rs_id, rs_box)| {
+                    rs_id == py_id
+                        && rs_box
+                            .iter()
+                            .zip(py_box.iter())
+                            .all(|(r, p)| (r - p).abs() <= 0.5)
+                });
+                if let Some(pos) = hit {
+                    rs_left.remove(pos);
+                } else {
+                    py_left.retain(|(id, _)| id != py_id);
+                }
+            }
+            if !py_left.is_empty() || !rs_left.is_empty() {
+                diff_frames += 1;
+                if first.is_none() {
+                    let flat = |v: &[(f64, [f64; 4])]| -> Vec<f64> {
+                        v.iter()
+                            .flat_map(|(id, b)| [*id, b[0], b[1], b[2], b[3]])
+                            .collect()
+                    };
+                    first = Some((i + 1, flat(&py_left), flat(&rs_left)));
+                }
+            }
+        }
+        println!(
+            "[replay] frames={} diff_frames={diff_frames}",
+            pipe.track_log.len()
+        );
+        if let Some((f, py, rs)) = first {
+            panic!("轨迹分歧 first frame={f}: PY-only={py:?} RS-only={rs:?}（按 supervision 语义继续收敛）");
+        }
+    }
 }
