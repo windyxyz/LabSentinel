@@ -42,7 +42,8 @@ from .constants import TYPE_TEXT
 # B-28：api 层不再导入 get_engine——/api/system 只读 engine._engine/PRELOAD，模型缺失不炸
 from .face import FaceClient
 from .folders import image_exts, thumbnail_bytes
-from .models import CameraCreate, RuleCreate, ZoneCreate
+from .models import (CameraCreate, ClaimPairingBody, DiscoveryProbeBody, RuleCreate,
+                     SilenceCreate, TemplatePreviewBody, ZoneCreate)
 from .pipeline import CameraManager
 from .stats import daily as stats_daily_query
 from .stats import hourly as stats_hourly_query
@@ -428,12 +429,12 @@ def create_pairing():
 
 
 @router.post("/pairing/claim")
-def claim_pairing(body: dict):
+def claim_pairing(body: ClaimPairingBody):
     """客户端用配对码换设备令牌（只返回一次；服务端只存 hash）。"""
     from . import devices
-    code = str(body.get("code") or "").strip()
-    name = str(body.get("device_name") or "device")[:64]
-    platform = str(body.get("platform") or "")[:32]
+    code = body.code.strip()
+    name = body.device_name[:64]
+    platform = body.platform[:32]
     if store is None:
         raise HTTPException(503, "服务未就绪")
     token = devices.claim(store, code, name, platform)
@@ -615,14 +616,14 @@ def alert_template_get():
 
 
 @router.post("/alert-template/preview", dependencies=[Depends(require_admin)])
-def alert_template_preview(body: dict):
+def alert_template_preview(body: TemplatePreviewBody):
     from .alerts import alert_title, render_alert
-    row = {"ts": body.get("ts") or datetime.now().isoformat(timespec="seconds"),
-           "camera_id": int(body.get("camera_id", 1)),
-           "type": body.get("type", "enter"),
-           "level": int(body.get("level", 2)),
-           "track_id": int(body.get("track_id", 1)),
-           "detail": body.get("detail", "（示例事件详情）")}
+    row = {"ts": body.ts or datetime.now().isoformat(timespec="seconds"),
+           "camera_id": body.camera_id,
+           "type": body.type,
+           "level": body.level,
+           "track_id": body.track_id,
+           "detail": body.detail}
     return {"title": alert_title(row["level"]), "text": render_alert(row)}
 
 
@@ -644,11 +645,9 @@ def list_alert_silences(active: int = 1):
 
 
 @router.post("/alert-silences", dependencies=[Depends(require_admin)])
-def add_alert_silence(body: dict):
-    scope = body.get("scope", "global")
-    if scope not in _ALLOWED_SILENCE_SCOPES:
-        raise HTTPException(400, f"scope 必须为 {'|'.join(_ALLOWED_SILENCE_SCOPES)}")
-    target = body.get("target")
+def add_alert_silence(body: SilenceCreate):
+    scope = body.scope
+    target = body.target
     if scope == "global":
         target = None
     else:
@@ -660,11 +659,9 @@ def add_alert_silence(body: dict):
             raise HTTPException(400, "level 必须为 1|2|3")
         if scope == "type" and target not in TYPE_TEXT:
             raise HTTPException(400, f"type 必须为 {'|'.join(TYPE_TEXT)}")
-    duration = int(body.get("duration_s", 3600))
-    if not (60 <= duration <= 7 * 86400):
-        raise HTTPException(400, "duration_s 必须 60–604800（1 分钟 ~ 7 天）")
+    duration = body.duration_s
     rec = store.add_silence(scope, str(target) if target is not None else None,
-                            body.get("reason"), created_by="admin", duration_s=duration)
+                            body.reason, created_by="admin", duration_s=duration)
     return rec
 
 
@@ -780,20 +777,14 @@ def discovery_cameras(timeout: float = 3.0, refresh: int = 0):
 
 
 @router.post("/discovery/probe", dependencies=[Depends(require_admin)])
-def discovery_probe(body: dict):
+def discovery_probe(body: DiscoveryProbeBody):
     """TCP/ffprobe 只读探测（凭证仅用于本次探测，不写日志/不回传）。"""
-    host = str(body.get("host") or "").strip()
+    host = body.host.strip()
     if not host:
         raise HTTPException(400, "host 必填")
-    try:
-        port = int(body.get("port") or 554)
-    except (TypeError, ValueError):
-        raise HTTPException(400, "port 必须是整数")
-    if not 1 <= port <= 65535:
-        raise HTTPException(400, "port 必须在 1-65535")
-    return discovery.probe_host(host, port=port,
-                                username=str(body.get("username") or "") or None,
-                                password=str(body.get("password") or "") or None)
+    return discovery.probe_host(host, port=body.port,
+                                username=body.username or None,
+                                password=body.password or None)
 
 
 # ---- T-505 第四步（纯搬移）：cameras 分组/批量/CRUD 与 config-io 移入子路由 ----

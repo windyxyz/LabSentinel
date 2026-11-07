@@ -78,9 +78,9 @@ def test_put_group_and_validation(client):
     # 清空=未分组
     r = client.put(f"/api/cameras/{cam['id']}/group", json={"group_name": ""})
     assert r.json()["group_name"] == ""
-    # 长度校验
+    # 长度校验（T-505/B-23：GroupBody → Pydantic 422）
     assert client.put(f"/api/cameras/{cam['id']}/group",
-                      json={"group_name": "x" * 33}).status_code == 400
+                      json={"group_name": "x" * 33}).status_code == 422
     assert client.put("/api/cameras/99999/group", json={"group_name": "x"}).status_code == 404
 
 
@@ -108,16 +108,17 @@ def test_bulk_start_stop_with_manager_mock(client, monkeypatch):
 
 
 def test_bulk_validation(client):
-    assert client.post("/api/cameras/bulk", json={"ids": [1], "action": "x"}).status_code == 400
-    assert client.post("/api/cameras/bulk", json={"ids": [], "action": "start"}).status_code == 400
+    # T-505/B-23：BulkBody（extra=forbid）→ 形状/枚举/类型约束自动 422；去重留处理器 400
+    assert client.post("/api/cameras/bulk", json={"ids": [1], "action": "x"}).status_code == 422
+    assert client.post("/api/cameras/bulk", json={"ids": [], "action": "start"}).status_code == 422
     assert client.post("/api/cameras/bulk",
                        json={"ids": [1, 1], "action": "start"}).status_code == 400  # 去重
     assert client.post("/api/cameras/bulk",
-                       json={"ids": list(range(101)), "action": "start"}).status_code == 400  # >100
+                       json={"ids": list(range(101)), "action": "start"}).status_code == 422  # >100
     assert client.post("/api/cameras/bulk",
-                       json={"ids": ["a"], "action": "start"}).status_code == 400  # 非整数
+                       json={"ids": ["a"], "action": "start"}).status_code == 422  # 非整数
     assert client.post("/api/cameras/bulk",
-                       json={"ids": [True], "action": "start"}).status_code == 400  # bool 冒充 int
+                       json={"ids": [True], "action": "start"}).status_code == 422  # bool 冒充 int
 
 
 def test_group_auth(client, monkeypatch):

@@ -56,7 +56,7 @@ def client():
 
 def test_analyzer_api_validation(client):
     assert client.put("/api/cameras/1/analyzer",
-                      json={"analyzer": "grpc"}).status_code == 400
+                      json={"analyzer": "grpc"}).status_code == 422
     assert client.put("/api/cameras/99999/analyzer",
                       json={"analyzer": "rust"}).status_code == 404
 

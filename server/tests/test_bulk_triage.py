@@ -78,13 +78,14 @@ def test_bulk_false_positive_pool_once(client, tmp_path, monkeypatch):
 
 def test_bulk_validation(client):
     _mk_events(1)
-    assert client.post("/api/events/bulk-status", json={"ids": [], "status": "acked"}).status_code == 400
+    # T-505/B-23：BulkStatusBody → 形状/枚举约束自动 422
+    assert client.post("/api/events/bulk-status", json={"ids": [], "status": "acked"}).status_code == 422
     assert client.post("/api/events/bulk-status",
-                       json={"ids": list(range(201)), "status": "acked"}).status_code == 400
+                       json={"ids": list(range(201)), "status": "acked"}).status_code == 422
     assert client.post("/api/events/bulk-status",
-                       json={"ids": [1], "status": "new"}).status_code == 400
+                       json={"ids": [1], "status": "new"}).status_code == 422
     assert client.post("/api/events/bulk-status",
-                       json={"ids": [1], "status": "bogus"}).status_code == 400
+                       json={"ids": [1], "status": "bogus"}).status_code == 422
 
 
 def test_bulk_requires_admin(client, monkeypatch):

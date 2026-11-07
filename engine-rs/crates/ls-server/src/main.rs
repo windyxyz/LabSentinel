@@ -325,7 +325,12 @@ async fn set_status(
 ) -> Response {
     let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
     if !["new", "acked", "false_positive", "ignored"].contains(&status) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "非法状态"}))).into_response();
+        // T-505 契约对齐：Python 侧 EventStatusBody Literal → 422，两实现同契约
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail": "非法状态"})),
+        )
+            .into_response();
     }
     let s = match ls_store::Store::open(&st.db_path) {
         Ok(s) => s,

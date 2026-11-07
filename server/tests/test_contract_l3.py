@@ -76,9 +76,9 @@ def _contract_cases(base: str, cid: int, eid: int):
         # 跨站写请求一律 403
         r = c.post("/api/backups/run", headers={"Origin": "https://evil.example"})
         assert r.status_code == 403, (r.status_code, r.text)
-        # 非法处置状态 400
+        # 非法处置状态（T-505：Literal 枚举 422）
         r = c.post(f"/api/events/{eid}/status", json={"status": "bogus"})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
 
 def test_python_meets_contract(cross_db):

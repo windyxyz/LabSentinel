@@ -126,7 +126,7 @@ def test_silence_api_crud_and_validation(tmp_path, monkeypatch):
         # camera 静默：目标存在
         assert c.post("/api/alert-silences", json={"scope": "camera", "target": str(cid),
                                                    "duration_s": 3600}).status_code == 200
-        # 校验
+        # 校验（T-505/B-23：SilenceCreate → 枚举/时长约束 422；语义校验留处理器 400/404）
         assert c.post("/api/alert-silences", json={"scope": "camera"}).status_code == 400
         assert c.post("/api/alert-silences",
                       json={"scope": "camera", "target": "9999"}).status_code == 404
@@ -135,7 +135,7 @@ def test_silence_api_crud_and_validation(tmp_path, monkeypatch):
         assert c.post("/api/alert-silences",
                       json={"scope": "type", "target": "nope"}).status_code == 400
         assert c.post("/api/alert-silences", json={"scope": "global",
-                                                   "duration_s": 10}).status_code == 400
+                                                   "duration_s": 10}).status_code == 422
         # 解除 + 404
         assert c.delete(f"/api/alert-silences/{sid}").status_code == 200
         assert c.delete(f"/api/alert-silences/{sid}").status_code == 404

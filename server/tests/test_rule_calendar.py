@@ -135,7 +135,7 @@ def test_calendar_api_crud_and_validation(client):
     assert client.post("/api/calendar", json={"date": "2026-13-99", "mode": "holiday"}
                        ).status_code == 400
     assert client.post("/api/calendar", json={"date": "2026-01-01", "mode": "x"}
-                       ).status_code == 400
+                       ).status_code == 422  # T-505：Literal 枚举 422
     assert client.post("/api/calendar", json={"date": "", "mode": "holiday"}).status_code == 400
     # 删除 + 404
     assert client.delete(f"/api/calendar/{d}").json() == {"ok": True}

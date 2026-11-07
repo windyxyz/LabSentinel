@@ -82,11 +82,11 @@ def _add_event_with_snapshot(s, snap_dir):
 def test_status_api_and_pool(client):
     c, s, tmp_path = client
     eid, snap = _add_event_with_snapshot(s, tmp_path / "snaps")
-    # 非法 status → 400
+    # 非法 status → 422（T-505：EventStatusBody Literal）
     r = c.post(f"/api/events/{eid}/status", json={"status": "whatever"})
-    assert r.status_code == 400
+    assert r.status_code == 422
     r = c.post(f"/api/events/{eid}/status", json={"status": "new"})
-    assert r.status_code == 400  # new 不是处置动作
+    assert r.status_code == 422  # new 不是处置动作
     # 不存在 → 404
     r = c.post("/api/events/9999/status", json={"status": "acked"})
     assert r.status_code == 404

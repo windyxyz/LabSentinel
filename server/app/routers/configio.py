@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from . import _context as ctx
+from ..models import ImportBody
 
 router = APIRouter()
 
@@ -110,15 +111,13 @@ def _validate_config_import(data: dict):
 
 
 @router.post("/config/import", dependencies=[Depends(ctx.admin_guard)])
-def config_import(body: dict):
+def config_import(body: ImportBody):
     """配置级导入（任务79）：merge 按名称去重；replace 需 confirm_replace=true
     （事件保留，但其 camera_id 将失去对应摄像头）。不自动启动摄像头。"""
-    mode = body.get("mode", "merge")
-    if mode not in ("merge", "replace"):
-        raise HTTPException(400, "mode 必须为 merge|replace")
-    cams, zones, rules = _validate_config_import(body.get("data"))
+    mode = body.mode
+    cams, zones, rules = _validate_config_import(body.data)
     if mode == "replace":
-        if not body.get("confirm_replace"):
+        if not body.confirm_replace:
             raise HTTPException(400, "replace 模式必须 confirm_replace=true"
                                      "（将清空现有摄像头/区域/规则；事件保留但失去对应摄像头）")
         if ctx.manager() is not None:

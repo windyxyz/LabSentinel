@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from . import _context as ctx
 from ..config import settings
-from ..store import EVENT_STATUSES
+from ..models import BulkStatusBody, EventStatusBody
 
 router = APIRouter()
 
@@ -82,33 +82,23 @@ def events_count(camera_id: int | None = None, level: int | None = None,
 
 
 @router.post("/events/{eid}/status", dependencies=[Depends(ctx.triage_guard)])  # T-620
-def set_event_status(eid: int, body: dict):
+def set_event_status(eid: int, body: EventStatusBody):
     """事件处置（任务12）：status ∈ acked|false_positive|ignored。
 
     标记误报时把截图**复制**到 annotation_pool/（不删原事件）——数据飞轮误报样本池。
     """
-    status = (body or {}).get("status", "")
-    if status not in EVENT_STATUSES or status == "new":
-        raise HTTPException(400, f"status 必须是 {'|'.join(EVENT_STATUSES[1:])}")
-    r = _triage_one(eid, status, (body or {}).get("handled_by", "admin"))
+    r = _triage_one(eid, body.status, body.handled_by)
     if r == "missing":
         raise HTTPException(404, "event not found")
-    return {"ok": True, "status": status}
+    return {"ok": True, "status": body.status}
 
 
 @router.post("/events/bulk-status", dependencies=[Depends(ctx.admin_guard)])
-def bulk_event_status(body: dict):
+def bulk_event_status(body: BulkStatusBody):
     """批量处置（任务83）：逐条短事务复用单条逻辑；missing 容错；单条失败不中断整批。"""
-    status = (body or {}).get("status", "")
-    if status not in EVENT_STATUSES or status == "new":
-        raise HTTPException(400, f"status 必须是 {'|'.join(EVENT_STATUSES[1:])}")
-    ids = body.get("ids")
-    if not isinstance(ids, list) or not ids:
-        raise HTTPException(400, "ids 不能为空")
-    ids = sorted({int(x) for x in ids})
-    if len(ids) > 200:
-        raise HTTPException(400, "ids 一次最多 200 条")
-    handled_by = (body or {}).get("handled_by", "admin")
+    status = body.status
+    ids = sorted(set(body.ids))
+    handled_by = body.handled_by
     updated = skipped = 0
     missing, failed = [], []
     for eid in ids:

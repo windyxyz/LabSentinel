@@ -40,6 +40,9 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-505：16 处 API 请求体改 Pydantic 模型（extra=forbid）——形状/枚举/长度约束
+  自动 422（此前 400），跨实体校验保持 400/404；`/events/{id}/status` 非法状态
+  Python/Rust 两实现同步 422。前端请求字段全部兼容。
 - T-329：Rust 告警渠道 8 通道全量接线——补 PushPlus（业务码 200 修齐）/Qmsg
   （表单+key 编码）/Email（lettre rustls，ssl/starttls/私网 none）；HTTP 超时 5s。
 - T-326：Rust 分析器（gray=rust 路径）补齐**视频存证**——事件帧快照、事件前后

@@ -11,21 +11,18 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from . import _context as ctx
 from ..config import settings
-from ..models import CameraCreate
+from ..models import AnalyzerBody, BulkBody, CameraCreate, CopyConfigBody, GroupBody
 
 router = APIRouter()
 
 
 # ---- 分组与批量启停（任务111）----
 @router.put("/cameras/{cid}/group", dependencies=[Depends(ctx.admin_guard)])
-def set_camera_group(cid: int, body: dict):
-    name = str(body.get("group_name") or "")
-    if len(name) > 32:
-        raise HTTPException(400, "group_name 最长 32 字符")
+def set_camera_group(cid: int, body: GroupBody):
     if ctx.store().camera(cid) is None:
         raise HTTPException(404, "camera not found")
-    ctx.store().set_camera_group(cid, name)
-    return {"id": cid, "group_name": name}
+    ctx.store().set_camera_group(cid, body.group_name)
+    return {"id": cid, "group_name": body.group_name}
 
 
 @router.get("/camera-groups", dependencies=[Depends(ctx.read_guard)])
@@ -34,16 +31,11 @@ def camera_groups():
 
 
 @router.post("/cameras/bulk", dependencies=[Depends(ctx.admin_guard)])
-def cameras_bulk(body: dict):
+def cameras_bulk(body: BulkBody):
     """批量启停：{ids:[...], action:"start"|"stop"}。ids 去重、1-100 个；不删数据。"""
-    ids = body.get("ids")
-    action = body.get("action")
-    if action not in ("start", "stop"):
-        raise HTTPException(400, "action must be start|stop")
-    if not isinstance(ids, list) or not ids or len(set(ids)) != len(ids) or len(ids) > 100:
+    if len(set(body.ids)) != len(body.ids):
         raise HTTPException(400, "ids 必须为去重非空列表且 ≤100 个")
-    if not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
-        raise HTTPException(400, "ids 必须是整数数组")
+    ids, action = body.ids, body.action
     missing, failed = [], []
     for cid in ids:
         cam = ctx.store().camera(cid)
@@ -101,11 +93,9 @@ def add_camera(body: CameraCreate):
 
 
 @router.put("/cameras/{cid}/analyzer", dependencies=[Depends(ctx.admin_guard)])
-def set_camera_analyzer(cid: int, body: dict):
+def set_camera_analyzer(cid: int, body: AnalyzerBody):
     """T-336：迁移期一键切换/回退单路分析器（python|rust）。运行中自动重启生效。"""
-    impl = str(body.get("analyzer") or "")
-    if impl not in ("python", "rust"):
-        raise HTTPException(400, "analyzer 仅支持 python|rust")
+    impl = body.analyzer
     cam = ctx.store().camera(cid)
     if cam is None:
         raise HTTPException(404, "camera not found")
@@ -161,7 +151,7 @@ def camera_webrtc(cid: int):
 
 
 @router.post("/cameras/{cid}/copy-config", dependencies=[Depends(ctx.admin_guard)])
-def copy_camera_config(cid: int, body: dict):
+def copy_camera_config(cid: int, body: CopyConfigBody):
     """把源摄像头的区域/规则批量复制到多路目标（任务80）。
 
     先全量校验（源/目标存在、排除自身、目标去重）再写库；规则 zone_id 按**区域名**映射到
@@ -171,18 +161,15 @@ def copy_camera_config(cid: int, body: dict):
     src = ctx.store().camera(cid)
     if src is None:
         raise HTTPException(404, "camera not found")
-    targets = body.get("target_ids") or []
-    if not targets:
-        raise HTTPException(400, "target_ids 不能为空")
-    targets = sorted(set(int(t) for t in targets))
+    targets = sorted(set(body.target_ids))
     if cid in targets:
         raise HTTPException(400, "target_ids 不能包含源摄像头自身")
     missing = [t for t in targets if ctx.store().camera(t) is None]
     if missing:
         raise HTTPException(404, f"目标摄像头不存在: {missing}")
-    copy_zones = bool(body.get("copy_zones", True))
-    copy_rules = bool(body.get("copy_rules", True))
-    suffix = str(body.get("name_suffix", "") or "")
+    copy_zones = body.copy_zones
+    copy_rules = body.copy_rules
+    suffix = body.name_suffix
     src_zones = ctx.store().zones(cid)
     src_rules = ctx.store().rules(cid)
     warnings: list[str] = []

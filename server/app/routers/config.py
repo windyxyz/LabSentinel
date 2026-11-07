@@ -8,7 +8,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 
 from . import _context as ctx
-from ..models import RuleCreate, ZoneCreate
+from ..models import CalendarBody, RuleCreate, TemplateApplyBody, TemplateBody, ZoneCreate
 
 router = APIRouter()
 
@@ -125,11 +125,9 @@ def list_rule_templates():
 
 
 @router.post("/rule-templates", dependencies=[Depends(ctx.admin_guard)])
-def create_rule_template(body: dict):
-    name = str(body.get("name") or "").strip()
-    if not name or len(name) > 64:
-        raise HTTPException(400, "name 必填且 ≤64 字符")
-    rules = _validate_template_rules(body.get("rules"))
+def create_rule_template(body: TemplateBody):
+    name = body.name.strip()
+    rules = _validate_template_rules(body.rules)
     tid = ctx.store().add_rule_template(name, json.dumps(rules, ensure_ascii=False))
     if tid is None:
         raise HTTPException(409, f"模板名已存在: {name}")
@@ -137,11 +135,9 @@ def create_rule_template(body: dict):
 
 
 @router.put("/rule-templates/{tid}", dependencies=[Depends(ctx.admin_guard)])
-def update_rule_template(tid: int, body: dict):
-    name = str(body.get("name") or "").strip()
-    if not name or len(name) > 64:
-        raise HTTPException(400, "name 必填且 ≤64 字符")
-    rules = _validate_template_rules(body.get("rules"))
+def update_rule_template(tid: int, body: TemplateBody):
+    name = body.name.strip()
+    rules = _validate_template_rules(body.rules)
     rc = ctx.store().update_rule_template(tid, name, json.dumps(rules, ensure_ascii=False))
     if rc == 0:
         raise HTTPException(404, "template not found")
@@ -158,16 +154,14 @@ def delete_rule_template(tid: int):
 
 
 @router.post("/rule-templates/{tid}/apply", dependencies=[Depends(ctx.admin_guard)])
-def apply_rule_template(tid: int, body: dict):
+def apply_rule_template(tid: int, body: TemplateApplyBody):
     """套用模板到多路：zone_id 须属该摄像头（或空=全画幅全局规则）；不自动启动。"""
     tpl = ctx.store().get_rule_template(tid)
     if tpl is None:
         raise HTTPException(404, "template not found")
     rules = json.loads(tpl["config_json"])
-    cam_ids = body.get("camera_ids")
-    if not isinstance(cam_ids, list) or not cam_ids or len(cam_ids) > 100:
-        raise HTTPException(400, "camera_ids 必须为非空数组且 ≤100")
-    zone_id = body.get("zone_id")
+    cam_ids = body.camera_ids
+    zone_id = body.zone_id
     created, skipped = 0, 0
     for cid in cam_ids:
         cam = ctx.store().camera(int(cid))
@@ -199,10 +193,10 @@ def list_calendar():
 
 
 @router.post("/calendar", dependencies=[Depends(ctx.admin_guard)])
-def set_calendar(body: dict):
-    d = str(body.get("date") or "").strip()
-    mode = str(body.get("mode") or "").strip()
-    note = str(body.get("note") or "")
+def set_calendar(body: CalendarBody):
+    d = body.date.strip()
+    mode = body.mode
+    note = body.note
     try:
         from datetime import date as _date
         _date.fromisoformat(d)

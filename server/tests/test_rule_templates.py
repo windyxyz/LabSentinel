@@ -61,17 +61,21 @@ def test_template_crud_and_validation(client):
     # 列表
     lst = client.get("/api/rule-templates").json()["templates"]
     assert lst[0]["name"] == "实验室常规" and lst[0]["rules_count"] == 2
-    # 校验矩阵
-    bad = [
-        {"name": "x1", "rules": []},                                   # 空
+    # 校验矩阵（T-505/B-23：TemplateBody → rules 形状 422；逐条规则语义留 400）
+    bad_400 = [
         {"name": "x2", "rules": [{"behavior": "foo"}]},                # behavior 非法
         {"name": "x3", "rules": [{"behavior": "enter", "level": 9}]},  # level 越界
         {"name": "x4", "rules": [{"behavior": "enter", "time_start": "8:0"}]},  # 时间格式
         {"name": "x5", "rules": [{"behavior": "enter", "days_of_week": "9"}]},  # 星期非法
+    ]
+    for b in bad_400:
+        assert client.post("/api/rule-templates", json=b).status_code == 400, b
+    bad_422 = [
+        {"name": "x1", "rules": []},                                   # 空
         {"name": "x6", "rules": "nope"},                               # 非数组
     ]
-    for b in bad:
-        assert client.post("/api/rule-templates", json=b).status_code == 400, b
+    for b in bad_422:
+        assert client.post("/api/rule-templates", json=b).status_code == 422, b
     # PUT 改名/冲突
     assert client.put(f"/api/rule-templates/{tid}",
                       json={"name": "常规 v2", "rules": GOOD_RULES[:1]}).json()["name"] == "常规 v2"

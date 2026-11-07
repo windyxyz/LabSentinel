@@ -100,12 +100,13 @@ def test_copy_full_frame_rule_zone_none(client):
 
 def test_copy_validation_zero_write(client):
     c1, z1, _ = _mk(client, "src", "a.mp4", zone=True, rules=("enter",))
-    # 空目标 / 含源自身 / 含不存在 id → 400/404 且零写入
+    # 空目标 / 含源自身 / 含不存在 id → 422/400/404 且零写入
+    #（T-505：CopyConfigBody min_length → 空目标 422；语义校验留 400/404）
     for body in ({"target_ids": []},
                  {"target_ids": [c1]},
                  {"target_ids": [9999]}):
         r = client.post(f"/api/cameras/{c1}/copy-config", json=body)
-        assert r.status_code in (400, 404)
+        assert r.status_code in (400, 404, 422)
     assert _rules(client, c1) and _zones(client, c1)  # 源不受影响
     # 源不存在 → 404
     assert client.post("/api/cameras/9999/copy-config",

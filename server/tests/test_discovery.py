@@ -203,9 +203,10 @@ def test_discovery_probe_api(client, monkeypatch):
     monkeypatch.setattr(discovery, "_ffprobe_stream", lambda url: None)
     r = client.post("/api/discovery/probe", json={"host": "192.168.1.64"})
     assert r.status_code == 200 and r.json()["port_open"] is True
-    assert client.post("/api/discovery/probe", json={"host": ""}).status_code == 400
+    # T-505/B-23：DiscoveryProbeBody → host 空/端口越界 422
+    assert client.post("/api/discovery/probe", json={"host": ""}).status_code == 422
     assert client.post("/api/discovery/probe",
-                       json={"host": "h", "port": 70000}).status_code == 400
+                       json={"host": "h", "port": 70000}).status_code == 422
 
 
 def test_discovery_auth(client, monkeypatch):
