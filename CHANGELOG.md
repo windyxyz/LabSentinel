@@ -40,6 +40,16 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-329：Rust MQTT 事件总线（rumqttc）——payload v1 与 Python mqtt_bridge
+  逐字段一致、非阻塞入队、LWT/online、系统信任源 TLS。
+- T-325：Rust PPE 级联（违规类 0.30 / 穿戴类 0.20、交集判定、进场帧惰性推理）——
+  rust 分析器路径补齐 enter_no_ppe 事件，文案与 Python 一致；无模型时仅人员检测。
+- T-326：Rust 图片文件夹候选扫描器（扩展名/大小/静置期/自激排除/新图优先/
+  去重键），为 L4 folder 源迁移铺路。
+- T-330/T-328：后台作业迁移评估结论入档（genai/plugins 随 L3、folder 编排随
+  L4）；分析器默认值版本策略（N/N+1/N+2）注释明确。
+- T-332：ls-store schema 版本常量对齐 Python 权威编号（v13）。
+- T-322：补 ADR-0006 视频栈选型决策记录（ffmpeg 子进程，GStreamer 硬解后续）。
 - T-327：Rust sidecar 崩溃 ≤10s 自动恢复（watchdog：进程 liveness + 全量
   快照重放 + 事件桥重连，supervisor 与事件流双触发）；Store 配置版本变化
   自动推送 ApplyConfig；/api/system 暴露 sidecar watchdog 与 analyzer_version；

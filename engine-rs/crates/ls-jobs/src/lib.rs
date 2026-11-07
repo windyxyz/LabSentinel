@@ -7,6 +7,19 @@
 //!
 //! 调度线程与 Python 一致：启动即跑首轮，之后按周期；`stop()` 后 ≤200ms 退出。
 //! 发送侧复用 [`ls_dispatch`]：静默 / 渠道过滤(LS_ALERT_FILTERS) / 限流 / 投递记录 / 重试。
+//!
+//! ### T-330 genai / folder / plugins 迁移评估结论（2026-11-07）
+//! - **genai**（VLM 复核队列）：暂不迁移。它依赖外部 VLM HTTP 客户端
+//!   （`genai.py`，OpenAI 兼容协议 + 超时/重试/配额策略），且与事件派发强耦合
+//!   （复核结果回写 `events.ai_verdict` 并触发二次派发）。收益低于成本，留到 L3
+//!   控制面接管后与「事件流水线编排」一起迁（那时复用 ls-dispatch 的 HTTP 栈）。
+//! - **folder**（图片文件夹作业）：数据面（扫描/稳定期/去重/关键帧推理）属
+//!   T-326 范畴，见 `ls-ingest/src/folder.rs` 的纯函数扫描器；作业编排（每日上限、
+//!   缩略图、证据副本）在 Python `folders.py`，Rust 侧随 L4 一起收口。
+//! - **plugins**（插件子进程管理）：暂不迁移。清单校验/环境白名单/生命周期与
+//!   Windows 句柄语义强绑定（T-112/T-602），且属低频管理操作、无热路径收益；
+//!   L3 控制面迁移时用 `std::process` + 显式白名单环境重做（语义表已在
+//!   `server/app/plugins.py` 与 `docs/74-plugin-guide.md`，可直接翻译）。
 
 pub mod backup;
 pub mod escalation;
@@ -368,6 +381,35 @@ fn spawn_loop(
             }
         })
         .expect("无法创建后台作业线程")
+}
+
+/// T-329：从环境构造 MQTT 事件总线（LS_MQTT_*，与 Python settings 同名）。
+///
+/// 返回 `None` = 未启用/启动失败（事件总线属只读外发，任何故障不得影响主链路）。
+/// 注意：**首发派发编排仍在 Python**（`mqtt_bridge.py` 为当前生产路径）；
+/// 本入口供 L3 控制面接管首发派发时直接使用，payload/topic 语义已对齐。
+pub fn mqtt_from_env() -> Option<ls_dispatch::mqtt::MqttBus> {
+    if !env_bool("LS_MQTT_ENABLED", false) {
+        return None;
+    }
+    let config = ls_dispatch::mqtt::MqttConfig {
+        host: env_raw("LS_MQTT_HOST").unwrap_or_else(|| "127.0.0.1".into()),
+        port: env_i64("LS_MQTT_PORT", 1883) as u16,
+        username: env_raw("LS_MQTT_USERNAME").unwrap_or_default(),
+        password: env_raw("LS_MQTT_PASSWORD").unwrap_or_default(),
+        client_id: env_raw("LS_MQTT_CLIENT_ID").unwrap_or_default(),
+        topic_prefix: env_raw("LS_MQTT_TOPIC_PREFIX").unwrap_or_else(|| "labsentinel".into()),
+        qos: env_i64("LS_MQTT_QOS", 0) as u8,
+        retain: env_bool("LS_MQTT_RETAIN", false),
+        tls: env_bool("LS_MQTT_TLS", false),
+    };
+    match ls_dispatch::mqtt::MqttBus::start(config) {
+        Ok(bus) => Some(bus),
+        Err(e) => {
+            println!("[mqtt] 事件总线启动失败（降级关闭）: {e}");
+            None
+        }
+    }
 }
 
 /// LS_ALERT_FILTERS 解析（Python `alert_filters()` 等价：非法条目忽略并告警）。

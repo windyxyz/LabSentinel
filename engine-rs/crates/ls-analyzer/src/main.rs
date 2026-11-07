@@ -190,18 +190,216 @@ impl Detector for YoloDetector {
     }
 }
 
+/// T-325/Q-14：PPE 级联检测器（YoloModel + 类名→索引映射）。
+///
+/// 与 Python `vision.ppe_boxes` 同口径：违规类一次整图推理（conf=LS_PPE_CONF，
+/// 默认 0.30）、穿戴类逐个一次（conf=LS_PPE_WEARING_CONF，默认 0.20）；
+/// 单人判定=人框与违规框有交集 → NoPpe；否则与穿戴框有交集 → Wearing；皆无 → Unknown。
+struct YoloPpeRunner {
+    model: YoloModel,
+    violation_class: usize,
+    wearing_classes: Vec<usize>,
+    violation_conf: f32,
+    wearing_conf: f32,
+}
+
+fn boxes_overlap(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+impl pipeline::PpeRunner for YoloPpeRunner {
+    fn statuses(
+        &mut self,
+        bgr: &[u8],
+        w: u32,
+        h: u32,
+        person_boxes: &[[f32; 4]],
+    ) -> Vec<pipeline::PpeStatus> {
+        let (Ok(no_boxes_raw), Ok(wear_raw)) = (
+            self.model
+                .detect_class(bgr, w, h, self.violation_class, self.violation_conf, 0.0),
+            self.model.detect_class(
+                bgr,
+                w,
+                h,
+                self.wearing_classes.first().copied().unwrap_or(0),
+                self.wearing_conf,
+                0.0,
+            ),
+        ) else {
+            return vec![pipeline::PpeStatus::Unknown; person_boxes.len()];
+        };
+        let no_boxes: Vec<[f32; 4]> = no_boxes_raw.iter().map(|d| d.box_).collect();
+        let mut wear_boxes: Vec<[f32; 4]> = wear_raw.iter().map(|d| d.box_).collect();
+        // 多个穿戴类：额外每类一次推理（当前配置通常 1 类；合并模型 Q-14 后降为 1 次）
+        for class_id in self.wearing_classes.iter().skip(1) {
+            if let Ok(dets) = self
+                .model
+                .detect_class(bgr, w, h, *class_id, self.wearing_conf, 0.0)
+            {
+                wear_boxes.extend(dets.iter().map(|d| d.box_));
+            }
+        }
+        person_boxes
+            .iter()
+            .map(|pb| {
+                if no_boxes.iter().any(|nb| boxes_overlap(*nb, *pb)) {
+                    pipeline::PpeStatus::NoPpe
+                } else if wear_boxes.iter().any(|wb| boxes_overlap(*wb, *pb)) {
+                    pipeline::PpeStatus::Wearing
+                } else {
+                    pipeline::PpeStatus::Unknown
+                }
+            })
+            .collect()
+    }
+}
+
+/// 模型目录内锚点校验：目标必须是 dir 的直接子文件（拒绝 ../、绝对路径、分隔符）。
+/// 返回规范化后的路径；越界/不存在返回 None。
+fn anchored_child(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty()
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || std::path::Path::new(name).is_absolute()
+    {
+        return None;
+    }
+    let dir = dir.canonicalize().ok()?;
+    let target = dir.join(name).canonicalize().ok()?;
+    if target.parent() != Some(dir.as_path()) {
+        return None; // 符号链接逃逸/非直接子文件
+    }
+    Some(target)
+}
+
+/// 模型路径规范化与锚点校验（T-325 安全加固）：必须是**已存在的普通文件**，
+/// 且 canonicalize 成功（消除相对路径/cwd 歧义与符号链接指向目录的读取尝试）。
+/// 返回规范化路径；不满足返回 None（调用方回退空检测/仅人员检测）。
+fn anchor_model_file(raw: &std::path::Path) -> Option<std::path::PathBuf> {
+    let path = std::fs::canonicalize(raw).ok()?;
+    if !path.is_file() {
+        return None;
+    }
+    Some(path)
+}
+
+/// 读模型目录的类别名（model.json 的 `classes` 指向的文件；一行一个）。
+///
+/// 安全锚点：`classes` 只接受**模型目录内的直接文件名**（`anchored_child`），
+/// 拒绝 `../`、绝对路径与符号链接逃逸——模型目录内的清单不得成为任意文件读取入口。
+fn load_class_names(model_path: &std::path::Path) -> Vec<String> {
+    let dir = model_path.parent().unwrap_or(std::path::Path::new("."));
+    let stem = model_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut file = anchored_child(dir, &format!("{stem}.classes.txt"));
+    if let Ok(text) = std::fs::read_to_string(dir.join("model.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(c) = v.get("classes").and_then(|c| c.as_str()) {
+                file = anchored_child(dir, c); // 越界为 None → 使用回退名
+            }
+        }
+    }
+    let Some(file) = file else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(file)
+        .map(|t| {
+            t.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 构造 PPE 检测器：LS_PPE_MODEL 存在且能解析类名时启用，否则 None（仅人员检测）。
+fn make_ppe_runner() -> Option<Box<dyn pipeline::PpeRunner>> {
+    let raw = std::env::var("LS_PPE_MODEL").ok().map(PathBuf::from)?;
+    let Some(path) = anchor_model_file(&raw) else {
+        println!(
+            "[ls-analyzer] PPE 模型路径无效/不可读（仅人员检测）: {}",
+            raw.display()
+        );
+        return None;
+    };
+    let imgsz = env_u32("LS_IMGSZ", 640);
+    let iou = env_f32("LS_IOU_THRES", 0.50);
+    let violation_conf = env_f32("LS_PPE_CONF", 0.30);
+    let wearing_conf = env_f32("LS_PPE_WEARING_CONF", 0.20);
+    let names = load_class_names(&path);
+    if names.is_empty() {
+        println!(
+            "[ls-analyzer] PPE 类名文件缺失/为空（仅人员检测）: {}",
+            path.display()
+        );
+        return None;
+    }
+    let find = |name: &str| -> Option<usize> {
+        names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(name.trim()))
+    };
+    let violation_name =
+        std::env::var("LS_PPE_VIOLATION_CLASS").unwrap_or_else(|_| "no lab coat".to_string());
+    let Some(violation_class) = find(&violation_name) else {
+        println!(
+            "[ls-analyzer] PPE 违规类 {} 不在类表 {:?}",
+            violation_name, names
+        );
+        return None;
+    };
+    let wearing_names =
+        std::env::var("LS_PPE_CLASS_NAMES").unwrap_or_else(|_| "lab coat".to_string());
+    let wearing_classes: Vec<usize> = wearing_names.split(',').filter_map(find).collect();
+    if wearing_classes.is_empty() {
+        println!("[ls-analyzer] PPE 穿戴类 {wearing_names} 不在类表 {names:?}");
+        return None;
+    }
+    match YoloModel::load(&path, imgsz, violation_conf, iou, 0.0, None) {
+        Ok(model) => {
+            println!(
+                "[ls-analyzer] PPE 模型已加载: {}（违规类={violation_class} 穿戴类={wearing_classes:?}）",
+                path.display()
+            );
+            Some(Box::new(YoloPpeRunner {
+                model,
+                violation_class,
+                wearing_classes,
+                violation_conf,
+                wearing_conf,
+            }))
+        }
+        Err(e) => {
+            println!("[ls-analyzer] PPE 模型加载失败（仅人员检测）: {e}");
+            None
+        }
+    }
+}
+
 /// 构造检测器：模型路径由 AnalyzerImpl 实例注入（生产从 LS_MODEL_FP32 / 仓库布局
 /// 启动时解析一次；测试可各自指定或设 None，避免进程级 set_var 并发竞态）。
 fn make_detector(path: Option<&PathBuf>) -> Box<dyn Detector> {
-    let Some(path) = path else {
+    let Some(raw) = path else {
         println!("[ls-analyzer] 未配置模型——使用空检测器");
+        return Box::new(NullDetector);
+    };
+    // T-325 安全加固：模型路径规范化 + 普通文件锚点（相对路径/目录/符号链接逃逸拒绝）
+    let Some(path) = anchor_model_file(raw) else {
+        println!(
+            "[ls-analyzer] 模型路径无效/不可读（空检测）: {}",
+            raw.display()
+        );
         return Box::new(NullDetector);
     };
     let imgsz = env_u32("LS_IMGSZ", 640);
     let conf = env_f32("LS_CONF_THRES", 0.40);
     let iou = env_f32("LS_IOU_THRES", 0.50);
     let min_area = env_f32("LS_MIN_BOX_AREA", 1200.0);
-    match YoloModel::load(path, imgsz, conf, iou, min_area, None) {
+    match YoloModel::load(&path, imgsz, conf, iou, min_area, None) {
         Ok(model) => {
             println!(
                 "[ls-analyzer] 模型已加载: {}（imgsz={imgsz} conf={conf} iou={iou}）",
@@ -313,6 +511,8 @@ fn run_camera(state: AppState, job: CameraJob) {
         exit,
     );
     let mut detector: Box<dyn Detector> = make_detector(job.model_path.as_ref());
+    // T-325/Q-14：PPE 级联（模型未配置/未下载时 None → 仅人员检测，ppe 恒 Unknown）
+    pipe.set_ppe(make_ppe_runner());
     let mut ing = Ingest::new(IngestConfig {
         source: job.spec.source.clone(),
         analysis_fps: job.spec.analysis_fps,
@@ -356,7 +556,12 @@ fn run_camera(state: AppState, job: CameraJob) {
                     });
                     let dets = detector.detect(&frame);
                     let ts = pipeline::frame_ts_for(frame.index, job.spec.analysis_fps);
-                    let cands = pipe.process(&dets, &ts);
+                    // T-325：带原始帧处理——PPE 启用时在疑似进场帧整帧推理一次
+                    let cands = pipe.process_with_frame(
+                        &dets,
+                        &ts,
+                        Some((&frame.data, frame.width, frame.height)),
+                    );
                     if !cands.is_empty() {
                         // 事件帧快照：优先复用本帧抽帧结果，未命中 stride 则直接现编
                         //（不再走 feed——stride 计数每帧只允许推进一次）

@@ -4,6 +4,9 @@
 //!
 //! 重连：进程退出 → 指数退避（0.5s×2^n，上限 30s）重启；Stop 立即终止。
 
+/// T-326：图片文件夹源的候选扫描器（纯函数，与 Python `folders._candidates` 同口径）。
+pub mod folder;
+
 use std::io::Read;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};

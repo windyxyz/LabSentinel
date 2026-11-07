@@ -18,6 +18,11 @@ lettre = { version = "0.11", default-features = false, features = [
     "smtp-transport",
     "rustls-tls",
 ] }
+# T-329：MQTT 事件总线（payload v1 与 Python mqtt_bridge 同语义）
+rumqttc = { workspace = true }
+# MQTT TLS 系统信任源（rumqttc 0.24 的 Simple 需显式 CA；Rustls 注入用同版本线）
+rustls = "0.22"
+rustls-native-certs = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

@@ -115,6 +115,18 @@ pub struct CameraPipeline {
     pub track_log: Vec<Vec<(i64, [f32; 4])>>,
     /// L1 对齐诊断：每帧 (tracked, lost, unconfirmed) 的 (external_id, mean_x) 快照
     pub state_log: Vec<ls_track::TrackStateSnap>,
+    /// T-325/Q-14：PPE 检测器（None=未启用/未下载模型 → ppe 恒 Unknown，
+    /// 与 Python `ppe_model` 缺失时的「仅人员检测」模式同口径）。
+    ppe: Option<Box<dyn PpeRunner>>,
+}
+
+/// PPE 检测器接口（每帧最多一次整图推理；实现由 ls-analyzer 用 YoloModel 提供）。
+pub trait PpeRunner: Send {
+    /// 对整帧跑一次 PPE 证据检测，按人框归属返回每人状态（与 Python
+    /// `vision.ppe_status_from_boxes` 同语义：违规证据优先、穿戴证据次之、
+    /// 皆无 → Unknown——绝不把"证据不足"当"未穿"）。
+    fn statuses(&mut self, bgr: &[u8], w: u32, h: u32, person_boxes: &[[f32; 4]])
+        -> Vec<PpeStatus>;
 }
 
 impl CameraPipeline {
@@ -154,11 +166,29 @@ impl CameraPipeline {
             log_tracks: false,
             track_log: Vec::new(),
             state_log: Vec::new(),
+            ppe: None,
         }
     }
 
+    /// T-325/Q-14：注入 PPE 检测器（`None` 时保持「仅人员检测」）。
+    pub fn set_ppe(&mut self, ppe: Option<Box<dyn PpeRunner>>) {
+        self.ppe = ppe;
+    }
+
     /// 处理一帧检测结果，返回本帧事件候选（未入库）。
+    /// 无帧数据 = PPE 恒 Unknown（黄金语料/无模型路径，与 Python ppe_model="" 同口径）。
     pub fn process(&mut self, dets: &[PersonDetection], frame_ts: &str) -> Vec<Candidate> {
+        self.process_with_frame(dets, frame_ts, None)
+    }
+
+    /// T-325：带原始帧的处理——启用 PPE 时在**本帧有人可能进场**的情况下
+    /// 整帧跑一次 PPE 推理（Python `_analyze` 的惰性语义近似：只多算进场前一帧）。
+    pub fn process_with_frame(
+        &mut self,
+        dets: &[PersonDetection],
+        frame_ts: &str,
+        frame: Option<(&[u8], u32, u32)>,
+    ) -> Vec<Candidate> {
         self.frame_index += 1;
         let now = parse_ts(frame_ts).unwrap_or_else(Local::now);
         let mut out = Vec::new();
@@ -197,6 +227,21 @@ impl CameraPipeline {
         if self.log_tracks {
             self.track_log
                 .push(active.iter().map(|(b, id)| (*id, *b)).collect());
+        }
+        // T-325/Q-14：PPE 惰性推理——只有"本帧有 track 可能进场"（anchor 在区内
+        // 但该区尚未记录其在内）才整帧跑一次（与 Python 帧级缓存"每分析帧最多
+        // 一次"同口径；进入事件的 PPE 判定必须发生在进场那一帧）。
+        let mut det_ppe: Vec<PpeStatus> = dets.iter().map(|d| d.ppe).collect();
+        if let (Some(runner), Some((bgr, w, h))) = (self.ppe.as_mut(), frame) {
+            if needs_ppe(&self.zones, &self.zone_states, &active) {
+                let person_boxes: Vec<[f32; 4]> = active.iter().map(|(b, _)| *b).collect();
+                let statuses = runner.statuses(bgr, w, h, &person_boxes);
+                for (bbox, st) in active.iter().zip(statuses) {
+                    if let Some(i) = dets.iter().position(|d| d.box_ == bbox.0) {
+                        det_ppe[i] = st;
+                    }
+                }
+            }
         }
         let active_ids: HashSet<i64> = active.iter().map(|(_, id)| *id).collect();
 
@@ -238,8 +283,8 @@ impl CameraPipeline {
             }
             let ppe = dets
                 .iter()
-                .find(|d| d.box_ == *bbox)
-                .map(|d| d.ppe)
+                .position(|d| d.box_ == *bbox)
+                .map(|i| det_ppe[i])
                 .unwrap_or(PpeStatus::Unknown);
             for z in &self.zones {
                 if let Some(change) = self
@@ -442,6 +487,25 @@ impl CameraPipeline {
             .map(|v| v == "holiday")
             .unwrap_or(false)
     }
+}
+
+/// T-325：本帧是否有 track "可能进场"（anchor 在区内且该区尚未记录其在内）。
+/// 只用于决定是否触发整帧 PPE 推理（近似 Python `_analyze` 的惰性语义）。
+fn needs_ppe(
+    zones: &[ZoneSpec],
+    zone_states: &HashMap<i64, ZoneState>,
+    active: &[([f32; 4], i64)],
+) -> bool {
+    active.iter().any(|(bbox, tid)| {
+        let anchor = (((bbox[0] + bbox[2]) / 2.0) as i64, (bbox[3]) as i64);
+        zones.iter().any(|z| {
+            point_in_polygon(&z.points, anchor)
+                && zone_states
+                    .get(&z.id)
+                    .map(|st| !st.inside_ids().contains(tid))
+                    .unwrap_or(true)
+        })
+    })
 }
 
 fn rule_zone_ok(rule: &RuleSpec, behavior: &str, zone_id: Option<i64>) -> bool {
@@ -680,5 +744,115 @@ mod tests {
         assert_eq!(frame_ts_for(0, 5.0), "2026-01-01T00:00:00");
         assert_eq!(frame_ts_for(5, 5.0), "2026-01-01T00:00:01");
         assert_eq!(frame_ts_for(10, 5.0), "2026-01-01T00:00:02");
+    }
+
+    struct FakePpe(PpeStatus);
+    impl PpeRunner for FakePpe {
+        fn statuses(
+            &mut self,
+            _bgr: &[u8],
+            _w: u32,
+            _h: u32,
+            boxes: &[[f32; 4]],
+        ) -> Vec<PpeStatus> {
+            vec![self.0; boxes.len()]
+        }
+    }
+
+    #[test]
+    fn ppe_runner_no_coat_triggers_enter_no_ppe() {
+        let mut p = CameraPipeline::new(
+            camera(),
+            vec![zone()],
+            vec![rule(1, "enter", 2, 0), rule(2, "enter_no_ppe", 3, 0)],
+            HashMap::new(),
+            1,
+            1,
+        );
+        p.set_ppe(Some(Box::new(FakePpe(PpeStatus::NoPpe))));
+        let d = [det([10.0, 10.0, 100.0, 200.0])];
+        let frame = ([0u8; 12], 2u32, 2u32);
+        let ev = p.process_with_frame(
+            &d,
+            "2026-01-01T10:00:00",
+            Some((frame.0.as_slice(), frame.1, frame.2)),
+        );
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].behavior, "enter_no_ppe");
+        assert_eq!(ev[0].level, 3);
+        assert!(ev[0].detail.contains("未穿实验服"));
+    }
+
+    #[test]
+    fn ppe_runner_wearing_triggers_plain_enter() {
+        let mut p = CameraPipeline::new(
+            camera(),
+            vec![zone()],
+            vec![rule(1, "enter", 2, 0), rule(2, "enter_no_ppe", 3, 0)],
+            HashMap::new(),
+            1,
+            1,
+        );
+        p.set_ppe(Some(Box::new(FakePpe(PpeStatus::Wearing))));
+        let d = [det([10.0, 10.0, 100.0, 200.0])];
+        let ev = p.process_with_frame(
+            &d,
+            "2026-01-01T10:00:00",
+            Some(([0u8; 12].as_slice(), 2, 2)),
+        );
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].behavior, "enter");
+        assert!(ev[0].detail.contains("已穿实验服"));
+    }
+
+    #[test]
+    fn ppe_runner_not_called_when_all_inside() {
+        // 已在区内（无进场候选）→ 不触发整帧 PPE 推理（惰性语义）
+        let mut p = CameraPipeline::new(
+            camera(),
+            vec![zone()],
+            vec![rule(1, "enter", 2, 0)],
+            HashMap::new(),
+            1,
+            1,
+        );
+        struct CountingPpe(std::sync::Arc<std::sync::atomic::AtomicU32>);
+        impl PpeRunner for CountingPpe {
+            fn statuses(
+                &mut self,
+                _b: &[u8],
+                _w: u32,
+                _h: u32,
+                boxes: &[[f32; 4]],
+            ) -> Vec<PpeStatus> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                vec![PpeStatus::Unknown; boxes.len()]
+            }
+        }
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        p.set_ppe(Some(Box::new(CountingPpe(calls.clone()))));
+        let d = [det([10.0, 10.0, 100.0, 200.0])];
+        let first = p.process_with_frame(
+            &d,
+            "2026-01-01T10:00:00",
+            Some(([0u8; 12].as_slice(), 2, 2)),
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "进场帧必须跑一次 PPE"
+        );
+        let second = p.process_with_frame(
+            &d,
+            "2026-01-01T10:00:01",
+            Some(([0u8; 12].as_slice(), 2, 2)),
+        );
+        assert!(second.is_empty());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "已在区内不应重复推理（惰性）"
+        );
     }
 }

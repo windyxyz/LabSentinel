@@ -183,6 +183,20 @@ impl YoloModel {
 
     /// 对一帧 BGR raw 做检测，返回原图坐标 xyxy（已 NMS + 最小面积过滤）。
     pub fn detect(&mut self, bgr: &[u8], w: u32, h: u32) -> Result<Vec<Det>, String> {
+        self.detect_class(bgr, w, h, self.person_class, self.conf, self.min_box_area)
+    }
+
+    /// T-325/Q-14：按**类别索引 + 独立阈值**检测（PPE 级联用：违规类 0.30 /
+    /// 穿戴类 0.20 与 Python `vision.ppe_boxes` 同口径）。每次调用 = 一次整图推理。
+    pub fn detect_class(
+        &mut self,
+        bgr: &[u8],
+        w: u32,
+        h: u32,
+        class_id: usize,
+        conf: f32,
+        min_area: f32,
+    ) -> Result<Vec<Det>, String> {
         let (data, geom) = letterbox_nchw(bgr, w, h, self.imgsz)?;
         match self.backend {
             #[cfg(feature = "tract")]
@@ -209,14 +223,7 @@ impl YoloModel {
                         .copied()
                         .ok_or_else(|| "输出索引越界".to_string())
                 })?;
-                Self::decode_static(
-                    &rows,
-                    &geom,
-                    self.person_class,
-                    self.conf,
-                    self.iou,
-                    self.min_box_area,
-                )
+                Self::decode_static(&rows, &geom, class_id, conf, self.iou, min_area)
             }
             #[cfg(not(feature = "tract"))]
             Backend::Tract => Err("tract feature 未启用".into()),
@@ -238,14 +245,7 @@ impl YoloModel {
                     .map_err(|e| format!("输出类型错误: {e}"))?;
                 let shape: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
                 let rows = rows_from_flat(&shape, flat)?;
-                Self::decode_static(
-                    &rows,
-                    &geom,
-                    self.person_class,
-                    self.conf,
-                    self.iou,
-                    self.min_box_area,
-                )
+                Self::decode_static(&rows, &geom, class_id, conf, self.iou, min_area)
             }
             #[cfg(not(feature = "ort"))]
             Backend::Ort => Err("ort feature 未启用".into()),

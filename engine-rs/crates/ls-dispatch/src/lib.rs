@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 // T-329：邮件渠道（Transport trait 供 SmtpTransport::send）
 use lettre::Transport;
 
+pub mod mqtt;
+
 /// 渠道名（与 Python ch.name 一致）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Channel {

@@ -115,7 +115,11 @@ class Settings(BaseSettings):
     zone_exit_frames: int = 3  # T-306：连续 N 帧不在/消失才判离场
     evidence_fps: float = 10.0  # T-308：录像抽帧率（与源/分析帧率解耦）
     deterministic: bool = False  # T-321（L0）：确定性模式——文件源不按墙钟节奏、事件/规则时间取视频时间
-    analyzer_default: str = "python"  # T-310/T-327（L1）：新装默认后端 python|rust（逐路可覆盖 cameras.analyzer）
+    # T-310/T-327（L1）：新装默认后端 python|rust（逐路可覆盖 cameras.analyzer）。
+    # T-328 版本策略：N（当前 0.2.x 系列）保持 python 为默认、rust 为实验性可选；
+    # N+1 才把新装默认切 rust（升级保持原设置：升级路径不写 analyzer 列即沿用既有值）；
+    # N+2 rust 为唯一默认并在设置页标注 python 弃用。切换只需改本默认值 + 发布说明。
+    analyzer_default: str = "python"
     file_loop: bool = False  # 文件源循环播放（压测/演示用；默认关闭，正常播放完即止）
     min_box_area: int = 1200  # 过滤远处小框误检（像素面积，720p 下）
 
