@@ -136,8 +136,20 @@ def check_soak_summary(data: dict) -> list[str]:
 
 
 def check_crash_recovery(base: str, timeout_s: int = 10) -> list[str]:
-    """④ sidecar 崩溃恢复：kill 本机 ls-analyzer 后，≤10s 内 Events 流重连且
-    Python 服务健康仍 200（requires --with-crash；需要真实运行实例与权限）。"""
+    """④ sidecar 崩溃恢复：kill ls-analyzer 后 ≤10s 内**新进程**拉起且 Python
+    服务健康仍 200（requires --with-crash；需要真实运行实例与权限）。
+
+    判定用 /api/system 的 sidecar watchdog 状态：必须显式 running=True 且
+    restarts 严格大于 kill 前计数——字段缺失/默认 True 都不算通过（防假阳性）。
+    """
+    try:
+        sysinfo = get_json(base, "/api/system", timeout=2)
+        before = sysinfo.get("sidecar") or {}
+        if "running" not in before or "restarts" not in before:
+            return ["/api/system 缺 sidecar watchdog 观测字段（无法验证崩溃恢复）"]
+        restarts_before = int(before["restarts"])
+    except (urllib.error.URLError, ValueError, KeyError) as e:
+        return [f"kill 前读取 sidecar 状态失败: {e}"]
     try:
         subprocess.check_call(
             ["taskkill", "/F", "/IM", "ls-analyzer.exe"],
@@ -148,14 +160,15 @@ def check_crash_recovery(base: str, timeout_s: int = 10) -> list[str]:
     while time.time() < deadline:
         try:
             get_json(base, "/api/health/live", timeout=2)
-            # 事件桥重连后 /api/system 的 sidecar 状态 running（若有该字段）
             sysinfo = get_json(base, "/api/system", timeout=2)
-            if sysinfo.get("sidecar", {}).get("running", True):
-                return []  # 服务存活 + 桥已恢复
-        except urllib.error.URLError:
+            wd = sysinfo.get("sidecar")
+            if isinstance(wd, dict) and wd.get("running") is True \
+                    and int(wd.get("restarts", -1)) > restarts_before:
+                return []  # 服务存活 + 新 sidecar 进程已重建并重生配置
+        except (urllib.error.URLError, ValueError, TypeError):
             pass
         time.sleep(0.5)
-    return [f"sidecar kill 后 {timeout_s}s 内 Python 服务/事件桥未恢复"]
+    return [f"sidecar kill 后 {timeout_s}s 内未观测到新进程（running/restarts 未变化）"]
 
 
 def main() -> int:

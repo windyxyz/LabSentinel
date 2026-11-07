@@ -42,6 +42,13 @@ class SidecarEventBridge:
         self._ev_q: queue.Queue[tuple[int, int, str]] = queue.Queue()
         self._ev_thread: threading.Thread | None = None
         self._last_ts = ""
+        # T-327：注册恢复回调（sidecar 崩溃重建后由 watchdog 触发）
+        if hasattr(analyzer, "set_recovery_hook"):
+            analyzer.set_recovery_hook(self._on_sidecar_recovered)
+
+    def _on_sidecar_recovered(self) -> None:
+        """sidecar 重建后唤醒事件流循环（它读 analyzer._stub 拿到新通道）。"""
+        self._last_error = ""
 
     def start(self) -> bool:
         """启动订阅线程（sidecar 不可用时返回 False，由调用方回退 Python worker）。"""
@@ -76,12 +83,18 @@ class SidecarEventBridge:
         with self._lock:
             return {"ingested": self._ingested, "last_error": self._last_error,
                     "last_ts": self._last_ts, "running": self._thread is not None
-                    and self._thread.is_alive()}
+                    and self._thread.is_alive(),
+                    # T-327：sidecar 进程真实存活 + 重启计数（soak 演练据此判定）
+                    "watchdog": self.analyzer.watchdog_status()
+                    if hasattr(self.analyzer, "watchdog_status") else None}
 
     def _loop(self) -> None:
         from . import analyzer_pb2 as pb
         while not self._stop.is_set():
             try:
+                # T-327：断流/无 stub 时先跑 watchdog（崩溃 ≤10s 自动恢复 +
+                # Store 配置版本变化推送），再由循环重读新 stub 重建订阅
+                self.analyzer.ensure_running(self.store)
                 stub = self.analyzer._stub
                 if stub is None:
                     self._stop.wait(1.0)

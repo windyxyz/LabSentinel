@@ -69,6 +69,17 @@ def _providers_for(name: str) -> list[str]:
     return providers if set(providers) & avail else BACKENDS["cpu"][0]
 
 
+def _read_model_roles(model_path) -> dict:
+    """T-334/Q-14：读取模型同目录 model.json 的 roles；缺失/非法回退空 dict。"""
+    import json
+    from pathlib import Path
+    try:
+        p = Path(model_path).parent / "model.json"
+        return json.loads(p.read_text(encoding="utf-8")).get("roles") or {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
 class Engine:
     """推理引擎。NPU(vitisai) 后端配 XINT8 模型，其余后端配 FP32 模型。"""
 
@@ -78,6 +89,10 @@ class Engine:
         self.backend = None
         self.sess = None
         self.input_name = None
+        # T-334/Q-14：模型角色声明（同目录 model.json 的 roles.person_class）。
+        # 缺省 0 = COCO person 通道，与 Rust 侧 YoloModel 同口径。
+        self.PERSON_CLS = _read_model_roles(model_path or settings.model_fp32) \
+            .get("person_class", 0)
         # T-603：加速/需串行的后端由注册表 serialize 位决定（DML/VitisAI/CoreML）
         self._accel = BACKENDS.get(str(self.backend or ""), ([], False))[1] and str(self.backend) in (
             "directml", "vitisai", "coreml")

@@ -42,7 +42,10 @@ PIP_INDEXES = [
     "https://pypi.org/simple",
 ]
 _PTH = "python312._pth"
-MODELS = ["yolo11n.onnx", "yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt"]
+# Q-08：人体模型（Ultralytics AGPL-3.0，与项目兼容）随包；实验服权重许可未确认
+# 前不随包，改由设置页「按需下载」（许可确认 + assets.lock.json SHA256 校验）。
+# model.json 角色声明与 classes.txt 也随包（后者为模型契约，不含权重/数据）。
+MODELS = ["yolo11n.onnx", "model.json"]
 
 
 def dir_mb(p: Path) -> float:
@@ -153,8 +156,9 @@ def copy_assets() -> None:
     (app_dir / ".env.template").write_text(
         "# 便携版配置模板（启动器复制到数据目录并把相对路径改为绝对路径）\n"
         "LS_MODEL_FP32=../../models/yolo11n.onnx\n"
-        "LS_PPE_MODEL=../../models/yolo11n_ppe.onnx\n"
-        "LS_PPE_CLASS_NAMES=lab coat\n"
+        "# Q-08：实验服模型不随包，未下载时以「仅人员检测」模式运行；\n"
+        "# 设置页确认许可后按需下载，端点会写入 LS_PPE_MODEL 绝对路径。\n"
+        "# LS_PPE_MODEL=\n"
         "LS_PPE_CONF=0.30\n"
         "LS_WEB_DIST=../web\n"
         "LS_FILE_LOOP=true\n"

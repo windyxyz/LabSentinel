@@ -16,8 +16,16 @@ ort = ["dep:ort"]
 
 [dependencies]
 serde = { workspace = true }
+# T-334：model.json 角色声明解析（运行时读取，非测试专用）
+serde_json = { workspace = true }
 tract-onnx = { version = "0.23", optional = true }
 ort = { version = "2.0.0-rc.15", optional = true, default-features = false, features = ["load-dynamic"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[[example]]
+name = "resize_dump"
+# yolo 模块（含 cv2 复刻缩放）只在 tract feature 下导出；example 需显式声明，
+# 否则单独 `cargo test -p ls-infer`（默认 feature）会编译失败。
+required-features = ["tract"]

@@ -35,12 +35,47 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="黄金语料运行器（确定性，L0 对齐基准）")
     ap.add_argument("--video", required=True, help="语料视频路径")
     ap.add_argument("--out", required=True, help="事件 JSONL 输出路径")
+    ap.add_argument("--impl", choices=["python", "rust"], default="python",
+                    help="实现：python=真实 Python 管线 / rust=转发 ls-analyzer --golden（T-321）")
+    ap.add_argument("--fps", type=float, default=5.0, help="分析帧率（rust 实现转发 --fps）")
+    ap.add_argument("--model", default=None, help="模型路径（rust 实现转发 --model）")
     ap.add_argument("--no-model", action="store_true",
                     help="用恒空引擎（无模型环境冒烟；不对齐检测质量）")
     a = ap.parse_args()
 
     os.environ["LS_DETERMINISTIC"] = "1"
     os.environ["LS_LOG_FILE"] = "0"
+
+    # T-321：--impl rust 统一 CLI 转发到 Rust 离线运行器（事件 JSONL 格式一致，
+    # 可直接喂 golden_diff.py 做同口径 diff；不再要求用户记两套参数）。
+    if a.impl == "rust":
+        import shutil
+        import subprocess
+        exe = os.environ.get("LS_ANALYZER_EXE") or \
+            shutil.which("ls-analyzer") or \
+            str(Path(os.environ.get("CARGO_TARGET_DIR", "D:/tmp/ls-rs-target")) /
+                "debug" / ("ls-analyzer.exe" if os.name == "nt" else "ls-analyzer"))
+        if not Path(exe).is_file():
+            print(f"[golden] Rust 运行器不存在: {exe}")
+            return 2
+        out = Path(a.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [str(exe), "--golden", "--video", str(Path(a.video).resolve()),
+               "--out", str(out.resolve()), "--fps", str(a.fps)]
+        if a.model:
+            cmd += ["--model", str(Path(a.model).resolve())]
+        if a.no_model:
+            cmd.append("--no-model")
+        env = {**os.environ}
+        if not a.model and not a.no_model:
+            env.setdefault("LS_MODEL_FP32", str(ROOT / "m0-spike" / "yolo11n.onnx"))
+        # Rust 离线运行器用 ffprobe/ffmpeg 子进程；仓库自带工具的目录加入 PATH
+        tools_ffmpeg = str(ROOT / "tools" / "ffmpeg")
+        if Path(tools_ffmpeg).is_dir():
+            env["PATH"] = tools_ffmpeg + os.pathsep + env.get("PATH", "")
+        r = subprocess.run(cmd, env=env, capture_output=False)
+        return r.returncode
+
     import cv2  # noqa: E402
     from app.config import settings  # noqa: E402
     from app.pipeline import CameraWorker  # noqa: E402

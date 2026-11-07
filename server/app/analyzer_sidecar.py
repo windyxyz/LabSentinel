@@ -1,7 +1,9 @@
-"""T-327：Rust sidecar（ls-analyzer.exe）的 Python 客户端——AnalyzerBackend 实现。
+"""T-327：Rust sidecar (ls-analyzer.exe) 的 Python 客户端——AnalyzerBackend 实现。
 
 生命周期：spawn（一次性令牌）→ 等 READY 行 → gRPC 通道 → ApplyConfig/Start/Stop/Status。
-崩溃守护由上层（CameraManager supervisor 语义）负责；此处只做进程与通道管理。
+T-327 验收：sidecar 进程崩溃后 ≤10s 自动恢复——本类自带 watchdog (ensure_running)，
+事件桥断流重连与 CameraManager.supervise_tick 双路径触发；恢复时重放全量配置快照
+并重拉每路摄像头，Python 服务不中断。
 """
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ import logging
 import os
 import secrets
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -34,6 +37,29 @@ class SidecarAnalyzer(AnalyzerBackend):
         self._zones: dict[int, dict] = {}
         self._rules: dict[int, dict] = {}
         self._cfg_version = 0
+        # T-327 watchdog：进程守护锁 + 恢复计数 + Store 配置版本（ApplyConfig 推送用）
+        self._watch_lock = threading.Lock()
+        self._restarts = 0
+        self._last_restart_ts = ""
+        self._store_config_version = -1
+        self._on_recovered = None  # 由事件桥注入：恢复后重建订阅
+
+    def set_recovery_hook(self, hook) -> None:
+        """T-327：注入事件桥恢复回调（新 stub 建立后重启 Events 订阅）。"""
+        self._on_recovered = hook
+
+    def version(self) -> str:
+        """T-336：返回 sidecar 版本（LS_ANALYZER_VERSION 环境变量优先，
+        未设置时标 unknown——不写死版本串，避免与 Rust 构建元数据漂移）。"""
+        return os.environ.get("LS_ANALYZER_VERSION") or "unknown"
+
+    def watchdog_status(self) -> dict:
+        """T-327：供 /api/system 与 soak 演练观测（不依赖默认 True 的宽松判定）。"""
+        alive = self._proc is not None and self._proc.poll() is None
+        return {"running": bool(self._started and alive),
+                "restarts": self._restarts,
+                "last_restart_ts": self._last_restart_ts or None,
+                "config_version": self._cfg_version}
 
     # ---- 进程生命周期 ----
     def start(self) -> None:
@@ -108,12 +134,14 @@ class SidecarAnalyzer(AnalyzerBackend):
         """最近 sidecar 输出（诊断用）。"""
         return list(getattr(self, "_out_log", ()))
 
-    def stop(self) -> None:
+    def stop(self, keep_snapshot: bool = False) -> None:
+        """停止进程；keep_snapshot=True 保留配置快照供 ensure_running 恢复重放。"""
         self._started = False
         self._stub = None
-        self._cams.clear()
-        self._zones.clear()
-        self._rules.clear()
+        if not keep_snapshot:
+            self._cams.clear()
+            self._zones.clear()
+            self._rules.clear()
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
             try:
@@ -121,6 +149,86 @@ class SidecarAnalyzer(AnalyzerBackend):
             except subprocess.TimeoutExpired:
                 self._proc.kill()
         self._proc = None
+
+    def _replay(self) -> None:
+        """T-327：把累积的全量快照重新下发并重拉每路摄像头（恢复/版本变化共用）。"""
+        if self._stub is None:
+            return
+        from . import analyzer_pb2 as pb
+        self._cfg_version += 1
+        self._stub.ApplyConfig(self._proto_config(),
+                               metadata=(("x-ls-token", self._token),))
+        for cid in sorted(self._cams):
+            self._stub.StartCamera(pb.CameraRef(camera_id=cid),
+                                   metadata=(("x-ls-token", self._token),))
+
+    def sync_config(self, store) -> bool:
+        """T-327：Store.config_version 变化 → 重建区域/规则/相机快照 → ApplyConfig。
+
+        返回是否真的推送了新版本（无变化时零开销，不触碰运行中的数据面）。
+        """
+        try:
+            ver = store.config_version()
+        except Exception:  # noqa: BLE001  旧 Store/测试桩无该方法时跳过
+            return False
+        if ver == self._store_config_version:
+            return False
+        self._store_config_version = ver
+        if not self._started or self._stub is None:
+            return False
+        from . import configcache
+        try:
+            rust_cams = [c for c in store.cameras()
+                         if (c.get("analyzer") or "python") == "rust"]
+            self._cams = {int(c["id"]): dict(c) for c in rust_cams}
+            self._zones = {}
+            self._rules = {}
+            for c in rust_cams:
+                for z in configcache.zones(store, c["id"]):
+                    self._zones[int(z["id"])] = dict(z)
+            for r in configcache.rules(store):
+                if int(r["camera_id"]) in self._cams:
+                    self._rules[int(r["id"])] = dict(r)
+        except Exception as e:  # noqa: BLE001  读配置失败不动存量快照
+            log.warning("sidecar 配置快照刷新失败（沿用旧快照）: %s", e)
+            return False
+        self._replay()
+        return True
+
+    def ensure_running(self, store=None) -> bool:
+        """T-327 watchdog：sidecar 崩溃后 ≤10s 自动恢复；顺带做配置版本推送。
+
+        双触发：事件桥断流（1s 重连轮）与 CameraManager.supervise_tick（10s 巡检），
+        任一路径发现进程死亡都会重建进程 + 重放全量快照 + 重拉每路摄像头。
+        """
+        alive = self._started and self._proc is not None and self._proc.poll() is None
+        if alive:
+            if store is not None:
+                self.sync_config(store)
+            return True
+        with self._watch_lock:
+            # 并发触发时只有一个线程执行恢复；其它线程复查后直接返回
+            alive = self._started and self._proc is not None and self._proc.poll() is None
+            if alive:
+                return True
+            log.warning("sidecar 进程已退出，开始自动恢复（第 %s 次）",
+                        self._restarts + 1)
+            try:
+                self.stop(keep_snapshot=True)
+                self._port = 0  # 重新分配端口（避免旧进程 TIME_WAIT 占端口）
+                self.start()
+                self._replay()
+                self._restarts += 1
+                from datetime import datetime
+                self._last_restart_ts = datetime.now().isoformat(timespec="seconds")
+                if self._on_recovered is not None:
+                    self._on_recovered()
+                print(f"[sidecar] 已恢复（第 {self._restarts} 次重启，"
+                      f"重放 {len(self._cams)} 路配置）")
+                return True
+            except Exception as e:  # noqa: BLE001  恢复失败不影响 Python 主服务
+                log.warning("sidecar 自动恢复失败（下一轮继续重试）: %s", e)
+                return False
 
     @staticmethod
     def _free_port() -> int:

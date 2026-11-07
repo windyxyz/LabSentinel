@@ -26,6 +26,14 @@ def validate_settings() -> list[dict]:
     elif not settings.admin_token and not settings.auth_disabled:
         add("WARN", "admin_token", "未设管理令牌（本机默认无鉴权）",
             "Q-02：首启/升级应自动生成；源码模式可手动设 LS_ADMIN_TOKEN")
+    # Q-03 第 3 条：绑定非回环地址时强制开启读保护（启动校验写入，
+    # 避免"开了管理令牌但实时事件流/读接口仍裸奔"）。仅改进程内 settings，
+    # 不写 config.env（用户本机配置最小 diff）。
+    if not loopback and not settings.auth_read_protected:
+        settings.auth_read_protected = True
+        add("WARN", "auth_read_protected",
+            f"绑定 {host}（非回环）→ 已强制开启读保护",
+            "显式设置 LS_AUTH_READ_PROTECTED=1 可消除本提示")
     if settings.auth_disabled:
         if loopback:
             add("WARN", "auth_disabled", "LS_AUTH_DISABLED=1 已启用（仅回环绑定生效）",

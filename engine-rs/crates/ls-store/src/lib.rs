@@ -1,13 +1,15 @@
 //! ls-store（T-332/ADR-0008）：与 Python `store.py` 共用同一 SQLite 文件与 schema。
 //!
-//! Rust 侧**不重复实现迁移链**：打开 Python 已建好的库（含 v1~v12 迁移）直接读写，
+//! Rust 侧**不重复实现迁移链**：打开 Python 已建好的库（含 v1~v13 迁移）直接读写，
 //! 双向兼容由集成测试保证（Python 建库→Rust 读写 / Rust 建库→Python 读写）。
 //! L4 移除 Python 运行时时，迁移链逐条翻译到 `migrations.rs`（保持相同编号）。
 
 use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
-pub const SCHEMA_VERSION_LATEST: i64 = 12;
+/// 与 `server/app/store.py: SCHEMA_VERSION_LATEST` 的权威编号一致（v13 =
+/// 设备配对令牌表，T-620）；此处只作文档/诊断常量，不参与迁移执行。
+pub const SCHEMA_VERSION_LATEST: i64 = 13;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {

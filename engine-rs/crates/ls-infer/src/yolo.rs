@@ -85,7 +85,25 @@ impl Backend {
     }
 }
 
-/// YOLO11 ONNX 会话（后端无关；`person_class` = COCO person 通道 0）。
+/// T-334/Q-14：读取模型同目录的 `model.json` 角色声明（roles 对象）。
+/// 文件缺失/字段非法一律回退空对象（旧模型行为不变，绝不阻断推理）。
+fn read_model_roles(model_path: &Path) -> serde_json::Map<String, serde_json::Value> {
+    let Some(dir) = model_path.parent() else {
+        return serde_json::Map::new();
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join("model.json")) else {
+        return serde_json::Map::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return serde_json::Map::new();
+    };
+    v.get("roles")
+        .and_then(|r| r.as_object())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// YOLO11 ONNX 会话（后端无关；`person_class` 由 model.json 角色声明，缺省 0）。
 pub struct YoloModel {
     backend: Backend,
     #[cfg(feature = "tract")]
@@ -119,7 +137,13 @@ impl YoloModel {
             #[cfg(feature = "ort")]
             ort_session: None,
             imgsz,
-            person_class: 0,
+            // T-334/Q-14：模型角色声明（同目录 model.json 的 roles.person_class）。
+            // 缺省 0 = COCO person 通道，旧模型无声明时行为不变。
+            person_class: read_model_roles(path)
+                .get("person_class")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(0),
             conf,
             iou,
             min_box_area,

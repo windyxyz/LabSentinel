@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "model": "yolo11n.onnx",
+  "classes": "yolo11n.classes.txt",
+  "input": {"imgsz": 640, "layout": "NCHW", "dtype": "float32"},
+  "roles": {
+    "person_class": 0,
+    "wearing_classes": [],
+    "violation_class": null
+  },
+  "thresholds": {"conf": 0.40, "iou": 0.50, "min_box_area": 1200},
+  "source": "Ultralytics YOLO11n (AGPL-3.0), COCO person 通道 0",
+  "train_data_license": "COCO (CC BY 4.0) / Ultralytics AGPL-3.0；合并模型实验见 Q-14",
+  "notes": "Q-14：合并 3 类模型(person/lab coat/no lab coat)实验落地后，把 wearing_classes 与 violation_class 填入并同步 Rust/Python 引擎按角色取类；当前级联方案仅 person 角色生效。"
+}

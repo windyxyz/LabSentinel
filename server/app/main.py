@@ -108,6 +108,14 @@ async def lifespan(app: FastAPI):
     store = Store()
     alert_config.load(store)  # 任务140：网页端告警配置（DB 覆盖 .env，保存即生效）
     dispatcher.bind_store(store)  # 任务13：投递记录/死信需要写库
+    # Q-02：逃生口启用时每次启动写一条审计（action=auth_disabled），
+    # 便于事后追溯"本机何时关闭过鉴权"；写入失败不影响启动。
+    if settings.auth_disabled:
+        try:
+            _audit_write(datetime.datetime.now().isoformat(timespec="seconds"),
+                         "startup", "config", "auth_disabled", 0)
+        except Exception as e:  # noqa: BLE001  审计失败不阻断服务
+            logging.getLogger("app.errors").warning("[audit] auth_disabled 审计失败: %s", e)
     manager = CameraManager(store)
     # T-331（L3 灰度）：仅当存在 analyzer=rust 的摄像头时才拉起 sidecar/事件桥；
     # 默认全 python 保持零侵入（sidecar exe 缺失时 _rust_start 自动回退 Python worker）。

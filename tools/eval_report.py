@@ -91,8 +91,8 @@ def match_and_count(dets, gt, classes, stats):
 def main():
     ap = argparse.ArgumentParser(description="模型 test 集评估 → Markdown 报告（飞轮④）")
     ap.add_argument("--model", required=True, help="ONNX 模型路径")
-    ap.add_argument("--data", required=True, help="data.yaml（取 test/valid 图片目录）")
-    ap.add_argument("--classes", required=True, help="类名文件（与模型输出顺序一致）")
+    ap.add_argument("--data", default=None, help="data.yaml（python 引擎必填；rust 引擎忽略）")
+    ap.add_argument("--classes", default=None, help="类名文件（python 引擎必填；rust 引擎忽略）")
     ap.add_argument("--split", default="test", choices=["test", "valid"], help="评估哪个划分（默认 test）")
     ap.add_argument("--conf", type=float, default=0.25, help="评估置信度阈值（默认 0.25）")
     ap.add_argument("--limit", type=int, default=0, help="只评估前 N 张（0=全部；冒烟用）")
@@ -101,9 +101,37 @@ def main():
     ap.add_argument("--provider", default=None, choices=[None, "cpu"],
                     help="推理提供者；默认按 settings 顺序，'cpu' 强制 CPUExecutionProvider"
                          "（新导出模型在 DirectML 下可能触发 ORT 兼容问题时使用）")
+    ap.add_argument("--engine", choices=["python", "rust"], default="python",
+                    help="T-334：python=本机 Engine 评测 / rust=跨引擎一致性对比"
+                         "（委托 tools/detect_compare.py：同视频 Python vs Rust 检测 IoU）")
+    ap.add_argument("--video", default=None,
+                    help="--engine rust 必填：对齐语料视频（与 Rust --golden 同口径）")
     args = ap.parse_args()
 
+    # T-334：训练侧与线上推理一致性——rust 引擎走跨语言检测对齐（同一语料、
+    # 同一模型、同一逐帧抽帧），输出 Markdown 报告行；无独立 Rust 图片评测栈。
+    if args.engine == "rust":
+        import subprocess
+        if not args.video:
+            sys.exit("[error] --engine rust 需要 --video <对齐语料>")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "detect_compare.py"),
+                            "--video", str(Path(args.video).resolve()),
+                            "--fps", "5"], cwd=str(ROOT))
+        if r.returncode != 0:
+            return r.returncode
+        label = args.label or Path(args.video).stem
+        line = (f"| {label} | rust-vs-python | 跨引擎检测对齐（见 detect_compare 输出） | ")
+        print(line)
+        if args.report:
+            p = Path(args.report)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        return 0
+
     import yaml
+    if not args.data or not args.classes:
+        sys.exit("[error] --engine python 需要 --data 与 --classes")
     data_cfg = yaml.safe_load(Path(args.data).read_text(encoding="utf-8"))
     img_dir = Path(data_cfg.get(args.split) or "")
     if not img_dir.is_dir():

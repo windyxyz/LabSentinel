@@ -58,6 +58,24 @@
       ],
       "sha256": "0193bc86ec086edcb7c3198fe8aca944e4a5d748f63d2d1b4603b26892ebb628",
       "size": 121756431
+    },
+    "yolo11n_ppe.onnx": {
+      "version": "v1",
+      "license": "权重由 Roboflow 训练数据集派生，具体许可待维护者确认（Q-08）；不随包分发，用户确认许可后按需下载",
+      "urls": [
+        "https://github.com/Windy-LabSentinel/assets/releases/download/ppe-v1/yolo11n_ppe.onnx"
+      ],
+      "sha256": "f00231e64433af05323076956d5240830a1b25207c30acfe2f45bc23a152dd6f",
+      "size": 10673073
+    },
+    "yolo11n_ppe.classes.txt": {
+      "version": "v1",
+      "license": "同上（Q-08）",
+      "urls": [
+        "https://github.com/Windy-LabSentinel/assets/releases/download/ppe-v1/yolo11n_ppe.classes.txt"
+      ],
+      "sha256": "7ae65014ddcb3940b9bab06e350f404c5fe5873ba8b5551843f5a3f0351bf0d7",
+      "size": 91
     }
   }
 }

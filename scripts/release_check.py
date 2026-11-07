@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -303,6 +304,37 @@ def check_t409(res) -> None:
         results_add(res, "产物签名（T-409）", "PASS" if has_sig else "WARN",
                     "SHA256SUMS 已 minisign 签名" if has_sig else "SHA256SUMS 未签名（草稿发布可豁免）",
                     "证书就绪后 minisign -Sm" if not has_sig else "")
+    # 6) Q-13 书面豁免：表内每行必须有到期日；过期豁免按 FAIL 阻断发布
+    exc = ROOT / "SECURITY-EXCEPTIONS.md"
+    if not exc.is_file():
+        results_add(res, "漏洞豁免登记（Q-13）", "WARN", "SECURITY-EXCEPTIONS.md 缺失",
+                    "按模板补书面豁免文件（当前无豁免）")
+    else:
+        today = datetime.now().date()
+        rows = [ln for ln in exc.read_text(encoding="utf-8", errors="replace").splitlines()
+                if ln.startswith("|") and "---" not in ln and "组件 / 版本" not in ln
+                and "示例，勿留作真实豁免" not in ln]
+        expired, malformed = [], []
+        for ln in rows[1:]:  # 跳过表头
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            if len(cells) < 8:
+                malformed.append(ln[:60])
+                continue
+            try:
+                due = datetime.strptime(cells[6], "%Y-%m-%d").date()
+                if due < today:
+                    expired.append(cells[0])
+            except ValueError:
+                malformed.append(cells[0][:40])
+        if expired:
+            results_add(res, "漏洞豁免登记（Q-13）", "FAIL",
+                        "过期豁免: " + ", ".join(expired), "升级依赖或删除豁免行")
+        elif malformed:
+            results_add(res, "漏洞豁免登记（Q-13）", "WARN",
+                        f"{len(malformed)} 行格式/到期日不完整", "补齐理由/受影响路径/到期日")
+        else:
+            results_add(res, "漏洞豁免登记（Q-13）", "PASS",
+                        f"豁免表 {max(0, len(rows) - 1)} 行，均在有效期内")
 
 
 def _git_out(args: list[str]) -> str:

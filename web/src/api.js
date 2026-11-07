@@ -103,6 +103,9 @@ export const api = {
   alertTemplate: () => req('GET', '/api/alert-template'),
   audit: (params = {}) => req('GET', '/api/audit?' + new URLSearchParams(params)),
   alertTemplatePreview: (d) => req('POST', '/api/alert-template/preview', d),
+  // Q-08 / T-406：实验服模型按需下载（许可确认 + SHA256 校验）
+  ppeStatus: () => req('GET', '/api/models/ppe/status'),
+  ppeDownload: (confirm_license) => req('POST', '/api/models/ppe/download', { confirm_license }),
   setEventStatus: (id, status) => req('POST', `/api/events/${id}/status`, { status }),
   bulkStatus: (payload) => req('POST', '/api/events/bulk-status', payload),
   cameraWebrtc: (id) => req('GET', `/api/cameras/${id}/webrtc`),

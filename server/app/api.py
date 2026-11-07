@@ -63,10 +63,20 @@ face_client = FaceClient()  # 依据 settings 配置；未配置时 configured=F
 WS_AUTH_CODE = 4401
 
 
+def _auth_off() -> bool:
+    """Q-02 逃生口：LS_AUTH_DISABLED=1 且绑定回环时关闭鉴权（validate.py 已
+    保证非回环 FAIL 启动；此处只放行 token 校验，不改其它安全中间件）。"""
+    if not settings.auth_disabled:
+        return False
+    import os
+    host = os.environ.get("LS_HOST", "127.0.0.1").strip()
+    return host in ("127.0.0.1", "localhost", "::1", "")
+
+
 def _token_ok(provided: str | None) -> bool:
     """管理令牌校验（写操作专用，任务88 语义收紧）。"""
-    if not settings.admin_token:
-        return True  # 未启用鉴权
+    if not settings.admin_token or _auth_off():
+        return True  # 未启用鉴权 / Q-02 逃生口（仅回环）
     if not provided:
         return False
     import hmac
@@ -75,8 +85,8 @@ def _token_ok(provided: str | None) -> bool:
 
 def _read_token_ok(provided: str | None) -> bool:
     """读令牌校验（任务88）：admin_token 或 read_token 均可（hmac.compare_digest）。"""
-    if not settings.admin_token:
-        return True  # 未启用鉴权
+    if not settings.admin_token or _auth_off():
+        return True  # 未启用鉴权 / Q-02 逃生口（仅回环）
     if not provided:
         return False
     import hmac
@@ -917,6 +927,10 @@ folder_image_detail = _folders_router.folder_image_detail
 # 挂在被搬移段的原位置 → 注册顺序与路径集合完全不变（OpenAPI 快照无漂移）。
 from .routers import stats as _stats_router  # noqa: E402
 router.include_router(_stats_router.router)
+
+# ---- Q-08 / T-406：实验服模型按需下载（许可确认 + SHA256 校验）----
+from .routers import models as _models_router  # noqa: E402
+router.include_router(_models_router.router)
 
 # ---- websocket ----（T-106 / Q-03：口径统一 + 强制同源 + 子协议传令牌）
 WS_ORIGIN_CODE = 4403

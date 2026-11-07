@@ -4307,6 +4307,59 @@
         }
       }
     },
+    "/api/models/ppe/status": {
+      "get": {
+        "summary": "Ppe Status",
+        "operationId": "ppe_status_api_models_ppe_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/ppe/download": {
+      "post": {
+        "summary": "Ppe Download",
+        "description": "用户确认许可后下载两个资产；逐源 SHA256 校验，失败不留残件。",
+        "operationId": "ppe_download_api_models_ppe_download_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PpeDownloadBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/meta": {
       "get": {
         "summary": "Api Meta",
@@ -4684,6 +4737,21 @@
         ],
         "title": "ImportBody",
         "description": "任务79：配置导入（format/version/规模校验留 _validate_config_import 400）。"
+      },
+      "PpeDownloadBody": {
+        "properties": {
+          "confirm_license": {
+            "type": "boolean",
+            "title": "Confirm License"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "confirm_license"
+        ],
+        "title": "PpeDownloadBody",
+        "description": "许可确认（extra=forbid：不接受额外字段）。"
       },
       "RuleCreate": {
         "properties": {

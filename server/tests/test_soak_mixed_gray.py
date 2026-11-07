@@ -94,6 +94,39 @@ def test_event_rate_metrics_parse(monkeypatch):
     assert any("analyzer 标签" in p for p in s.check_event_rate("http://127.0.0.1:8001"))
 
 
+def test_crash_recovery_no_false_positive(monkeypatch):
+    """演练不得用默认 True 判定：字段缺失报错；kill 后 restarts 未递增判失败。"""
+    state = {"calls": 0}
+
+    def fake_get(base, path, timeout=5):
+        if path == "/api/system":
+            state["calls"] += 1
+            return {"sidecar": {"running": True, "restarts": 0}}
+        return {"status": "ok"}
+
+    monkeypatch.setattr(s, "get_json", fake_get)
+    monkeypatch.setattr(s.subprocess, "check_call", lambda *a, **k: 0)
+    monkeypatch.setattr(s.time, "sleep", lambda _: None)
+    problems = s.check_crash_recovery("http://127.0.0.1:8001", timeout_s=0)
+    assert any("未观测到新进程" in p for p in problems)
+    # 缺 watchdog 字段 → 直接拒绝演练
+    monkeypatch.setattr(s, "get_json", lambda b, p, timeout=5: {})
+    assert any("缺 sidecar watchdog" in p
+               for p in s.check_crash_recovery("http://127.0.0.1:8001"))
+    # 真恢复：restarts 递增 → 通过
+    state2 = {"n": 0}
+
+    def fake_get2(base, path, timeout=5):
+        if path == "/api/system":
+            state2["n"] += 1
+            return {"sidecar": {"running": True,
+                                "restarts": 0 if state2["n"] == 1 else 1}}
+        return {"status": "ok"}
+
+    monkeypatch.setattr(s, "get_json", fake_get2)
+    assert s.check_crash_recovery("http://127.0.0.1:8001", timeout_s=1) == []
+
+
 def test_summary_path_resolution(tmp_path):
     """相对 summary 路径相对仓库根解析（不依赖 cwd）。"""
     p = Path("Resources/logs/soak-mixed.json")

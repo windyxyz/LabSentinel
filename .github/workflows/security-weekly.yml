@@ -1,0 +1,52 @@
+# Q-13 / T-409：每周定时依赖漏洞审计（Python / Web / Rust 三栈）。
+# 复用 tests.yml 与 rust.yml 的 workflow_call 门禁；失败时自动开 issue 跟踪。
+name: security-weekly
+on:
+  schedule:
+    # 每周一 03:17 UTC（避开整点拥塞）
+    - cron: "17 3 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  python-web-audit:
+    uses: ./.github/workflows/tests.yml
+    secrets: inherit
+
+  rust-audit:
+    uses: ./.github/workflows/rust.yml
+    secrets: inherit
+
+  open-issue-on-failure:
+    needs: [python-web-audit, rust-audit]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `每周依赖审计失败 ${new Date().toISOString().slice(0,10)}`;
+            const body = [
+              'Q-13：每周定时审计出现 High/Critical 漏洞或审计门禁失败。',
+              '',
+              `- Python/Web: \`${{ needs.python-web-audit.result }}\``,
+              `- Rust: \`${{ needs.rust-audit.result }}\``,
+              `- 运行记录: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '处理：升级依赖锁文件；若 7 天内无法修复，在 `SECURITY-EXCEPTIONS.md` 写书面豁免（理由/受影响路径/到期日）。',
+            ].join('\n');
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'security,weekly-audit', per_page: 10,
+            });
+            if (existing.data.some(i => i.title.startsWith('每周依赖审计失败'))) {
+              core.info('已有未关闭的每周审计 issue，跳过重复创建');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title, body, labels: ['security', 'weekly-audit'],
+            });

@@ -40,6 +40,20 @@
   `tools/camera_soak.py` 缺 `import os`（B-17）。
 
 ### 变更
+- T-327：Rust sidecar 崩溃 ≤10s 自动恢复（watchdog：进程 liveness + 全量
+  快照重放 + 事件桥重连，supervisor 与事件流双触发）；Store 配置版本变化
+  自动推送 ApplyConfig；/api/system 暴露 sidecar watchdog 与 analyzer_version；
+  混合灰度 soak 演练修复假阳性判定（要求显式 running 且重启计数递增）。
+- Q-08/T-406：实验服模型改按需下载（许可确认 + assets.lock.json SHA256
+  校验 + 设置页模型管理），便携包不再随包 PPE 权重；补 fetch_assets.py、
+  media/SOURCES.md（CC0 占位模板）、签名公钥占位说明。
+- Q-13：每周定时审计 workflow（失败自动开 issue）+ SECURITY-EXCEPTIONS.md
+  书面豁免模板 + release_check 过期豁免阻断。
+- Q-03/Q-02：非回环绑定强制开启读保护；LS_AUTH_DISABLED 逃生口进入鉴权
+  主链路（仅回环）并在每次启动写审计。
+- T-321/T-334/T-335/T-336：golden_run --impl python|rust 统一 CLI；
+  eval_report --engine rust 跨引擎一致性；model.json 角色声明（Rust/Python
+  同口径读取）；rust.yml 补 nextest/sccache/msvc 目标；status 增 analyzer_version。
 - T-404：安装器新增 upgrade 子命令（zip/目录、防穿越解包）+ 健康检查失败
   自动回滚（数据目录不动、升级前 DB 备份）；VM 演练测试齐备。
 - T-335：engine-rs/deny.toml（许可证白名单/来源/公告）+ rust.yml

@@ -557,6 +557,14 @@ class CameraManager:
         """守护一轮（只在守护线程/测试里调用，不在 API/帧循环里做）。"""
         now = self._sup_clock()
         self._anomaly_check()
+        # T-327：rust 路的 sidecar 崩溃守护（与事件桥 1s 重连形成双触发，
+        # 任一路径发现进程死亡都会重建；配置版本变化也在此推送 ApplyConfig）。
+        # 放在锁外，避免 ensure_running 的 Popen/READY 等待阻塞 start/stop 控制面。
+        if self._rust_cams and self.sidecar is not None:
+            try:
+                self.sidecar.ensure_running(self.store)
+            except Exception as e:  # noqa: BLE001  守护线程绝不能死
+                print(f"[supervisor] sidecar watchdog 异常: {e!r}")
         starts: list[int] = []
         with self._mgmt_lock:
             # 启动成功（worker 存活 >5s）→ 重置退避计数
@@ -571,7 +579,7 @@ class CameraManager:
                 st = self._sup.setdefault(cid, self._sup_new_state())
                 if st["state"] == "given_up":
                     continue
-                if cid in self._rust_cams:  # T-331：Rust 路由守护由 sidecar 进程自管
+                if cid in self._rust_cams:  # T-331：Rust 路由守护由 sidecar watchdog 负责
                     st["state"] = "running"
                     continue
                 w = self.workers.get(cid)
@@ -824,6 +832,18 @@ class CameraManager:
                     "reconnect_count": r.reconnect_count if r else 0,
                     "opened_at": None, "frames_total": 0,
                     "kind": "video", "analyzer": "rust",
+                    # T-336：迁移期观测（与 Python 路 status 口径一致）
+                    "analyzer_version": self._analyzer_version(),
                     **self.supervisor_info(cid),
                 })
-        return {"cameras": cams}
+        # T-327：sidecar 进程真实存活/重启计数（soak 演练与运维观测用）
+        sidecar_watchdog = self.sidecar.watchdog_status() \
+            if self.sidecar is not None and hasattr(self.sidecar, "watchdog_status") else None
+        return {"cameras": cams, "sidecar": sidecar_watchdog}
+
+    def _analyzer_version(self) -> str:
+        """T-336：rust 分析器版本（与 ls-analyzer 构建元数据对齐；读不到给 unknown）。"""
+        try:
+            return str(self.sidecar.version()) if hasattr(self.sidecar, "version") else "unknown"
+        except Exception:  # noqa: BLE001  观测字段不能拖垮状态接口
+            return "unknown"
