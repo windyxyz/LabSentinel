@@ -6,9 +6,11 @@ uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 pydantic>=2.7
 pydantic-settings>=2.2
-# T-328/L1：Windows 与 Linux/CUDA 统一 onnxruntime 1.31.1（与 Rust ort 后端同引擎
-# 版本——黄金语料事件一致率 >=98% 的前提）。directml 包无 1.31 wheel（停在 1.24.4），
-# Windows 推理回落 CPU EP（Engine 注册表自动降级 directml->cpu）。
+# T-328/L1: Windows and Linux/CUDA share onnxruntime 1.31.1 (same engine as the
+# Rust ort backend -- prerequisite for golden-corpus event agreement >=98%).
+# No 1.31 wheel exists for onnxruntime-directml (stuck at 1.24.4), so Windows
+# inference falls back to the CPU EP (Engine registry degrades directml->cpu).
+# R2-303 restores DirectML as an optional second lock (requirements-win-dml.lock).
 onnxruntime==1.31.1 ; sys_platform == "win32"
 onnxruntime>=1.17 ; sys_platform != "win32"
 opencv-python-headless>=4.9
@@ -18,6 +20,14 @@ defusedxml>=0.7  # T-501: safe XML parsing for discovery
 numpy
 paho-mqtt>=1.6,<2
 reportlab>=4.2,<6
+# R2-001/N-01: analyzer_pb2_grpc.py requires grpcio>=1.85.1; secretstore.py
+# (POSIX) and update_check.py (minisign verify) require cryptography.
+# Both were missing from the locks -> sidecar unusable, secrets silently
+# plaintext, update verification skipped. Import assertion: test_locked_imports.py.
+# cryptography >=49: pip-audit flags 45.x (PYSEC-2026-3552/3553/3554,
+# GHSA-537c-gmf6-5ccf); fix versions are 49.0.0 / 50.0.0.
+grpcio>=1.85.1
+cryptography>=49,<51
 # opencv-python (GUI) is pulled by supervision; override removes it (B-03: two opencv
 # distributions writing the same cv2/ directory break installs/updates). See overrides.txt.
 opencv-python ; sys_platform == "never"

@@ -205,11 +205,12 @@ def smoke() -> None:
     deploy.log("    " + (r.stdout.strip() or r.stderr.strip()[-300:]))
     assert r.returncode == 0, "依赖导入冒烟失败"
     # T-002 断言：paho/reportlab 可导入 + opencv 只有一份发行版（B-03 去重）
-    code2 = ("import paho.mqtt.client, reportlab;"
+    # R2-001/N-01: grpc（sidecar）与 cryptography（密钥加密/更新验签）必须随锁进包
+    code2 = ("import paho.mqtt.client, reportlab, grpc, cryptography;"
              "import importlib.metadata as md;"
              "d=[x.metadata['Name'] for x in md.distributions() "
              "   if x.metadata['Name'].lower().startswith('opencv')];"
-             "assert len(d)==1, d; print('paho/reportlab OK, opencv dists=', d)")
+             "assert len(d)==1, d; print('paho/reportlab/grpc/cryptography OK, opencv dists=', d)")
     r = subprocess.run([str(RUNTIME / "python.exe"), "-c", code2], env=env,
                        capture_output=True, text=True, cwd=str(RUNTIME))
     deploy.log("    " + (r.stdout.strip() or r.stderr.strip()[-300:]))

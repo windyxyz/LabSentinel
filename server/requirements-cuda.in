@@ -1,6 +1,8 @@
-# Top-level server dependencies (T-002 source of truth for locked installs).
+# Top-level server dependencies (CUDA variant, T-002 source of truth for locks).
 # Keep this file pure ASCII -- pip decodes it with the system locale (GBK on zh-CN Windows).
-# Locked outputs: requirements-win.lock / requirements-linux.lock (uv pip compile --generate-hashes).
+# Locked output: requirements-cuda.lock (uv pip compile --generate-hashes).
+# Do NOT add plain onnxruntime here: onnxruntime-gpu and onnxruntime share the
+# same onnxruntime/ package directory (same conflict class as B-03).
 fastapi>=0.115
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9
@@ -15,6 +17,10 @@ defusedxml>=0.7  # T-501: safe XML parsing for discovery
 numpy
 paho-mqtt>=1.6,<2
 reportlab>=4.2,<6
+# R2-001/N-01: analyzer_pb2_grpc.py requires grpcio>=1.85.1; secretstore.py
+# (POSIX) and update_check.py (minisign verify) require cryptography.
+grpcio>=1.85.1
+cryptography>=49,<51
 # opencv-python (GUI) is pulled by supervision; override removes it (B-03: two opencv
 # distributions writing the same cv2/ directory break installs/updates). See overrides.txt.
 opencv-python ; sys_platform == "never"

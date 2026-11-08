@@ -245,8 +245,14 @@ def write_venv_path(venv: Path) -> None:
     VENV_MARK.write_text(text, encoding="gbk")
 
 
+def _platform_lock() -> str:
+    """R2-002: source deployment must install the same hashed lock as the portable build."""
+    return "requirements-win.lock" if sys.platform == "win32" else "requirements-linux.lock"
+
+
 def pip_install(venv: Path) -> None:
-    log("  [2] 安装服务端依赖（pip：清华 → 阿里云 → 官方，已装自动跳过，首次 2-5 分钟）...")
+    lock = _platform_lock()
+    log(f"  [2] 安装服务端依赖（{lock}：清华 → 阿里云 → 官方，已装自动跳过，首次 2-5 分钟）...")
     env = {**os.environ, "PYTHONUTF8": "1"}  # pip 按系统代码页解码 requirements，中文注释在 GBK 机会炸
     indexes = (
         ("清华镜像", "https://pypi.tuna.tsinghua.edu.cn/simple"),
@@ -261,14 +267,15 @@ def pip_install(venv: Path) -> None:
             run_env.pop("PIP_INDEX_URL", None)
         r = subprocess.run([str(venv_python(venv)), "-m", "pip", "install",
                             "--disable-pip-version-check",
-                            "-r", str(ROOT / "server" / "requirements.txt")],
+                            "--require-hashes", "--no-deps",
+                            "-r", str(ROOT / "server" / lock)],
                            check=False, env=run_env)
         if r.returncode == 0:
             if label != "清华镜像":
                 log(f"    依赖安装完成（来源：{label}）")
             return
         log(f"    {label} 安装失败（退出码 {r.returncode}），切换下一个源...")
-    raise SystemExit("  [失败] pip 依赖安装失败：三个源均不可用")
+    raise SystemExit(f"  [失败] {lock} 依赖安装失败：三个源均不可用")
 
 
 def _extract_openh264(payload: Path, dest: Path) -> None:
@@ -735,11 +742,15 @@ def cmd_check(quiet: bool = False) -> int:
     v = find_venv()
     add("venv 虚拟环境", v is not None, "python scripts/deploy.py install")
     if v:
+        # R2-002/N-20: the unified lock pins onnxruntime CPU on Windows; DirectML
+        # becomes an optional variant again in R2-303, so do not require Dml here.
         code = ("import fastapi,uvicorn,cv2,numpy,httpx,supervision,pydantic_settings,"
-                "onnxruntime; p=onnxruntime.get_available_providers();"
-                "assert any('Dml' in x for x in p), p")
+                "onnxruntime,grpc,cryptography;"
+                "assert onnxruntime.get_available_providers()")
         r = subprocess.run([str(venv_python(v)), "-c", code], capture_output=True, text=True)
-        add("服务端依赖（含 DirectML）", r.returncode == 0, r.stderr.strip().splitlines()[-1] if r.returncode and r.stderr else "pip install -r server/requirements.txt")
+        add("服务端依赖（锁文件）", r.returncode == 0,
+            r.stderr.strip().splitlines()[-1] if r.returncode and r.stderr
+            else f"python scripts/deploy.py install（{_platform_lock()}）")
         if not (v / "Lib" / "site-packages" / "cv2" / "openh264-2.5.0-win64.dll").exists():
             # 可选组件：缺了不该让体检失败（否则每次启动都会重跑部署）
             notes.append("OpenH264 DLL 缺失（可选：优先用系统 H.264，失败回退 mp4v）")
