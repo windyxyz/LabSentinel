@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
-use ls_dispatch::{check_url, deliver, is_ok, Channel, ChannelConfig};
+use ls_dispatch::{check_url, deliver, deliver_with_backoff, is_ok, Channel, ChannelConfig};
 
 /// 本地 HTTP 桩：对每个请求回固定 (status, body)，并记录收到的头与体。
 struct Stub {
@@ -123,7 +123,10 @@ fn hmac_signature_matches_known_vectors() {
 #[test]
 fn business_code_and_retry_semantics() {
     // Webhook 渠道语义（与 Python GenericWebhookChannel 一致：成功=HTTP 2xx，不解析业务码）
-    // 桩回 500 → 失败重试 1+3 次共 4 个请求
+    // 桩回 500 → 失败重试 1+3 次共 4 个请求。
+    // N-34：退避注入 [0,0,0]——消除 20s 真实等待，且最后一个请求的响应返回时
+    // 桩线程已完成计数写入（HTTP 响应先于计数？桩在写出响应前记录，见 spawn_stub），
+    // 断言前再轮询等待计数稳定，彻底消除竞态。
     let stub = spawn_stub(500, "boom");
     let cfg = ChannelConfig {
         url: format!("http://{}/hook", stub.addr),
@@ -131,9 +134,18 @@ fn business_code_and_retry_semantics() {
         allow_http: true,
         ..Default::default()
     };
-    let d = deliver(Channel::Webhook, &cfg, 2, "hi");
+    let d = deliver_with_backoff(Channel::Webhook, &cfg, 2, "hi", &[0, 0, 0]);
     assert!(!d.ok);
     assert_eq!(d.attempts, 4, "失败重试 1+3 次");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while stub.requests.lock().unwrap().len() < 4 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "桩计数未在 1s 内收敛到 4（实际 {}）",
+            stub.requests.lock().unwrap().len()
+        );
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(stub.requests.lock().unwrap().len(), 4);
 
     // 2xx → 一次成功（即便 body 不是 JSON——Webhook 不解析业务码）
@@ -144,7 +156,7 @@ fn business_code_and_retry_semantics() {
         allow_http: true,
         ..Default::default()
     };
-    let d2 = deliver(Channel::Webhook, &cfg2, 2, "hi");
+    let d2 = deliver_with_backoff(Channel::Webhook, &cfg2, 2, "hi", &[0, 0, 0]);
     assert!(d2.ok && d2.attempts == 1);
     // 厂商渠道的业务码判定（请求需打真实域名，此处只测 is_ok 纯函数）
     assert!(is_ok(Channel::Wecom, 200, "{\"errcode\":0}"));

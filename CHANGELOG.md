@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Rust 控制面（R2-309 批次 1，2026-11-09）
+- **ls-server 路由 17→61/106（57.5%，scripts/rust_route_coverage.py 实测）**：
+  cameras 扩展（DELETE/group/analyzer/start/webrtc/camera-groups/bulk/usb-devices）、
+  zones 与 rules CRUD、rule-templates、events 全套（bulk-status/timeline/快照/视频）、
+  stats 四件套（daily/weekly/hourly/quality）+ metrics + CSV 导出、
+  配对与设备令牌（T-620：sha256 存库、Bearer 头、读保护下可读、touch 60s 节流、
+  5 次失败作废全部配对码）、审计查询、投递/静默/日历、/api/v1/meta。
+  鉴权中间件对齐 Python（R2-103/R2-108 口径：Bearer 等价、claim 公开、读保护豁免 health）。
+- ls-store 扩展对应方法 + 修复 `update_delivery` 误用 `error` 列（Python 权威列为
+  `last_error`，测试自建 schema 同步更正）。
+- N-34/R2-505：ls-dispatch 退避可注入（`deliver_with_backoff`），重试语义集成测试
+  从 20s 真实等待降到 2s 并消除桩计数竞态。
+- 审计写入在中间件内 await spawn_blocking（响应返回前落库，异步等待不阻塞执行器）。
+
 ### 修复
 - T-202（B-05）：便携启动器托管 go2rtc.exe（端口探测防重复拉起、日志独立、
   锁文件记录 go2rtc pid 并随 --stop 同停）——便携版实时画面恢复可用。

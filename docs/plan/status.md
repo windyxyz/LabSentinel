@@ -76,11 +76,12 @@
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| R2-307 路由覆盖率统计进 CI | ✅ | `ls-server --dump-routes` + `scripts/rust_route_coverage.py`（路径参数归一化 {param}/:id）；实测 **17/106 = 16.0%**；rust.yml 覆盖率 artifact（先跟踪不门禁） |
-| R2-309 ls-server 补齐（按路由组分批） | ⬜ | 17/106 → ≥95%；顺序：鉴权中间件 → cameras/zones/rules → events 全套+媒体签名 → alerts → export/stats → folders → face/plugins/genai |
-| R2-503 审计写入移出事件循环 | ✅ | `_audit_enqueue` + 单写线程（队列 10000 满则丢弃+WARNING）；中间件零阻塞 |
+| R2-307 路由覆盖率统计进 CI | ✅ | `ls-server --dump-routes` + `scripts/rust_route_coverage.py`（路径参数归一化 {param}/:id）；rust.yml 覆盖率 artifact（先跟踪不门禁） |
+| R2-309 ls-server 补齐（按路由组分批） | 🟡 | **批次 1 完成（64e9f1f）：17→61/106 = 57.5%**——cameras/zones/rules/模板 CRUD、配对与设备令牌（Bearer/读保护/节流/防爆破）、审计、投递/静默/日历、stats 四件套+timeline、CSV 导出、metrics、v1/meta；ls-store 扩展 + 修复 update_delivery 列名；新集成测试 7 例。**余量 45 条**：face/plugins/genai/discovery/mqtt/update/alerts 配置读写/export/pdf/媒体签名/system-shutdown/model/ppe 下载（多依赖外部服务或文件系统，随批次 2+） |
+| R2-503 审计写入移出事件循环 | ✅ | Python：队列+单写线程；Rust：spawn_blocking await（异步等待不阻塞执行器） |
 | R2-504 第三方 Action 钉 SHA + Dependabot | ✅ | 7 个 Action 全部钉 commit SHA（API 实测当前 HEAD）；`.github/dependabot.yml`（pip/npm/cargo/actions 每周） |
-| N-34 重试语义测试稳定性 | ⬜ | 当前环境已通过，仍建议注入退避（并入 R2-309 批次） |
+| N-34 重试语义测试稳定性 | ✅ | ls-dispatch `deliver_with_backoff`（退避注入 [0,0,0]）+ 断言前轮询计数收敛；集成测试 20s→2s |
+| R2-502 前端测试补齐 | 🟡 | 28→**34 例**（Devices 2、Wall 2、Models 2）；WebrtcPlayer 子协议/断线重连需 stub RTCPeerConnection 信令全流程，投入产出低暂缓（记录为余量） |
 
 ## 本轮环境事件（2026-11-09）
 

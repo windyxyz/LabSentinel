@@ -286,6 +286,17 @@ pub struct Delivery {
 /// 单渠道投递（真实 HTTP；失败按 Python RETRY_BACKOFF=[1,4,15] 重试）。
 /// Email 渠道不走 HTTP，转 `deliver_email`（由派发层路由）。
 pub fn deliver(ch: Channel, cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
+    deliver_with_backoff(ch, cfg, level, text, &[1, 4, 15])
+}
+
+/// N-34/R2-505：退避可注入（测试用 `[0,0,0]` 消除 20s 真实等待与桩计数竞态窗口）。
+pub fn deliver_with_backoff(
+    ch: Channel,
+    cfg: &ChannelConfig,
+    level: i64,
+    text: &str,
+    backoff_secs: &[u64],
+) -> Delivery {
     if ch == Channel::Email {
         return deliver_email(cfg, level, text);
     }
@@ -335,7 +346,12 @@ pub fn deliver(ch: Channel, cfg: &ChannelConfig, level: i64, text: &str) -> Deli
             resp_body.chars().take(120).collect::<String>()
         ));
         if attempt < 3 {
-            std::thread::sleep(Duration::from_secs([1, 4, 15][attempt as usize]));
+            // 退避可注入（N-34）：越界/0 值不等待
+            if let Some(&s) = backoff_secs.get(attempt as usize) {
+                if s > 0 {
+                    std::thread::sleep(Duration::from_secs(s));
+                }
+            }
         }
     }
     Delivery {
