@@ -22,6 +22,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+try:
+    import health_check  # R2-402：真实升级健康检查（同目录导入）
+except ImportError:  # 从仓库根作为包导入时回退
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import health_check
+
 
 def _version_default() -> str:
     """T-401：跟随仓库根 VERSION（单一来源）。
@@ -332,15 +338,17 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
     log(f"  启动方式：{'桌面/开始菜单快捷方式' if shortcuts else '(无快捷方式)'}，或 {install / 'LabSentinel.exe'} / 启动.bat")
     log(f"  数据目录：{data_root}（升级/卸载默认保留）")
     log(f"  卸载方式：开始菜单 卸载.lnk 或 {install / '卸载.bat'}（默认保留数据）")
-    # T-404：新版本健康检查（失败自动回滚到归档旧版，数据目录不动）。
-    # health_cmd 可注入（VM 演练用假健康检查制造失败）；缺省仅当 runtime exe
-    # 是真实可执行文件时启用导入冒烟——测试用的桩文件（内容占位）跳过。
+    # T-404/R2-402：新版本健康检查（失败自动回滚到归档旧版，数据目录不动）。
+    # 默认真实启动 uvicorn 到临时回环端口并轮询 /api/health/ready（N-18：
+    # 旧默认 `sys.exit(0)` 永远通过，自动回滚形同虚设）。health_cmd 可注入
+    # （VM 演练用假健康检查制造失败）；测试桩 runtime 跳过。
+    health_env = None
     if health_cmd is None and upgrading and old_version:
-        py = install / "runtime" / "python.exe"
-        if py.is_file() and py.stat().st_size > 4096:
-            health_cmd = [str(py), "-c", "import sys; sys.exit(0)"]
+        built = health_check.default_health_cmd(install)
+        if built is not None:
+            health_cmd, health_env = built
     if health_cmd:
-        ok = _health_check(install, health_cmd)
+        ok = _health_check(install, health_cmd, health_env)
         if not ok:
             log("[失败] 新版本健康检查未通过——自动回滚到上一版本")
             if _versions_dir(install).exists():
@@ -461,18 +469,20 @@ def _force_copy(src, dst):
     return shutil.copy2(src, dst)
 
 
-def _health_check(install: Path, cmd: list[str]) -> bool:
-    """T-404：启动后健康检查（60s 上限，退出码 0 = 通过）。
+def _health_check(install: Path, cmd: list[str], env: dict | None = None) -> bool:
+    """T-404/R2-402：启动后健康检查（默认真实起服务；60s 上限，退出码 0 = 通过）。
 
     cmd 由受信任的调用方构造（CLI --health-cmd 为测试/演练用，不在生产路径），
     绝不由安装目录内文本拼装，避免升级包内容注入命令。
     """
     try:
         r = subprocess.run(cmd, cwd=str(install), capture_output=True, timeout=60,
-                           creationflags=CREATE_NO_WINDOW)
+                           env=env, creationflags=CREATE_NO_WINDOW)
         if r.returncode != 0:
-            log(f"  [健康检查] 退出码 {r.returncode}: "
-                f"{r.stderr.decode('utf-8', 'replace')[:200]}")
+            stderr = r.stderr
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", "replace")
+            log(f"  [健康检查] 退出码 {r.returncode}: {(stderr or '')[:200]}")
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"  [健康检查] 执行失败: {e}")
