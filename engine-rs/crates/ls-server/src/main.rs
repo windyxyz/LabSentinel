@@ -149,6 +149,31 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/folder-images/summary"),
     ("GET", "/api/logs"),
     ("GET", "/api/models/ppe/status"),
+    // ---- R2-309 批次 3 ----
+    ("POST", "/api/config/import"),
+    ("GET", "/api/events/:eid/evidence.zip"),
+    ("GET", "/api/export/evidence.zip"),
+    ("GET", "/api/plugins/:pid/logs"),
+    ("POST", "/api/plugins/:pid/enable"),
+    ("POST", "/api/plugins/:pid/disable"),
+    ("POST", "/api/plugins/:pid/start"),
+    ("POST", "/api/plugins/:pid/stop"),
+    ("GET", "/api/face/status"),
+    ("POST", "/api/face/persons"),
+    ("GET", "/api/face/persons"),
+    ("DELETE", "/api/face/persons/all"),
+    ("DELETE", "/api/face/persons/:subject"),
+    ("POST", "/api/alert-test"),
+    ("POST", "/api/models/ppe/download"),
+    // ---- R2-309 批次 3b（收尾批） ----
+    ("GET", "/api/folder-images/export.csv"),
+    ("GET", "/api/folder-images/:iid"),
+    ("GET", "/api/folder-images/:iid/file"),
+    ("GET", "/api/folder-images/:iid/thumb"),
+    ("POST", "/api/alert-template/preview"),
+    ("POST", "/api/rule-templates/:tid/apply"),
+    ("POST", "/api/system/shutdown"),
+    ("GET", "/api/cameras/:cid/snapshot"),
 ];
 
 pub type Shared = Arc<AppState>;
@@ -227,6 +252,30 @@ pub fn build_router(state: Shared) -> Router {
         .route("/folder-images/summary", get(folder_images_summary))
         .route("/logs", get(logs_tail))
         .route("/models/ppe/status", get(ppe_status))
+        // ---- R2-309 批次 3 ----
+        .route("/config/import", post(config_import))
+        .route("/events/:eid/evidence.zip", get(event_evidence_zip))
+        .route("/export/evidence.zip", get(export_evidence_zip))
+        .route("/plugins/:pid/logs", get(plugin_logs))
+        .route("/plugins/:pid/enable", post(plugin_action))
+        .route("/plugins/:pid/disable", post(plugin_action))
+        .route("/plugins/:pid/start", post(plugin_action))
+        .route("/plugins/:pid/stop", post(plugin_action))
+        .route("/face/status", get(face_status))
+        .route("/face/persons", get(face_persons_list).post(face_register))
+        .route("/face/persons/all", delete(face_clear_all))
+        .route("/face/persons/:subject", delete(face_delete))
+        .route("/alert-test", post(alert_test))
+        .route("/models/ppe/download", post(ppe_download))
+        // ---- R2-309 批次 3b ----
+        .route("/folder-images/export.csv", get(folder_images_csv))
+        .route("/folder-images/:iid", get(folder_image_detail))
+        .route("/folder-images/:iid/file", get(folder_image_file))
+        .route("/folder-images/:iid/thumb", get(folder_image_thumb))
+        .route("/alert-template/preview", post(alert_template_preview))
+        .route("/rule-templates/:tid/apply", post(apply_rule_template))
+        .route("/system/shutdown", post(shutdown_server))
+        .route("/cameras/:cid/snapshot", get(camera_snapshot))
         .with_state(state.clone());
     let ws = Router::new()
         .route("/ws/events", get(ws_events))
@@ -2442,6 +2491,1050 @@ async fn ws_events(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| handle_ws(socket, st.events_tx.subscribe()))
 }
 
+// ==== R2-309 批次 3b：图片记录详情/导出/模板预览与应用/关机/快照占位 ====
+
+fn folder_row_json(r: &ls_store::FolderImageRow, path_full: bool) -> Value {
+    let mut v = json!({"id": r.id, "camera_id": r.camera_id, "name": r.name,
+        "ts": r.ts, "processed_ts": r.processed_ts, "width": r.width,
+        "height": r.height, "persons": r.persons, "in_zone": r.in_zone,
+        "ppe_no": r.ppe_no, "ppe_wearing": r.ppe_wearing, "key": r.key,
+        "violation": r.violation, "event_id": r.event_id,
+        "snapshot": r.snapshot, "error": r.error});
+    if path_full {
+        v["path"] = json!(r.path);
+    }
+    v
+}
+
+async fn folder_image_detail(State(st): State<Shared>, AxPath(iid): AxPath<i64>) -> Response {
+    with_store(&st, |s| match s.folder_image(iid)? {
+        Some(r) => Ok(Json(folder_row_json(&r, true)).into_response()),
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({"detail": "image record not found"})),
+        )
+            .into_response()),
+    })
+}
+
+/// 与 Python folder_readable_path 同口径：记录的 path 是真实文件路径
+async fn folder_image_file(State(st): State<Shared>, AxPath(iid): AxPath<i64>) -> Response {
+    with_store(&st, |s| match s.folder_image(iid)? {
+        Some(r) => match std::fs::read(&r.path) {
+            Ok(data) => {
+                let mt = if r.path.to_ascii_lowercase().ends_with(".png") {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                };
+                Ok((
+                    [
+                        (header::CONTENT_TYPE, mt),
+                        (header::CACHE_CONTROL, "private, max-age=3600"),
+                    ],
+                    data,
+                )
+                    .into_response())
+            }
+            Err(_) => Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": "原图片文件不存在（可能已被系统清理）"})),
+            )
+                .into_response()),
+        },
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({"detail": "image record not found"})),
+        )
+            .into_response()),
+    })
+}
+
+async fn folder_image_thumb(State(st): State<Shared>, AxPath(iid): AxPath<i64>) -> Response {
+    with_store(&st, |s| match s.folder_image(iid)? {
+        Some(_r) => {
+            // Python 侧缩略图缓存在 <data>/thumbs/img_{id}.jpg；rust 独立模式
+            // 不生成缩略图（无图像处理依赖），命中缓存则回，否则如实 415
+            let thumb = std::path::Path::new(&st.data_dir)
+                .join("thumbs")
+                .join(format!("img_{iid}.jpg"));
+            match std::fs::read(&thumb) {
+                Ok(data) => Ok((
+                    [
+                        (header::CONTENT_TYPE, "image/jpeg"),
+                        (header::CACHE_CONTROL, "private, max-age=3600"),
+                    ],
+                    data,
+                )
+                    .into_response()),
+                Err(_) => Ok((
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    Json(json!({"detail": "缩略图缓存不存在（rust 控制面不生成缩略图；原图走 /file）"})),
+                )
+                    .into_response()),
+            }
+        }
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({"detail": "image record not found"})),
+        )
+            .into_response()),
+    })
+}
+
+async fn folder_images_csv(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let parse_i64 = |k: &str| q.get(k).and_then(|v| v.parse().ok());
+    let camera_id = parse_i64("camera_id");
+    let key = parse_i64("key").map(|v| v != 0);
+    let violation = parse_i64("violation").map(|v| v != 0);
+    let start_ts = q.get("start_ts").map(|s| s.as_str());
+    let end_ts = q.get("end_ts").map(|s| s.as_str());
+    let error_only = q.get("error_only").map(|v| v == "1").unwrap_or(false);
+    with_store(&st, |s| {
+        let f = ls_store::FolderImageFilter {
+            camera_id,
+            key,
+            violation,
+            start_ts,
+            end_ts,
+            error_only,
+            limit: 10_000,
+            offset: 0,
+        };
+        let rows = s.folder_images(&f)?;
+        let mut out = String::from(
+            "id,camera_id,ts,name,persons,in_zone,ppe_no,ppe_wearing,key,violation,error\n",
+        );
+        for r in &rows {
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{},{}\n",
+                r.id,
+                r.camera_id,
+                csv_escape(&r.ts),
+                csv_escape(r.name.as_deref().unwrap_or("")),
+                r.persons,
+                r.in_zone,
+                r.ppe_no,
+                r.ppe_wearing,
+                r.key as i64,
+                r.violation as i64,
+                csv_escape(r.error.as_deref().unwrap_or(""))
+            ));
+        }
+        Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], out).into_response())
+    })
+}
+
+/// Python TYPE_TEXT/LEVEL_ICON 同口径（constants.py 同步维护）
+fn type_text(t: &str) -> &str {
+    match t {
+        "enter" => "进入安全区",
+        "enter_no_ppe" => "进入安全区未穿实验服",
+        "exit" => "离开安全区",
+        "occupancy_over" => "在场人数超限",
+        "stranger" => "陌生人进入",
+        other => other,
+    }
+}
+
+fn level_icon(level: i64) -> &'static str {
+    match level {
+        1 => "ℹ️",
+        2 => "⚠️",
+        3 => "🔴",
+        _ => "ℹ️",
+    }
+}
+
+/// Python alerts.render_alert 复刻：占位符白名单 + 未知占位符原样保留
+fn render_alert_row(
+    template: &str,
+    ts: &str,
+    camera_id: i64,
+    type_: &str,
+    level: i64,
+    track_id: i64,
+    detail: &str,
+) -> String {
+    let track_part = if type_ == "occupancy_over" {
+        String::new()
+    } else {
+        format!(" · track {track_id}")
+    };
+    let vals: Vec<(&str, String)> = vec![
+        ("icon", level_icon(level).to_string()),
+        ("level", level.to_string()),
+        ("type", type_.to_string()),
+        ("type_text", type_text(type_).to_string()),
+        ("ts", ts.to_string()),
+        ("camera_id", camera_id.to_string()),
+        ("track_id", track_id.to_string()),
+        ("track_part", track_part),
+        ("detail", detail.to_string()),
+    ];
+    // 单次替换：先按长度降序尝试每个 {key}；未知占位符原样保留
+    let mut out = template.to_string();
+    for (k, v) in &vals {
+        out = out.replace(&format!("{{{k}}}"), v);
+    }
+    out
+}
+
+async fn alert_template_preview(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    let _ = &st; // 模板文本取默认值（settings 单一来源在 Python 侧；rust 用同默认串）
+    let ts = body
+        .get("ts")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(iso_now);
+    let camera_id = body.get("camera_id").and_then(|v| v.as_i64()).unwrap_or(1);
+    let type_ = body
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("enter")
+        .to_string();
+    let level = body.get("level").and_then(|v| v.as_i64()).unwrap_or(2);
+    let track_id = body.get("track_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let detail = body
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let text = render_alert_row(
+        "{icon} L{level} {type_text} · {ts}\n摄像头 #{camera_id}{track_part}\n{detail}",
+        &ts,
+        camera_id,
+        &type_,
+        level,
+        track_id,
+        &detail,
+    );
+    let title = format!("LabSentinel 级别{level}告警");
+    Json(json!({"title": title, "text": text})).into_response()
+}
+
+async fn apply_rule_template(
+    State(st): State<Shared>,
+    AxPath(tid): AxPath<i64>,
+    Json(body): Json<Value>,
+) -> Response {
+    let cam_ids: Vec<i64> = body
+        .get("camera_ids")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+        .unwrap_or_default();
+    let zone_id: Option<i64> = body.get("zone_id").and_then(|v| v.as_i64());
+    with_store(&st, |s| {
+        let Some(tpl) = s.get_rule_template(tid)? else {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": "template not found"})),
+            )
+                .into_response());
+        };
+        let parsed: Value =
+            serde_json::from_str(&tpl.config_json).unwrap_or(Value::Array(Vec::new()));
+        let Some(rules) = parsed.as_array() else {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"detail": "模板 config_json 不是数组"})),
+            )
+                .into_response());
+        };
+        // 先校验全部目标（Python 同语义：任一摄像头缺失/区域不归属即 4xx，不半写）
+        for cid in &cam_ids {
+            if s.camera(*cid)?.is_none() {
+                return Ok((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"detail": format!("camera {cid} not found")})),
+                )
+                    .into_response());
+            }
+            if let Some(zid) = zone_id {
+                match s.zone(zid)? {
+                    Some(z) if z.1 != *cid => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"detail": format!("区域 {zid} 不属于摄像头 #{cid}")})),
+                        )
+                            .into_response());
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Ok((
+                            StatusCode::NOT_FOUND,
+                            Json(json!({"detail": format!("zone {zid} not found")})),
+                        )
+                            .into_response());
+                    }
+                }
+            }
+        }
+        let mut created = 0i64;
+        let mut skipped = 0i64;
+        for cid in &cam_ids {
+            for r in rules {
+                let behavior = r.get("behavior").and_then(|v| v.as_str()).unwrap_or("");
+                let t_start = r.get("time_start").and_then(|v| v.as_str());
+                let t_end = r.get("time_end").and_then(|v| v.as_str());
+                let dup = s.rules_all()?.iter().any(|x| {
+                    x.1 == *cid
+                        && x.2 == zone_id
+                        && x.3 == behavior
+                        && x.6 == t_start.map(String::from)
+                        && x.7 == t_end.map(String::from)
+                });
+                if dup {
+                    skipped += 1;
+                    continue;
+                }
+                s.add_rule(
+                    *cid,
+                    zone_id,
+                    behavior,
+                    r.get("level").and_then(|v| v.as_i64()).unwrap_or(2),
+                    r.get("cooldown_s").and_then(|v| v.as_i64()).unwrap_or(0),
+                    t_start,
+                    t_end,
+                    r.get("threshold").and_then(|v| v.as_i64()).unwrap_or(0),
+                    r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                )?;
+                created += 1;
+            }
+        }
+        Ok(Json(json!({"ok": true, "created": created, "skipped": skipped})).into_response())
+    })
+}
+
+async fn shutdown_server() -> Response {
+    // Python _do_shutdown 同语义：先应答再退出（延迟给响应送达留窗口）
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        std::process::exit(0);
+    });
+    Json(json!({"ok": true, "message": "服务将在 300ms 内退出"})).into_response()
+}
+
+async fn camera_snapshot(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
+    with_store(&st, |s| {
+        if s.camera(cid)?.is_none() {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": "camera not found"})),
+            )
+                .into_response());
+        }
+        // rust 控制面独立模式无分析 worker（无实时帧缓冲）；与 start_camera 同口径
+        Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail": "rust 控制面独立模式无分析 worker（无实时帧）；实时画面/截图请使用 Python 服务",
+                        "code": "no_worker"})),
+        )
+            .into_response())
+    })
+}
+
+// ==== R2-309 批次 3：配置导入/存证打包/插件占位/face 分支/告警自检/PPE 下载 ====
+
+/// 标准 ZIP（stored 无压缩）写出器：本地文件头 + central directory + EOCD。
+/// CRC32（IEEE 802.3，表驱动）手写实现，零额外依赖——存证打包只有 jpeg/mp4，
+/// stored 已足够（压缩收益小，可靠优先）。
+struct ZipWriter {
+    out: Vec<u8>,
+    central: Vec<u8>,
+}
+
+impl ZipWriter {
+    fn new() -> Self {
+        Self {
+            out: Vec::new(),
+            central: Vec::new(),
+        }
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+        let table = TABLE.get_or_init(|| {
+            let mut t = [0u32; 256];
+            for (i, e) in t.iter_mut().enumerate() {
+                let mut c = i as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 {
+                        0xEDB8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+                *e = c;
+            }
+            t
+        });
+        let mut c = 0xFFFF_FFFFu32;
+        for &b in data {
+            c = table[((c ^ b as u32) & 0xff) as usize] ^ (c >> 8);
+        }
+        !c
+    }
+
+    fn add_file(&mut self, name: &str, data: &[u8]) {
+        let crc = Self::crc32(data);
+        let offset = self.out.len() as u32;
+        // 本地文件头：sig, ver(20), flags(0), method(stored), time/date(0), crc,
+        // csize=size, usize=size, namelen, extralen(0)
+        self.out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        self.out.extend_from_slice(&20u16.to_le_bytes());
+        self.out.extend_from_slice(&0u16.to_le_bytes());
+        self.out.extend_from_slice(&0u16.to_le_bytes());
+        self.out.extend_from_slice(&0u16.to_le_bytes());
+        self.out.extend_from_slice(&0u16.to_le_bytes());
+        self.out.extend_from_slice(&crc.to_le_bytes());
+        self.out
+            .extend_from_slice(&(data.len() as u32).to_le_bytes());
+        self.out
+            .extend_from_slice(&(data.len() as u32).to_le_bytes());
+        self.out
+            .extend_from_slice(&(name.len() as u16).to_le_bytes());
+        self.out.extend_from_slice(&0u16.to_le_bytes());
+        self.out.extend_from_slice(name.as_bytes());
+        self.out.extend_from_slice(data);
+        // central directory 条目
+        self.central
+            .extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        self.central.extend_from_slice(&20u16.to_le_bytes());
+        self.central.extend_from_slice(&20u16.to_le_bytes());
+        self.central.extend_from_slice(&0u16.to_le_bytes());
+        self.central.extend_from_slice(&0u16.to_le_bytes());
+        self.central.extend_from_slice(&0u16.to_le_bytes());
+        self.central.extend_from_slice(&0u16.to_le_bytes());
+        self.central.extend_from_slice(&crc.to_le_bytes());
+        self.central
+            .extend_from_slice(&(data.len() as u32).to_le_bytes());
+        self.central
+            .extend_from_slice(&(data.len() as u32).to_le_bytes());
+        self.central
+            .extend_from_slice(&(name.len() as u16).to_le_bytes());
+        self.central.extend_from_slice(&0u16.to_le_bytes()); // extra
+        self.central.extend_from_slice(&0u16.to_le_bytes()); // comment
+        self.central.extend_from_slice(&0u16.to_le_bytes()); // disk
+        self.central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        self.central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        self.central.extend_from_slice(&offset.to_le_bytes());
+        self.central.extend_from_slice(name.as_bytes());
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        let cd_offset = self.out.len() as u32;
+        let cd_size = self.central.len() as u32;
+        let count = {
+            // 条目数 = central 里 0x02014b50 出现次数
+            self.central
+                .windows(4)
+                .filter(|w| *w == 0x0201_4b50u32.to_le_bytes())
+                .count() as u16
+        };
+        self.out.extend_from_slice(&self.central);
+        self.out.extend_from_slice(&0x0605_4b50u32.to_le_bytes()); // EOCD
+        self.out.extend_from_slice(&0u16.to_le_bytes());
+        self.out.extend_from_slice(&0u16.to_le_bytes());
+        self.out.extend_from_slice(&count.to_le_bytes());
+        self.out.extend_from_slice(&count.to_le_bytes());
+        self.out.extend_from_slice(&cd_size.to_le_bytes());
+        self.out.extend_from_slice(&cd_offset.to_le_bytes());
+        self.out.extend_from_slice(&0u16.to_le_bytes());
+        self.out
+    }
+}
+
+fn read_media_file(st: &Shared, rel: &str) -> Option<(String, Vec<u8>)> {
+    let p = std::path::Path::new(&st.data_dir).join(rel);
+    let data = std::fs::read(&p).ok()?;
+    let name = std::path::Path::new(rel)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".into());
+    Some((name, data))
+}
+
+async fn event_evidence_zip(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
+    with_store(&st, |s| {
+        let Some(ev) = s.event_by_id(eid)? else {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": "event not found"})),
+            )
+                .into_response());
+        };
+        let mut zip = ZipWriter::new();
+        let mut parts = 0usize;
+        if let Some(snap) = &ev.snapshot {
+            if let Some((name, data)) = read_media_file(&st, snap) {
+                zip.add_file(&format!("event-{eid}/{name}"), &data);
+                parts += 1;
+            }
+        }
+        if let Some(video) = &ev.video {
+            if let Some((name, data)) = read_media_file(&st, video) {
+                zip.add_file(&format!("event-{eid}/{name}"), &data);
+                parts += 1;
+            }
+        }
+        let meta = json!({
+            "id": ev.id, "ts": ev.ts, "camera_id": ev.camera_id, "type": ev.type_,
+            "level": ev.level, "track_id": ev.track_id, "detail": ev.detail,
+            "status": ev.status,
+        });
+        zip.add_file(
+            &format!("event-{eid}/evidence.json"),
+            meta.to_string().as_bytes(),
+        );
+        if parts == 0 {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": "事件无存证文件（快照/视频不存在）"})),
+            )
+                .into_response());
+        }
+        Ok(([(header::CONTENT_TYPE, "application/zip")], zip.finish()).into_response())
+    })
+}
+
+async fn export_evidence_zip(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let parse_i64 = |k: &str| q.get(k).and_then(|v| v.parse().ok());
+    let camera_id = parse_i64("camera_id");
+    let days: i64 = q
+        .get("days")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30)
+        .clamp(1, 365);
+    let start = iso_days_ago(days - 1) + "T00:00:00";
+    with_store(&st, |s| {
+        let rows = s.events_query(&ls_store::EventsFilter {
+            camera_id,
+            start_ts: Some(&start),
+            limit: 2000,
+            ..Default::default()
+        })?;
+        let with_media: Vec<_> = rows
+            .into_iter()
+            .filter(|e| e.snapshot.is_some() || e.video.is_some())
+            .collect();
+        if with_media.is_empty() {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": "范围内无带存证的事件"})),
+            )
+                .into_response());
+        }
+        let mut zip = ZipWriter::new();
+        let mut index = Vec::new();
+        for e in &with_media {
+            let mut files = 0usize;
+            if let Some(snap) = &e.snapshot {
+                if let Some((name, data)) = read_media_file(&st, snap) {
+                    zip.add_file(&format!("event-{}/{}", e.id, name), &data);
+                    files += 1;
+                }
+            }
+            if let Some(video) = &e.video {
+                if let Some((name, data)) = read_media_file(&st, video) {
+                    zip.add_file(&format!("event-{}/{}", e.id, name), &data);
+                    files += 1;
+                }
+            }
+            index.push(json!({"id": e.id, "ts": e.ts, "camera_id": e.camera_id,
+                "type": e.type_, "level": e.level, "detail": e.detail, "files": files}));
+        }
+        zip.add_file(
+            "export-index.json",
+            json!({"exported": index.len(), "events": index})
+                .to_string()
+                .as_bytes(),
+        );
+        Ok(([(header::CONTENT_TYPE, "application/zip")], zip.finish()).into_response())
+    })
+}
+
+async fn config_import(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    let mode = body
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("merge")
+        .to_string();
+    if mode != "merge" && mode != "replace" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail": "mode 必须是 merge|replace"})),
+        )
+            .into_response();
+    }
+    if mode == "replace"
+        && !body
+            .get("confirm_replace")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail": "replace 模式必须 confirm_replace=true（将清空现有摄像头/区域/规则；事件保留但失去对应摄像头）"})),
+        )
+            .into_response();
+    }
+    let data = body.get("data").cloned().unwrap_or(Value::Null);
+    let cams = data
+        .get("cameras")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let zones = data
+        .get("zones")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let rules = data
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if cams.is_empty() && zones.is_empty() && rules.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail": "data 至少包含 cameras/zones/rules 之一"})),
+        )
+            .into_response();
+    }
+    with_store(&st, |s| {
+        if mode == "replace" {
+            s.clear_config()?;
+        }
+        let mut created = (0i64, 0i64, 0i64);
+        let mut skipped_cam: Vec<String> = Vec::new();
+        let mut cam_id_by_name: std::collections::HashMap<String, i64> =
+            s.cameras()?.into_iter().map(|c| (c.name, c.id)).collect();
+        // cameras：merge 按名称去重
+        for c in &cams {
+            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let source = c.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let type_ = c.get("type").and_then(|v| v.as_str()).unwrap_or("file");
+            if name.is_empty() {
+                skipped_cam.push("<unnamed>".into());
+                continue;
+            }
+            if cam_id_by_name.contains_key(name) {
+                skipped_cam.push(name.to_string());
+                continue;
+            }
+            let group = c.get("group_name").and_then(|v| v.as_str()).unwrap_or("");
+            let cid = s.add_camera_full(name, source, type_, group)?;
+            cam_id_by_name.insert(name.to_string(), cid);
+            created.0 += 1;
+        }
+        // zones：按 camera_name 映射
+        let mut zone_id_by_name: std::collections::HashMap<(i64, String), i64> = s
+            .zones_all()?
+            .into_iter()
+            .map(|z| ((z.1, z.2), z.0))
+            .collect();
+        let mut skipped_zone: Vec<String> = Vec::new();
+        for z in &zones {
+            let cname = z.get("camera_name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = z.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(cid) = cam_id_by_name.get(cname).copied() else {
+                skipped_zone.push(format!("{cname}/{name}"));
+                continue;
+            };
+            let polygon = z.get("polygon").cloned().unwrap_or(Value::Null);
+            if !polygon.is_array() || name.is_empty() {
+                skipped_zone.push(format!("{cname}/{name}"));
+                continue;
+            }
+            let key = (cid, name.to_string());
+            if zone_id_by_name.contains_key(&key) {
+                skipped_zone.push(format!("{cname}/{name}"));
+                continue;
+            }
+            let zid = s.add_zone(cid, name, &polygon.to_string())?;
+            zone_id_by_name.insert(key, zid);
+            created.1 += 1;
+        }
+        // rules：camera_name + zone_name（可选）映射；zone 缺失则跳过
+        let mut skipped_rule: Vec<String> = Vec::new();
+        for r in &rules {
+            let cname = r.get("camera_name").and_then(|v| v.as_str()).unwrap_or("");
+            let behavior = r.get("behavior").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(cid) = cam_id_by_name.get(cname).copied() else {
+                skipped_rule.push(format!("{cname}/{behavior}"));
+                continue;
+            };
+            let zone_id = match r.get("zone_name").and_then(|v| v.as_str()) {
+                Some(zname) if !zname.is_empty() => {
+                    match zone_id_by_name.get(&(cid, zname.to_string())) {
+                        Some(zid) => Some(*zid),
+                        None => {
+                            skipped_rule.push(format!("{cname}/{behavior}（区域缺失）"));
+                            continue;
+                        }
+                    }
+                }
+                _ => None,
+            };
+            s.add_rule(
+                cid,
+                zone_id,
+                behavior,
+                r.get("level").and_then(|v| v.as_i64()).unwrap_or(2),
+                r.get("cooldown_s").and_then(|v| v.as_i64()).unwrap_or(0),
+                r.get("time_start").and_then(|v| v.as_str()),
+                r.get("time_end").and_then(|v| v.as_str()),
+                r.get("threshold").and_then(|v| v.as_i64()).unwrap_or(0),
+                r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+            )?;
+            created.2 += 1;
+        }
+        Ok(Json(json!({"ok": true, "mode": mode,
+                       "created": {"cameras": created.0, "zones": created.1, "rules": created.2},
+                       "skipped": {"cameras": skipped_cam, "zones": skipped_zone,
+                                    "rules": skipped_rule}}))
+        .into_response())
+    })
+}
+
+// ---- 插件占位（rust 独立模式无插件管理器：列表恒空 → 任何 pid 不存在，
+// 与 Python 对未知 pid 的 404 行为一致，不是假桩而是真实结果） ----
+fn plugin_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"detail": "plugin not found（rust 控制面无插件管理器，列表见 GET /api/plugins）"})),
+    )
+        .into_response()
+}
+
+async fn plugin_logs(AxPath(_pid): AxPath<String>) -> Response {
+    plugin_not_found()
+}
+
+async fn plugin_action(AxPath(_pid): AxPath<String>) -> Response {
+    plugin_not_found()
+}
+
+// ---- face（合规敏感：默认关闭。分支与 Python _face_guard 同语义） ----
+fn face_enabled() -> bool {
+    std::env::var("LS_FACE_ENABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn face_guard() -> Result<(), Box<Response>> {
+    if !face_enabled() {
+        return Err(Box::new((
+            StatusCode::FORBIDDEN,
+            Json(json!({"detail": "人脸比对功能未开启（LS_FACE_ENABLED=false）。开启方式与合规要求见 README。"})),
+        )
+            .into_response()));
+    }
+    let key = std::env::var("LS_COMPREFACE_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        return Err(Box::new(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"detail": "人脸服务未配置（缺少 LS_COMPREFACE_API_KEY）"})),
+            )
+                .into_response(),
+        ));
+    }
+    // CompreFace HTTP 客户端在 Python 服务实现（注册/识别/1:N 全链）；rust 独立
+    // 模式开启开关后如实返回 503 而不是假装可用（§11.3 证据约束）。
+    Err(Box::new((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"detail": "CompreFace 客户端在 Python 服务实现；rust 控制面独立模式不支持人脸注册/识别",
+                    "code": "not_available_standalone"})),
+    )
+        .into_response()))
+}
+
+async fn face_status() -> Json<Value> {
+    let key = std::env::var("LS_COMPREFACE_API_KEY").unwrap_or_default();
+    Json(
+        json!({"enabled": face_enabled(), "configured": !key.is_empty(),
+                "threshold": 0.75,
+                "note": "CompreFace 客户端在 Python 服务实现"}),
+    )
+}
+
+async fn face_register(State(_st): State<Shared>, _body: axum::body::Bytes) -> Response {
+    if let Err(resp) = face_guard() {
+        return *resp;
+    }
+    unreachable!("face_guard 在独立模式下恒 Err（见上）")
+}
+
+async fn face_persons_list() -> Response {
+    if let Err(resp) = face_guard() {
+        return *resp;
+    }
+    unreachable!("face_guard 在独立模式下恒 Err")
+}
+
+async fn face_clear_all() -> Response {
+    if let Err(resp) = face_guard() {
+        return *resp;
+    }
+    unreachable!("face_guard 在独立模式下恒 Err")
+}
+
+async fn face_delete(AxPath(_subject): AxPath<String>) -> Response {
+    if let Err(resp) = face_guard() {
+        return *resp;
+    }
+    unreachable!("face_guard 在独立模式下恒 Err")
+}
+
+// ---- 告警自检（真实发送：复用 ls-dispatch，渠道 URL 读 env） ----
+async fn alert_test(
+    State(_st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let want = q.get("channel").map(|s| s.as_str().to_string());
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    // 渠道 -> (env key, ls-dispatch Channel)；URL 与 Python settings 同名 env
+    let candidates: Vec<(String, ls_dispatch::Channel, String)> = vec![
+        (
+            "wecom".into(),
+            ls_dispatch::Channel::Wecom,
+            env("LS_WECOM_WEBHOOK").unwrap_or_default(),
+        ),
+        (
+            "dingtalk".into(),
+            ls_dispatch::Channel::Dingtalk,
+            env("LS_DINGTALK_WEBHOOK").unwrap_or_default(),
+        ),
+        (
+            "feishu".into(),
+            ls_dispatch::Channel::Feishu,
+            env("LS_FEISHU_WEBHOOK").unwrap_or_default(),
+        ),
+        (
+            "webhook".into(),
+            ls_dispatch::Channel::Webhook,
+            env("LS_WEBHOOK_URL").unwrap_or_default(),
+        ),
+    ];
+    let mut results: Vec<Value> = Vec::new();
+    let mut sent = 0usize;
+    for (name, ch, url) in candidates {
+        if let Some(w) = &want {
+            if w != &name {
+                continue;
+            }
+        }
+        if url.is_empty() {
+            if want.as_deref() == Some(name.as_str()) {
+                // 显式点名但未配置：如实报告
+                results.push(json!({"channel": name, "ok": false,
+                                     "error": "未配置（env 为空）"}));
+            }
+            continue;
+        }
+        let cfg = ls_dispatch::ChannelConfig {
+            url,
+            allow_http: std::env::var("LS_WEBHOOK_ALLOW_HTTP")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            ..Default::default()
+        };
+        let d = ls_dispatch::deliver(ch, &cfg, 2, "LabSentinel 渠道自检测试（rust 控制面）");
+        if d.ok {
+            sent += 1;
+        }
+        results.push(json!({"channel": name, "ok": d.ok, "attempts": d.attempts,
+                             "error": d.error}));
+    }
+    Json(
+        json!({"ok": want.is_none() || results.iter().any(|r| r["ok"] == true),
+                "sent": sent, "results": results,
+                "note": "渠道配置读 env；网页端配置的渠道（app_settings）在 Python 服务"}),
+    )
+    .into_response()
+}
+
+// ---- PPE 按需下载（Q-08 复刻：锁文件白名单 + SHA256 + 许可确认） ----
+fn asset_lock_path(st: &Shared) -> std::path::PathBuf {
+    // 便携布局 <包>/scripts/assets.lock.json → 开发布局 <repo>/scripts/assets.lock.json
+    std::path::Path::new(&st.data_dir)
+        .ancestors()
+        .find_map(|p| {
+            p.join("scripts/assets.lock.json")
+                .is_file()
+                .then(|| p.join("scripts/assets.lock.json"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("scripts/assets.lock.json"))
+}
+
+async fn ppe_download(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    if !body
+        .get("confirm_license")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail": "必须先确认实验服模型的数据集许可说明"})),
+        )
+            .into_response();
+    }
+    let lock_path = asset_lock_path(&st);
+    let Ok(lock_raw) = std::fs::read_to_string(&lock_path) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"detail": format!("assets.lock.json 不存在: {}", lock_path.display())})),
+        )
+            .into_response();
+    };
+    let Ok(lock) = serde_json::from_str::<Value>(&lock_raw) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": "assets.lock.json 解析失败"})),
+        )
+            .into_response();
+    };
+    let assets = match lock.get("assets").and_then(|v| v.as_object()) {
+        Some(a) => a,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": "assets.lock.json 缺 assets"})),
+            )
+                .into_response()
+        }
+    };
+    // SSRF 防护对齐 Python _allowed_hosts：白名单域名只来自锁文件 urls
+    let mut allowed_hosts: Vec<String> = Vec::new();
+    for spec in assets.values() {
+        if let Some(urls) = spec.get("urls").and_then(|v| v.as_array()) {
+            for u in urls {
+                if let Some(url) = u.as_str() {
+                    if let Some(host) = url::host_of(url) {
+                        if !allowed_hosts.contains(&host) {
+                            allowed_hosts.push(host);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let models_dir = std::path::Path::new(&st.data_dir).join("models");
+    std::fs::create_dir_all(&models_dir).ok();
+    let mut downloaded = Vec::new();
+    for name in ["yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt"] {
+        let Some(spec) = assets.get(name) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": format!("锁文件缺资产: {name}")})),
+            )
+                .into_response();
+        };
+        let want_sha = spec.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
+        let want_size = spec.get("size").and_then(|v| v.as_i64()).unwrap_or(-1);
+        let out = models_dir.join(name);
+        // 已装且哈希正确 → 跳过重复下载
+        if let Ok(existing) = std::fs::read(&out) {
+            if existing.len() as i64 == want_size && sha256_hex(&existing) == want_sha {
+                downloaded.push(json!({"name": name, "cached": true}));
+                continue;
+            }
+        }
+        let mut ok = false;
+        let mut last_err = String::new();
+        let urls: Vec<String> = spec
+            .get("urls")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for url in &urls {
+            // 白名单 + https 校验（与 Python _check_url 同口径）
+            let Some(host) = url::host_of(url) else {
+                continue;
+            };
+            if !allowed_hosts.contains(&host) || !url.starts_with("https://") {
+                last_err = format!("url 不在白名单或非 https: {url}");
+                continue;
+            }
+            match ureq::get(url)
+                .timeout(std::time::Duration::from_secs(60))
+                .call()
+            {
+                Ok(resp) => {
+                    let mut bytes = Vec::new();
+                    use std::io::Read;
+                    if resp.into_reader().read_to_end(&mut bytes).is_err() {
+                        last_err = "下载中断".into();
+                        continue;
+                    }
+                    let got_sha = sha256_hex(&bytes);
+                    if got_sha != want_sha || bytes.len() as i64 != want_size {
+                        last_err = format!("SHA256/大小校验失败（got {got_sha}）");
+                        continue;
+                    }
+                    if std::fs::write(&out, &bytes).is_err() {
+                        last_err = "写盘失败".into();
+                        continue;
+                    }
+                    ok = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = format!("下载失败: {e}");
+                    continue;
+                }
+            }
+        }
+        if !ok {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"detail": format!("资产 {name} 下载/校验失败: {last_err}")})),
+            )
+                .into_response();
+        }
+        downloaded.push(json!({"name": name, "cached": false}));
+    }
+    let model_path = models_dir.join("yolo11n_ppe.onnx");
+    with_store(&st, |s| {
+        s.setting_set("ppe_model", &model_path.to_string_lossy())?;
+        Ok(Json(json!({"ok": true, "installed": true, "mode": "ppe",
+                       "downloaded": downloaded,
+                       "model_path": model_path.to_string_lossy(),
+                       "note": "已生效并写入 app_settings；env LS_PPE_MODEL 优先级更高"}))
+        .into_response())
+    })
+}
+
+mod url {
+    /// 从 URL 提取 host（标准库解析；与 Python urlparse(url).hostname 等价的宽松实现）
+    pub fn host_of(url: &str) -> Option<String> {
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))?;
+        let host_port = rest.split(['/', '?', '#']).next()?;
+        let host = host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port);
+        if host.is_empty() || host.contains('@') {
+            return None;
+        }
+        Some(host.to_string())
+    }
+}
+
 async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
     use axum::extract::ws::Message;
     loop {
@@ -2555,6 +3648,15 @@ mod tests {
     }
 
     fn test_state_cfg(db: &str, admin_token: &str, read_protected: bool) -> Shared {
+        test_state_cfg_dir(db, admin_token, read_protected, "D:/tmp")
+    }
+
+    fn test_state_cfg_dir(
+        db: &str,
+        admin_token: &str,
+        read_protected: bool,
+        data_dir: &str,
+    ) -> Shared {
         Arc::new(AppState {
             db_path: db.into(),
             admin_token: admin_token.into(),
@@ -2563,7 +3665,7 @@ mod tests {
             trusted_hosts: vec!["127.0.0.1".into(), "localhost".into()],
             allowed_origins: vec![],
             web_dist: String::new(),
-            data_dir: "D:/tmp".into(),
+            data_dir: data_dir.into(),
             version: "0.2.0".into(),
             events_tx: broadcast::channel(16).0,
             jobs: Arc::new(ls_jobs::Jobs::new(
@@ -2690,6 +3792,125 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(body_json(r).await["started"], true);
+    }
+
+    #[tokio::test]
+    async fn batch3_import_evidence_and_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        seed_schema(&db);
+        let st = test_state_cfg_dir(
+            db.to_str().unwrap(),
+            "adm",
+            false,
+            dir.path().to_str().unwrap(),
+        );
+        let app = build_router(Arc::clone(&st));
+        // config/import：merge 导入两台摄像头 + 区域
+        let import_body = json!({"mode": "merge", "data": {
+            "cameras": [
+                {"name": "导入A", "source": "rtsp://u:p@192.168.1.10/s", "type": "rtsp"},
+                {"name": "导入B", "source": "b.mp4", "type": "file"}],
+            "zones": [
+                {"camera_name": "导入A", "name": "台面", "polygon": [[0,0],[50,0],[50,50]]}]},
+        });
+        let r = req_hdr(
+            &app,
+            "POST",
+            "/api/config/import",
+            Some(import_body.clone()),
+            &[("x-admin-token", "adm")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK, "import");
+        let j = body_json(r).await;
+        assert_eq!(j["created"]["cameras"], 2);
+        assert_eq!(j["created"]["zones"], 1);
+        // 重复导入 → merge 按名称去重
+        let r = req_hdr(
+            &app,
+            "POST",
+            "/api/config/import",
+            Some(import_body),
+            &[("x-admin-token", "adm")],
+        )
+        .await;
+        let j = body_json(r).await;
+        assert_eq!(j["created"]["cameras"], 0);
+        assert_eq!(j["skipped"]["cameras"].as_array().unwrap().len(), 2);
+        // replace 未确认 → 400
+        let r = req_hdr(
+            &app,
+            "POST",
+            "/api/config/import",
+            Some(json!({"mode": "replace", "data": {"cameras": []}})),
+            &[("x-admin-token", "adm")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // evidence.zip：造快照文件 → 打包可解
+        {
+            let s = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+            let _eid = s
+                .add_event(&ls_store::NewEvent {
+                    camera_id: 1,
+                    type_: "enter",
+                    level: 2,
+                    track_id: 1,
+                    detail: "存证",
+                    snapshot: Some("snapshots/ev.jpg"),
+                    ts: "2026-11-09T10:00:00",
+                })
+                .unwrap();
+            let snap_dir = dir.path().join("snapshots");
+            std::fs::create_dir_all(&snap_dir).unwrap();
+            std::fs::write(snap_dir.join("ev.jpg"), b"\xff\xd8fake-jpeg").unwrap();
+        }
+        let r = req(&app, "GET", "/api/events/1/evidence.zip", None).await;
+        assert_eq!(r.status(), StatusCode::OK, "zip");
+        let b = http_body_util::BodyExt::collect(r.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        // ZIP 魔数（本地文件头）
+        assert_eq!(&b[0..4], &0x0403_4b50u32.to_le_bytes());
+        assert!(b.len() > 100);
+        // export/evidence.zip（范围内有存证）
+        let r = req(&app, "GET", "/api/export/evidence.zip?days=30", None).await;
+        assert_eq!(r.status(), StatusCode::OK, "export zip");
+        // plugins：未知 pid → 404（rust 无插件管理器，真实结果）
+        let r = req(&app, "GET", "/api/plugins/p1/logs", None).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        // face 默认关闭 → 403（真实配置状态）
+        let r = req(&app, "GET", "/api/face/persons", None).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = req(&app, "GET", "/api/face/status", None).await;
+        assert_eq!(body_json(r).await["enabled"], false);
+        // media/sign：HMAC 签名返回 exp+sig
+        let r = req(
+            &app,
+            "GET",
+            "/api/media/sign?path=/api/events/1/snapshot",
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let j = body_json(r).await;
+        assert!(j["sig"].as_str().unwrap().starts_with("sha256="));
+        // 非法 path → 400
+        let r = req(&app, "GET", "/api/media/sign?path=https://evil", None).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // alert-test：无渠道配置 → sent=0 且 200（写守卫与 Python admin_guard 一致）
+        let r = req_hdr(
+            &app,
+            "POST",
+            "/api/alert-test",
+            None,
+            &[("x-admin-token", "adm")],
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(body_json(r).await["sent"], 0);
     }
 
     #[tokio::test]

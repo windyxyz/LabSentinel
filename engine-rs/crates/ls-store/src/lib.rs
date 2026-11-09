@@ -1130,6 +1130,87 @@ impl Store {
                 other => Err(other),
             })
     }
+
+    /// app_settings 写（upsert；R2-309 批次 3：ppe_download 写 ppe_model 路径）
+    pub fn setting_set(&self, key: &str, value: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "INSERT INTO app_settings(key,value,updated_ts) VALUES(?,?,?) \
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
+            params![key, value, chrono_now()],
+        )
+    }
+
+    /// R2-309 批次 3：config/import replace 模式（Python store.clear_config 同语义：
+    /// 清空摄像头/区域/规则；事件保留但 camera_id 失去对应摄像头）
+    pub fn clear_config(&self) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM rules", [])?;
+        self.conn.execute("DELETE FROM zones", [])?;
+        self.conn.execute("DELETE FROM cameras", [])?;
+        Ok(())
+    }
+
+    /// 带分组的新增摄像头（Python add_camera(name, source, type, group_name) 同列）
+    pub fn add_camera_full(
+        &self,
+        name: &str,
+        source: &str,
+        type_: &str,
+        group_name: &str,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO cameras(name,source,type,group_name) VALUES(?,?,?,?)",
+            params![name, source, type_, group_name],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// folder_images 单行（Python store.folder_image 同口径）
+    pub fn folder_image(&self, iid: i64) -> rusqlite::Result<Option<FolderImageRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,camera_id,path,name,ts,processed_ts,width,height,persons,in_zone, \
+             ppe_no,ppe_wearing,COALESCE(key,0),COALESCE(violation,0),event_id,snapshot,error \
+             FROM folder_images WHERE id=?",
+        )?;
+        let mut rows = stmt.query_map(params![iid], map_folder_image)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// zones 单查（rule-template apply 校验区域归属用）
+    pub fn zone(&self, zid: i64) -> rusqlite::Result<Option<(i64, i64, String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id,camera_id,name,polygon FROM zones WHERE id=?")?;
+        let mut rows = stmt.query_map(params![zid], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 规则模板单查（apply 用）
+    pub fn get_rule_template(&self, tid: i64) -> rusqlite::Result<Option<Template>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,name,config_json,created_ts,updated_ts FROM rule_templates WHERE id=?",
+        )?;
+        let mut rows = stmt.query_map(params![tid], |r| {
+            Ok(Template {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                config_json: r.get(2)?,
+                created_ts: r.get(3)?,
+                updated_ts: r.get(4)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
 }
 
 fn map_folder_image(r: &Row<'_>) -> rusqlite::Result<FolderImageRow> {
