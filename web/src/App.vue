@@ -10,6 +10,7 @@ import AlertSettings from './views/AlertSettings.vue'
 import Face from './views/Face.vue'
 import Wall from './views/Wall.vue'
 import Models from './views/Models.vue'
+import Devices from './views/Devices.vue'
 
 // 图标为 Fluent 风格线性 SVG（16px），不依赖图标字体/库
 const tabs = [
@@ -31,6 +32,8 @@ const tabs = [
     icon: '<circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 13.8c.9-2.7 3-4 5.5-4s4.6 1.3 5.5 4"/>' },
   { key: 'models', label: '模型管理', comp: Models,
     icon: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M5 7h6M5 10h4"/>' },
+  { key: 'devices', label: '设备管理', comp: Devices,
+    icon: '<rect x="4.5" y="2" width="7" height="12" rx="1.5"/><path d="M7 12.2h2"/>' },
 ]
 const active = ref('dash')
 // T-709：值班大屏路由（无 vue-router 的轻量判定）——/wall 全屏无导航

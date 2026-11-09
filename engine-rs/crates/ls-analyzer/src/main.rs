@@ -166,7 +166,7 @@ fn env_f32(key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-/// YOLO 检测器（tract 纯 Rust）。PPE 分类尚未接入 → ppe=Unknown（管线走"未启用"分支）。
+/// YOLO 检测器（tract/ort 双后端，见 make_detector / YoloPpeRunner：PPE 级联已接入）。
 struct YoloDetector {
     model: YoloModel,
 }

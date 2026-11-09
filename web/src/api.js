@@ -106,6 +106,10 @@ export const api = {
   // Q-08 / T-406：实验服模型按需下载（许可确认 + SHA256 校验）
   ppeStatus: () => req('GET', '/api/models/ppe/status'),
   ppeDownload: (confirm_license) => req('POST', '/api/models/ppe/download', { confirm_license }),
+  // R2-203：设备配对与三级令牌
+  createPairing: () => req('POST', '/api/pairing'),
+  listDevices: () => req('GET', '/api/devices'),
+  revokeDevice: (id) => req('DELETE', `/api/devices/${id}`),
   setEventStatus: (id, status) => req('POST', `/api/events/${id}/status`, { status }),
   bulkStatus: (payload) => req('POST', '/api/events/bulk-status', payload),
   cameraWebrtc: (id) => req('GET', `/api/cameras/${id}/webrtc`),

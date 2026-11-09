@@ -173,6 +173,25 @@ def copy_assets() -> None:
         shutil.copy2(ffmpeg, tools / "ffmpeg.exe")
     else:
         deploy.log("  [警告] tools/ffmpeg/ffmpeg.exe 不存在，便携包将没有实时画面转码（可后补）")
+    # R2-304：实验性 rust 分析器随包（--with-rust）；失败不阻断 cpu 包构建。
+    if _WITH_RUST:
+        bin_dir = DIST / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        target = Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "engine-rs" / "target")))
+        exe = target / "release" / "ls-analyzer.exe"
+        if exe.exists():
+            shutil.copy2(exe, bin_dir / "ls-analyzer.exe")
+            # ort 后端运行时动态库（D:/tmp/ort-dylib 是本机布局，逐候选探测）
+            for ort_dir in (ROOT / "tools" / "onnxruntime",
+                            Path(os.environ.get("ORT_DYLIB_DIR", ""))):
+                if ort_dir and ort_dir.is_dir():
+                    for dll in ort_dir.glob("onnxruntime*.dll"):
+                        shutil.copy2(dll, bin_dir / dll.name)
+                    break
+            deploy.log(f"  [R2-304] bin/ls-analyzer.exe 已打包（实验性；LS_ANALYZER_EXE 由启动器注入）")
+        else:
+            deploy.log("  [警告] --with-rust：未找到 " + str(exe) +
+                       "（先 cargo build --release -p ls-analyzer），继续不含 rust 分析器")
     # 法律与配置模板
     for f in ("LICENSE", "NOTICE"):
         if (ROOT / f).exists():

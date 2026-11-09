@@ -280,6 +280,15 @@ def start_server(port: int, cfg: dict) -> int:
            # （源码模式才是 <根>/tools），显式指回包根 tools/，避免 go2rtc 冷启动读错位置
            "LS_GO2RTC_YAML": (APP_ROOT / "tools" / "go2rtc.yaml").as_posix(),
            "PYTHONUTF8": "1"}
+    # R2-304: bundled experimental rust analyzer (bin/ls-analyzer.exe) — the
+    # sidecar resolves it itself via analyzer_sidecar._default_exe(), but an
+    # explicit env var keeps the contract obvious and overridable by config.env.
+    _sidecar = APP_ROOT / "bin" / "ls-analyzer.exe"
+    if _sidecar.is_file():
+        env.setdefault("LS_ANALYZER_EXE", str(_sidecar))
+        _ort = APP_ROOT / "bin" / "onnxruntime.dll"
+        if _ort.is_file():
+            env.setdefault("ORT_DYLIB_PATH", str(_ort))
     for k, v in cfg.items():          # config.env 里的 LS_* 透传（用户可加告警渠道等）
         if k.startswith("LS_"):
             env[k] = v

@@ -315,6 +315,21 @@ def _engine_backend_peek() -> str:
     return _eng_mod.PRELOAD.get("backend") or order.split(",")[0].strip()
 
 
+def _sidecar_component() -> dict:
+    """R2-204/F2-02/F2-03：rust 分析器可用性透出（UI 据此置灰切换开关）。"""
+    from .analyzer_sidecar import _DEFAULT_EXE
+    exe_exists = _DEFAULT_EXE.is_file()
+    comp = {"available": exe_exists, "exe": str(_DEFAULT_EXE),
+            "version": None, "reason": None if exe_exists
+            else "ls-analyzer 未随包（--with-rust 构建）或未构建"}
+    if exe_exists:
+        sidecar = getattr(manager, "sidecar", None) if manager else None
+        if sidecar is not None:
+            comp["version"] = sidecar.version()
+            comp.update({f"watchdog_{k}": v for k, v in sidecar.watchdog_status().items()})
+    return comp
+
+
 @router.get("/system")
 def system():
     today = store.today_event_counts()
@@ -334,6 +349,7 @@ def system():
         "components": {
             "engine": dict(_eng_mod.PRELOAD),  # B-28：预热状态与错误如实上报
             "go2rtc": go2rtc.health(),         # T-101/T-202：回环鉴权网关健康
+            "analyzer_sidecar": _sidecar_component(),  # R2-204
         },
     }
 
