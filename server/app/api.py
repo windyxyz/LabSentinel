@@ -89,7 +89,7 @@ def _token_ok(provided: str | None) -> bool:
 def _read_token_ok(provided: str | None) -> bool:
     """R2-103/N-02 读令牌校验：admin/read/已配对设备令牌均可。
 
-    77 号 Q-11 口径「设备令牌 = 查看 + 处置」：局域网绑定会强制开启读保护，
+    Q-11 口径「设备令牌 = 查看 + 处置」：局域网绑定会强制开启读保护，
     若此处不接受设备令牌，配对后的手机在唯一需要它的场景里拿不到任何数据。
     """
     if not settings.admin_token or _auth_off():

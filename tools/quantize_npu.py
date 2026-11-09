@@ -47,7 +47,7 @@ def parse_args():
 def patch_quark_import():
     """注入绕道：剥掉 build_custom_ops.py 末尾的 _initialize_kernels() 调用后手工加载模块。
 
-    依据 docs/50-tasks/06-training-toolchain.md 附录（M0 实测有效）。只在内存中生效，
+    依据 M0 训练工具链实测（历史任务包已归档，见 docs/plan/status.md）。只在内存中生效，
     不修改 npu-venv 里的任何文件。原因是该模块 import 时会 JIT 编译 C++ 自定义算子，
     本机无 Visual Studio MSVC 会直接失败。
     """

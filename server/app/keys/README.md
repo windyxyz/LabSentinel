@@ -1,6 +1,6 @@
 # 更新清单签名公钥（Q-06）
 
-> minisign 密钥对由维护者离线生成（77 号文档 §五人工事项）。生成后：
+> minisign 密钥对由维护者离线生成（发布决策中的人工事项）。生成后：
 > 1. 把**公钥**写入本目录 `update.pub`（纯文本，minisign 公钥格式：
 >    `untrusted comment: minisign public key <HEX>` 下一行为 base64 公钥）；
 > 2. 私钥离线备份一份，CI 机密存一份（`MINISIGN_SECKEY`）；

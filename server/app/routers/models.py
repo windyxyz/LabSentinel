@@ -1,6 +1,6 @@
 """Q-08 / T-406：实验服（PPE）模型按需下载——许可确认 + SHA256 校验。
 
-77 号文档 Q-08：权重许可确认前不随包；首启/设置页显示数据集名称与许可说明，
+Q-08：权重许可确认前不随包；首启/设置页显示数据集名称与许可说明，
 用户显式确认后从发布资产下载（assets.lock.json 哈希校验），未下载时以
 "仅人员检测"模式运行（settings.ppe_model 为空即可）。
 """
@@ -25,7 +25,7 @@ _ASSET_CLASSES = "yolo11n_ppe.classes.txt"
 _LOCK = Path(__file__).resolve().parents[3] / "scripts" / "assets.lock.json"
 
 LICENSE_NOTICE = (
-    "实验服模型权重由 Roboflow 训练数据集派生，具体许可仍待确认（77 号 Q-08）。"
+    "实验服模型权重由 Roboflow 训练数据集派生，具体许可仍待确认（Q-08）。"
     "下载即表示你已阅读并接受该数据集的用途限制；许可确认后我们会随包分发清晰授权的自有权重。"
 )
 

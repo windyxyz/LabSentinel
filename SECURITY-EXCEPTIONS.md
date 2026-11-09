@@ -1,6 +1,6 @@
 # 依赖漏洞书面豁免（Q-13 / T-409）
 
-> 规则（77 号文档 Q-13）：生产依赖出现 High/Critical → 阻断发布，7 天内升级修复；
+> 规则（Q-13，见 docs/plan/78-review-round2-plan-2026-11-07.md §10）：生产依赖出现 High/Critical → 阻断发布，7 天内升级修复；
 > 无法按期修复时**必须**在本文件写书面豁免（理由、受影响路径、到期日）。
 > 开发依赖 High/Critical 30 天内处理，不阻断发布。
 > 每周定时审计见 `.github/workflows/security-weekly.yml`（失败自动开 issue）。

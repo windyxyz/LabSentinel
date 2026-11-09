@@ -7,7 +7,7 @@ date: 2026-11-07
 
 ## 背景
 
-76 号文档 T-322 原定：在 `ls-ingest/examples/` 写 GStreamer（gstreamer-rs）与
+重构计划 T-322 原定：在 `ls-ingest/examples/` 写 GStreamer（gstreamer-rs）与
 FFmpeg（ffmpeg-next/ffmpeg-sys）两个 PoC，对 4 路 1080p 源测 30 分钟后产出本 ADR。
 实际上 L1 数据面直接以 **ffmpeg 子进程 + rawvideo 管道**落地（`engine-rs/crates/
 ls-ingest/src/lib.rs`），并已在黄金语料（322/322 逐位对齐）与灰度路径上验证。本文

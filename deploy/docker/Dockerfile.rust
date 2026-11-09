@@ -1,4 +1,6 @@
-# T-333（L4）：Rust 单二进制镜像（Python 运行时已移除）。
+# T-333（L4 预备，实验性 nightly 产物）：Rust 单二进制镜像。
+# 更正（R2-501/N-27）：Python 运行时**尚未移除**，L3 控制面只实现 17/97 路由；
+# 本产物不得进入正式 Release，仅供 nightly/实验验证。
 # 多阶段：builder 编译 ls-server → runtime 只带二进制 + 内嵌 web + 模型挂载。
 # 构建（Linux，需 rust:1.99 + cmake/libclang，ort feature 未启用时纯 Rust 即可）:
 #   docker build -f deploy/docker/Dockerfile.rust -t labsentinel-server:0.2.0 .

@@ -110,7 +110,7 @@ def check_links(res) -> None:
         preview = "; ".join(f"{p.relative_to(ROOT)}→{t}" for p, t, _ in broken[:8])
         results_add(res, "相对链接", "FAIL",
                     f"断链 {len(broken)} 条（OK {ok_n}）：{preview}{'…' if len(broken) > 8 else ''}",
-                    "修复或删除断链；docs/50-tasks 历史报告可标注")
+                    "修复或删除断链；已归档的历史报告可标注为纯文本")
     else:
         results_add(res, "相对链接", "PASS", f"{ok_n} 条全部可达")
 

@@ -130,7 +130,8 @@
   Python verify 实测可直接读取，verify/restore 保守语义）、escalation（超时未处置
   提醒，静默/渠道过滤/限流/投递记录/重试复用 ls-dispatch）；ls-server 托管三作业调度
   并新增 `/api/maintenance/{status,preview,cleanup}`、`/api/backups/{status,run}`、
-  `/api/escalation/status`，L3 契约测试对 Python/Rust 双实现同套断言通过。
+  `/api/escalation/status`，L3 契约测试对**已实现路由**做 Python/Rust 双实现同套断言通过
+  （覆盖率口径见下文 T-331 更正说明：17/97 路径，非全量覆盖）。
   ls-dispatch 补通用 Webhook HMAC-SHA256 签名（X-LS-Signature）与 alert_silences
   `global` 口径；ls-store 暴露只读连接供维护作业分页查询。
 - **T-505 第一步（纯搬移打样）**：`api.py` 的 stats/export 段（10 路由）原样移入
@@ -196,15 +197,18 @@
   事件流；Status 实时返回 fps/帧龄/重连/错误。Python SidecarAnalyzer 改为下发真实
   摄像头/区域/规则快照（原为空配置占位）。管线单测 5 例 + gRPC 端到端（合成视频
   fps>0 → stop→stopped）实测通过。
-- **L2/L3/L4 Rust 替换 Python 运行时（核心目标）**：
-  - ls-store（T-332）：rusqlite 打开 Python 同库（schema v12 双向兼容，ADR-0008）；
+- **L2 / L3 骨架 / L4 预备（Rust 替换 Python 运行时的分阶段进展）**：
+  - ls-store（T-332）：rusqlite 打开 Python 同库（schema v13 双向兼容，ADR-0008）；
   - ls-dispatch（T-329）：8 渠道等价语义、域名白名单、静默/过滤/限流/重试/死信；
-  - **ls-server（T-331）**：axum 控制面单二进制（health/system/events/cameras/stats/
-    backups/处置、Host/CSRF/令牌、WS 广播），**L3 契约测试对 Python 与 Rust 双实现
-    同一套用例 100% 通过**；
-  - L4：scripts/build_rust.py 单二进制分发（不含 280MB CPython runtime）、
-    deploy/docker/Dockerfile.rust（distroless 风格非 root + 健康探针）、
-    --healthcheck 参数；Python 运行时按文档保留一个版本周期，tools/ 训练链长期保留。
+  - **ls-server（T-331，L3 控制面骨架）**：axum 单二进制，已实现约 17 条路由
+    （health/system/events/cameras/stats/backups/处置等子集）。契约测试覆盖的是
+    **已实现的路由**，不是 OpenAPI 全部路径；2026-11-07 二轮审查实测
+    **17/97 路径（约 18%）覆盖**，距 L3 门槛（≥95%）仍有约 80 条路由待补。
+    R5 阶段（R2-307/R2-309）以 scripts/rust_route_coverage.py 自动统计为准。
+  - **L4 尚未开始**：Python 运行时仍是唯一可用的产品形态；
+    scripts/build_rust.py 与 deploy/docker/Dockerfile.rust 是实验性 nightly 产物，
+    不得进入正式 Release。tools/ 训练链按重构计划长期保留（不在 L4 移除范围）。
+  - 口径更正依据：docs/plan/78-review-round2-plan-2026-11-07.md（N-27/N-30）。
 - T-504（B-22）：stdout 行级 tee——各模块历史 print 以 INFO 双写进 logging（→
   server.log 轮转），/api/logs 可查后端日志；LS_LOG_TEE=0 可关。pytest 捕获流不接。
 - T-326（L1/Rust）：ls-ingest——ffmpeg 子进程取流（RTSP/文件通用，rawvideo 管道，
