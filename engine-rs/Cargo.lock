@@ -1225,6 +1225,7 @@ name = "ls-server"
 version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
+ "getrandom 0.2.17",
  "http-body-util",
  "ls-core",
  "ls-dispatch",
@@ -1233,6 +1234,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tower 0.4.13",

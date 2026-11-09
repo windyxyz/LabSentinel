@@ -20,6 +20,9 @@ tower-http = { version = "0.5", features = ["fs", "cors"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 http-body-util = "0.1"
+rusqlite = "0.31" # R2-309: stats/quality SQL 参数绑定（bundled 由 ls-store 统一启用）
+sha2 = "0.10"     # R2-309: pairing token hash (same as hashlib.sha256)
+getrandom = "0.2" # system entropy for pairing tokens
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
