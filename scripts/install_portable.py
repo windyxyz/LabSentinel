@@ -63,6 +63,20 @@ def log(m=""):
     print(m, flush=True)
 
 
+def run_text(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """R2-006/N-37: system tools (reg/PowerShell) emit ANSI on zh-CN Windows
+    while the portable launcher sets PYTHONUTF8=1 -- decode with the system
+    code page and replace errors instead of raising in the reader thread.
+    """
+    if os.name == "nt":
+        kwargs.setdefault("encoding", "mbcs")
+    else:
+        kwargs.setdefault("encoding", "utf-8")
+    kwargs.setdefault("errors", "replace")
+    kwargs.setdefault("text", True)
+    return subprocess.run(argv, **kwargs)
+
+
 def ps(script: str) -> None:
     exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     r = subprocess.run([exe, "-NoProfile", "-Command", script],
@@ -176,9 +190,9 @@ def set_uninstall_registry(install: Path, version: str) -> bool:
     ]
     ok = True
     for name, val, typ in pairs:
-        r = subprocess.run(["reg", "add", UNINSTALL_KEY, "/v", name, "/t", typ,
-                            "/d", str(val), "/f"], capture_output=True, text=True,
-                           creationflags=CREATE_NO_WINDOW)
+        r = run_text(["reg", "add", UNINSTALL_KEY, "/v", name, "/t", typ,
+                      "/d", str(val), "/f"], capture_output=True,
+                     creationflags=CREATE_NO_WINDOW)
         if r.returncode != 0:
             ok = False
             log(f"  注册表卸载项 {name} 写入失败：{(r.stderr or '').strip()[:80]}")
@@ -195,9 +209,9 @@ def remove_uninstall_registry() -> None:
 def installed_location() -> Path | None:
     """读注册表卸载项 InstallLocation；目录含 LabSentinel.exe 才视为有效安装（任务120）。"""
     try:
-        r = subprocess.run(["reg", "query", UNINSTALL_KEY, "/v", "InstallLocation"],
-                           capture_output=True, text=True, errors="replace", timeout=10,
-                           creationflags=CREATE_NO_WINDOW)
+        r = run_text(["reg", "query", UNINSTALL_KEY, "/v", "InstallLocation"],
+                     capture_output=True, timeout=10,
+                     creationflags=CREATE_NO_WINDOW)
         for ln in (r.stdout or "").splitlines():
             ln = ln.strip()
             if ln.startswith("InstallLocation"):
@@ -213,9 +227,9 @@ def installed_location() -> Path | None:
 def set_autostart(install: Path, on: bool) -> None:
     if on:
         val = f'"{install / "runtime" / "pythonw.exe"}" "{install / "scripts" / "portable_launcher.py"}"'
-        r = subprocess.run(["reg", "add", RUN_KEY, "/v", "LabSentinel", "/t", "REG_SZ",
-                            "/d", val, "/f"], capture_output=True, text=True,
-                           creationflags=CREATE_NO_WINDOW)
+        r = run_text(["reg", "add", RUN_KEY, "/v", "LabSentinel", "/t", "REG_SZ",
+                      "/d", val, "/f"], capture_output=True,
+                     creationflags=CREATE_NO_WINDOW)
         if r.returncode == 0:
             log("  开机自启：已开启（HKCU Run\\LabSentinel）")
         else:
