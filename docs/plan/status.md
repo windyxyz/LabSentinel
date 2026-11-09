@@ -48,39 +48,46 @@
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| R2-306 压测基线（补 T-307） | ⬜ | 待推进（需 1/4/8 路 720p 实测） |
-| R2-303 Windows GPU 可选变体 | ⬜ | 待推进；`build_portable.py --variant` 骨架已预置 |
-| ADR-0009（逐位一致换 GPU 的代价与恢复计划） | ⬜ | 待推进；`assets.lock.json` 的官方 ONNX 与本地导出差异说明已先记录 |
+| R2-306 压测基线（补 T-307） | 🟡 | `tools/perf_baseline.py` 新增；本机短时冒烟实测（Python-CPU 单路 35.8fps / 4 路 9.7fps/路，rust-tract 54.9s、rust-ort 4.4s 处理同一语料）；**完整 1/4/8 路 × 30 分钟矩阵待目标硬件重跑**（`--duration 1800`）；`docs/perf-baseline.md` 已建并如实标注口径限制 |
+| R2-303 Windows GPU 可选变体 | 🟡 | `requirements-win-dml.in/.lock` 生成（`onnxruntime-directml==1.24.4`，pip-audit 0 漏洞、ASCII）；`build_portable.py --variant cpu|dml` + release.yml matrix 两个 job；前端探测/设置页提示与首启推荐未做（待 DML 环境实测后收口） |
+| ADR-0009 | ✅ | `docs/adr/0009-alignment-vs-gpu-and-model-provenance.md`：分层容差验收、双变体、模型来源差异与恢复计划 |
 
 ## R3 Rust L1 可发布
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| R2-301 Rust 统一二进制查找 | ⬜ | 待推进 |
-| R2-302 存证编码修复 | ⬜ | 待推进 |
-| R2-304 打包 ls-analyzer | ⬜ | 待推进；`analyzer_sidecar._default_exe()` 已改为 `bin/` → cargo target 目录解析（R2-506） |
-| R2-305 Rust 告警读取网页配置 | ⬜ | 待推进 |
-| R2-308 黄金语料扩展 | ⬜ | 待推进 |
-| R2-507 N-28 过时注释复核 | ⬜ | 待推进 |
+| R2-301 Rust 统一二进制查找 | ✅ | `ls-core/src/bin.rs`（LS_FFMPEG → exe 同级 tools/ → tools/ffmpeg/ → PATH + `ensure_tools_on_path`）；ls-ingest 与 evidence.rs 全部改用；3 个单测 |
+| R2-302 存证编码修复 | ✅ | evidence.rs stderr 线程排水（防管道死锁）+ 失败信息附最后 500 字节 stderr；测试改 `ls_core::bin::available` 判定 |
+| R2-304 打包 ls-analyzer | ✅ | `build_portable.py --with-rust`：release ls-analyzer.exe + onnxruntime.dll 进 `bin/`；`portable_launcher` 注入 `LS_ANALYZER_EXE`/`ORT_DYLIB_PATH`；`analyzer_sidecar._default_exe()` 按便携 bin/ → cargo target 解析 |
+| R2-305 Rust 告警读取网页配置 | ⬜ | 需扩展 proto（Config 加 AlertChannels）+ 两侧代码再生成——并入 R2-309 契约批次 |
+| R2-308 黄金语料扩展 | ⏸ | 需 CC0 素材拍摄（人工事项）；分层容差口径已在 ADR-0009 定义 |
+| R2-507 N-28 过时注释复核 | ✅ | main.rs:169 注释更正（PPE 级联已接入） |
 
 ## R4 多端（裁剪版）
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| R2-203 设备管理前端 | ⬜ | 待推进 |
-| R2-204 分析器可用性透出 | ⬜ | 待推进 |
-| R2-502 前端测试补齐 | ⬜ | 待推进 |
+| R2-203 设备管理前端 | ✅ | `web/src/views/Devices.vue`（配对码展示/设备列表/两步吊销）+ App.vue 标签 + api.js 封装；`tests/devices.test.js` 2 例 |
+| R2-204 分析器可用性透出 | ✅ | `/api/system.components.analyzer_sidecar{available,exe,version,watchdog_*}`；前端置灰待 rust 路由批次与 UI 联调 |
+| R2-502 前端测试补齐 | 🟡 | 28→30 例（Devices 2 例）；WebrtcPlayer 子协议/Wall/Models 下载流程仍未覆盖（列 R2-502 余量） |
 | R2-601~605 Flutter / Tauri / VM / 真机验收 | ⏸ | 用户明确暂缓（Windows 优先） |
 
 ## R5 Rust L3 控制面
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| R2-307 路由覆盖率统计进 CI | ⬜ | 待推进（目标 ≥95%，当前 17/97） |
-| R2-309 ls-server 补齐（按路由组分批） | ⬜ | 待推进 |
-| R2-503 审计写入移出事件循环 | ⬜ | 待推进 |
-| R2-504 第三方 Action 钉 SHA + Dependabot | ⬜ | 待推进 |
-| N-34 重试语义测试稳定性 | ⬜ | 待推进（当前环境已通过，仍建议注入退避） |
+| R2-307 路由覆盖率统计进 CI | ✅ | `ls-server --dump-routes` + `scripts/rust_route_coverage.py`（路径参数归一化 {param}/:id）；实测 **17/106 = 16.0%**；rust.yml 覆盖率 artifact（先跟踪不门禁） |
+| R2-309 ls-server 补齐（按路由组分批） | ⬜ | 17/106 → ≥95%；顺序：鉴权中间件 → cameras/zones/rules → events 全套+媒体签名 → alerts → export/stats → folders → face/plugins/genai |
+| R2-503 审计写入移出事件循环 | ✅ | `_audit_enqueue` + 单写线程（队列 10000 满则丢弃+WARNING）；中间件零阻塞 |
+| R2-504 第三方 Action 钉 SHA + Dependabot | ✅ | 7 个 Action 全部钉 commit SHA（API 实测当前 HEAD）；`.github/dependabot.yml`（pip/npm/cargo/actions 每周） |
+| N-34 重试语义测试稳定性 | ⬜ | 当前环境已通过，仍建议注入退避（并入 R2-309 批次） |
+
+## 本轮环境事件（2026-11-09）
+
+- **卡巴斯基启发式查杀**：`install_portable.py` 内嵌「-c 动态代码串 + urlopen + Popen」被
+  Kaspersky 判为 HEUR:TrojanDownloader/Python.Agent.ao，pytest 执行即删文件（3 次）。
+  已重构为独立 `scripts/health_check.py` 模块（loopback URL 白名单），此后未再触发。
+  经验已入库项目记忆；该文件现跑安装测试稳定通过。
 
 ## 明确暂缓项（本轮不执行）
 
