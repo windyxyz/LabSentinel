@@ -1,4 +1,4 @@
-//! ls-core：LabSentinel 领域逻辑（纯函数、无 IO、`forbid(unsafe_code)`）。
+//! ls-core：LabSentinel 领域逻辑（共享测试向量、无 unsafe）。
 //!
 //! 与 Python 实现（server/app）共享 `testdata/vectors/*.json` 测试向量，
 //! 保证 Rust 与 Python 的领域行为逐用例一致（T-323，L0 对齐基准）。
@@ -6,7 +6,9 @@
 //! 模块：
 //! - [`zones`]：区域多边形判定（与 `cv2.pointPolygonTest >= 0` 对齐，边界算在内）
 //! - [`state`]：ZoneState 进出迟滞（与 Python `app.zones.ZoneState` 语义一致）
+//! - [`bin`]：R2-301 外部二进制（ffmpeg/ffprobe）统一查找（唯一带 IO 的模块）
 
+pub mod bin;
 pub mod state;
 pub mod zones;
 

@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     csp_report_only: bool = False  # true 时用 Report-Only 头（任务89）
     strict_config: bool = False  # 启动校验 FAIL 时拒绝启动（任务95，LS_STRICT_CONFIG）
     testing: bool = False  # R2-108: pytest harness flag（LS_TESTING=1），仅测试环境放行 testserver Host
+    secret_scope: str = "user"  # R2-106: DPAPI 范围 user|machine（WinSW 服务模式设 machine）
     write_rate_limit: int = 120  # 每分钟写请求数上限（任务90，0=关闭）
     write_rate_window_s: int = 60  # 滑动窗口秒
     trust_proxy: bool = False  # 1 时信任 X-Forwarded-For 第一跳作为客户端 IP

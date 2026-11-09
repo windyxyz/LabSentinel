@@ -16,6 +16,21 @@ from pathlib import Path
 log = logging.getLogger("app.secretstore")
 
 _PREFIX = "enc:v1:"
+# CRYPTPROTECT_UI_FORBIDDEN = 0x1；CRYPTPROTECT_LOCAL_MACHINE = 0x4
+_DPAPI_UI_FORBIDDEN = 0x1
+_DPAPI_LOCAL_MACHINE = 0x4
+
+
+def _dpapi_flags() -> int:
+    """R2-106/N-12：服务账户（WinSW LocalService）与安装用户不是同一账户，
+    DPAPI 用户范围密文迁移后无法解密。LS_SECRET_SCOPE=machine 时改用机器范围
+    （同机任意账户可解，仍受机器边界保护）。"""
+    from .config import settings
+    scope = (getattr(settings, "secret_scope", "user") or "user").strip().lower()
+    flags = _DPAPI_UI_FORBIDDEN
+    if scope == "machine":
+        flags |= _DPAPI_LOCAL_MACHINE
+    return flags
 
 
 def _dpapi_protect(data: bytes) -> bytes | None:
@@ -44,9 +59,8 @@ def _dpapi_protect(data: bytes) -> bytes | None:
 
     src, keep_src = _blob(data)
     dst, keep_dst = _blob(b"")
-    # CRYPTPROTECT_UI_FORBIDDEN = 0x1
-    ok = crypt32.CryptProtectData(ctypes.byref(src), None, None, None, None, 0x1,
-                                  ctypes.byref(dst))
+    ok = crypt32.CryptProtectData(ctypes.byref(src), None, None, None, None,
+                                  _dpapi_flags(), ctypes.byref(dst))
     if not ok or not dst.cbData:
         return None
     out = ctypes.string_at(dst.pbData, dst.cbData)
@@ -76,8 +90,8 @@ def _dpapi_unprotect(data: bytes) -> bytes | None:
     crypt32.CryptUnprotectData.restype = wintypes.BOOL
     src, keep_src = _blob(data)
     dst, keep_dst = _blob(b"")
-    ok = crypt32.CryptUnprotectData(ctypes.byref(src), None, None, None, None, 0x1,
-                                    ctypes.byref(dst))
+    ok = crypt32.CryptUnprotectData(ctypes.byref(src), None, None, None, None,
+                                    _dpapi_flags(), ctypes.byref(dst))
     if not ok or not dst.cbData:
         return None
     out = ctypes.string_at(dst.pbData, dst.cbData)
@@ -102,7 +116,11 @@ def _fernet(data_dir: Path):
 
 
 def protect(value: str, data_dir: Path) -> str:
-    """加密；失败降级明文（不阻断配置保存，日志告警）。"""
+    """R2-106/N-12：加密不可用则**拒绝保存**，绝不静默降级明文。
+
+    旧实现在无 DPAPI / 缺 cryptography 时返回明文并只打一条 WARNING，
+    Linux/Docker 上按锁安装（此前 cryptography 未入锁）会让告警密钥裸奔。
+    """
     raw = value.encode("utf-8")
     blob: bytes | None = None
     if os.name == "nt":
@@ -112,8 +130,9 @@ def protect(value: str, data_dir: Path) -> str:
         if f is not None:
             blob = f.encrypt(raw)
     if blob is None:
-        log.warning("[secretstore] 无可用加密后端，敏感值以明文保存")
-        return value
+        log.error("[secretstore] 加密组件不可用，拒绝以明文保存密钥")
+        from .alert_config import AlertConfigError  # 延迟导入，避免循环依赖
+        raise AlertConfigError("加密组件不可用，拒绝明文保存密钥（检查 cryptography 安装与 data 目录权限）")
     return _PREFIX + base64.urlsafe_b64encode(blob).decode("ascii")
 
 

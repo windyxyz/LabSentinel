@@ -1,0 +1,24 @@
+# Windows DirectML (GPU) variant -- R2-303 / ADR-0009.
+# Keep this file pure ASCII (pip decodes with the system locale on zh-CN Windows).
+# Locked output: requirements-win-dml.lock (uv pip compile --generate-hashes).
+# Do NOT install plain onnxruntime alongside onnxruntime-directml: both write
+# the same onnxruntime/ package directory (B-03 conflict class). Only the
+# inference backend line differs from requirements.in; everything else is
+# duplicated explicitly so uv can resolve without a `-r` including onnxruntime.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pydantic>=2.7
+pydantic-settings>=2.2
+onnxruntime-directml==1.24.4 ; sys_platform == "win32"
+opencv-python-headless>=4.9
+supervision==0.25.1
+httpx>=0.27
+defusedxml>=0.7
+numpy
+paho-mqtt>=1.6,<2
+reportlab>=4.2,<6
+grpcio>=1.85.1
+cryptography>=49,<51
+# opencv-python (GUI) is pulled by supervision; override removes it (B-03).
+opencv-python ; sys_platform == "never"

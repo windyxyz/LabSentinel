@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
+ls-core = { path = "../ls-core" }  # R2-301: unified ffmpeg lookup
 
 [dev-dependencies]
 tempfile = "3"

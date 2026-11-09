@@ -32,6 +32,11 @@ jobs:
   build-win:
     needs: [verify, test-linux]
     runs-on: windows-latest
+    # R2-303: cpu (default) + optional DirectML variant, same recipe.
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cpu, dml]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -62,14 +67,15 @@ jobs:
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "ls-models"
-          python scripts/build_portable.py --zip --python (Get-Command python).Source --models-dir $dir
+          python scripts/build_portable.py --zip --variant ${{ matrix.variant }} --python (Get-Command python).Source --models-dir $dir
           if ($LASTEXITCODE -ne 0) { throw "便携包构建失败" }
       # T-410：Windows 冒烟进 CI——用刚产出的 zip 真实启动→健康/前端/DB 断言→停止；
       # 随后 install/uninstall 到隔离临时目录，验证安装标记与安全卸载。
       - name: T-410 portable zip 冒烟（隔离启动/健康/停止）
         shell: pwsh
         run: |
-          $zip = Get-ChildItem Resources/dist/LabSentinel-portable-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $pattern = if ("${{ matrix.variant }}" -eq "dml") { "LabSentinel-portable-*-dml.zip" } else { "LabSentinel-portable-*.zip" }
+          $zip = Get-ChildItem Resources/dist/$pattern | Where-Object { $_.Name -notlike "*-dml.zip" -or "${{ matrix.variant }}" -eq "dml" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           python scripts/smoke_portable.py --zip $zip.FullName --timeout 90
       - name: T-410 install/uninstall 冒烟（隔离目录）
         shell: pwsh
@@ -80,25 +86,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "install 失败" }
           python scripts/install_portable.py uninstall --install-dir $dir
           if ($LASTEXITCODE -ne 0) { throw "uninstall 失败" }
-      - name: Rust L4 单二进制构建（T-333：无 CPython runtime 的第二产物）
-        run: |
-          python scripts/build_rust.py --zip
       - name: SHA256SUMS
         shell: pwsh
         run: |
-          $zip = Get-ChildItem Resources/dist/LabSentinel-portable-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $pattern = if ("${{ matrix.variant }}" -eq "dml") { "LabSentinel-portable-*-dml.zip" } else { "LabSentinel-portable-*.zip" }
+          $zip = Get-ChildItem Resources/dist/$pattern | Where-Object { $_.Name -notlike "*-dml.zip" -or "${{ matrix.variant }}" -eq "dml" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($zip.Name)" | Out-File -FilePath Resources/dist/SHA256SUMS.txt -Encoding ascii
-          Get-Content Resources/dist/SHA256SUMS.txt
+          "$hash  $($zip.Name)" | Out-File -FilePath Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt -Encoding ascii
+          Get-Content Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt
       - name: manifest（干净树来源记录）
         run: |
           python scripts/release_manifest.py
       - uses: actions/upload-artifact@v4
         with:
-          name: LabSentinel-portable
+          name: LabSentinel-portable-${{ matrix.variant }}
           path: |
             Resources/dist/LabSentinel-portable-*.zip
-            Resources/dist/SHA256SUMS.txt
+            Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt
             Resources/dist/RELEASE-MANIFEST.json
           if-no-files-found: error
           retention-days: 14
@@ -106,6 +110,25 @@ jobs:
       #   signtool sign /fd SHA256 /tr <RFC3161> /td SHA256 LabSentinel.exe
       #   minisign -Sm Resources/dist/SHA256SUMS.txt
       # provenance 占位（T-407 后）：actions/attest-build-provenance
+
+  nightly-rust:
+    # R2-004 / §9.3: L3 control plane is only 17/97 routes -- the Rust single
+    # binary is an EXPERIMENTAL nightly artifact and must not enter a formal
+    # Release. Kept as a separate job so a Rust build failure cannot block
+    # the Windows portable release.
+    needs: [verify]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build_rust.py --zip (experimental)
+        run: python scripts/build_rust.py --zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labsentinel-rust-nightly
+          path: Resources/dist/labsentinel-rust-*.zip
+          if-no-files-found: warn
+          retention-days: 7
 
   publish:
     needs: [build-win]
@@ -115,12 +138,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: LabSentinel-portable
+          pattern: LabSentinel-portable-*
+          merge-multiple: true
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
           draft: true  # 签名作业接入前保持草稿，人工校验后发布
           files: |
             dist/LabSentinel-portable-*.zip
-            dist/SHA256SUMS.txt
+            dist/SHA256SUMS-*.txt
             dist/RELEASE-MANIFEST.json

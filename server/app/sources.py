@@ -12,9 +12,23 @@ from pathlib import Path
 _RTSP = re.compile(r"^rtsps?://[^\s\"'#\x00-\x1f]+$", re.IGNORECASE)
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv"}
 
-#: 系统目录黑名单（图片文件夹允许根，T-111；默认拒绝用户主目录之外的系统位置）
-SYSTEM_DIR_NAMES = {"windows", "program files", "program files (x86)", "programdata",
-                    "system", "etc", "usr", "bin", "sbin", "library"}
+#: R2-105/N-11：旧的"任意父目录名黑名单"既漏判（C:\Windows 本身 parents 里没有
+#: windows）又误杀（D:\data\Library\shots 因父目录叫 library 被拒）。改为按具体
+#: 系统根做"真实路径是否位于其下"的判断，且包含目录本身。
+def _system_roots() -> list[Path]:
+    if os.name == "nt":
+        env = [os.environ.get(k) for k in
+               ("WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "SystemRoot")]
+        return [Path(p).resolve() for p in env if p]
+    return [Path(p) for p in ("/etc", "/usr", "/bin", "/sbin", "/boot", "/proc",
+                              "/sys", "/System", "/Library", "/dev")]
+
+
+def _under(path: Path, root: Path) -> bool:
+    try:
+        return os.path.commonpath([str(path), str(root)]) == str(root)
+    except ValueError:  # 不同盘符 / 不同根
+        return False
 
 
 class SourceError(ValueError):
@@ -69,8 +83,8 @@ def check_folder_root(source: str, allowed_roots: str = "") -> str:
     if not p.is_dir():
         raise SourceError("图片文件夹不存在或不是目录")
     real = p.resolve()
-    parts_lower = {q.name.lower() for q in real.parents}
-    if parts_lower & SYSTEM_DIR_NAMES:
+    # R2-105：包含目录本身（旧逻辑只看 real.parents，C:\Windows 可直接通过）。
+    if any(_under(real, r) for r in _system_roots()):
         raise SourceError("图片文件夹不能位于系统目录（Windows/Program Files/AppData/System 等）")
     if os.name == "nt":
         appdata = Path(os.environ.get("APPDATA", ""))

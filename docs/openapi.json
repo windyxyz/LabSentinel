@@ -204,7 +204,7 @@
     "/api/pairing/claim": {
       "post": {
         "summary": "Claim Pairing",
-        "description": "客户端用配对码换设备令牌（只返回一次；服务端只存 hash）。",
+        "description": "客户端用配对码换设备令牌（只返回一次；服务端只存 hash）。\n\nR2-110/N-17：单独限流 10 次/分钟/IP + 连续 5 次失败作废全部待配对码，\n防 6 位码被暴力枚举（全局写限流 120/分钟对 10^6 空间太宽松）。",
         "operationId": "claim_pairing_api_pairing_claim_post",
         "requestBody": {
           "content": {

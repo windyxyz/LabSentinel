@@ -1,5 +1,5 @@
-//! ls-analyzer sidecar（T-327/T-331）：监听 127.0.0.1:<port>，一次性认证令牌经启动参数传入
-//! （--token <secret>，Python 父进程生成），防本机其它进程未授权调用。
+//! ls-analyzer sidecar（T-327/T-331）：监听 127.0.0.1:<port>，一次性认证令牌经
+//! LS_ANALYZER_TOKEN 环境变量传入（R2-109；--token 保留一版兼容），防本机其它进程未授权调用。
 //!
 //! 数据面（T-331/T-325）：ApplyConfig 下发全量快照 → StartCamera 启动 ffmpeg 取流
 //! （ls-ingest）→ YOLO 检测（tract 纯 Rust；模型缺失时回退 NullDetector）→ ByteTrack
@@ -993,7 +993,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let mut port: u16 = 59001;
-    let mut token = String::new();
+    // R2-109/N-16: prefer the environment variable (not visible in the process
+    // command line to other users); keep --token for one-version compatibility
+    // with older Python parents.
+    let mut token = std::env::var("LS_ANALYZER_TOKEN").unwrap_or_default();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -1003,7 +1006,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if token.is_empty() {
-        return Err("必须提供 --token（一次性认证令牌，由父进程生成）".into());
+        return Err("必须提供 LS_ANALYZER_TOKEN 或 --token（一次性认证令牌，由父进程生成）".into());
     }
     let addr = format!("127.0.0.1:{port}").parse()?;
     let model = resolve_model_path();

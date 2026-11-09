@@ -460,9 +460,16 @@ def create_pairing():
 
 
 @router.post("/pairing/claim")
-def claim_pairing(body: ClaimPairingBody):
-    """客户端用配对码换设备令牌（只返回一次；服务端只存 hash）。"""
+def claim_pairing(request: Request, body: ClaimPairingBody):
+    """客户端用配对码换设备令牌（只返回一次；服务端只存 hash）。
+
+    R2-110/N-17：单独限流 10 次/分钟/IP + 连续 5 次失败作废全部待配对码，
+    防 6 位码被暴力枚举（全局写限流 120/分钟对 10^6 空间太宽松）。
+    """
     from . import devices
+    ip = request.client.host if request.client else "unknown"
+    if not devices.claim_rate_ok(ip):
+        raise HTTPException(429, "配对尝试过于频繁，请稍后重试")
     code = body.code.strip()
     name = body.device_name[:64]
     platform = body.platform[:32]

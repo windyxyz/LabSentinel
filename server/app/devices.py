@@ -16,11 +16,17 @@ from datetime import datetime
 
 _PAIR_TTL_S = 300
 _TOUCH_INTERVAL_S = 60  # R2-103: do not write SQLite on every read request
+_MAX_CLAIM_FAILURES = 5  # R2-110/N-17: 5 次连续失败作废全部待配对码
 _pair_lock = threading.Lock()
 #: code -> (expire_ts, created_by)
 _pending: dict[str, float] = {}
 #: device_id -> last touch_ts（进程内节流，重启后自然重置）
 _last_touch: dict[int, float] = {}
+_claim_failures = 0  # 全局连续失败计数（配对码空间 10^6，仅靠写限流不够）
+# R2-110: claim 接口单独按 IP 限流 10 次/分钟（全局写限流 120/分钟太宽松）
+_CLAIM_RATE_MAX = 10
+_CLAIM_RATE_WINDOW_S = 60.0
+_claim_rate: dict[str, list[float]] = {}
 
 
 def _hash(token: str) -> str:
@@ -39,14 +45,49 @@ def new_pairing_code() -> str:
 
 
 def claim(store, code: str, device_name: str, platform: str = "") -> str | None:
-    """用配对码换设备令牌；成功后码作废。返回令牌明文（仅此一次）或 None。"""
+    """用配对码换设备令牌；成功后码作废。返回令牌明文（仅此一次）或 None。
+
+    R2-110/N-17: 连续失败达 _MAX_CLAIM_FAILURES 次作废**全部**待配对码，
+    要求管理员重新生成（失败计数见 note_failed_claim）。
+    """
+    global _claim_failures
     with _pair_lock:
         exp = _pending.pop(code, None)
-        if exp is None or exp < time.time():
-            return None
+        valid = exp is not None and exp >= time.time()
+        if valid:
+            _claim_failures = 0  # 成功即清零
+    if not valid:
+        note_failed_claim()  # 在锁外调用，避免同一非重入锁自锁
+        return None
     token = secrets.token_urlsafe(32)
     store.add_device(device_name or "device", platform, _hash(token))
     return token
+
+
+def claim_rate_ok(ip: str) -> bool:
+    """R2-110: per-IP sliding window for the pairing claim endpoint."""
+    global _claim_rate
+    now = time.time()
+    with _pair_lock:
+        hits = [t for t in _claim_rate.get(ip, []) if now - t < _CLAIM_RATE_WINDOW_S]
+        if len(hits) >= _CLAIM_RATE_MAX:
+            _claim_rate[ip] = hits
+            return False
+        hits.append(now)
+        _claim_rate[ip] = hits
+        if len(_claim_rate) > 1000:
+            _claim_rate = {k: v for k, v in _claim_rate.items() if v}
+        return True
+
+
+def note_failed_claim() -> None:
+    """记录一次配对码校验失败；达到阈值作废全部待配对码。"""
+    global _claim_failures
+    with _pair_lock:
+        _claim_failures += 1
+        if _claim_failures >= _MAX_CLAIM_FAILURES:
+            _pending.clear()
+            _claim_failures = 0  # 新一轮从 0 开始（管理员重新生成才有新码）
 
 
 def verify(store, token: str) -> dict | None:

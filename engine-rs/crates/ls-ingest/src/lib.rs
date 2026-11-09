@@ -73,7 +73,8 @@ impl Ingest {
     }
 
     fn build_cmd(&self) -> Command {
-        let mut c = Command::new("ffmpeg");
+        // R2-301/N-22: portable layout keeps ffmpeg in tools/ (not on PATH).
+        let mut c = Command::new(ls_core::bin::find("ffmpeg"));
         c.stdout(Stdio::piped()).stderr(Stdio::null());
         if self.cfg.rtsp_transport_tcp && self.cfg.source.starts_with("rtsp") {
             c.arg("-rtsp_transport").arg("tcp");
@@ -198,7 +199,7 @@ mod tests {
 
     /// 本机 ffmpeg 可用时才跑（CI 干净环境 skip）。
     fn ffmpeg_available() -> bool {
-        Command::new("ffmpeg").arg("-version").output().is_ok()
+        ls_core::bin::available("ffmpeg")
     }
 
     #[test]
@@ -211,7 +212,7 @@ mod tests {
         let dir = std::env::temp_dir().join("ls-ingest-test");
         std::fs::create_dir_all(&dir).unwrap();
         let v = dir.join("t.mp4");
-        let st = Command::new("ffmpeg")
+        let st = Command::new(ls_core::bin::find("ffmpeg"))
             .args([
                 "-y",
                 "-f",

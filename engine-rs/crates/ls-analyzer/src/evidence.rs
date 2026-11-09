@@ -201,7 +201,9 @@ pub fn encode_mp4(frames: &[Vec<u8>], fps: f64, out: &Path) -> Result<(), String
 }
 
 fn encode_mp4_with(frames: &[Vec<u8>], fps: f64, out: &Path, codec: &[&str]) -> Result<(), String> {
-    let mut child = std::process::Command::new("ffmpeg")
+    // R2-301/R2-302: portable ffmpeg lookup + drain stderr in a thread so
+    // verbose ffmpeg output cannot fill the pipe and deadlock the child.
+    let mut child = std::process::Command::new(ls_core::bin::find("ffmpeg"))
         .args([
             "-hide_banner",
             "-v",
@@ -220,6 +222,14 @@ fn encode_mp4_with(frames: &[Vec<u8>], fps: f64, out: &Path, codec: &[&str]) -> 
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("ffmpeg spawn: {e}"))?;
+    let stderr = child.stderr.take().ok_or("ffmpeg stderr 不可用")?;
+    let err_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut r = stderr;
+        let _ = r.read_to_end(&mut buf);
+        buf
+    });
     {
         let mut stdin = child.stdin.take().ok_or("ffmpeg stdin 不可用")?;
         for f in frames {
@@ -227,10 +237,21 @@ fn encode_mp4_with(frames: &[Vec<u8>], fps: f64, out: &Path, codec: &[&str]) -> 
         }
     }
     let res = child.wait().map_err(|e| format!("ffmpeg wait: {e}"))?;
+    let err_bytes = err_thread.join().unwrap_or_default();
     if res.success() && out.is_file() {
         return Ok(());
     }
-    Err(format!("ffmpeg {codec:?} 失败: {res:?}"))
+    let tail = String::from_utf8_lossy(&err_bytes);
+    let detail = tail
+        .trim()
+        .chars()
+        .rev()
+        .take(500)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    Err(format!("ffmpeg {codec:?} 失败: {res:?}; stderr: {detail}"))
 }
 
 /// 视频目录相对 data_dir 的 relpath（proto：video_relpath 相对 data_dir）。
@@ -312,15 +333,8 @@ mod tests {
 
     #[test]
     fn encode_mp4_integration() {
-        // ffmpeg 可用时走真实编码（CI/开发机有 ffmpeg；无则跳过）
-        if std::process::Command::new("ffmpeg")
-            .arg("-version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| !s.success())
-            .unwrap_or(true)
-        {
+        // R2-302: portable lookup; ffmpeg 可用时**必须**通过（不再静默吞失败）。
+        if !ls_core::bin::available("ffmpeg") {
             eprintln!("skip: ffmpeg 不可用");
             return;
         }

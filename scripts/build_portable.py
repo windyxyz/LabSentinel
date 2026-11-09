@@ -96,7 +96,11 @@ def ensure_deps() -> None:
     """T-002（B-03/R-02）：依赖从带哈希锁文件全新安装到干净 site-packages。
     锁文件 sha256 stamp 不一致（requirements 变更/首装/依赖漂移）即清空重装，
     修复旧逻辑"fastapi/cv2 存在即跳过"导致的 requirements 变更不生效与 opencv 双包并存。"""
-    lock = ROOT / "server" / "requirements-win.lock"
+    # R2-303: cpu (default) vs dml (DirectML) are separate hash-pinned locks;
+    # they must never be installed into the same site-packages (B-03 conflict).
+    lock = ROOT / "server" / ("requirements-win-dml.lock" if _VARIANT == "dml"
+                              else "requirements-win.lock")
+    deploy.log(f"  [锁] 变体 {_VARIANT} → {lock.name}")
     stamp = SITE / ".lock.sha256"
     want = hashlib.sha256(lock.read_bytes()).hexdigest()
     if stamp.exists() and stamp.read_text("ascii").strip() == want:
@@ -257,7 +261,10 @@ def report() -> None:
 
 
 def make_zip() -> Path:
-    out = ROOT / "Resources" / "dist" / f"LabSentinel-portable-{date.today():%Y%m%d}.zip"
+    # R2-303: two variants produce two distinct artifacts.
+    suffix = f"-{_VARIANT}" if _VARIANT != "cpu" else ""
+    out = (ROOT / "Resources" / "dist" /
+           f"LabSentinel-portable-{date.today():%Y%m%d}{suffix}.zip")
     deploy.log(f"[打包] {out} ...")
     for pyc_dir in (DIST / "app").rglob("__pycache__"):
         # 构建期冒烟 import app.main 会在清理后于 staging 重新生成 __pycache__（任务129）

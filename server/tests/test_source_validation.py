@@ -59,11 +59,12 @@ def test_folder_system_roots_rejected(tmp_path, monkeypatch):
     assert check_folder_root(str(good), str(base)) == str(good.resolve())
     with pytest.raises(SourceError):
         check_folder_root(str(good), str(base / "other"))
-    # 系统目录黑名单（模拟 Windows 目录名）
+    # R2-105：系统根判断基于真实系统路径，不再按"任意父目录名"误杀。
+    # 用户目录下叫 Windows/Web 的普通目录应当通过；真实系统根由
+    # test_folder_system_roots.py 单独验证。
     sysdir = base / "Windows" / "Web"
     sysdir.mkdir(parents=True)
-    with pytest.raises(SourceError):
-        check_folder_root(str(sysdir))
+    assert check_folder_root(str(sysdir)) == str(sysdir.resolve())
     import shutil
     shutil.rmtree(base, ignore_errors=True)
 

@@ -103,9 +103,12 @@ class SidecarAnalyzer(AnalyzerBackend):
             "LS_VIDEO_DIR": str(settings.video_dir),
             "LS_DATA_DIR": str(settings.data_dir),
             "LS_EVIDENCE_FPS": str(settings.evidence_fps),
+            # R2-109/N-16: 一次性令牌不再出现在命令行（本机其它用户可从进程
+            # 列表读到），改由环境变量传给子进程（同用户可见、其它用户不可见）。
+            "LS_ANALYZER_TOKEN": self._token,
         }
         self._proc = subprocess.Popen(
-            [str(self._exe), "--port", str(self._port), "--token", self._token],
+            [str(self._exe), "--port", str(self._port)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             env=child_env,

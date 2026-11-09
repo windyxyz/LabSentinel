@@ -77,28 +77,50 @@ def _manifest_sig_url(manifest_url: str) -> str:
     return manifest_url.rstrip("/") + ".minisig"
 
 
+def _parse_minisign_pub(text: str) -> tuple[bytes, bytes]:
+    """返回 (key_id, public_key_bytes)。minisign 公钥第二行 base64：
+    alg(2B) + key_id(8B) + pk(32B)；也兼容纯 64 hex（key_id 为空，跳过比对）。
+    """
+    import base64
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    if len(lines) >= 2 and not all(c in "0123456789abcdefABCDEF" for c in lines[-1]):
+        blob = base64.b64decode(lines[-1])
+        if len(blob) < 42 or blob[:2] not in (b"Ed", b"ED"):
+            raise UpdateCheckError("minisign 公钥格式无效（alg 不是 Ed/ED）")
+        return blob[2:10], blob[10:42]
+    raw = lines[-1]
+    if len(raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in raw):
+        return b"", bytes.fromhex(raw)  # 旧格式：无 key_id
+    raise UpdateCheckError("更新公钥格式无效（需要 minisign 公钥或 64 hex）")
+
+
 def _verify_signature(manifest_url: str, body: bytes, timeout: float) -> None:
-    """Ed25519 验签（公钥 app/keys/update.pub 存在才启用；格式 minisign 或原始 64 字节 hex）。
-    公钥缺失时跳过（渐进式：签名体系部署前清单照常工作，T-408 生成公钥后自动强制）。"""
+    """R2-107/N-13：按 minisign 格式验签（公钥存在才启用）。
+
+    .minisig 结构：第 1 行注释；第 2 行 base64 = alg(2B: Ed/ED) + key_id(8B)
+    + signature(64B)；第 3 行 trusted comment；第 4 行全局签名。
+    旧实现取**最后一行**（全局签名）当文件签名且直接 verify(body)，
+    放入合法公钥后仍会被拒。ED（minisign ≥0.10 默认）对 body 先做 BLAKE2b-512
+    预哈希再验签；Ed 直接验 body。公钥 key_id 必须匹配。
+    """
+    import base64
+    import hashlib
     from pathlib import Path
+
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
     pub = Path(__file__).resolve().parent / "keys" / "update.pub"
     if not pub.exists():
-        return
+        return  # 渐进式：签名体系部署前清单照常工作
     try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        from cryptography.exceptions import InvalidSignature
-        key_raw = pub.read_text("ascii").strip()
-        # 支持 minisign pub 第二行 base64（前 10 字节头 + 32 字节密钥）或纯 64 hex
-        if " " in key_raw or "\n" in key_raw:
-            import base64
-            b64 = key_raw.splitlines()[-1].strip()
-            blob = base64.b64decode(b64)
-            key_bytes = blob[-32:]
-        else:
-            key_bytes = bytes.fromhex(key_raw)
+        key_id, key_bytes = _parse_minisign_pub(pub.read_text("ascii"))
         key = Ed25519PublicKey.from_public_bytes(key_bytes)
+    except UpdateCheckError:
+        raise
     except Exception as e:  # noqa: BLE001
         raise UpdateCheckError(f"更新公钥无效: {type(e).__name__}") from e
+
     sig_url = _manifest_sig_url(manifest_url)
     parts = urlparse(sig_url)
     base = f"{parts.scheme}://{parts.netloc}"
@@ -108,12 +130,26 @@ def _verify_signature(manifest_url: str, body: bytes, timeout: float) -> None:
             r = client.get(path)
         if r.status_code != 200:
             raise UpdateCheckError("更新清单签名缺失")
-        sig_line = r.text.strip().splitlines()[-1]
-        import base64
-        sig = base64.b64decode(sig_line)
-        key.verify(sig, body)
+        lines = r.text.strip().splitlines()
+        if len(lines) < 2:
+            raise UpdateCheckError("minisign 签名文件缺第 2 行签名")
+        blob = base64.b64decode(lines[1].strip())
+        if len(blob) < 74:
+            raise UpdateCheckError("minisign 签名长度不足（需要 alg+key_id+sig）")
+        alg, sig_key_id, sig = blob[:2], blob[2:10], blob[10:74]
+        if alg not in (b"Ed", b"ED"):
+            raise UpdateCheckError("minisign 签名算法不是 Ed/ED")
+        if key_id and key_id != sig_key_id:
+            raise UpdateCheckError("minisign 签名公钥 key_id 不匹配")
+        msg = (hashlib.blake2b(body, digest_size=64).digest()
+               if alg == b"ED" else body)
+        key.verify(sig, msg)
+    except UpdateCheckError:
+        raise
     except InvalidSignature as e:
         raise UpdateCheckError("更新清单签名校验失败") from e
+    except (ValueError, TypeError) as e:
+        raise UpdateCheckError(f"minisign 签名解析失败: {type(e).__name__}") from e
     except httpx.HTTPError as e:
         raise UpdateCheckError(f"更新签名获取失败：{type(e).__name__}") from e
 
