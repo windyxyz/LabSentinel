@@ -24,6 +24,10 @@ def client(tmp_path, monkeypatch):
 
 
 def _audit_rows(client, token=None):
+    # R2-503：审计写入改为队列 + 单写线程后，测试需等队列排空再查询。
+    from app import main as _main
+    if getattr(_main, "_audit_thread", None) is not None:
+        _main._audit_queue.join()
     headers = {"X-Admin-Token": "tok87"} if token else {}
     r = client.get("/api/audit", params={"limit": 200}, headers=headers)
     return r.json()["items"]

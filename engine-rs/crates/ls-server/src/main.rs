@@ -507,7 +507,10 @@ async fn main() {
         }
         // R2-307: print the route inventory JSON and exit (coverage script).
         if a == "--dump-routes" {
-            println!("{}", serde_json::to_string_pretty(&dump_routes()).expect("json"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&dump_routes()).expect("json")
+            );
             std::process::exit(0);
         }
     }
