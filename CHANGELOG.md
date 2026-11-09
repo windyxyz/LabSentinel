@@ -6,14 +6,22 @@
 
 ## [Unreleased]
 
-### Rust 控制面（R2-309 批次 1，2026-11-09）
-- **ls-server 路由 17→61/106（57.5%，scripts/rust_route_coverage.py 实测）**：
-  cameras 扩展（DELETE/group/analyzer/start/webrtc/camera-groups/bulk/usb-devices）、
-  zones 与 rules CRUD、rule-templates、events 全套（bulk-status/timeline/快照/视频）、
-  stats 四件套（daily/weekly/hourly/quality）+ metrics + CSV 导出、
+### Rust 控制面（R2-309 批次 1+2，2026-11-09）
+- **ls-server 路由 17→76/106（71.7%，scripts/rust_route_coverage.py 实测）**：
+  批次 1（61 条）：cameras 扩展（DELETE/group/analyzer/start/webrtc/camera-groups/bulk/
+  usb-devices）、zones 与 rules CRUD、rule-templates、events 全套（bulk-status/timeline/
+  快照/视频）、stats 四件套（daily/weekly/hourly/quality）+ metrics + CSV 导出、
   配对与设备令牌（T-620：sha256 存库、Bearer 头、读保护下可读、touch 60s 节流、
   5 次失败作废全部配对码）、审计查询、投递/静默/日历、/api/v1/meta。
+  批次 2（+15 条）：copy-config（按区域名映射+去重，Python 任务80 同语义）、
+  config/export（RTSP 凭证脱敏）、config/validate、media/sign（HMAC-SHA256 短期签名）、
+  model/status、mqtt/genai/plugins/update 状态端点（rust 独立模式如实标注能力边界）、
+  alerts/status（投递汇总）、alert-template、folder-images 列表与汇总、logs、ppe/status。
   鉴权中间件对齐 Python（R2-103/R2-108 口径：Bearer 等价、claim 公开、读保护豁免 health）。
+  **余量 30 条**：face 5 条（需 CompreFace）、discovery 2 条（网络探测）、
+  evidence.zip/monthly.pdf（打包/PDF）、alert-test（真实外发）、ppe/download（下载+许可）、
+  folders/{cid}/scan（需推理管线）、alerts/config 读写（enc:v1 加密语义）等——
+  均依赖外部服务或跨语言密钥，随批次 3 处理。
 - ls-store 扩展对应方法 + 修复 `update_delivery` 误用 `error` 列（Python 权威列为
   `last_error`，测试自建 schema 同步更正）。
 - N-34/R2-505：ls-dispatch 退避可注入（`deliver_with_backoff`），重试语义集成测试

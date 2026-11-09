@@ -1226,6 +1226,7 @@ version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
  "getrandom 0.2.17",
+ "hmac",
  "http-body-util",
  "ls-core",
  "ls-dispatch",

@@ -997,6 +997,161 @@ impl Store {
         }
         Ok(out)
     }
+
+    // ---- 图片文件夹识别记录（任务121，R2-309 批次 2；行结构见模块级 FolderImageRow） ----
+
+    pub fn folder_images(
+        &self,
+        f: &FolderImageFilter<'_>,
+    ) -> rusqlite::Result<Vec<FolderImageRow>> {
+        let (camera_id, key, violation) = (f.camera_id, f.key, f.violation);
+        let (start_ts, end_ts) = (f.start_ts, f.end_ts);
+        let error_only = f.error_only;
+        let (limit, offset) = (f.limit, f.offset);
+        let mut sql = String::from(
+            "SELECT id,camera_id,path,name,ts,processed_ts,width,height,persons,in_zone, \
+             ppe_no,ppe_wearing,COALESCE(key,0),COALESCE(violation,0),event_id,snapshot,error \
+             FROM folder_images WHERE 1=1",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(v) = camera_id {
+            sql.push_str(" AND camera_id=?");
+            args.push(Box::new(v));
+        }
+        if let Some(v) = key {
+            sql.push_str(" AND COALESCE(key,0)=?");
+            args.push(Box::new(v as i64));
+        }
+        if let Some(v) = violation {
+            sql.push_str(" AND COALESCE(violation,0)=?");
+            args.push(Box::new(v as i64));
+        }
+        if let Some(v) = start_ts {
+            sql.push_str(" AND ts>=?");
+            args.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = end_ts {
+            sql.push_str(" AND ts<=?");
+            args.push(Box::new(v.to_string()));
+        }
+        if error_only {
+            sql.push_str(" AND error IS NOT NULL");
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ? OFFSET ?");
+        args.push(Box::new(limit));
+        args.push(Box::new(offset));
+        let vals: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(vals.as_slice(), map_folder_image)?;
+        rows.collect()
+    }
+
+    pub fn count_folder_images(
+        &self,
+        camera_id: Option<i64>,
+        key: Option<bool>,
+        violation: Option<bool>,
+        start_ts: Option<&str>,
+        end_ts: Option<&str>,
+        error_only: bool,
+    ) -> rusqlite::Result<i64> {
+        let mut sql = String::from("SELECT COUNT(*) FROM folder_images WHERE 1=1");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(v) = camera_id {
+            sql.push_str(" AND camera_id=?");
+            args.push(Box::new(v));
+        }
+        if let Some(v) = key {
+            sql.push_str(" AND COALESCE(key,0)=?");
+            args.push(Box::new(v as i64));
+        }
+        if let Some(v) = violation {
+            sql.push_str(" AND COALESCE(violation,0)=?");
+            args.push(Box::new(v as i64));
+        }
+        if let Some(v) = start_ts {
+            sql.push_str(" AND ts>=?");
+            args.push(Box::new(v.to_string()));
+        }
+        if let Some(v) = end_ts {
+            sql.push_str(" AND ts<=?");
+            args.push(Box::new(v.to_string()));
+        }
+        if error_only {
+            sql.push_str(" AND error IS NOT NULL");
+        }
+        let vals: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        self.conn.query_row(&sql, vals.as_slice(), |r| r.get(0))
+    }
+
+    /// 按摄像头聚合近 N 天（与 Python folder_image_summary 同 SQL 口径）。
+    /// 返回 (camera_id, total, key_n, violation_n, persons_sum, in_zone_sum,
+    /// error_n, last_image_ts, last_processed_ts)
+    pub fn folder_image_summary(
+        &self,
+        days: i64,
+        camera_id: Option<i64>,
+    ) -> rusqlite::Result<Vec<FolderImageSummary>> {
+        let cutoff = iso_days_ago(days) + "T00:00:00";
+        let mut stmt = self.conn.prepare(
+            "SELECT camera_id, COUNT(*), COALESCE(SUM(key),0), COALESCE(SUM(violation),0), \
+             COALESCE(SUM(persons),0), COALESCE(SUM(in_zone),0), \
+             COALESCE(SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END),0), \
+             MAX(ts), MAX(processed_ts) FROM folder_images \
+             WHERE ts >= ? AND (? IS NULL OR camera_id=?) GROUP BY camera_id",
+        )?;
+        let rows = stmt.query_map(params![cutoff, camera_id, camera_id], |r| {
+            Ok(FolderImageSummary {
+                camera_id: r.get(0)?,
+                total: r.get(1)?,
+                key_n: r.get(2)?,
+                violation_n: r.get(3)?,
+                persons_sum: r.get(4)?,
+                in_zone_sum: r.get(5)?,
+                error_n: r.get(6)?,
+                last_image_ts: r.get(7)?,
+                last_processed_ts: r.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// app_settings 读（R2-309：ppe 状态等只读消费；不做解密）
+    pub fn setting_get(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key=?",
+                params![key],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+    }
+}
+
+fn map_folder_image(r: &Row<'_>) -> rusqlite::Result<FolderImageRow> {
+    Ok(FolderImageRow {
+        id: r.get(0)?,
+        camera_id: r.get(1)?,
+        path: r.get(2)?,
+        name: r.get(3)?,
+        ts: r.get(4)?,
+        processed_ts: r.get(5)?,
+        width: r.get(6)?,
+        height: r.get(7)?,
+        persons: r.get(8)?,
+        in_zone: r.get(9)?,
+        ppe_no: r.get(10)?,
+        ppe_wearing: r.get(11)?,
+        key: r.get::<_, i64>(12)? != 0,
+        violation: r.get::<_, i64>(13)? != 0,
+        event_id: r.get(14)?,
+        snapshot: r.get(15)?,
+        error: r.get(16)?,
+    })
 }
 
 /// 全量规则行：(id, camera_id, zone_id, behavior, level, cooldown_s,
@@ -1016,6 +1171,55 @@ pub type RuleFullRow = (
 
 /// 时间线一天：(date, [(hour, total, l3), …24])
 pub type TimelineDay = (String, Vec<(i64, i64, i64)>);
+
+/// folder_images 行（与 Python folder_row_out 同字段口径）
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderImageRow {
+    pub id: i64,
+    pub camera_id: i64,
+    pub path: String,
+    pub name: Option<String>,
+    pub ts: String,
+    pub processed_ts: String,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub persons: i64,
+    pub in_zone: i64,
+    pub ppe_no: i64,
+    pub ppe_wearing: i64,
+    pub key: bool,
+    pub violation: bool,
+    pub event_id: Option<i64>,
+    pub snapshot: Option<String>,
+    pub error: Option<String>,
+}
+
+/// folder_images 列表过滤（R2-309 批次 2：与 Python GET /api/folder-images 同参）
+pub struct FolderImageFilter<'a> {
+    pub camera_id: Option<i64>,
+    pub key: Option<bool>,
+    pub violation: Option<bool>,
+    pub start_ts: Option<&'a str>,
+    pub end_ts: Option<&'a str>,
+    pub error_only: bool,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// 图片识别汇总行（Python folder_image_summary 同字段：total/key/violation/
+/// persons/in_zone/error + 最近时间）
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderImageSummary {
+    pub camera_id: i64,
+    pub total: i64,
+    pub key_n: i64,
+    pub violation_n: i64,
+    pub persons_sum: i64,
+    pub in_zone_sum: i64,
+    pub error_n: i64,
+    pub last_image_ts: Option<String>,
+    pub last_processed_ts: Option<String>,
+}
 
 /// ISO 日期（本地时间近似：UTC 即可，控制面统计与 Python 同基准即可对齐）
 fn iso_days_ago(days: i64) -> String {

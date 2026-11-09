@@ -133,6 +133,22 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/metrics"),
     ("GET", "/api/diagnostics/summary"),
     ("GET", "/api/v1/meta"),
+    // ---- R2-309 批次 2 ----
+    ("POST", "/api/cameras/:cid/copy-config"),
+    ("GET", "/api/config/export"),
+    ("GET", "/api/config/validate"),
+    ("GET", "/api/media/sign"),
+    ("GET", "/api/model/status"),
+    ("GET", "/api/mqtt/status"),
+    ("GET", "/api/genai/status"),
+    ("GET", "/api/plugins"),
+    ("GET", "/api/update/check"),
+    ("GET", "/api/alerts/status"),
+    ("GET", "/api/alert-template"),
+    ("GET", "/api/folder-images"),
+    ("GET", "/api/folder-images/summary"),
+    ("GET", "/api/logs"),
+    ("GET", "/api/models/ppe/status"),
 ];
 
 pub type Shared = Arc<AppState>;
@@ -195,6 +211,22 @@ pub fn build_router(state: Shared) -> Router {
         .route("/metrics", get(metrics))
         .route("/diagnostics/summary", get(diagnostics_summary))
         .route("/v1/meta", get(api_v1_meta))
+        // ---- R2-309 批次 2 ----
+        .route("/cameras/:cid/copy-config", post(copy_camera_config))
+        .route("/config/export", get(config_export))
+        .route("/config/validate", get(config_validate))
+        .route("/media/sign", get(sign_media))
+        .route("/model/status", get(model_status))
+        .route("/mqtt/status", get(mqtt_status))
+        .route("/genai/status", get(genai_status))
+        .route("/plugins", get(plugins_list))
+        .route("/update/check", get(update_check_status))
+        .route("/alerts/status", get(alerts_status))
+        .route("/alert-template", get(alert_template_get))
+        .route("/folder-images", get(folder_images_list))
+        .route("/folder-images/summary", get(folder_images_summary))
+        .route("/logs", get(logs_tail))
+        .route("/models/ppe/status", get(ppe_status))
         .with_state(state.clone());
     let ws = Router::new()
         .route("/ws/events", get(ws_events))
@@ -1877,6 +1909,533 @@ async fn api_v1_meta() -> Json<Value> {
         "statuses": {"new": "未处置", "acked": "已确认",
                      "false_positive": "误报", "ignored": "忽略"}
     }))
+}
+
+// ==== R2-309 批次 2：配置导出/签名/状态端点/图片识别记录（契约 1:1 对齐 Python） ====
+
+/// Python `_RTSP_CRED` 同款：rtsp://user:pass@ → rtsp://user:***:***@
+fn mask_rtsp_creds(source: &str) -> String {
+    // 简单可靠的做法：找到 "://" 后第一个 @，把其中的 "pass:" 部分掩掉
+    let Some(idx) = source.find("://") else {
+        return source.to_string();
+    };
+    let (scheme, rest) = source.split_at(idx + 3);
+    match rest.find('@') {
+        Some(at) if !rest[..at].is_empty() => {
+            let cred = &rest[..at];
+            let masked = match cred.split_once(':') {
+                Some((user, _)) => format!("{user}:***:***@"),
+                None => "***:***@".to_string(),
+            };
+            format!("{scheme}{masked}{}", &rest[at + 1..])
+        }
+        _ => source.to_string(),
+    }
+}
+
+fn file_info(p: &std::path::Path) -> Value {
+    match std::fs::metadata(p) {
+        Ok(m) => json!({"path": p.to_string_lossy(), "exists": true,
+                        "size_bytes": m.len(),
+                        "mtime": iso_now()}),
+        Err(_) => json!({"path": p.to_string_lossy(), "exists": false,
+                         "size_bytes": null, "mtime": null}),
+    }
+}
+
+async fn copy_camera_config(
+    State(st): State<Shared>,
+    AxPath(cid): AxPath<i64>,
+    Json(body): Json<Value>,
+) -> Response {
+    let targets: Vec<i64> = body
+        .get("target_ids")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            let mut ids: Vec<i64> = a.iter().filter_map(|x| x.as_i64()).collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        })
+        .unwrap_or_default();
+    let copy_zones = body
+        .get("copy_zones")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let copy_rules = body
+        .get("copy_rules")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let suffix = body
+        .get("name_suffix")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-copy")
+        .to_string();
+    if targets.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail": "target_ids 必填"})),
+        )
+            .into_response();
+    }
+    if targets.contains(&cid) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail": "target_ids 不能包含源摄像头自身"})),
+        )
+            .into_response();
+    }
+    with_store(&st, |s| {
+        if s.camera(cid)?.is_none() {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({"detail": "camera not found"})),
+            )
+                .into_response());
+        }
+        for t in &targets {
+            if s.camera(*t)?.is_none() {
+                return Ok((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"detail": format!("目标摄像头不存在: #{t}")})),
+                )
+                    .into_response());
+            }
+        }
+        // Python 语义：先全量校验再写库；规则 zone_id 按区域名映射到目标
+        let src_zones = s.zones_all()?;
+        let src_zones: Vec<_> = src_zones.into_iter().filter(|z| z.1 == cid).collect();
+        let src_rules = s.rules_all()?;
+        let src_rules: Vec<_> = src_rules.into_iter().filter(|r| r.1 == cid).collect();
+        let mut zones_created = 0i64;
+        let mut zones_skipped = 0i64;
+        let mut rules_created = 0i64;
+        let mut rules_skipped = 0i64;
+        let mut warnings: Vec<String> = Vec::new();
+        for tid in &targets {
+            let tgt_zones = s.zones_all()?;
+            let mut zone_map: std::collections::HashMap<String, i64> = tgt_zones
+                .iter()
+                .filter(|z| z.1 == *tid)
+                .map(|z| (z.2.clone(), z.0))
+                .collect();
+            if copy_zones {
+                for z in &src_zones {
+                    let new_name = format!("{}{}", z.2, suffix);
+                    if let Some(existing) = zone_map.get(&new_name) {
+                        zone_map.insert(z.2.clone(), *existing);
+                        zones_skipped += 1;
+                        continue;
+                    }
+                    let zid = s.add_zone(*tid, &new_name, &z.3)?;
+                    zone_map.insert(z.2.clone(), zid);
+                    zone_map.insert(new_name, zid);
+                    zones_created += 1;
+                }
+            } else {
+                zones_skipped += src_zones.len() as i64;
+            }
+            if copy_rules {
+                for r in &src_rules {
+                    let zid = r.2.and_then(|zid| {
+                        let src_name = src_zones.iter().find(|z| z.0 == zid).map(|z| z.2.clone());
+                        src_name.and_then(|n| zone_map.get(&n).copied())
+                    });
+                    if r.2.is_some() && zid.is_none() {
+                        rules_skipped += 1;
+                        warnings.push(format!(
+                            "目标 #{tid}：规则 {} 的源区域在目标上不存在（未复制区域或同名缺失）——已跳过",
+                            r.3
+                        ));
+                        continue;
+                    }
+                    // 去重：同 behavior+zone+时段
+                    let dup = s.rules_all()?.iter().any(|x| {
+                        x.1 == *tid && x.2 == zid && x.3 == r.3 && x.6 == r.6 && x.7 == r.7
+                    });
+                    if dup {
+                        rules_skipped += 1;
+                        continue;
+                    }
+                    s.add_rule(
+                        *tid,
+                        zid,
+                        &r.3,
+                        r.4,
+                        r.5,
+                        r.6.as_deref(),
+                        r.7.as_deref(),
+                        r.8,
+                        r.9 != 0,
+                    )?;
+                    rules_created += 1;
+                }
+            } else {
+                rules_skipped += src_rules.len() as i64;
+            }
+        }
+        Ok(Json(json!({"ok": true, "zones_created": zones_created,
+                       "zones_skipped": zones_skipped, "rules_created": rules_created,
+                       "rules_skipped": rules_skipped, "warnings": warnings}))
+        .into_response())
+    })
+}
+
+async fn config_export(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let with_secrets = q.get("with_secrets").map(|v| v == "1").unwrap_or(false);
+    with_store(&st, |s| {
+        let cams = s.cameras()?;
+        let cname: std::collections::HashMap<i64, String> =
+            cams.iter().map(|c| (c.id, c.name.clone())).collect();
+        let zones = s.zones_all()?;
+        let rules = s.rules_all()?;
+        let cameras: Vec<Value> = cams
+            .iter()
+            .map(|c| {
+                let src = if with_secrets {
+                    c.source.clone()
+                } else {
+                    mask_rtsp_creds(&c.source)
+                };
+                json!({"name": c.name, "source": src, "type": c.type_,
+                       "group_name": c.group_name})
+            })
+            .collect();
+        let zones_out: Vec<Value> = zones
+            .iter()
+            .map(|z| {
+                let polygon =
+                    serde_json::from_str::<Value>(&z.3).unwrap_or(Value::String(z.3.clone()));
+                json!({"camera_name": cname.get(&z.1).cloned().unwrap_or(format!("#{}", z.1)),
+                       "name": z.2, "polygon": polygon})
+            })
+            .collect();
+        let rules_out: Vec<Value> = rules
+            .iter()
+            .map(|r| {
+                json!({"camera_name": cname.get(&r.1).cloned().unwrap_or(format!("#{}", r.1)),
+                       "zone_id": r.2, "behavior": r.3, "level": r.4, "cooldown_s": r.5,
+                       "time_start": r.6, "time_end": r.7, "threshold": r.8,
+                       "enabled": r.9 != 0})
+            })
+            .collect();
+        Ok(Json(json!({"version": st.version, "cameras": cameras,
+                       "zones": zones_out, "rules": rules_out}))
+        .into_response())
+    })
+}
+
+async fn config_validate(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        let cams = s.cameras()?;
+        let mut issues: Vec<Value> = Vec::new();
+        for c in &cams {
+            if c.source.is_empty() {
+                issues.push(json!({"kind": "camera", "id": c.id, "name": c.name,
+                                    "message": "source 为空"}));
+            }
+        }
+        // 无区域的摄像头提示（配置完整性，非错误）
+        let zones = s.zones_all()?;
+        let with_zones: std::collections::HashSet<i64> = zones.iter().map(|z| z.1).collect();
+        for c in &cams {
+            if !with_zones.contains(&c.id) {
+                issues.push(json!({"kind": "camera", "id": c.id, "name": c.name,
+                                    "message": "尚无区域（全画幅规则仍可用）"}));
+            }
+        }
+        Ok(Json(json!({"ok": true, "cameras": cams.len(),
+                       "zones": zones.len(), "issues": issues})))
+    })
+}
+
+/// T-108 对齐：HMAC(path|exp) 短期签名；密钥 = admin_token（未设时进程内随机）。
+fn media_secret(st: &Shared) -> String {
+    use std::sync::OnceLock;
+    static FALLBACK: OnceLock<String> = OnceLock::new();
+    if !st.admin_token.is_empty() {
+        st.admin_token.clone()
+    } else {
+        FALLBACK.get_or_init(random_token).clone()
+    }
+}
+
+async fn sign_media(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let path = q.get("path").cloned().unwrap_or_default();
+    if !path.starts_with("/api/") || path.contains('?') || path.contains('#') || path.contains(' ')
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail": "path 只能是 /api/ 媒体路径（查询串自行拼接在签名后）"})),
+        )
+            .into_response();
+    }
+    let ttl = 300i64;
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+        + ttl;
+    let msg = format!("{path}|{exp}");
+    use hmac::Mac; // trait 方法（update/finalize）需在作用域
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+    let mut mac = HmacSha256::new_from_slice(media_secret(&st).as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(msg.as_bytes());
+    let sig: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Json(json!({"exp": exp.to_string(), "sig": format!("sha256={sig}")})).into_response()
+}
+
+async fn model_status() -> Response {
+    // rust 控制面无 Python 引擎；文件状态与配置如实上报，引擎字段如实标注。
+    let fp32 = std::env::var("LS_MODEL_FP32").unwrap_or_default();
+    let ppe = std::env::var("LS_PPE_MODEL").unwrap_or_default();
+    let active = if ppe.is_empty() { &fp32 } else { &ppe };
+    Json(json!({
+        "engine": {"loaded": false, "backend": null,
+                   "note": "rust 控制面独立模式不加载 ONNX（数据面在 Python 服务/sidecar）"},
+        "models": {"ppe": file_info(std::path::Path::new(active)),
+                   "fp32": file_info(std::path::Path::new(&fp32))},
+        "backend_order": std::env::var("LS_BACKEND_ORDER").unwrap_or_default(),
+    }))
+    .into_response()
+}
+
+async fn mqtt_status() -> Response {
+    // rust 侧未接 MQTT 桥（任务125 在 Python 侧）；未启用形状与 Python 一致
+    Json(json!({"enabled": false, "connected": false,
+                "note": "MQTT 事件桥在 Python 服务实现；rust 控制面独立模式不启用"}))
+    .into_response()
+}
+
+async fn genai_status() -> Response {
+    Json(json!({"provider": "none", "configured": false,
+                "note": "VLM 复核在 Python 服务实现；rust 控制面独立模式不启用"}))
+    .into_response()
+}
+
+async fn plugins_list() -> Response {
+    Json(json!({"plugins": [],
+                "note": "插件管理器在 Python 服务实现；rust 控制面独立模式无插件"}))
+    .into_response()
+}
+
+async fn update_check_status() -> Response {
+    // LS_UPDATE_MANIFEST_URL 未配置时 Python 返回 enabled=false（只查静态清单）
+    let manifest = std::env::var("LS_UPDATE_MANIFEST_URL").unwrap_or_default();
+    Json(
+        json!({"enabled": !manifest.is_empty(), "current": st_version(),
+        "latest": null, "update_available": false,
+        "error": null,
+        "note": if manifest.is_empty() {
+            "未配置 LS_UPDATE_MANIFEST_URL，更新检查关闭"
+        } else {
+            "rust 控制面仅上报配置状态；清单拉取在 Python 服务"
+        }}),
+    )
+    .into_response()
+}
+
+fn st_version() -> String {
+    std::env::var("LS_VERSION").unwrap_or_else(|_| "0.2.0".into())
+}
+
+async fn alerts_status(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        let counts = s.deliveries(None, 10_000)?;
+        let mut summary = std::collections::BTreeMap::new();
+        for d in &counts {
+            *summary.entry(d.status.clone()).or_insert(0) += 1;
+        }
+        Ok(Json(json!({
+            "configured": {"wecom": false, "dingtalk": false, "feishu": false,
+                            "serverchan": false, "pushplus": false, "qmsg": false,
+                            "email": false, "webhook": false},
+            "note": "渠道配置在 Python 服务（app_settings/env + 密钥加密）；rust 控制面只汇总投递",
+            "deliveries_summary": summary,
+            "deliveries_total": counts.len(),
+        }))
+        .into_response())
+    })
+}
+
+async fn alert_template_get() -> Json<Value> {
+    // 与 Python settings 默认模板 + placeholders 说明一致（任务85）
+    Json(json!({
+        "title": "LabSentinel 级别{level}告警",
+        "text": "{icon} L{level} {type_text} · {ts}\n摄像头 #{camera_id}{track_part}\n{detail}",
+        "placeholders": {
+            "icon": "级别图标（ℹ️/⚠️/🔴）", "level": "级别数字 1-3",
+            "type": "事件类型标识", "type_text": "事件类型中文名",
+            "ts": "事件时间", "camera_id": "摄像头 ID",
+            "track_id": "跟踪 ID（occupancy 为 0）", "detail": "事件详情",
+            "track_part": "「 · track N」或空串（occupancy 时为空）",
+        },
+    }))
+}
+
+async fn folder_images_list(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let parse_i64 = |k: &str| q.get(k).and_then(|v| v.parse().ok());
+    let camera_id = parse_i64("camera_id");
+    let key = parse_i64("key").map(|v| v != 0);
+    let violation = parse_i64("violation").map(|v| v != 0);
+    let start_ts = q.get("start_ts").map(|s| s.as_str());
+    let end_ts = q.get("end_ts").map(|s| s.as_str());
+    let error_only = q.get("error_only").map(|v| v == "1").unwrap_or(false);
+    let limit = parse_i64("limit").unwrap_or(60).clamp(1, 500);
+    let offset = parse_i64("offset").unwrap_or(0).max(0);
+    with_store(&st, |s| {
+        let f = ls_store::FolderImageFilter {
+            camera_id,
+            key,
+            violation,
+            start_ts,
+            end_ts,
+            error_only,
+            limit,
+            offset,
+        };
+        let rows = s.folder_images(&f)?;
+        let total =
+            s.count_folder_images(camera_id, key, violation, start_ts, end_ts, error_only)?;
+        let names: std::collections::HashMap<i64, String> =
+            s.cameras()?.into_iter().map(|c| (c.id, c.name)).collect();
+        Ok(Json(json!({"items": rows.iter().map(|r| json!({
+                "id": r.id, "camera_id": r.camera_id, "path": r.path, "name": r.name,
+                "ts": r.ts, "processed_ts": r.processed_ts, "width": r.width,
+                "height": r.height, "persons": r.persons, "in_zone": r.in_zone,
+                "ppe_no": r.ppe_no, "ppe_wearing": r.ppe_wearing, "key": r.key,
+                "violation": r.violation, "event_id": r.event_id,
+                "snapshot": r.snapshot, "error": r.error}))
+            .collect::<Vec<_>>(), "total": total, "limit": limit, "offset": offset,
+            "camera_names": names}))
+        .into_response())
+    })
+}
+
+async fn folder_images_summary(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let days: i64 = q
+        .get("days")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7)
+        .clamp(1, 3650);
+    let camera_id: Option<i64> = q.get("camera_id").and_then(|v| v.parse().ok());
+    with_store(&st, |s| {
+        let cams = s.cameras()?;
+        let rows = s.folder_image_summary(days, camera_id)?;
+        let mut items: Vec<Value> = Vec::new();
+        let mut totals = std::collections::BTreeMap::<String, i64>::new();
+        for k in ["total", "key", "violation", "persons", "errors"] {
+            totals.insert(k.into(), 0);
+        }
+        let mut seen: std::collections::HashSet<i64> = Default::default();
+        for r in &rows {
+            let cid = r.camera_id;
+            let cam = cams.iter().find(|c| c.id == cid);
+            items.push(
+                json!({"camera_id": cid, "camera_name": cam.map(|c| &c.name),
+                "status": cam.map(|c| &c.status), "total": r.total, "key": r.key_n,
+                "violation": r.violation_n, "persons": r.persons_sum,
+                "in_zone": r.in_zone_sum, "errors": r.error_n,
+                "last_image_ts": r.last_image_ts, "last_processed_ts": r.last_processed_ts}),
+            );
+            seen.insert(cid);
+            for (k, val) in [
+                ("total", r.total),
+                ("key", r.key_n),
+                ("violation", r.violation_n),
+                ("persons", r.persons_sum),
+                ("errors", r.error_n),
+            ] {
+                *totals.entry(k.into()).or_insert(0) += val;
+            }
+        }
+        // 尚无识别记录的 folder 摄像头也列出（UI 显示"等待图片"）
+        for c in &cams {
+            if c.type_ != "folder" || seen.contains(&c.id) {
+                continue;
+            }
+            if camera_id.map(|x| x != c.id).unwrap_or(false) {
+                continue;
+            }
+            items.push(json!({"camera_id": c.id, "camera_name": c.name,
+                "status": c.status, "total": 0, "key": 0, "violation": 0,
+                "persons": 0, "in_zone": 0, "errors": 0,
+                "last_image_ts": null, "last_processed_ts": null}));
+        }
+        items.sort_by_key(|x| x["camera_id"].as_i64().unwrap_or(0));
+        Ok(Json(
+            json!({"days": days, "items": items, "totals": totals}),
+        ))
+    })
+}
+
+async fn logs_tail(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let limit: usize = q
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+        .clamp(1, 2000);
+    // rust 控制面的日志走 stdout；若有 Python 侧落盘日志则读取尾部
+    let log_path = std::path::Path::new(&st.data_dir).join("logs/server.log");
+    let lines: Vec<String> = match std::fs::read_to_string(&log_path) {
+        Ok(content) => content
+            .lines()
+            .rev()
+            .take(limit)
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    Json(json!({"lines": lines, "file": log_path.to_string_lossy(),
+                "note": if lines.is_empty() { "rust 控制面日志走 stdout（无落盘文件）" } else { "" }}))
+        .into_response()
+}
+
+async fn ppe_status(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        // ppe_model 优先级：env > app_settings（Q-08 按需下载写入）
+        let env_ppe = std::env::var("LS_PPE_MODEL").ok().filter(|v| !v.is_empty());
+        let db_ppe = s.setting_get("ppe_model").ok().flatten();
+        let model_path = env_ppe.or(db_ppe);
+        let installed = model_path
+            .as_ref()
+            .map(|p| std::path::Path::new(p).is_file())
+            .unwrap_or(false);
+        Ok(Json(json!({
+            "installed": installed,
+            "mode": if installed { "ppe" } else { "person_only" },
+            "active": installed,
+            "license_confirmed_required": !installed,
+            "license_notice": "实验服模型权重由 Roboflow 训练数据集派生，具体许可仍待确认（Q-08）。下载即表示你已阅读并接受该数据集的用途限制。",
+            "model_path": model_path,
+            "note": "rust 控制面只读状态；下载端点在 Python 服务（含 SHA256 校验）",
+        }))
+        .into_response())
+    })
 }
 
 async fn ws_events(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {

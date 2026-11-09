@@ -77,7 +77,7 @@
 | 任务 | 状态 | 说明 |
 |---|---|---|
 | R2-307 路由覆盖率统计进 CI | ✅ | `ls-server --dump-routes` + `scripts/rust_route_coverage.py`（路径参数归一化 {param}/:id）；rust.yml 覆盖率 artifact（先跟踪不门禁） |
-| R2-309 ls-server 补齐（按路由组分批） | 🟡 | **批次 1 完成（64e9f1f）：17→61/106 = 57.5%**——cameras/zones/rules/模板 CRUD、配对与设备令牌（Bearer/读保护/节流/防爆破）、审计、投递/静默/日历、stats 四件套+timeline、CSV 导出、metrics、v1/meta；ls-store 扩展 + 修复 update_delivery 列名；新集成测试 7 例。**余量 45 条**：face/plugins/genai/discovery/mqtt/update/alerts 配置读写/export/pdf/媒体签名/system-shutdown/model/ppe 下载（多依赖外部服务或文件系统，随批次 2+） |
+| R2-309 ls-server 补齐（按路由组分批） | 🟡 | **批次 1+2 完成（64e9f1f + 本批）：17→76/106 = 71.7%**。批次 2 新增：copy-config、config/export（脱敏）、config/validate、media/sign（HMAC）、model/mqtt/genai/plugins/update 状态（能力边界如实标注）、alerts/status、alert-template、folder-images 列表+汇总、logs、ppe/status。**余量 30 条**：face 5（需 CompreFace）、discovery 2（网络探测）、evidence.zip/monthly.pdf（打包/PDF 生成）、alert-test（真实外发）、ppe/download（网络下载）、folders/scan（需推理管线）、alerts/config 读写（enc:v1 跨语言加密）、config/import、plugins 控制、events 导出 zip——均需外部服务或跨语言密钥协作，随批次 3 |
 | R2-503 审计写入移出事件循环 | ✅ | Python：队列+单写线程；Rust：spawn_blocking await（异步等待不阻塞执行器） |
 | R2-504 第三方 Action 钉 SHA + Dependabot | ✅ | 7 个 Action 全部钉 commit SHA（API 实测当前 HEAD）；`.github/dependabot.yml`（pip/npm/cargo/actions 每周） |
 | N-34 重试语义测试稳定性 | ✅ | ls-dispatch `deliver_with_backoff`（退避注入 [0,0,0]）+ 断言前轮询计数收敛；集成测试 20s→2s |
