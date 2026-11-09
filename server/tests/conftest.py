@@ -6,10 +6,27 @@
 # 已自行 monkeypatch 同名字段的用例（test_retention_preview/test_health_errors/test_camera_status
 # 等）不受影响：其 monkeypatch 在本 fixture 之后生效，覆盖默认值。
 import os
+from pathlib import Path
 
 os.environ.setdefault("LS_LOG_FILE", "0")
+# R2-108: allow the TestClient "testserver" Host only under pytest (before app import).
+os.environ.setdefault("LS_TESTING", "1")
 
 import pytest  # noqa: E402
+
+REPO = Path(__file__).resolve().parents[2]
+# R2-506/N-29: no developer-machine absolute paths. Cargo's default target
+# directory (engine-rs/target, gitignored) is the fallback; CI can override it.
+RS_TARGET = Path(os.environ.get("CARGO_TARGET_DIR", str(REPO / "engine-rs" / "target")))
+
+
+def rs_exe(name: str, env_var: str) -> Path:
+    """Resolve a Rust binary for cross-language tests (exe missing -> caller skips)."""
+    override = os.environ.get(env_var)
+    if override:
+        return Path(override)
+    suffix = ".exe" if os.name == "nt" else ""
+    return RS_TARGET / "debug" / f"{name}{suffix}"
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +38,10 @@ def isolate_settings_paths(tmp_path, monkeypatch):
     for sub in ("snapshots", "videos", "annotation_pool"):
         (data / sub).mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(settings, "db_path", data / "test.db")
+    # R2-102/R2-103: validate_settings() and _enforce_bind() may flip read
+    # protection in place; give every test a deterministic auth baseline.
+    monkeypatch.setattr(settings, "auth_read_protected", False)
+    monkeypatch.setattr(settings, "host", "127.0.0.1")
     monkeypatch.setattr(settings, "data_dir", data)
     monkeypatch.setattr(settings, "snapshot_dir", data / "snapshots")
     monkeypatch.setattr(settings, "video_dir", data / "videos")

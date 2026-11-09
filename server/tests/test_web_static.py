@@ -1,7 +1,6 @@
 """单元测试：任务43 单端口模式（web/dist 托管 + SPA 回退 + 路由优先级 + 缺 dist 提示）
 + 任务72 缓存头与选择性 gzip。
 运行: pytest tests/test_web_static.py -q"""
-import gzip
 import os
 import sys
 
@@ -119,10 +118,13 @@ def test_gzip_assets_and_json(dist):
         assert r.headers.get("content-encoding") == "gzip"
         assert r.headers.get("vary") == "Accept-Encoding"
         assert r.text == big  # httpx 自动解压后与原文一致
+        # R2-005/N-38: httpx already decompressed the body -- calling
+        # gzip.decompress() on r.content raises BadGzipFile. The old
+        # `or True` also made the assertion vacuous. Assert the header instead.
+        assert len(r.content) >= 1024
         rj = c.get("/api/system", headers={"Accept-Encoding": "gzip"})
         assert rj.status_code == 200  # JSON 可被压缩（不解也 200）
-        if rj.headers.get("content-encoding") == "gzip":
-            assert len(gzip.decompress(rj.content)) >= 1024 or True
+        assert rj.json()["version"]
 
 
 def test_gzip_skips_zip_and_range(dist):

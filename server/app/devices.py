@@ -15,9 +15,12 @@ import time
 from datetime import datetime
 
 _PAIR_TTL_S = 300
+_TOUCH_INTERVAL_S = 60  # R2-103: do not write SQLite on every read request
 _pair_lock = threading.Lock()
 #: code -> (expire_ts, created_by)
 _pending: dict[str, float] = {}
+#: device_id -> last touch_ts（进程内节流，重启后自然重置）
+_last_touch: dict[int, float] = {}
 
 
 def _hash(token: str) -> str:
@@ -47,14 +50,23 @@ def claim(store, code: str, device_name: str, platform: str = "") -> str | None:
 
 
 def verify(store, token: str) -> dict | None:
-    """设备令牌校验：返回设备行（未吊销）或 None；顺带刷新 last_seen。"""
+    """设备令牌校验：返回设备行（未吊销）或 None；顺带刷新 last_seen。
+
+    R2-103: _read_token_ok now calls this on every protected read, so throttle
+    touch_device writes to at most once per device per _TOUCH_INTERVAL_S.
+    """
     if not token:
         return None
     row = store.device_by_hash(_hash(token))
     if row is None or row.get("revoked"):
         return None
+    did, now = row["id"], time.time()
+    with _pair_lock:
+        if now - _last_touch.get(did, 0.0) < _TOUCH_INTERVAL_S:
+            return row
+        _last_touch[did] = now
     try:
-        store.touch_device(row["id"])
+        store.touch_device(did)
     except Exception:  # noqa: BLE001
         pass
     return row

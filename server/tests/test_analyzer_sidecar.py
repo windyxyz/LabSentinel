@@ -1,10 +1,9 @@
 """T-327 集成：Python SidecarAnalyzer ↔ Rust ls-analyzer.exe 端到端。
 
-exe 缺失（CI 干净检出）自动 skip；本机构建产物在 D:/tmp/ls-rs-target/debug/。
+exe 缺失（CI 干净检出）自动 skip；路径由 conftest.rs_exe() 统一解析（R2-506）。
 """
 import os
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -12,9 +11,10 @@ import pytest  # noqa: E402
 
 from app.analyzer import AnalyzerBackend  # noqa: E402
 from app.analyzer_sidecar import SidecarAnalyzer  # noqa: E402
+from conftest import rs_exe  # noqa: E402
 
-EXE = Path(os.environ.get("LS_ANALYZER_EXE", "D:/tmp/ls-rs-target/debug/ls-analyzer.exe"))
-pytestmark = pytest.mark.skipif(not EXE.exists(), reason="ls-analyzer.exe 未构建")
+EXE = rs_exe("ls-analyzer", "LS_ANALYZER_EXE")
+pytestmark = pytest.mark.skipif(not EXE.exists(), reason="ls-analyzer 未构建（或设 LS_ANALYZER_EXE）")
 
 
 @pytest.fixture()

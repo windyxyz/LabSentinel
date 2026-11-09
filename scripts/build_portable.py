@@ -26,6 +26,14 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
+# R2-004/N-09: CI has no .venv. A --python CLI arg lets the workflow pass
+# sys.executable; venv_python() keeps working unchanged for local builds.
+_PYTHON_OVERRIDE: Path | None = None
+# R2-303/R2-304: variant & rust packaging are filled in by later batches;
+# the CLI is declared now so release.yml can be written once.
+_VARIANT = "cpu"
+_WITH_RUST = False
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deploy  # 复用 http_download/_assert_public_host/log 与 GBK venv 标记读取
 
@@ -46,6 +54,10 @@ _PTH = "python312._pth"
 # 前不随包，改由设置页「按需下载」（许可确认 + assets.lock.json SHA256 校验）。
 # model.json 角色声明与 classes.txt 也随包（后者为模型契约，不含权重/数据）。
 MODELS = ["yolo11n.onnx", "model.json"]
+# R2-004/N-09: model source directory is overridable so CI can fetch the model
+# via scripts/fetch_assets.py into a scratch dir instead of relying on a
+# gitignored m0-spike/*.onnx in a clean checkout.
+_MODELS_DIR: Path | None = None
 
 
 def dir_mb(p: Path) -> float:
@@ -53,9 +65,14 @@ def dir_mb(p: Path) -> float:
 
 
 def venv_python() -> Path:
+    # R2-004/N-09: CI passes --python sys.executable (no .venv in a clean checkout).
+    if _PYTHON_OVERRIDE is not None:
+        if not _PYTHON_OVERRIDE.exists():
+            raise SystemExit(f"[失败] --python 指定的解释器不存在：{_PYTHON_OVERRIDE}")
+        return _PYTHON_OVERRIDE
     v = deploy._read_venv_mark() or (ROOT / ".venv" / "Scripts" / "python.exe")
     if not Path(v).exists():
-        raise SystemExit(f"[失败] 找不到构建用 venv python（{v}）；先跑 deploy.py install")
+        raise SystemExit(f"[失败] 找不到构建用 venv python（{v}）；先跑 deploy.py install 或传 --python")
     return Path(v)
 
 
@@ -119,9 +136,13 @@ def copy_assets() -> None:
     shutil.copytree(ROOT / "web" / "dist", DIST / "app" / "web", dirs_exist_ok=True)
     # 模型
     (DIST / "models").mkdir(parents=True, exist_ok=True)
+    models_dir = _MODELS_DIR or (ROOT / "m0-spike")
     for name in MODELS:
-        src = ROOT / "m0-spike" / name
-        assert src.exists(), f"缺模型文件 {src}"
+        # model.json is tracked in git (model contract, no weights); only the
+        # .onnx weight comes from --models-dir in CI.
+        src = (models_dir if name.endswith(".onnx") else ROOT / "m0-spike") / name
+        assert src.exists(), (f"缺模型文件 {src}；CI 请先运行 "
+                              "python scripts/fetch_assets.py --name yolo11n.onnx --out <models-dir>/yolo11n.onnx")
         shutil.copy2(src, DIST / "models" / name)
     # 演示视频：T-406/Q-07 起不再随包（Mixkit 素材仅个人使用，公开分发有版权风险）。
     # 首启无演示摄像头，引导用户添加自己的源；自拍 CC0 素材就绪后经 media/SOURCES.md 恢复。
@@ -250,10 +271,25 @@ def make_zip() -> Path:
 
 
 def main() -> int:
+    global _PYTHON_OVERRIDE, _VARIANT, _WITH_RUST
     ap = argparse.ArgumentParser(description="便携运行时构建器（任务44）")
     ap.add_argument("--zip", action="store_true", help="构建后打包 zip")
     ap.add_argument("--smoke-only", action="store_true", help="只重跑冒烟（已构建时）")
+    ap.add_argument("--python", type=Path, default=None,
+                    help="构建用 Python 解释器（CI 传 sys.executable；本机默认 .venv）")
+    ap.add_argument("--models-dir", type=Path, default=None,
+                    help="模型源目录（默认 <仓库>/m0-spike；CI 下载模型后指向该目录）")
+    ap.add_argument("--variant", choices=["cpu", "dml"], default="cpu",
+                    help="R2-303：推理变体（cpu=统一锁 / dml=DirectML 可选包）")
+    ap.add_argument("--with-rust", action="store_true",
+                    help="R2-304：把 ls-analyzer 打进 bin/（实验产物）")
     a = ap.parse_args()
+    _PYTHON_OVERRIDE = a.python
+    _VARIANT = a.variant
+    _WITH_RUST = a.with_rust
+    if a.models_dir is not None:
+        global _MODELS_DIR
+        _MODELS_DIR = a.models_dir
     deploy.log("[便携构建] 目标 " + str(DIST))
     DIST.mkdir(parents=True, exist_ok=True)
     if a.smoke_only:  # 2026-10-30 审阅：参数原先从未被使用（定义后死参）

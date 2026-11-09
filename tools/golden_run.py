@@ -53,7 +53,7 @@ def main() -> int:
         import subprocess
         exe = os.environ.get("LS_ANALYZER_EXE") or \
             shutil.which("ls-analyzer") or \
-            str(Path(os.environ.get("CARGO_TARGET_DIR", "D:/tmp/ls-rs-target")) /
+            str(Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "engine-rs" / "target"))) /
                 "debug" / ("ls-analyzer.exe" if os.name == "nt" else "ls-analyzer"))
         if not Path(exe).is_file():
             print(f"[golden] Rust 运行器不存在: {exe}")

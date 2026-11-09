@@ -4,6 +4,7 @@ Windows：usb_devices.py 现有 DirectShow（委托）；Linux：/dev/video* + v
 macOS：ffmpeg -f avfoundation -list_devices 解析。返回结构不变 [{index, name}]。
 """
 from . import is_linux, is_macos, is_windows
+from .process import run_text  # R2-006: locale-correct subprocess text decoding
 
 
 def list_cameras(refresh: bool = False) -> list[dict]:
@@ -23,7 +24,7 @@ def _list_v4l2() -> list[dict]:
     names: dict[str, str] = {}
     try:
         import subprocess
-        r = subprocess.run(["v4l2-ctl", "--list-devices"], capture_output=True, text=True, timeout=5)
+        r = run_text(["v4l2-ctl", "--list-devices"], capture_output=True, timeout=5)
         cur = None
         for line in (r.stdout or "").splitlines():
             if line and not line.startswith(("\t", " ")) and line.rstrip().endswith(":"):
@@ -48,8 +49,8 @@ def _list_avfoundation() -> list[dict]:
         import subprocess
         from .binaries import find_binary
         ff = find_binary("ffmpeg") or "ffmpeg"
-        r = subprocess.run([ff, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-                           capture_output=True, text=True, timeout=10)
+        r = run_text([ff, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                     capture_output=True, timeout=10)
         out, in_video = [], False
         for line in (r.stderr or "").splitlines():
             if "AVFoundation video devices" in line:

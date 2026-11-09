@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import gzip
 import logging
+import os
 import re
 import threading
 import time
@@ -45,17 +46,25 @@ from .store import Store
 
 setup_file_logging()  # LS_LOG_FILE=0 关闭；失败静默（console 照常）
 
-# 任务95：启动配置校验（默认只告警；LS_STRICT_CONFIG=1 时 FAIL 拒绝启动）
+# 任务95：启动配置校验（默认 WARN；LS_STRICT_CONFIG=1 时 FAIL 拒绝启动）。
+# R2-102/N-03：安全类 FATAL 无条件拒绝启动（非回环无令牌 / 逃生口用于非回环）。
 from .validate import fail_count as _vc_fail
+from .validate import fatal_count as _vc_fatal
 from .validate import validate_settings
 
 _v_results = validate_settings()
 for _v in _v_results:
     _lg = logging.getLogger("app.validate")
-    if _v["level"] == "FAIL":
-        _lg.error("配置校验 FAIL: %s %s（hint: %s）", _v["key"], _v["message"], _v["hint"])
+    if _v["level"] in ("FAIL", "FATAL"):
+        _lg.error("配置校验 %s: %s %s（hint: %s）", _v["level"], _v["key"],
+                  _v["message"], _v["hint"])
     elif _v["level"] == "WARN":
         _lg.warning("配置校验 WARN: %s %s", _v["key"], _v["message"])
+if _vc_fatal(_v_results) > 0:
+    _fatals = [v for v in _v_results if v["level"] == "FATAL"]
+    raise RuntimeError(
+        f"配置校验 FATAL {_vc_fatal(_v_results)} 项（安全底线，拒绝启动）: "
+        + "; ".join(f"{v['key']}: {v['message']}" for v in _fatals))
 if settings.strict_config and _vc_fail(_v_results) > 0:
     _fails = [v for v in _v_results if v["level"] == "FAIL"]
     raise RuntimeError(
@@ -199,6 +208,37 @@ _rate_lock = threading.Lock()
 _rate_windows: dict[str, deque] = {}  # client_ip → [timestamps]
 
 
+_bind_checked = False
+
+
+def _enforce_bind(scope: dict) -> None:
+    """R2-102/N-03: enforce security on the ACTUAL uvicorn bind address.
+
+    validate_settings() uses settings.host (env/.env); a user running
+    `uvicorn --host 0.0.0.0` manually could still bypass it. uvicorn fills
+    scope["server"] with the real (host, port), so check once on the first
+    request: non-loopback without a token / with the auth escape hatch is a
+    fatal condition -- log and exit rather than serve unauthenticated writes
+    to the LAN. TestClient uses "testserver" which is loopback-equivalent.
+    """
+    global _bind_checked
+    if _bind_checked:
+        return
+    _bind_checked = True
+    from .validate import is_loopback_host
+    server = scope.get("server") or ("127.0.0.1", 0)
+    host = str(server[0])
+    if host == "testserver" or is_loopback_host(host):
+        return
+    from .config import settings
+    if not settings.admin_token or settings.auth_disabled:
+        logging.getLogger("app.security").critical(
+            "非回环监听 %s 但无管理令牌/逃生口开启——拒绝服务", host)
+        # Hard stop: uvicorn cannot recover from this in-process.
+        os._exit(3)
+    settings.auth_read_protected = True
+
+
 def _client_ip(request: Request) -> str:
     """任务90：trust_proxy 开启时取 X-Forwarded-For 第一跳；否则直连地址。"""
     if settings.trust_proxy:
@@ -211,7 +251,9 @@ def _client_ip(request: Request) -> str:
 async def request_id_middleware(request: Request, call_next):
     """任务63：响应头始终带 X-Request-ID（客户端合法传入则回显，否则生成 uuid4）。
     任务87：写请求（/api/* 非 GET）完成后落审计行（不含 body/headers/query）。
-    任务90：/api/* 写接口滑动窗口限流（GET/WS/健康探针不受影响）。"""
+    任务90：/api/* 写接口滑动窗口限流（GET/WS/健康探针不受影响）。
+    R2-102：首个请求按 uvicorn 实际绑定地址兜底校验（防手工 --host 绕过）。"""
+    _enforce_bind(request.scope)
     rid = _client_request_id(request)
     request.state.request_id = rid
     request_id_var.set(rid)
@@ -332,11 +374,13 @@ async def events_ws(ws: WebSocket):
 async def webrtc_ws(ws: WebSocket, cid: int):
     """T-102：WebRTC 信令鉴权代理——浏览器只连 8000，go2rtc :1984 仅回环可达。"""
     from . import webrtc_proxy
-    from .api import _ws_auth_check
+    from .api import _ws_auth_check, accept_with_subprotocol
     if not _ws_auth_check(ws):
         await ws.close(code=4401)
         return
-    await ws.accept()
+    # R2-104/N-05: echo the offered subprotocol (RFC 6455 §4.1), otherwise the
+    # browser closes the handshake when the first-run token is enabled.
+    await accept_with_subprotocol(ws)
     try:
         await webrtc_proxy.proxy(ws, cid)
     except (WebSocketDisconnect, OSError, ConnectionError):
@@ -444,8 +488,11 @@ def create_app() -> FastAPI:
     # ---- T-105（S-03/P1）：Host 白名单（防 DNS Rebinding）----
     from starlette.middleware.trustedhost import TrustedHostMiddleware  # noqa: E402
 
-    _allowed_hosts = [h.strip() for h in settings.trusted_hosts.split(",") if h.strip()] \
-        + ["testserver"]
+    _allowed_hosts = [h.strip() for h in settings.trusted_hosts.split(",") if h.strip()]
+    # R2-108/N-14: testserver is only needed by pytest's TestClient, never in prod.
+    # settings.testing is set by tests/conftest.py via LS_TESTING=1 before app import.
+    if settings.testing or os.environ.get("PYTEST_CURRENT_TEST"):
+        _allowed_hosts.append("testserver")
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
     application.middleware("http")(request_id_middleware)
     application.middleware("http")(selective_gzip_middleware)

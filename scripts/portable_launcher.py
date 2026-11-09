@@ -283,14 +283,19 @@ def start_server(port: int, cfg: dict) -> int:
     for k, v in cfg.items():          # config.env 里的 LS_* 透传（用户可加告警渠道等）
         if k.startswith("LS_"):
             env[k] = v
+    # R2-102/N-03: --host comes from the same config.env LS_HOST that pydantic
+    # settings reads. No split between "what uvicorn binds" and "what validation
+    # assumes". Default stays loopback; LAN users must set a token (FATAL gate).
+    bind_host = cfg.get("LS_HOST", "127.0.0.1").strip() or "127.0.0.1"
     server_log = LOGS / f"server-{datetime.now():%Y%m%d}.log"
     with open(server_log, "ab") as lf:
-        lf.write(f"\n===== launcher 启动 {datetime.now():%Y-%m-%d %H:%M:%S} port={port} =====\n".encode())
+        lf.write(f"\n===== launcher 启动 {datetime.now():%Y-%m-%d %H:%M:%S} host={bind_host} port={port} =====\n".encode())
         proc = subprocess.Popen(
-            [str(RUNTIME / "python.exe"), "-m", "uvicorn", "app.main:app", "--port", str(port)],
+            [str(RUNTIME / "python.exe"), "-m", "uvicorn", "app.main:app",
+             "--host", bind_host, "--port", str(port)],
             cwd=str(SERVER), env=env, stdout=lf, stderr=subprocess.STDOUT,
             creationflags=CREATE_NO_WINDOW)
-    log.info("uvicorn pid=%d port=%d 日志=%s", proc.pid, port, server_log)
+    log.info("uvicorn pid=%d host=%s port=%d 日志=%s", proc.pid, bind_host, port, server_log)
     return proc.pid
 
 

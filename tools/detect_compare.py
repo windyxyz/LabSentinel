@@ -17,7 +17,12 @@ sys.path.insert(0, str(ROOT / "server"))
 
 import cv2  # noqa: E402
 
-RS_EXE = Path("D:/tmp/ls-rs-target/debug/ls-analyzer.exe")
+# R2-506: no developer-machine paths; allow LS_ANALYZER_EXE / CARGO_TARGET_DIR.
+_suffix = ".exe" if os.name == "nt" else ""
+RS_EXE = Path(os.environ.get(
+    "LS_ANALYZER_EXE",
+    str(Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "engine-rs" / "target")))
+        / "debug" / f"ls-analyzer{_suffix}")))
 FFMPEG = ROOT / "tools" / "ffmpeg" / "ffmpeg.exe"
 MODEL = ROOT / "m0-spike" / "yolo11n.onnx"
 

@@ -18,13 +18,17 @@ import pytest  # noqa: E402
 
 from app.store import Store  # noqa: E402
 
-REPO = Path(__file__).resolve().parents[2]
-RS_EXE = Path("D:/tmp/ls-rs-target/debug/labsentinel-server.exe")
-ENV = {**os.environ, "TMP": "D:/tmp", "TEMP": "D:/tmp"}
+from conftest import RS_TARGET, rs_exe  # noqa: E402  (R2-506: shared exe resolver)
+
+RS_EXE = rs_exe("labsentinel-server", "LS_SERVER_EXE")
+ENV = {**os.environ, "TMP": str(RS_TARGET), "TEMP": str(RS_TARGET)}
 
 
 def _rust_selftest(db: Path) -> None:
-    assert RS_EXE.exists(), "labsentinel-server.exe 未构建（先 cargo build -p ls-server）"
+    # R2-005/N-36: CI does not build the Rust binary -> skip, do not fail.
+    # rust.yml builds ls-server and sets LS_SERVER_EXE to actually run these.
+    if not RS_EXE.exists():
+        pytest.skip(f"labsentinel-server 未构建（先 cargo build -p ls-server，或设 LS_SERVER_EXE）：{RS_EXE}")
     r = subprocess.run([str(RS_EXE), "--selftest-db", str(db)],
                        capture_output=True, text=True, timeout=60, env=ENV)
     assert r.returncode == 0, (r.stdout[-1500:], r.stderr[-1500:])

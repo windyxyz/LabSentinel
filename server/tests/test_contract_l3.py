@@ -1,8 +1,8 @@
 """T-331（L3）契约测试：同一套 API 用例分别打 Python 实现与 Rust 实现。
 
 Python 侧 = fastapi TestClient（app.main:app）；Rust 侧 = 临时起 labsentinel-server
-（D:/tmp/ls-rs-target/debug/labsentinel-server.exe，指向同一 SQLite 库），
-黑盒 httpx 逐端点断言状态码与核心字段一致。exe 缺失时 Rust 侧 skip。
+（由 conftest.rs_exe() 解析，指向同一 SQLite 库），黑盒 httpx 逐端点断言状态码
+与核心字段一致。exe 缺失时 Rust 侧 skip。
 运行: pytest tests/test_contract_l3.py -q
 """
 import os
@@ -23,8 +23,10 @@ from app.config import settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.store import Store  # noqa: E402
 
+from conftest import rs_exe  # noqa: E402  (R2-506: shared exe resolver)
+
 REPO = Path(__file__).resolve().parents[2]
-EXE = Path("D:/tmp/ls-rs-target/debug/labsentinel-server.exe")
+EXE = rs_exe("labsentinel-server", "LS_SERVER_EXE")
 
 
 def _free_port() -> int:

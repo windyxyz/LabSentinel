@@ -2,7 +2,7 @@
 
 用法（标准库）:
     python scripts/fetch_assets.py --name yolo11n_ppe.onnx --out models/yolo11n_ppe.onnx
-    python scripts/fetch_assets.py --all --out-dir D:/tmp/assets
+    python scripts/fetch_assets.py --all --out-dir models/
     python scripts/fetch_assets.py --list
 
 铁律：

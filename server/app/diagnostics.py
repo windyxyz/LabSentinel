@@ -17,11 +17,12 @@ def summary(store) -> dict:
         disk = {"data_dir": str(settings.data_dir), "free_bytes": du.free, "total_bytes": du.total}
     except OSError:
         disk = {"data_dir": str(settings.data_dir), "free_bytes": None, "total_bytes": None}
-    from .api import _system_version  # 版本常量单一来源（api 模块此时已加载）
-    from .engine import get_engine
+    from .api import _engine_backend_peek, _system_version  # 版本常量单一来源（api 模块此时已加载）
+    # R2-005/N-35: /api/system 用 _engine_backend_peek()（只读 _engine/PRELOAD，
+    # 不触发 get_engine）。诊断摘要同样不能因模型缺失/损坏而 500。
     return {
         "version": _system_version(),
-        "backend": get_engine().backend,
+        "backend": _engine_backend_peek(),
         "uptime_s": logging_setup.uptime_s(),
         "counts": {
             "cameras": len(store.cameras()),

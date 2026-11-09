@@ -1,4 +1,9 @@
 [toolchain]
-# 本机无 MSVC Build Tools，使用自包含 GNU 工具链（含链接器）。
-# CI/Linux 侧各自以 rustup default 选择宿主工具链；此文件仅锁定 channel 保证版本一致。
-channel = "stable-x86_64-pc-windows-gnu"
+# R2-003/N-15: channel must contain a version/channel only -- rustup >=1.29
+# rejects a target triple in `channel` ("target tuple in channel name").
+# Host-specific targets are installed via `targets` below; the Windows GNU
+# build recipe is selected explicitly in scripts/build_rust.py via
+# LS_W64DEVKIT (no toolchain default override).
+channel = "stable"
+components = ["clippy", "rustfmt"]
+targets = ["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu", "x86_64-unknown-linux-gnu"]

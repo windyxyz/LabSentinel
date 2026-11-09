@@ -15,13 +15,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: clean tree / tag == VERSION
+      - name: clean tree / tag == VERSION / CHANGELOG has this release
         run: |
-          git diff --exit-code HEAD --stat || true
+          # R2-004/N-10: the old `|| true` made this check a no-op.
+          test -z "$(git status --porcelain)" || { echo "::error::工作区不干净"; git status --short; exit 1; }
           V=$(cat VERSION | tr -d ' \n')
           T="${GITHUB_REF_NAME#v}"
           test "$V" = "$T" || { echo "::error::tag $GITHUB_REF_NAME != VERSION $V"; exit 1; }
-          grep -q "## [Unreleased]" CHANGELOG.md || { echo "::error::CHANGELOG 缺本版条目"; exit 1; }
+          # R2-004/N-10: require a section for THIS version, not just [Unreleased].
+          grep -qE "^## \[${V}\]|^## ${V}" CHANGELOG.md || {
+            echo "::error::CHANGELOG 缺 ## [$V] 本版条目（发布前把 Unreleased 改名）"; exit 1; }
 
   test-linux:
     uses: ./.github/workflows/tests.yml
@@ -45,8 +48,22 @@ jobs:
         run: |
           npm ci --registry=https://registry.npmmirror.com
           npm run build
+      # R2-004/N-09: yolo11n.onnx is gitignored. Fetch the hash-verified model
+      # into a scratch dir and point build_portable at it; a clean CI checkout
+      # must not depend on a developer machine's m0-spike/ files.
+      - name: fetch base model (hash-verified)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "ls-models"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          python -I scripts/fetch_assets.py --name yolo11n.onnx --out (Join-Path $dir "yolo11n.onnx")
+          if ($LASTEXITCODE -ne 0) { throw "模型下载/校验失败" }
       - name: portable build（含锁文件全新安装 + 冒烟断言）
-        run: python scripts/build_portable.py --zip
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "ls-models"
+          python scripts/build_portable.py --zip --python (Get-Command python).Source --models-dir $dir
+          if ($LASTEXITCODE -ne 0) { throw "便携包构建失败" }
       # T-410：Windows 冒烟进 CI——用刚产出的 zip 真实启动→健康/前端/DB 断言→停止；
       # 随后 install/uninstall 到隔离临时目录，验证安装标记与安全卸载。
       - name: T-410 portable zip 冒烟（隔离启动/健康/停止）

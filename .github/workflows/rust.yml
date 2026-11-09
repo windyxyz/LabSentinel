@@ -30,18 +30,50 @@ jobs:
       # T-335：sccache 编译缓存（与 rust-cache 叠加，跨 job 复用编译产物）
       - uses: taiki-e/install-action@sccache
       - uses: taiki-e/install-action@cargo-nextest
-      - name: cargo nextest run（workspace：契约/向量/单元）
+      # R2-505/N-32: --all-features brings the tract AND ort inference paths into
+      # CI (ls-analyzer enables both indirectly, but explicit is required so a
+      # feature-gated regression cannot hide behind default features).
+      - name: cargo nextest run（workspace --all-features：契约/向量/单元）
         working-directory: engine-rs
-        run: cargo nextest run --workspace
+        run: cargo nextest run --workspace --all-features
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
       - name: clippy -D warnings（手写 crate 零告警；生成代码在 ls-proto 内豁免）
         working-directory: engine-rs
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: fmt check
         working-directory: engine-rs
         run: cargo fmt --all -- --check
+
+  cross_language_db:
+    # R2-005/N-36: the three DB bidirectional tests skip when the Rust binary
+    # is absent (tests.yml does not build Rust). Build ls-server here and run
+    # those cases for real with LS_SERVER_EXE instead of leaving them skipped.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-rs
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: cargo build -p ls-server
+        working-directory: engine-rs
+        run: cargo build -p ls-server
+      - name: Install Python deps (hash-pinned lock)
+        run: |
+          pip install --require-hashes --no-deps -r server/requirements-linux.lock
+          pip install pytest
+      - name: DB bidirectional compatibility (Python <-> Rust)
+        working-directory: server
+        run: python -m pytest tests/test_store_bidirectional.py -q
+        env:
+          LS_LOG_FILE: "0"
+          LS_SERVER_EXE: ${{ github.workspace }}/engine-rs/target/debug/labsentinel-server
 
   audit:
     # T-335：许可证白名单/已知漏洞/yanked/source 单一门禁（Linux 即可，跨平台无关）

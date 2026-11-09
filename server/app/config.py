@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     csp: str = ""  # Content-Security-Policy（默认空=不发送）
     csp_report_only: bool = False  # true 时用 Report-Only 头（任务89）
     strict_config: bool = False  # 启动校验 FAIL 时拒绝启动（任务95，LS_STRICT_CONFIG）
+    testing: bool = False  # R2-108: pytest harness flag（LS_TESTING=1），仅测试环境放行 testserver Host
     write_rate_limit: int = 120  # 每分钟写请求数上限（任务90，0=关闭）
     write_rate_window_s: int = 60  # 滑动窗口秒
     trust_proxy: bool = False  # 1 时信任 X-Forwarded-For 第一跳作为客户端 IP
@@ -84,6 +85,12 @@ class Settings(BaseSettings):
                                 "摄像头 #{camera_id}{track_part}\n{detail}")
     alert_filters: str = ""  # 任务86：JSON，按渠道过滤 {"wecom":{"min_level":2,"types":[..]}}
     pdf_font: str | None = None  # PDF 中文字体路径（默认 C:\Windows\Fonts\msyh.ttc）
+
+    # R2-102/N-03: uvicorn bind address as the SINGLE source of truth.
+    # The launcher / systemd / WinSW / Docker all pass --host "$LS_HOST".
+    # pydantic-settings reads LS_HOST from both the process env and server/.env,
+    # unlike the old os.environ.get("LS_HOST") which missed the .env value.
+    host: str = "127.0.0.1"
 
     # 管理鉴权（任务16）：admin_token 为空 = 不启用（内网信任场景）；启用后写操作需 X-Admin-Token
     admin_token: str = ""

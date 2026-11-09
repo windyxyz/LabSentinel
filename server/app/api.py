@@ -64,13 +64,16 @@ WS_AUTH_CODE = 4401
 
 
 def _auth_off() -> bool:
-    """Q-02 逃生口：LS_AUTH_DISABLED=1 且绑定回环时关闭鉴权（validate.py 已
-    保证非回环 FAIL 启动；此处只放行 token 校验，不改其它安全中间件）。"""
+    """Q-02/R2-102 逃生口：LS_AUTH_DISABLED=1 且绑定回环时关闭鉴权。
+
+    绑定地址一律读 settings.host（pydantic-settings 同时读环境变量与 .env），
+    不再读 os.environ["LS_HOST"]——那样会漏掉 .env 里的值，且与实际监听脱钩。
+    validate.py 的 FATAL + main._enforce_bind 保证非回环不会走到这里。
+    """
     if not settings.auth_disabled:
         return False
-    import os
-    host = os.environ.get("LS_HOST", "127.0.0.1").strip()
-    return host in ("127.0.0.1", "localhost", "::1", "")
+    from .validate import is_loopback_host
+    return is_loopback_host(settings.host)
 
 
 def _token_ok(provided: str | None) -> bool:
@@ -84,7 +87,11 @@ def _token_ok(provided: str | None) -> bool:
 
 
 def _read_token_ok(provided: str | None) -> bool:
-    """读令牌校验（任务88）：admin_token 或 read_token 均可（hmac.compare_digest）。"""
+    """R2-103/N-02 读令牌校验：admin/read/已配对设备令牌均可。
+
+    77 号 Q-11 口径「设备令牌 = 查看 + 处置」：局域网绑定会强制开启读保护，
+    若此处不接受设备令牌，配对后的手机在唯一需要它的场景里拿不到任何数据。
+    """
     if not settings.admin_token or _auth_off():
         return True  # 未启用鉴权 / Q-02 逃生口（仅回环）
     if not provided:
@@ -92,7 +99,10 @@ def _read_token_ok(provided: str | None) -> bool:
     import hmac
     if hmac.compare_digest(provided, settings.admin_token):
         return True
-    return bool(settings.read_token) and hmac.compare_digest(provided, settings.read_token)
+    if settings.read_token and hmac.compare_digest(provided, settings.read_token):
+        return True
+    from . import devices
+    return store is not None and devices.verify(store, provided) is not None
 
 
 def _warn_same_token():
@@ -105,14 +115,24 @@ def _warn_same_token():
 _warn_same_token()
 
 
+def _bearer_token(headers) -> str | None:
+    """R2-103: mobile clients use `Authorization: Bearer <token>`; treat it as
+    equivalent to X-Admin-Token when the latter is absent.
+    """
+    auth = headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return None
+
+
 def require_admin(request: Request):
     """写操作守卫：只接受管理令牌（任务88：只读令牌写永拒）。T-113：结果写入 state.actor。"""
-    if not _token_ok(request.headers.get("X-Admin-Token")):
+    provided = request.headers.get("X-Admin-Token") or _bearer_token(request.headers)
+    if not _token_ok(provided):
         request.state.actor = "rejected"
-        if settings.admin_token and settings.read_token and \
-                request.headers.get("X-Admin-Token") == settings.read_token:
+        if settings.admin_token and settings.read_token and provided == settings.read_token:
             raise HTTPException(401, "当前令牌无写权限（只读令牌）——请使用管理令牌")
-        raise HTTPException(401, "需要管理令牌（X-Admin-Token）")
+        raise HTTPException(401, "需要管理令牌（X-Admin-Token 或 Authorization: Bearer）")
     request.state.actor = "admin" if settings.admin_token else "anonymous(auth-off)"
 
 
@@ -121,7 +141,7 @@ def require_triage(request: Request):
     if not settings.admin_token:
         request.state.actor = "anonymous(auth-off)"
         return
-    provided = request.headers.get("X-Admin-Token")
+    provided = request.headers.get("X-Admin-Token") or _bearer_token(request.headers)
     if _token_ok(provided):
         request.state.actor = "admin"
         return
@@ -167,12 +187,13 @@ def require_read(request: Request):
     if _media_sig_ok(request):
         request.state.actor = "read(signed)"
         return
-    provided = request.headers.get("X-Admin-Token")
+    provided = (request.headers.get("X-Admin-Token")
+                or _bearer_token(request.headers))
     if settings.allow_url_token:
         provided = provided or request.query_params.get("token")
     if not _read_token_ok(provided):
         request.state.actor = "rejected"
-        raise HTTPException(401, "需要管理令牌或签名媒体 URL")
+        raise HTTPException(401, "需要管理令牌、设备令牌或签名媒体 URL")
     request.state.actor = "read"
 
 
@@ -949,11 +970,15 @@ def _ws_origin_ok(ws: WebSocket) -> bool:
 
 
 def _ws_token(ws) -> str | None:
-    """令牌来源优先级：Sec-WebSocket-Protocol: bearer.<token> → ?token=（弃用，日志告警）。"""
+    """R2-103 令牌来源优先级：子协议 bearer.<token> → Authorization: Bearer →
+    ?token=（弃用，日志告警）。设备令牌走 _read_token_ok，与 HTTP 读口径一致。"""
     protos = [p.strip() for p in ws.headers.get("sec-websocket-protocol", "").split(",")]
     for p in protos:
         if p.startswith("bearer."):
             return p[len("bearer."):]
+    bearer = _bearer_token(ws.headers)
+    if bearer:
+        return bearer
     t = ws.query_params.get("token")
     if t:
         print("[auth] WS 仍使用 ?token= 查询参数（弃用，改用子协议 bearer.<token>）", flush=True)
@@ -969,6 +994,20 @@ def _ws_auth_check(ws) -> bool:
     return True
 
 
+def accept_with_subprotocol(ws: WebSocket):
+    """R2-104/N-05: echo the `labsentinel` subprotocol when the client offers it.
+
+    RFC 6455 §4.1: a client that sends Sec-WebSocket-Protocol MUST close the
+    connection if the server response omits it. /ws/events already did this;
+    /ws/webrtc/{cid} did not -> with the first-run token enabled (default now)
+    the browser dropped the signaling handshake and live video was dead.
+    Shared here so both endpoints stay in sync.
+    """
+    protos = [p.strip() for p in ws.headers.get("sec-websocket-protocol", "").split(",")]
+    subprotocol = "labsentinel" if "labsentinel" in protos else None
+    return ws.accept(subprotocol=subprotocol)
+
+
 async def ws_events(ws: WebSocket):
     if not _ws_origin_ok(ws):
         await ws.close(code=WS_ORIGIN_CODE)
@@ -979,7 +1018,7 @@ async def ws_events(ws: WebSocket):
     # T-201/B-19：try/finally 保证任何异常都清理 hub；子协议回显（客户端发了 labsentinel 时）
     protos = [p.strip() for p in ws.headers.get("sec-websocket-protocol", "").split(",")]
     subprotocol = "labsentinel" if "labsentinel" in protos else None
-    await dispatcher.hub.connect(ws, subprotocol=subprotocol)
+    await dispatcher.hub.connect(ws, subprotocol=subprotocol)  # hub.connect 内部 accept
     try:
         while True:
             await ws.receive_text()  # 忽略客户端心跳

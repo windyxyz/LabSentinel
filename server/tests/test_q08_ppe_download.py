@@ -93,32 +93,27 @@ def test_weekly_audit_workflow_exists():
     assert "SECURITY-EXCEPTIONS.md" in text
 
 
-def test_auth_disabled_loopback_only():
-    """Q-02 逃生口：仅回环放行；非回环即便 auth_disabled 也拒绝。"""
+def test_auth_disabled_loopback_only(monkeypatch):
+    """Q-02/R2-102 逃生口：仅回环放行；非回环即便 auth_disabled 也拒绝。
+
+    绑定地址现在读 settings.host（单一来源），不再读 os.environ["LS_HOST"]。
+    """
     from app.api import _auth_off
     from app.config import settings
-    old_flag, old_host = settings.auth_disabled, os.environ.get("LS_HOST")
-    try:
-        settings.auth_disabled = True
-        os.environ["LS_HOST"] = "127.0.0.1"
-        assert _auth_off() is True
-        os.environ["LS_HOST"] = "0.0.0.0"
-        assert _auth_off() is False
-        settings.auth_disabled = False
-        assert _auth_off() is False
-    finally:
-        settings.auth_disabled = old_flag
-        if old_host is None:
-            os.environ.pop("LS_HOST", None)
-        else:
-            os.environ["LS_HOST"] = old_host
+    monkeypatch.setattr(settings, "auth_disabled", True)
+    monkeypatch.setattr(settings, "host", "127.0.0.1")
+    assert _auth_off() is True
+    monkeypatch.setattr(settings, "host", "0.0.0.0")
+    assert _auth_off() is False
+    monkeypatch.setattr(settings, "auth_disabled", False)
+    assert _auth_off() is False
 
 
 def test_validate_forces_read_protection_on_lan(monkeypatch):
-    """Q-03：非回环绑定强制开启读保护（启动校验写入 settings）。"""
+    """Q-03/R2-102：非回环绑定强制开启读保护（启动校验写入 settings）。"""
     from app.config import settings
     from app import validate as v
-    monkeypatch.setenv("LS_HOST", "192.168.1.10")
+    monkeypatch.setattr(settings, "host", "192.168.1.10")  # R2-102 单一来源
     monkeypatch.setattr(settings, "auth_read_protected", False)
     monkeypatch.setattr(settings, "admin_token", "test-token")
     res = v.validate_settings()

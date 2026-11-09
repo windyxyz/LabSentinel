@@ -19,14 +19,32 @@ from .analyzer import AnalyzerBackend, AnalyzerStatusRow
 
 log = logging.getLogger("app.analyzer_sidecar")
 
-_DEFAULT_EXE = Path("D:/tmp/ls-rs-target/debug/ls-analyzer.exe")
+def _default_exe() -> Path:
+    """R2-506/N-06: no developer-machine paths. Resolution order:
+    LS_ANALYZER_EXE -> portable install bin/ls-analyzer[.exe] -> cargo target dir
+    (engine-rs/target, gitignored; CARGO_TARGET_DIR can override).
+    R2-304 packages the binary into bin/ and sets LS_ANALYZER_EXE in the launcher.
+    """
+    env = os.environ.get("LS_ANALYZER_EXE")
+    if env:
+        return Path(env)
+    here = Path(__file__).resolve()
+    suffix = ".exe" if os.name == "nt" else ""
+    portable = here.parents[2] / "bin" / f"ls-analyzer{suffix}"
+    if portable.is_file():
+        return portable
+    target = Path(os.environ.get("CARGO_TARGET_DIR", str(here.parents[2] / "engine-rs" / "target")))
+    return target / "debug" / f"ls-analyzer{suffix}"
+
+
+_DEFAULT_EXE = _default_exe()
 
 
 class SidecarAnalyzer(AnalyzerBackend):
     """单个 sidecar 进程 = 全部 rust 摄像头（按 cameras.analyzer='rust' 灰度）。"""
 
     def __init__(self, exe: Path | None = None, port: int = 0):
-        self._exe = Path(exe or os.environ.get("LS_ANALYZER_EXE", _DEFAULT_EXE))
+        self._exe = Path(exe or _DEFAULT_EXE)
         self._port = port
         self._proc: subprocess.Popen | None = None
         self._token = ""

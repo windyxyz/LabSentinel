@@ -53,6 +53,11 @@ def test_system_200_and_preload_error_when_model_missing(tmp_path, monkeypatch):
 
 
 def test_ready_ok_then_model_missing(tmp_path, monkeypatch):
+    # R2-005/N-38: do not depend on a model file outside the repo. The ready
+    # probe only checks Path(model).exists(), so a fake file is sufficient.
+    fake_model = tmp_path / "fake-model.onnx"
+    fake_model.write_bytes(b"onnx-placeholder")
+    monkeypatch.setattr(settings, "ppe_model", fake_model)
     with TestClient(app) as c:
         r = c.get("/api/health/ready")
         assert r.status_code == 200

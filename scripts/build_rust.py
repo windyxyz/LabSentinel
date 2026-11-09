@@ -1,10 +1,16 @@
-"""T-333（L4）：Rust 单二进制分发构建。
+"""T-333（L4）：Rust 单二进制分发构建（实验产物，未达 L3 门槛不进正式 Release）。
 
 产物包：labsentinel-server.exe + web/dist + models/ + go2rtc + THIRD_PARTY_LICENSES.txt
 （不含嵌入式 CPython runtime ≈ 280MB → 单二进制 + 资源 ≈ 数十 MB）。
 Python 源码按 76 文档 L4 语义保留一个版本周期于 server/（legacy），训练工具链 tools/ 长期保留。
 
 用法: python scripts/build_rust.py [--zip]
+
+R2-003/R2-506：不再写死 D:/tmp 路径。
+  - 产物目录默认 engine-rs/target（仓库相对，已 gitignore），可用 CARGO_TARGET_DIR 覆盖。
+  - 本机 Windows GNU 配方需要 LS_W64DEVKIT 指向 w64devkit 根目录；未设置时用宿主
+    默认工具链（CI 的 MSVC / Linux 走这条）。rust-toolchain.toml 只钉 channel，
+    目标三元组由显式 `cargo +stable-x86_64-pc-windows-gnu` 选择。
 """
 import os
 import shutil
@@ -15,29 +21,42 @@ from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+ENGINE_RS = ROOT / "engine-rs"
 DIST = ROOT / "Resources" / "dist" / "rust" / "labsentinel-server"
 CARGO = Path(os.environ.get("CARGO", str(Path.home() / ".cargo/bin/cargo.exe")))
-TARGET = Path(os.environ.get("CARGO_TARGET_DIR", "D:/tmp/ls-rs-target"))
+TARGET = Path(os.environ.get("CARGO_TARGET_DIR", str(ENGINE_RS / "target")))
 VERSION = (ROOT / "VERSION").read_text("ascii").strip()
-W64 = Path("D:/tmp/w64devkit/w64devkit")
+# R2-506: no hard-coded developer-machine path; opt in via environment.
+W64 = Path(os.environ["LS_W64DEVKIT"]) if os.environ.get("LS_W64DEVKIT") else None
+
+
+def _gcc_lib_dir(w64: Path) -> Path:
+    """Pick the newest GCC version dir instead of pinning 15.2.0."""
+    base = w64 / "lib" / "gcc" / "x86_64-w64-mingw32"
+    versions = sorted(p for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
+    return versions[-1] if versions else base
 
 
 def build_binary() -> Path:
-    """CI（MSVC/Linux）走宿主默认工具链；本机 w64devkit 配方自动探测启用。"""
+    """CI（MSVC/Linux）走宿主默认工具链；本机 w64devkit 配方按 LS_W64DEVKIT 启用。"""
     env = dict(os.environ)
-    if W64.exists() and sys.platform == "win32":
-        # 本机 GNU 工具链配方（rustup self-contained 缺 as/cc1；w64devkit 为 UCRT 版）
-        rustup_sc = (Path.home() / ".rustup/toolchains/stable-x86_64-pc-windows-gnu/"
+    args = [str(CARGO)]
+    if W64 and W64.is_dir() and sys.platform == "win32":
+        # rust-toolchain.toml pins channel=stable (host = msvc here); select the
+        # GNU toolchain explicitly for the self-contained Windows GNU build.
+        args.append("+stable-x86_64-pc-windows-gnu")
+        home = Path.home()
+        rustup_sc = (home / ".rustup/toolchains/stable-x86_64-pc-windows-gnu/"
                      "lib/rustlib/x86_64-pc-windows-gnu/lib/self-contained")
-        env["PATH"] = f"{W64 / 'bin'};{Path.home() / '.cargo/bin'};" + env.get("PATH", "")
+        env["PATH"] = f"{W64 / 'bin'};{home / '.cargo/bin'};" + env.get("PATH", "")
         env["RUSTFLAGS"] = (f"-L {rustup_sc} "
-                            f"-L {W64 / 'lib/gcc/x86_64-w64-mingw32/15.2.0'} "
+                            f"-L {_gcc_lib_dir(W64)} "
                             f"-L {W64 / 'lib'} -C link-arg=-lucrt")
+    args += ["build", "--release", "-p", "ls-server"]
     env.setdefault("CARGO_TARGET_DIR", str(TARGET))
-    r = subprocess.run([str(CARGO), "build", "--release", "-p", "ls-server"],
-                       cwd=ROOT / "engine-rs", env=env)
+    r = subprocess.run(args, cwd=ENGINE_RS, env=env)
     if r.returncode:
-        raise SystemExit("[失败] cargo build -p ls-server 失败（先确认 w64devkit 构建配方）")
+        raise SystemExit("[失败] cargo build -p ls-server 失败（先确认工具链/LS_W64DEVKIT 构建配方）")
     name = "labsentinel-server.exe" if sys.platform == "win32" else "labsentinel-server"
     exe = TARGET / "release" / name
     if not exe.exists():
@@ -69,7 +88,7 @@ def assemble() -> None:
         "Rust crates: 见 engine-rs/Cargo.lock（cargo-deny 生成完整清单）\n"
         "go2rtc: MIT · onnxruntime: MIT · OpenCV(ffmpeg): 见 NOTICE\n", encoding="utf-8")
     (DIST / "README.txt").write_text(
-        f"LabSentinel {VERSION} — Rust 单二进制分发\n"
+        f"LabSentinel {VERSION} — Rust 单二进制分发（实验产物，非 L3 正式 Release）\n"
         "启动: labsentinel-server.exe（LS_DB_PATH / LS_PORT / LS_ADMIN_TOKEN）\n"
         "模型目录 models/，前端 web/，实时画面 go2rtc 见 tools/\n"
         "训练/量化/标注工具链仍在仓库 tools/（Python，AI 生态依赖）\n", encoding="utf-8")

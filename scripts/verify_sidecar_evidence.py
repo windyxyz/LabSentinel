@@ -18,8 +18,12 @@ sys.path.insert(0, str(ROOT / "server"))
 
 VIDEO = ROOT / "Resources/效果演示/实验有风险，防护需穿戴-检测效果_v2.mp4"
 MODEL = ROOT / "m0-spike/yolo11n.onnx"
-EXE = Path(os.environ.get("LS_ANALYZER_EXE",
-                          "D:/tmp/ls-rs-target/debug/ls-analyzer.exe"))
+# R2-506: no developer-machine paths; mirror analyzer_sidecar._default_exe().
+_suffix = ".exe" if os.name == "nt" else ""
+EXE = Path(os.environ.get(
+    "LS_ANALYZER_EXE",
+    str(Path(os.environ.get("CARGO_TARGET_DIR", str(ROOT / "engine-rs" / "target")))
+        / "debug" / f"ls-analyzer{_suffix}")))
 
 
 def main() -> int:

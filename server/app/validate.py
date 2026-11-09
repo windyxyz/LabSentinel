@@ -1,8 +1,13 @@
 """启动配置校验（任务95）：只读检查，FAIL/WARN/OK 列表；strict 模式 fail-fast。
 
 不加载 ONNX、不启动线程、不改配置/文件（临时写探针写完即删）。
+
+R2-102/N-03：
+  - 绑定地址一律读 settings.host（pydantic-settings 同时读环境变量与 .env），
+    不再读 os.environ["LS_HOST"]（那样会漏掉 .env 里的值）。
+  - 安全类 FAIL 用 level="FATAL"：无论 LS_STRICT_CONFIG 与否都拒绝启动。
+  - 运行时另有 _enforce_bind()（main.py）按 uvicorn 实际绑定地址兜底。
 """
-import os
 import shutil
 from pathlib import Path
 
@@ -11,18 +16,24 @@ from .config import settings
 _MIN_MODEL_BYTES = 1_000_000
 
 
+def is_loopback_host(host: str) -> bool:
+    """Single definition shared by validate/api/main (R2-102)."""
+    return host.strip() in ("127.0.0.1", "localhost", "::1", "")
+
+
 def validate_settings() -> list[dict]:
     results: list[dict] = []
 
     def add(level, key, message, hint=""):
         results.append({"level": level, "key": key, "message": message, "hint": hint})
 
-    # T-104（Q-02）：绑定非回环地址时强制要求管理令牌（即使不 strict 也拒绝启动）
-    host = os.environ.get("LS_HOST", "127.0.0.1").strip()
-    loopback = host in ("127.0.0.1", "localhost", "::1", "")
+    # T-104（Q-02）+ R2-102：非回环绑定必须有管理令牌、不允许逃生口。
+    # FATAL = 无条件拒绝启动（不再依赖 LS_STRICT_CONFIG）。
+    host = settings.host
+    loopback = is_loopback_host(host)
     if not loopback and not settings.admin_token and not settings.auth_disabled:
-        add("FAIL", "admin_token", f"绑定 {host} 但未设 LS_ADMIN_TOKEN",
-            "首启生成令牌或显式 LS_AUTH_DISABLED=1（仅回环允许）")
+        add("FATAL", "admin_token", f"绑定 {host} 但未设 LS_ADMIN_TOKEN",
+            "首启生成令牌或改用回环绑定（这是安全底线，不能只用 WARN）")
     elif not settings.admin_token and not settings.auth_disabled:
         add("WARN", "admin_token", "未设管理令牌（本机默认无鉴权）",
             "Q-02：首启/升级应自动生成；源码模式可手动设 LS_ADMIN_TOKEN")
@@ -39,8 +50,16 @@ def validate_settings() -> list[dict]:
             add("WARN", "auth_disabled", "LS_AUTH_DISABLED=1 已启用（仅回环绑定生效）",
                 "生产环境建议关闭")
         else:
-            add("FAIL", "auth_disabled", "LS_AUTH_DISABLED=1 仅在回环绑定时允许",
+            add("FATAL", "auth_disabled", "LS_AUTH_DISABLED=1 仅在回环绑定时允许",
                 "去掉 LS_AUTH_DISABLED 并设置管理令牌")
+    # R2-102: TrustedHostMiddleware would 400 every LAN request if trusted_hosts
+    # only contains loopback names. Warn (not fatal: the admin may use a proxy).
+    if not loopback:
+        hosts = [h.strip().lower() for h in settings.trusted_hosts.split(",") if h.strip()]
+        if hosts and all(is_loopback_host(h) for h in hosts):
+            add("WARN", "trusted_hosts",
+                f"绑定 {host} 但 Host 白名单只含回环名，局域网请求会被 400",
+                "把可达 IP/主机名加入 LS_TRUSTED_HOSTS")
 
     # 目录可写
     for key in ("data_dir", "snapshot_dir", "video_dir", "annotation_pool_dir"):
@@ -138,7 +157,12 @@ def validate_settings() -> list[dict]:
 
 
 def fail_count(results: list[dict]) -> int:
-    return sum(1 for r in results if r["level"] == "FAIL")
+    return sum(1 for r in results if r["level"] in ("FAIL", "FATAL"))
+
+
+def fatal_count(results: list[dict]) -> int:
+    """R2-102: security FAILs that must block startup regardless of strict_config."""
+    return sum(1 for r in results if r["level"] == "FATAL")
 
 
 def warn_count(results: list[dict]) -> int:

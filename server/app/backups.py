@@ -68,15 +68,15 @@ def run_backup() -> tuple[bool, str]:
         return False, "backup_data.py 不存在"
     out = backup_dir() / f"auto-{datetime.now():%Y%m%d-%H%M%S}.zip"
     out.parent.mkdir(parents=True, exist_ok=True)
-    import subprocess
     import sys
+    from .platform.process import run_text  # R2-006/N-39: stderr 非空且可解码
     try:
         # T-204（B-08）：LS_BACKUP_INCLUDE_MEDIA 生效（原恒 --no-media）
         media_args = [] if settings.backup_include_media else ["--no-media"]
-        r = subprocess.run(
+        r = run_text(
             [sys.executable, str(script), "backup",
              "--data-dir", str(settings.data_dir), "--out", str(out), *media_args],
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, timeout=300)
         if r.returncode != 0:
             return False, f"backup_data.py exit {r.returncode}: {r.stderr.strip()[:200]}"
         files = auto_files()
