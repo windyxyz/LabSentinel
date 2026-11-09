@@ -25,7 +25,7 @@ jobs:
     if: failure()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@b507739f17c2106b2a1a596000eaa49a0d5c33a2  # v7
         with:
           script: |
             const title = `每周依赖审计失败 ${new Date().toISOString().slice(0,10)}`;

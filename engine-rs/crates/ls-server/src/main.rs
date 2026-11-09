@@ -37,6 +37,35 @@ pub struct AppState {
     pub jobs: Arc<ls_jobs::Jobs>,
 }
 
+/// R2-307: machine-readable route inventory for scripts/rust_route_coverage.py.
+/// Format: {"paths": {"<method> <path>": ...}} — one entry per (method, path).
+pub fn dump_routes() -> serde_json::Value {
+    let mut routes = Vec::new();
+    for (method, path) in [
+        ("GET", "/api/health/live"),
+        ("GET", "/api/health/ready"),
+        ("GET", "/api/system"),
+        ("GET", "/api/events"),
+        ("POST", "/api/events/:id/status"),
+        ("GET", "/api/cameras"),
+        ("POST", "/api/cameras"),
+        ("GET", "/api/cameras/:id/status"),
+        ("GET", "/api/stats/summary"),
+        ("GET", "/api/config/summary"),
+        ("GET", "/api/backups/status"),
+        ("POST", "/api/backups/run"),
+        ("GET", "/api/maintenance/status"),
+        ("GET", "/api/maintenance/preview"),
+        ("POST", "/api/maintenance/cleanup"),
+        ("GET", "/api/escalation/status"),
+        ("GET", "/api/events/count"),
+        ("GET", "/api/ws/events"),
+    ] {
+        routes.push(serde_json::json!({"method": method, "path": path}));
+    }
+    serde_json::json!({ "routes": routes })
+}
+
 pub type Shared = Arc<AppState>;
 
 pub fn build_router(state: Shared) -> Router {
@@ -475,6 +504,11 @@ async fn main() {
             let db = args.next().expect("--selftest-db <path>");
             let code = ls_store::selftest::run(&db);
             std::process::exit(code);
+        }
+        // R2-307: print the route inventory JSON and exit (coverage script).
+        if a == "--dump-routes" {
+            println!("{}", serde_json::to_string_pretty(&dump_routes()).expect("json"));
+            std::process::exit(0);
         }
     }
     let db_path =

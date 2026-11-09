@@ -97,7 +97,7 @@ jobs:
       - name: manifest（干净树来源记录）
         run: |
           python scripts/release_manifest.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@0c366cb4fc8897159c94880f94b55bc716ad6a66  # v4
         with:
           name: LabSentinel-portable-${{ matrix.variant }}
           path: |
@@ -120,10 +120,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
       - name: build_rust.py --zip (experimental)
         run: python scripts/build_rust.py --zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@0c366cb4fc8897159c94880f94b55bc716ad6a66  # v4
         with:
           name: labsentinel-rust-nightly
           path: Resources/dist/labsentinel-rust-*.zip
@@ -136,12 +136,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@2a5974104b6d5dbdb2f9468a3e54da3bdd241578  # v4
         with:
           pattern: LabSentinel-portable-*
           merge-multiple: true
           path: dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v2
         with:
           draft: true  # 签名作业接入前保持草稿，人工校验后发布
           files: |

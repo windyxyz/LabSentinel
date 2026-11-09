@@ -7,6 +7,7 @@ import datetime
 import gzip
 import logging
 import os
+import queue
 import re
 import threading
 import time
@@ -301,21 +302,48 @@ async def request_id_middleware(request: Request, call_next):
         _security_headers(resp500)  # S-18：500 分支不再缺安全头
         return resp500
     response.headers["X-Request-ID"] = rid
-    # 任务87：审计（/api/* 写操作；写失败只 WARNING 不影响响应；不含 body/headers/query）
+    # 任务87/R2-503：审计（/api/* 写操作）改为入队 + 单写线程——旧实现在 async
+    # 中间件里同步开 SQLite 连接写 audit_log，磁盘抖动时阻塞整个事件循环。
+    # 写失败只 WARNING 不影响响应；不含 body/headers/query。
     if (request.method in _UNSAFE_METHODS
             and request.url.path.startswith("/api/")):
-        try:
-            # T-113：actor 由 require_admin 判定结果写入 state；401 记 rejected
-            actor = getattr(request.state, "actor", None)
-            if not actor:
-                actor = "rejected" if response.status_code == 401 else \
-                        ("admin" if request.headers.get("X-Admin-Token") else "anonymous")
-            _audit_write(datetime.datetime.now().isoformat(timespec="seconds"), rid, actor,
-                         f"{request.method} {request.url.path}", response.status_code)
-        except Exception as e:  # noqa: BLE001
-            logging.getLogger("app.errors").warning("[audit] 写审计失败: %s", e)
+        # T-113：actor 由 require_admin 判定结果写入 state；401 记 rejected
+        actor = getattr(request.state, "actor", None)
+        if not actor:
+            actor = "rejected" if response.status_code == 401 else \
+                    ("admin" if request.headers.get("X-Admin-Token") else "anonymous")
+        _audit_enqueue(datetime.datetime.now().isoformat(timespec="seconds"), rid, actor,
+                       f"{request.method} {request.url.path}", response.status_code)
     _security_headers(response)
     return response
+
+
+_audit_queue: "queue.Queue[tuple]" = queue.Queue(maxsize=10_000)
+_audit_thread: threading.Thread | None = None
+
+
+def _audit_enqueue(ts: str, rid: str, actor: str, action: str, status_code: int) -> None:
+    """R2-503: never block the event loop; drop (with a warning) when saturated."""
+    global _audit_thread
+    if _audit_thread is None:
+        _audit_thread = threading.Thread(target=_audit_worker, daemon=True,
+                                         name="audit-writer")
+        _audit_thread.start()
+    try:
+        _audit_queue.put_nowait((ts, rid, actor, action, status_code))
+    except queue.Full:
+        logging.getLogger("app.errors").warning("[audit] 队列已满，丢弃一条审计行")
+
+
+def _audit_worker() -> None:
+    while True:
+        ts, rid, actor, action, status_code = _audit_queue.get()
+        try:
+            _audit_write(ts, rid, actor, action, status_code)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("app.errors").warning("[audit] 写审计失败: %s", e)
+        finally:
+            _audit_queue.task_done()
 
 
 def _audit_write(ts: str, rid: str, actor: str, action: str, status_code: int) -> None:
