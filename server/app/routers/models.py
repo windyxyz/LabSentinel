@@ -164,4 +164,8 @@ def _download_all(specs) -> None:
             finally:
                 part.unlink(missing_ok=True)
         if not ok:
-            raise HTTPException(502, f"资产下载/校验失败: {name}（所有源均不可用或哈希不匹配）")
+            urls = ", ".join(spec.get("urls", [])) or "(锁文件未提供来源)"
+            raise HTTPException(
+                502, f"资产下载/校验失败: {name}（所有源均不可用或哈希不匹配）；来源: {urls}。"
+                "若为项目自建 release 资产缺失（如 Windy-LabSentinel/assets 仓库未建立），"
+                "需维护者上传对应文件后重试（scripts/assets.lock.json 为唯一事实源）")

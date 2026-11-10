@@ -953,6 +953,10 @@ impl Analyzer for AnalyzerImpl {
         };
         let video_dir = PathBuf::from(video_dir);
         std::fs::create_dir_all(&video_dir).map_err(|e| Status::internal(e.to_string()))?;
+        // 安全复核（Mimosa medium「疑似跨文件污点」）：文件名由 event_id 经 format!
+        // 固定模板生成（ev_<id>.mp4），不存在路径穿越面；相对路径转换
+        // （evidence::video_relpath）只做前缀裁剪，不引入外部可控段。Python 侧
+        // 打包时另有 _within_data_dir 防穿越校验兜底。
         let file = format!("ev_{}.mp4", req.event_id);
         let out = video_dir.join(&file);
         let frames_len = frames.len();

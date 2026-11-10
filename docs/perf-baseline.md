@@ -32,15 +32,15 @@
       "ok": true,
       "implementation": "rust-tract",
       "cameras": 1,
-      "duration_s": 54.9,
-      "note": "offline golden runner; per-camera fps not comparable to online path"
+      "duration_s": 81.2,
+      "note": "offline golden runner; per-camera fps not comparable to online path (2026-11-11 rerun; 2026-11-09 measured 54.9)"
     },
     {
       "ok": true,
       "implementation": "rust-ort",
       "cameras": 1,
-      "duration_s": 4.4,
-      "note": "offline golden runner; per-camera fps not comparable to online path"
+      "duration_s": 4.0,
+      "note": "offline golden runner; per-camera fps not comparable to online path (2026-11-11 rerun; 2026-11-09 measured 4.4)"
     },
     {
       "ok": false,
@@ -76,9 +76,10 @@
 - 本轮为 `--duration 12 --cameras 1` 的短时冒烟，用于验证脚本与四种实现的可测性；
   **完整 1/4/8 路 × 30 分钟矩阵尚未在目标硬件上跑完**（`--duration 1800`）。
 - Python-CPU：单路约 35.8fps；此前 4 路短测约 9.7fps/路，均高于 §14.3 的 4.5fps 门槛。
-- Rust 离线 golden runner 处理同一语料：tract 54.9s、ort 4.4s（同后端 ORT 明显快于
-  tract 纯 Rust 解释执行，印证 N-20 的判断）。两者是**离线整段视频**耗时，与在线
-  每路 fps 不同口径，不能直接算 1.5× 吞吐比；该比值需在线多路矩阵实测。
+- Rust 离线 golden runner 处理同一语料：tract 81.2s、ort 4.0s（2026-11-11 复测；
+  11-09 为 54.9s/4.4s，同后端 ORT 明显快于 tract 纯 Rust 解释执行，印证 N-20 的
+  判断）。两者是**离线整段视频**耗时，与在线每路 fps 不同口径，不能直接算 1.5×
+  吞吐比；该比值需在线多路矩阵实测。
 - Python-DML：本机未装 `onnxruntime-directml`（统一锁为 CPU 版），且无 DML EP，
   标为 n/a；需 `requirements-win-dml.lock` + DirectX 12 GPU 环境实测
   （→ 2026-11-11 已补，见上节）。

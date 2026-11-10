@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 mod discovery;
 mod fernet;
+mod pdf;
 
 use axum::extract::{
     ws::{WebSocket, WebSocketUpgrade},
@@ -133,6 +134,8 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     // ---- 导出/诊断/杂项 ----
     ("GET", "/api/export/events.csv"),
     ("GET", "/api/export/stats.csv"),
+    // ---- R2-309 收尾：月报 PDF（folders/{cid}/scan 需推理管线接线，保持 503 如实标注） ----
+    ("GET", "/api/export/monthly.pdf"),
     ("GET", "/api/metrics"),
     ("GET", "/api/diagnostics/summary"),
     ("GET", "/api/v1/meta"),
@@ -242,6 +245,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/calendar/:d", delete(delete_calendar))
         .route("/export/events.csv", get(export_events_csv))
         .route("/export/stats.csv", get(export_stats_csv))
+        .route("/export/monthly.pdf", get(export_monthly_pdf))
         .route("/metrics", get(metrics))
         .route("/diagnostics/summary", get(diagnostics_summary))
         .route("/v1/meta", get(api_v1_meta))
@@ -540,6 +544,9 @@ fn extract_target(path: &str) -> Option<String> {
         return None;
     };
     let id = path.rsplit('/').next()?.trim();
+    // 安全复核（Mimosa medium「疑似跨文件污点」）：审计 resource 只保留纯数字 id
+    // （URL 中的其余部分——含任何注入字符——都会在此被整体丢弃），随后的 format!
+    // 只拼 kind（上表硬编码枚举）与该数字串，无日志注入/结构污染面。
     if id.chars().all(|c| c.is_ascii_digit()) && !id.is_empty() {
         Some(format!("{kind}:{id}"))
     } else {
@@ -1918,6 +1925,135 @@ async fn export_stats_csv(State(st): State<Shared>) -> Response {
             ));
         }
         Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], out).into_response())
+    })
+}
+
+/// `YYYY-MM` → (year, month)。对齐 Python `strptime(month, "%Y-%m")` 的常见口径
+/// （月允许 1-2 位；年要求 4 位——Python `%Y` 更宽松，此处收紧到实际契约）。
+fn parse_month(s: &str) -> Option<(i64, u32)> {
+    let (y, m) = s.split_once('-')?;
+    if y.len() != 4 || !(1..=2).contains(&m.len()) {
+        return None;
+    }
+    let y: i64 = y.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    if !(1..=12).contains(&m) {
+        return None;
+    }
+    Some((y, m))
+}
+
+/// 月首/次日边界字符串与当月天数（平闰年规则就地实现，不引新依赖）。
+fn month_bounds(y: i64, m: u32) -> (String, String, u32) {
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let leap = |yy: i64| (yy % 4 == 0 && yy % 100 != 0) || yy % 400 == 0;
+    let dim = [
+        31u32,
+        if leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ][(m - 1) as usize];
+    (
+        format!("{y:04}-{m:02}-01"),
+        format!("{ny:04}-{nm:02}-01"),
+        dim,
+    )
+}
+
+/// 生成时间戳（UTC 基准，与 `iso_days_ago` 注释同口径：控制面统计以同一基准对齐 Python）。
+fn now_minute() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let (y, m, d) = civil_from_days(secs.div_euclid(86400));
+    let day = secs.rem_euclid(86400);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+        day / 3600,
+        (day % 3600) / 60
+    )
+}
+
+/// R2-309 余量收口：月报 PDF（版式与 Python `export.monthly_pdf` 对齐，实现见 pdf.rs）。
+/// 注意：`events_query` 的 end_ts 是闭区间（`<=`），Python `events_between` 是开区间
+/// （`<`）——end 过滤在 handler 内做，保持两侧同口径（单月取 100 万行内全量统计）。
+async fn export_monthly_pdf(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let bad = |msg: &str| (StatusCode::BAD_REQUEST, Json(json!({"detail": msg}))).into_response();
+    let Some(month) = q.get("month") else {
+        // Python FastAPI 缺必填 query 参数返回 422（错误体为 error 对象数组）
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!([{"loc": ["query", "month"], "msg": "Field required", "type": "missing"}])),
+        )
+            .into_response();
+    };
+    let Some((y, m)) = parse_month(month) else {
+        return bad("month 必须是 YYYY-MM 格式");
+    };
+    let month = month.clone();
+    with_store(&st, |s| {
+        let (start, until, dim) = month_bounds(y, m);
+        let rows = s.events_query(&ls_store::EventsFilter {
+            start_ts: Some(&start),
+            limit: 1_000_000,
+            ..Default::default()
+        })?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|e| e.ts.as_str() < until.as_str()) // Python：ts < until（开区间）
+            .collect();
+        let mut by_level = [0i64; 3];
+        let mut unhandled = 0i64;
+        let mut by_day: Vec<(u32, i64)> = Vec::new();
+        for e in &rows {
+            if (1..=3).contains(&e.level) {
+                by_level[(e.level - 1) as usize] += 1;
+            }
+            if e.status == "new" {
+                unhandled += 1;
+            }
+            if let Ok(d) = e.ts.get(8..10).unwrap_or("").parse::<u32>() {
+                match by_day.iter_mut().find(|(dd, _)| *dd == d) {
+                    Some((_, v)) => *v += 1,
+                    None => by_day.push((d, 1)),
+                }
+            }
+        }
+        let generated = now_minute();
+        let report = pdf::MonthlyReport {
+            month: &month,
+            generated: &generated,
+            total: rows.len() as i64,
+            by_level,
+            unhandled,
+            by_day: &by_day,
+            days_in_month: dim,
+        };
+        let bytes = pdf::render_monthly(&report);
+        let ctype = HeaderValue::from_static("application/pdf");
+        let disposition =
+            HeaderValue::from_str(&format!("attachment; filename=monthly_{month}.pdf"))
+                .unwrap_or(HeaderValue::from_static("attachment"));
+        Ok((
+            [
+                (header::CONTENT_TYPE, ctype),
+                (header::CONTENT_DISPOSITION, disposition),
+            ],
+            bytes,
+        )
+            .into_response())
     })
 }
 
@@ -4870,6 +5006,71 @@ mod tests {
         assert_eq!(j[0]["name"], "夜间入侵v2");
         assert_eq!(j[0]["config"]["level"], 2);
         let r = req(&app, "DELETE", &format!("/api/rule-templates/{tid}"), None).await;
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    // ==== R2-309 收尾：月报 PDF（export/monthly.pdf，105/106）====
+
+    #[tokio::test]
+    async fn export_monthly_pdf_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        seed_schema(&db);
+        let st = test_state_cfg_dir(
+            db.to_str().unwrap(),
+            "adm",
+            false,
+            dir.path().to_str().unwrap(),
+        );
+        let app = build_router(Arc::clone(&st));
+        // 播种：2026-11 三条（2×L2 new、1×L3 acked）+ 越界月份一条（不得计入）
+        {
+            let s = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+            for (i, (ts, level, detail)) in [
+                ("2026-11-05T10:00:00", 2i64, "a"),
+                ("2026-11-05T11:00:00", 2, "b"),
+                ("2026-11-20T09:30:00", 3, "c"),
+                ("2026-12-01T00:00:00", 1, "out-of-month"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                s.add_event(&ls_store::NewEvent {
+                    camera_id: 1,
+                    type_: "enter",
+                    level,
+                    track_id: i as i64,
+                    detail,
+                    snapshot: None,
+                    ts,
+                })
+                .unwrap();
+            }
+            s.set_event_status(3, "acked", None, None).unwrap(); // L3 那条已处置
+        }
+        // 缺 month → 422（对齐 FastAPI 必填参数语义）
+        let r = req(&app, "GET", "/api/export/monthly.pdf", None).await;
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY, "缺 month");
+        // 格式/范围非法 → 400（对齐 Python「month 必须是 YYYY-MM 格式」；年收紧 4 位）
+        let r = req(&app, "GET", "/api/export/monthly.pdf?month=2026-13", None).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = req(&app, "GET", "/api/export/monthly.pdf?month=26-2", None).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // 200：application/pdf + Content-Disposition + 合法 PDF 结构（页眉/EOF）
+        let r = req(&app, "GET", "/api/export/monthly.pdf?month=2026-11", None).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()["content-type"], "application/pdf");
+        let cd = r.headers()["content-disposition"].to_str().unwrap();
+        assert!(cd.contains("monthly_2026-11.pdf"), "{cd}");
+        let b = http_body_util::BodyExt::collect(r.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert!(b.starts_with(b"%PDF"), "PDF 魔数");
+        assert!(b.windows(5).any(|w| w == b"%%EOF"), "EOF 标记");
+        assert!(b.windows(9).any(|w| w == b"endstream"), "内容流闭合");
+        // 闰年 2 月（29 天）同样可用
+        let r = req(&app, "GET", "/api/export/monthly.pdf?month=2024-02", None).await;
         assert_eq!(r.status(), StatusCode::OK);
     }
 }
