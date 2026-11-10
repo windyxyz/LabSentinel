@@ -28,7 +28,10 @@ SECRET_PATTERNS = [
     (re.compile(r"\beyJ[A-Za-z0-9_-]{30,}\.eyJ"), "JWT"),
 ]
 ALLOWLIST_LINE = re.compile(
-    r"(your-secret-token|test-secret|tok60|tok65|your-hmac-secret|示例|占位|placeholder)",
+    r"(your-secret-token|test-secret|tok60|tok65|your-hmac-secret|示例|占位|placeholder"
+    r"|\$\(openssl rand -hex )",  # 2026-11-11：78 号审阅 §10.2 的部署示例命令
+                                  # （LS_ADMIN_TOKEN=$(openssl rand -hex 24)）——
+                                  # 运行时生成，非密钥值
     re.IGNORECASE)
 LS_TOKEN_SET = re.compile(r"^#?\s*LS_ADMIN_TOKEN=.+$")
 
