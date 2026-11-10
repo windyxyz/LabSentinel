@@ -11,6 +11,9 @@
 
 use std::sync::Arc;
 
+mod discovery;
+mod fernet;
+
 use axum::extract::{
     ws::{WebSocket, WebSocketUpgrade},
     Path as AxPath, Query, State,
@@ -174,6 +177,12 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/rule-templates/:tid/apply"),
     ("POST", "/api/system/shutdown"),
     ("GET", "/api/cameras/:cid/snapshot"),
+    // ---- R2-309 批次 4（L3 门槛冲刺） ----
+    ("GET", "/api/alerts/config"),
+    ("PUT", "/api/alerts/config"),
+    ("POST", "/api/alerts/config/reset"),
+    ("GET", "/api/discovery/cameras"),
+    ("POST", "/api/discovery/probe"),
 ];
 
 pub type Shared = Arc<AppState>;
@@ -276,6 +285,14 @@ pub fn build_router(state: Shared) -> Router {
         .route("/rule-templates/:tid/apply", post(apply_rule_template))
         .route("/system/shutdown", post(shutdown_server))
         .route("/cameras/:cid/snapshot", get(camera_snapshot))
+        // ---- R2-309 批次 4 ----
+        .route(
+            "/alerts/config",
+            get(alerts_config_get).put(alerts_config_put),
+        )
+        .route("/alerts/config/reset", post(alerts_config_reset))
+        .route("/discovery/cameras", get(discovery_cameras))
+        .route("/discovery/probe", post(discovery_probe))
         .with_state(state.clone());
     let ws = Router::new()
         .route("/ws/events", get(ws_events))
@@ -2489,6 +2506,463 @@ async fn ppe_status(State(st): State<Shared>) -> Response {
 
 async fn ws_events(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| handle_ws(socket, st.events_tx.subscribe()))
+}
+
+// ==== R2-309 批次 4：网页端告警渠道配置（任务140 复刻 + Fernet 互操作）+ 局域网发现 ====
+
+/// 与 Python `alert_config.FIELDS/SECRET/URL/BOOL/INT` 同口径的字段元数据。
+mod alert_cfg {
+    pub const PREFIX: &str = "alert.";
+    /// channel -> (api 字段, settings 字段)
+    pub const FIELDS: &[(&str, &[(&str, &str)])] = &[
+        ("wecom", &[("webhook", "wecom_webhook")]),
+        ("dingtalk", &[("webhook", "dingtalk_webhook")]),
+        ("feishu", &[("webhook", "feishu_webhook")]),
+        ("serverchan", &[("sendkey", "serverchan_sendkey")]),
+        ("pushplus", &[("token", "pushplus_token")]),
+        ("qmsg", &[("key", "qmsg_key"), ("qq", "qmsg_qq")]),
+        (
+            "email",
+            &[
+                ("smtp_host", "smtp_host"),
+                ("smtp_port", "smtp_port"),
+                ("smtp_user", "smtp_user"),
+                ("smtp_pass", "smtp_pass"),
+                ("to", "alert_email_to"),
+            ],
+        ),
+        (
+            "webhook",
+            &[
+                ("url", "webhook_url"),
+                ("secret", "webhook_secret"),
+                ("allow_http", "webhook_allow_http"),
+            ],
+        ),
+    ];
+    pub const SECRET_FIELDS: &[&str] = &[
+        "wecom_webhook",
+        "dingtalk_webhook",
+        "feishu_webhook",
+        "serverchan_sendkey",
+        "pushplus_token",
+        "qmsg_key",
+        "smtp_pass",
+        "webhook_secret",
+    ];
+    pub const URL_FIELDS: &[&str] = &[
+        "wecom_webhook",
+        "dingtalk_webhook",
+        "feishu_webhook",
+        "webhook_url",
+    ];
+    pub const BOOL_FIELDS: &[&str] = &["webhook_allow_http"];
+    pub const INT_FIELDS: &[&str] = &["smtp_port"];
+
+    /// 渠道 URL host 白名单（与 Python alerts.py 常量同口径）
+    pub fn url_allowed_hosts(field: &str) -> Option<&'static [&'static str]> {
+        match field {
+            "wecom_webhook" => Some(&["qyapi.weixin.qq.com"]),
+            "dingtalk_webhook" => Some(&["oapi.dingtalk.com"]),
+            "feishu_webhook" => Some(&["open.feishu.cn"]),
+            _ => None,
+        }
+    }
+
+    pub fn fields_of(channel: &str) -> Option<&'static [(&'static str, &'static str)]> {
+        FIELDS.iter().find(|(c, _)| *c == channel).map(|(_, m)| *m)
+    }
+
+    pub fn is_secret(field: &str) -> bool {
+        SECRET_FIELDS.contains(&field)
+    }
+
+    pub fn is_url(field: &str) -> bool {
+        URL_FIELDS.contains(&field)
+    }
+
+    pub fn is_bool(field: &str) -> bool {
+        BOOL_FIELDS.contains(&field)
+    }
+
+    pub fn is_int(field: &str) -> bool {
+        INT_FIELDS.contains(&field)
+    }
+}
+
+/// Python `_mask_url` 复刻：保留 scheme/host/路径结构，查询值全 ***，长 token 打码。
+fn mask_url(url: &str) -> String {
+    if url.is_empty() {
+        return String::new();
+    }
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s.to_string(), r.to_string()),
+        None => return "***".into(),
+    };
+    let (authority, tail) = match rest.find('/') {
+        Some(i) => (rest[..i].to_string(), rest[i..].to_string()),
+        None => (rest.clone(), String::new()),
+    };
+    let (path_part, query) = match tail.split_once('?') {
+        Some((p, q)) => (p.to_string(), Some(q.to_string())),
+        None => (tail.clone(), None),
+    };
+    let mut parts: Vec<String> = path_part
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if let Some(last) = parts.last_mut() {
+        if last.len() >= 8 {
+            *last = "***".into();
+        }
+    }
+    let query_out = query.map(|q| {
+        q.split('&')
+            .filter(|kv| !kv.is_empty())
+            .map(|kv| format!("{}=***", kv.split('=').next().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join("&")
+    });
+    format!(
+        "{scheme}://{authority}/{}{}{}",
+        parts.join("/"),
+        if query_out.is_some() { "?" } else { "" },
+        query_out.unwrap_or_default()
+    )
+}
+
+/// 字段当前有效值：DB 覆盖（解密）优先，其次 env（Python load() 语义的读路径）。
+fn alert_field_value(s: &ls_store::Store, st: &Shared, field: &str) -> String {
+    if let Ok(Some(raw)) = s.setting_get(&format!("{}{field}", alert_cfg::PREFIX)) {
+        if alert_cfg::is_secret(field) {
+            return fernet::unprotect(&raw, std::path::Path::new(&st.data_dir));
+        }
+        return raw;
+    }
+    std::env::var(format!("LS_{}", field.to_ascii_uppercase())).unwrap_or_default()
+}
+
+/// Python `alert_config.status` 复刻：永不回显密钥/完整 webhook。
+fn alerts_config_status(s: &ls_store::Store, st: &Shared) -> Value {
+    let mut channels = serde_json::Map::new();
+    for (channel, mapping) in alert_cfg::FIELDS {
+        let mut item = serde_json::Map::new();
+        let mut any_db = false;
+        let mut any_env = false;
+        for (api_name, field) in mapping.iter() {
+            let db_raw = s
+                .setting_get(&format!("{}{field}", alert_cfg::PREFIX))
+                .ok()
+                .flatten();
+            if db_raw.is_some() {
+                any_db = true;
+            }
+            let val = alert_field_value(s, st, field);
+            if !val.is_empty() {
+                any_env = true;
+            }
+            if alert_cfg::is_bool(field) {
+                let b = matches!(val.as_str(), "1" | "true" | "True" | "yes" | "on");
+                item.insert(api_name.to_string(), json!(b));
+                continue;
+            }
+            if alert_cfg::is_int(field) {
+                let n: Option<i64> = val.parse().ok();
+                item.insert(api_name.to_string(), json!(n));
+                continue;
+            }
+            let configured_like = !val.trim().is_empty();
+            item.insert(format!("has_{api_name}"), json!(configured_like));
+            if alert_cfg::is_url(field) {
+                item.insert(api_name.to_string(), json!(mask_url(&val)));
+            } else if alert_cfg::is_secret(field) {
+                item.insert(api_name.to_string(), json!(""));
+            } else {
+                item.insert(api_name.to_string(), json!(val));
+            }
+        }
+        // configured 判定（Python _configured 同口径；qmsg 需 key+qq、email 需 host+to）
+        let get = |f: &str| alert_field_value(s, st, f);
+        let configured = match *channel {
+            "qmsg" => !get("qmsg_key").trim().is_empty() && !get("qmsg_qq").trim().is_empty(),
+            "email" => {
+                !get("smtp_host").trim().is_empty() && !get("alert_email_to").trim().is_empty()
+            }
+            _ => mapping
+                .iter()
+                .any(|(_, f)| !get(f).trim().is_empty() && !alert_cfg::is_bool(f)),
+        };
+        item.insert("configured".into(), json!(configured));
+        item.insert(
+            "source".into(),
+            json!(if any_db {
+                "db"
+            } else if any_env {
+                "env"
+            } else {
+                "none"
+            }),
+        );
+        channels.insert(channel.to_string(), Value::Object(item));
+    }
+    json!({"channels": Value::Object(channels),
+           "note": "密钥/完整 webhook 不会回显；留空保存=保持原值；清除=回退启动时 .env"})
+}
+
+async fn alerts_config_get(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        Ok(Json(alerts_config_status(s, &st)).into_response())
+    })
+}
+
+/// Python `_validate_url` 同口径：禁凭证；厂商渠道只允许 https + 白名单域名。
+fn validate_alert_url(field: &str, url: &str) -> Result<(), String> {
+    if let Some(authority) = url.split("://").nth(1) {
+        if let Some((user, _)) = authority.rsplit_once('@') {
+            if user.contains(':') && !user.is_empty() {
+                return Err("Webhook URL 不能携带 user:pass@ 凭证".into());
+            }
+        }
+    }
+    if field == "webhook_url" {
+        let ok_scheme = url.starts_with("https://") || url.starts_with("http://");
+        let has_host = url
+            .split("://")
+            .nth(1)
+            .map(|r| !r.is_empty())
+            .unwrap_or(false);
+        if !ok_scheme || !has_host {
+            return Err("Webhook URL 必须是 http(s) 且含主机".into());
+        }
+        return Ok(());
+    }
+    if let Some(allowed) = alert_cfg::url_allowed_hosts(field) {
+        if !url.starts_with("https://") {
+            return Err(format!(
+                "该渠道只允许 https 且域名为 {}",
+                allowed.join(", ")
+            ));
+        }
+        let host = url::host_of(url).unwrap_or_default();
+        if !allowed.contains(&host.as_str()) {
+            return Err(format!(
+                "该渠道只允许 https 且域名为 {}",
+                allowed.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn alerts_config_put(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    let Some(body_obj) = body.as_object() else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail": "body 必须是对象"})),
+        )
+            .into_response();
+    };
+    let mut pending: Vec<(String, String)> = Vec::new(); // (field, serialized)
+    for (channel, values) in body_obj {
+        let Some(mapping) = alert_cfg::fields_of(channel) else {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"detail": format!("未知渠道: {channel}")})),
+            )
+                .into_response();
+        };
+        let Some(values) = values.as_object() else {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"detail": format!("{channel} 配置必须是对象")})),
+            )
+                .into_response();
+        };
+        for (api_name, raw) in values {
+            let Some((_, field)) = mapping.iter().find(|(a, _)| a == api_name) else {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({"detail": format!("{channel} 含未知字段: {api_name}")})),
+                )
+                    .into_response();
+            };
+            // 留空 = 保持原值
+            let text = raw
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let Some(text) = text else { continue };
+            if alert_cfg::is_int(field) {
+                let Ok(n) = text.parse::<i64>() else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"detail": format!("{api_name} 必须是整数")})),
+                    )
+                        .into_response();
+                };
+                if !(1..=65535).contains(&n) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"detail": format!("{api_name} 必须在 1-65535")})),
+                    )
+                        .into_response();
+                }
+                pending.push((field.to_string(), n.to_string()));
+                continue;
+            }
+            if alert_cfg::is_bool(field) {
+                let b = matches!(text.as_str(), "1" | "true" | "True" | "yes" | "on");
+                pending.push((field.to_string(), if b { "1".into() } else { "0".into() }));
+                continue;
+            }
+            if alert_cfg::is_url(field) {
+                if let Err(e) = validate_alert_url(field, &text) {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response();
+                }
+            }
+            if *field == "alert_email_to" && !text.is_empty() {
+                let parts: Vec<&str> = text.split('@').collect();
+                let ok = parts.len() == 2
+                    && !parts[0].is_empty()
+                    && !parts[1].is_empty()
+                    && parts[1].contains('.');
+                if !ok {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"detail": "收件邮箱格式不正确"})),
+                    )
+                        .into_response();
+                }
+            }
+            if *field == "smtp_host" && (text.contains("://") || text.contains(' ')) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"detail": "SMTP 服务器只填主机名，如 smtp.qq.com"})),
+                )
+                    .into_response();
+            }
+            if *field == "qmsg_qq" && !text.chars().all(|c| c.is_ascii_digit()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"detail": "Qmsg 接收 QQ 必须是数字"})),
+                )
+                    .into_response();
+            }
+            // 敏感字段加密（Fernet，与 POSIX 语义互操作）；失败拒绝保存（R2-106）
+            let serialized = if alert_cfg::is_secret(field) {
+                match fernet::protect(&text, std::path::Path::new(&st.data_dir)) {
+                    Some(enc) => enc,
+                    None => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"detail": "加密组件不可用，拒绝明文保存密钥"})),
+                        )
+                            .into_response()
+                    }
+                }
+            } else {
+                text.clone()
+            };
+            pending.push((field.to_string(), serialized));
+        }
+    }
+    with_store(&st, |s| {
+        for (field, val) in &pending {
+            s.setting_set(&format!("{}{field}", alert_cfg::PREFIX), val)?;
+        }
+        Ok(Json(alerts_config_status(s, &st)).into_response())
+    })
+}
+
+async fn alerts_config_reset(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let channel = q.get("channel").cloned();
+    let fields: Vec<String> = match channel.as_deref() {
+        None => alert_cfg::FIELDS
+            .iter()
+            .flat_map(|(_, m)| m.iter().map(|(_, f)| f.to_string()))
+            .collect(),
+        Some(c) => match alert_cfg::fields_of(c) {
+            Some(m) => m.iter().map(|(_, f)| f.to_string()).collect(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"detail": format!("未知渠道: {c}")})),
+                )
+                    .into_response();
+            }
+        },
+    };
+    with_store(&st, |s| {
+        for f in &fields {
+            // Python delete_app_settings 移除行；这里置空串——读路径 DB 覆盖为空 →
+            // env 生效，行为等价（source 会显示 db，与 Python 的 env 有差异，如实记录）
+            s.setting_set(&format!("{}{f}", alert_cfg::PREFIX), "")?;
+        }
+        Ok(Json(alerts_config_status(s, &st)).into_response())
+    })
+}
+
+// ---- 局域网发现（任务113；require_admin 口径同 Python） ----
+async fn discovery_cameras(
+    State(_st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let timeout: u64 = q
+        .get("timeout")
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|v| v.clamp(1.0, 5.0) as u64)
+        .unwrap_or(3);
+    let refresh = q.get("refresh").map(|v| v == "1").unwrap_or(false);
+    let devices = discovery::get_devices(timeout, refresh);
+    let hint = if devices.is_empty() {
+        "未发现设备：确认摄像头与主机同网段、摄像头已开启 ONVIF、UDP 3702 未被防火墙拦截；也可用品牌模板手输 RTSP 地址"
+    } else {
+        ""
+    };
+    Json(
+        json!({"devices": devices, "lan": discovery::lan_addresses(),
+                "error": hint,
+                "note": "ffprobe 增强探测在 rust 侧为可选（tools/ffprobe 存在时启用）"}),
+    )
+    .into_response()
+}
+
+async fn discovery_probe(State(_st): State<Shared>, Json(body): Json<Value>) -> Response {
+    let host = body
+        .get("host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if host.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail": "host 必填"})),
+        )
+            .into_response();
+    }
+    let port = body.get("port").and_then(|v| v.as_i64()).unwrap_or(554);
+    if !(1..=65535).contains(&port) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail": "port 必须在 1-65535"})),
+        )
+            .into_response();
+    }
+    let username = body.get("username").and_then(|v| v.as_str());
+    let password = body.get("password").and_then(|v| v.as_str());
+    // 凭证仅本次探测用（不写日志/不回传——probe_host 返回值已保证）
+    Json(discovery::probe_host(
+        &host,
+        port as u16,
+        username,
+        password,
+    ))
+    .into_response()
 }
 
 // ==== R2-309 批次 3b：图片记录详情/导出/模板预览与应用/关机/快照占位 ====
