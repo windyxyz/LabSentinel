@@ -50,8 +50,14 @@ namespace LabSentinelLauncher
                 bool stop = args.Length > 0 &&
                     string.Equals(args[0], "--stop", StringComparison.OrdinalIgnoreCase);
 
-                // 启动脚本用相对常量路径（cwd=包根，WorkingDirectory 指定），Arguments 纯常量——
-                // 免引号拼接与环境变量注入面；停止信号为常量值环境变量 LS_PORTABLE_STOP
+                // 2026-11-11 冒烟修复（R2-004 本地实机验证发现）：launcher 路径改为
+                // 绝对路径 + 显式 WorkingDirectory。旧实现用相对路径 runpy.run_path(
+                // 'scripts/portable_launcher.py') 并假设子进程继承 cwd=包根——双击
+                // 时成立，但以其他 cwd 启动 exe（命令行/计划任务/冒烟脚本）时 runpy
+                // 会解析到错误目录的 launcher，APP_ROOT 随之漂移（冒烟实录：找成了
+                // 开发机仓库根的 runtime）。launcher 路径来自 exe 自身 BaseDirectory
+                // 派生（非外部输入），引号拼接是可控的；停止信号仍为常量环境变量
+                // LS_PORTABLE_STOP。
                 ProcessStartInfo psi = new ProcessStartInfo();
                 if (stop)
                 {
@@ -62,9 +68,8 @@ namespace LabSentinelLauncher
                 {
                     psi.FileName = pythonw;
                 }
-                psi.Arguments = "-c \"import os,runpy;runpy.run_path('scripts/portable_launcher.py', run_name='__main__')\"";
-                // 不设 WorkingDirectory：子进程继承本进程 cwd（= exe 所在包根），
-                // 相对脚本路径即可解析；少一处变量派生属性
+                psi.Arguments = "\"" + launcher + "\"";
+                psi.WorkingDirectory = root;
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
 

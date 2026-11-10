@@ -174,8 +174,12 @@ def main() -> int:
         exe = pkg / "LabSentinel.exe"
         if exe.exists():
             stop_cmd = [str(exe), "--stop"]
+            # 2026-11-11：显式 cwd=pkg 模拟双击语义（Explorer 会把 cwd 设为 exe 目录）。
+            # 旧实现继承冒烟脚本的 cwd，配合入口 exe 的相对路径假设会跑错 launcher
+            # （已由 LabSentinelLauncher.cs 绝对路径修复双保险，此处仍保持确定性）。
             proc = subprocess.Popen([str(exe)], env=env, stdin=DEVNULL, stdout=DEVNULL,
-                                    stderr=DEVNULL, creationflags=CREATE_NO_WINDOW)
+                                    stderr=DEVNULL, cwd=str(pkg),
+                                    creationflags=CREATE_NO_WINDOW)
             launcher_label = "LabSentinel.exe"
         else:
             bat = pkg / "启动.bat"

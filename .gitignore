@@ -48,6 +48,9 @@ tools/go2rtc.yaml
 # ---- 二进制组件（可再下载，见 NOTICE 与部署指南；不入库）----
 tools/ffmpeg/
 tools/go2rtc.exe
+# ort 动态库：R2-304 --with-rust 随包（build_portable 逐候选探测；本机由
+# requirements-win-dml.lock venv 的 onnxruntime/capi 复制，或官方 release 解包）
+tools/onnxruntime/
 
 # ---- 误建环境残留（防御）----
 server/LabSentinelgpu-venv/
