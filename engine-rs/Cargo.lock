@@ -1187,6 +1187,7 @@ dependencies = [
  "chrono",
  "jpeg-encoder",
  "ls-core",
+ "ls-dispatch",
  "ls-infer",
  "ls-ingest",
  "ls-proto",

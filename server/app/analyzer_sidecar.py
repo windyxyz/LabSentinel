@@ -263,7 +263,9 @@ class SidecarAnalyzer(AnalyzerBackend):
 
     # ---- AnalyzerBackend 接口 ----
     def _proto_config(self):
-        """把当前累积快照转成 proto Config（T-331：Rust 数据面需要源码/区域/规则）。"""
+        """把当前累积快照转成 proto Config（T-331：Rust 数据面需要源码/区域/规则；
+        R2-305：附带已解密的告警渠道快照——仅 127.0.0.1 gRPC + 令牌传输，明文只进
+        数据面内存）。"""
         from . import analyzer_pb2 as pb
         from .config import settings
         cams = [
@@ -296,7 +298,51 @@ class SidecarAnalyzer(AnalyzerBackend):
             )
             for r in self._rules.values()
         ]
-        return pb.Config(version=self._cfg_version, cameras=cams, zones=zones, rules=rules)
+        cfg = pb.Config(version=self._cfg_version, cameras=cams, zones=zones, rules=rules)
+        # R2-305：渠道快照（settings 已含 alert_config.load 的 DB 解密覆盖；env 本来明文）
+        ac = pb.AlertChannels()
+        _s = str(getattr(settings, "wecom_webhook", "") or "")
+        if _s.strip():
+            ac.channels.append(pb.AlertChannel(channel="wecom", url=_s))
+        _s = str(getattr(settings, "dingtalk_webhook", "") or "")
+        if _s.strip():
+            ac.channels.append(pb.AlertChannel(channel="dingtalk", url=_s))
+        _s = str(getattr(settings, "feishu_webhook", "") or "")
+        if _s.strip():
+            ac.channels.append(pb.AlertChannel(channel="feishu", url=_s))
+        _s = str(getattr(settings, "serverchan_sendkey", "") or "")
+        if _s.strip():
+            ac.channels.append(pb.AlertChannel(
+                channel="serverchan",
+                url=f"https://sctapi.ftqq.com/{_s.strip()}.send"))
+        _s = str(getattr(settings, "pushplus_token", "") or "")
+        if _s.strip():
+            ac.channels.append(pb.AlertChannel(channel="pushplus", token=_s))
+        _k = str(getattr(settings, "qmsg_key", "") or "")
+        _q = str(getattr(settings, "qmsg_qq", "") or "")
+        if _k.strip() and _q.strip():
+            ac.channels.append(pb.AlertChannel(channel="qmsg", key=_k, qq=_q))
+        _u = str(getattr(settings, "webhook_url", "") or "")
+        if _u.strip():
+            ac.channels.append(pb.AlertChannel(
+                channel="webhook", url=_u,
+                secret=str(getattr(settings, "webhook_secret", "") or ""),
+                allow_http=bool(getattr(settings, "webhook_allow_http", False))))
+        _h = str(getattr(settings, "smtp_host", "") or "")
+        _t = str(getattr(settings, "alert_email_to", "") or "")
+        if _h.strip() and _t.strip():
+            ac.channels.append(pb.AlertChannel(
+                channel="email",
+                email=pb.EmailChannel(
+                    host=_h,
+                    port=int(getattr(settings, "smtp_port", 465) or 465),
+                    user=str(getattr(settings, "smtp_user", "") or ""),
+                    password=str(getattr(settings, "smtp_pass", "") or ""),
+                    to=_t,
+                    security=str(getattr(settings, "smtp_security", "ssl") or "ssl"))))
+        if len(ac.channels):
+            cfg.alert_channels.CopyFrom(ac)
+        return cfg
 
     def start_camera(self, camera: dict, zones: list[dict], rules: list[dict]) -> None:
         self.start()

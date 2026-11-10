@@ -76,6 +76,11 @@ struct AppStateInner {
     model_path: Option<PathBuf>,
     /// 每个事件流订阅者的发送端（数据面线程 try_send 非阻塞广播）
     event_txs: Vec<mpsc::Sender<Result<EventCandidate, Status>>>,
+    /// R2-305：已解密的告警渠道快照（ApplyConfig 下发；数据面本地派发/escalation
+    /// 消费。明文只进内存，绝不落盘/日志）
+    alert_channels: Vec<ls_dispatch::ChannelConfig>,
+    /// R2-305：渠道名（与 alert_channels 同序对应）
+    alert_channel_names: Vec<String>,
 }
 
 type AppState = Arc<Mutex<AppStateInner>>;
@@ -120,6 +125,8 @@ impl AnalyzerImpl {
                 evidence: HashMap::new(),
                 model_path,
                 event_txs: vec![],
+                alert_channels: Vec::new(),
+                alert_channel_names: Vec::new(),
             })),
         }
     }
@@ -691,6 +698,38 @@ impl Analyzer for AnalyzerImpl {
             })
             .collect();
         let calendar = cfg.calendar.map(|c| c.exceptions).unwrap_or_default();
+        // R2-305：渠道快照（已解密明文只进内存；供数据面本地派发/escalation 消费）
+        let (alert_channels, alert_channel_names) = match cfg.alert_channels {
+            Some(ac) => {
+                let mut cfgs = Vec::new();
+                let mut names = Vec::new();
+                for ch in &ac.channels {
+                    names.push(ch.channel.clone());
+                    let mut cc = ls_dispatch::ChannelConfig {
+                        url: ch.url.clone(),
+                        secret: ch.secret.clone(),
+                        token: ch.token.clone(),
+                        key: ch.key.clone(),
+                        allow_http: ch.allow_http,
+                        qq: ch.qq.clone(),
+                        ..Default::default()
+                    };
+                    if let Some(em) = &ch.email {
+                        cc.email = ls_dispatch::EmailConfig {
+                            host: em.host.clone(),
+                            port: em.port.max(0) as u16,
+                            user: em.user.clone(),
+                            pass: em.password.clone(),
+                            to: em.to.clone(),
+                            security: em.security.clone(),
+                        };
+                    }
+                    cfgs.push(cc);
+                }
+                (cfgs, names)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
         let running: Vec<i64> = {
             let mut st = lock(&self.state);
             st.config_version = cfg.version;
@@ -698,8 +737,19 @@ impl Analyzer for AnalyzerImpl {
             st.zones_cfg = zones;
             st.rules_cfg = rules;
             st.calendar = calendar;
+            if !alert_channel_names.is_empty() {
+                // 渠道快照存在时整体替换；空=保持既有（避免未启用网页配置时清空）
+                st.alert_channels = alert_channels;
+                st.alert_channel_names = alert_channel_names.clone();
+            }
             st.running.keys().copied().collect()
         };
+        if !alert_channel_names.is_empty() {
+            println!(
+                "[ls-analyzer] ApplyConfig alert_channels={:?}",
+                alert_channel_names
+            );
+        }
         // 运行中的摄像头按新快照重启（旧线程置停止标志后由 spawn_camera 替换）
         for cid in running {
             spawn_camera(self.state.clone(), cid);
@@ -1109,6 +1159,7 @@ mod tests {
             zones: vec![],
             rules: vec![],
             calendar: None,
+            alert_channels: None,
         };
         client
             .apply_config(token_req(cfg))
@@ -1234,6 +1285,7 @@ mod tests {
                 enabled: true,
             }],
             calendar: None,
+            alert_channels: None,
         };
         client.apply_config(token_req(cfg)).await.unwrap();
         client
@@ -1489,5 +1541,59 @@ mod tests {
         if let Some((f, py, rs)) = first {
             panic!("轨迹分歧 first frame={f}: PY-only={py:?} RS-only={rs:?}（按 supervision 语义继续收敛）");
         }
+    }
+
+    #[tokio::test]
+    async fn alert_channels_snapshot_parsed() {
+        // R2-305：ApplyConfig 渠道快照解析进数据面状态（明文只进内存）
+        let imp = AnalyzerImpl::new("tok".into(), None);
+        let cfg = Config {
+            version: 1,
+            cameras: vec![],
+            zones: vec![],
+            rules: vec![],
+            calendar: None,
+            alert_channels: Some(ls_proto::analyzer::AlertChannels {
+                channels: vec![
+                    ls_proto::analyzer::AlertChannel {
+                        channel: "wecom".into(),
+                        url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=t".into(),
+                        ..Default::default()
+                    },
+                    ls_proto::analyzer::AlertChannel {
+                        channel: "qmsg".into(),
+                        key: "k1".into(),
+                        qq: "10001".into(),
+                        ..Default::default()
+                    },
+                ],
+            }),
+        };
+        let mut req = tonic::Request::new(cfg);
+        req.metadata_mut()
+            .insert("x-ls-token", "tok".parse().unwrap());
+        imp.apply_config(req).await.expect("apply_config");
+        {
+            let st = lock(&imp.state);
+            assert_eq!(st.alert_channel_names, vec!["wecom", "qmsg"]);
+            assert_eq!(st.alert_channels.len(), 2);
+            assert!(st.alert_channels[0].url.contains("qyapi.weixin.qq.com"));
+            assert_eq!(st.alert_channels[1].qq, "10001");
+        }
+        // 空快照不覆盖既有渠道（避免未启用网页配置时清空）
+        let cfg2 = Config {
+            version: 2,
+            cameras: vec![],
+            zones: vec![],
+            rules: vec![],
+            calendar: None,
+            alert_channels: None,
+        };
+        let mut req2 = tonic::Request::new(cfg2);
+        req2.metadata_mut()
+            .insert("x-ls-token", "tok".parse().unwrap());
+        imp.apply_config(req2).await.expect("apply_config 2");
+        let st = lock(&imp.state);
+        assert_eq!(st.alert_channels.len(), 2, "空快照保持既有渠道");
     }
 }

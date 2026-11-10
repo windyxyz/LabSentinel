@@ -130,6 +130,8 @@ pub struct Jobs {
     escalation_last: Mutex<Option<EscalationOutcome>>,
     rate: Mutex<ls_dispatch::RateLimiter>,
     handles: Mutex<Vec<JoinHandle<()>>>,
+    /// R2-305：ApplyConfig/控制面注入的渠道快照（网页配置优先于 env；None=回退 env）
+    alert_channels: Mutex<Option<Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)>>>,
 }
 
 impl Jobs {
@@ -144,6 +146,18 @@ impl Jobs {
             escalation_last: Mutex::new(None),
             rate: Mutex::new(ls_dispatch::RateLimiter::new()),
             handles: Mutex::new(Vec::new()),
+            alert_channels: Mutex::new(None),
+        }
+    }
+
+    /// R2-305：注入渠道快照（网页端配置的生效值；None=回退 channels_from_env）。
+    /// 渠道快照只进内存（凭据不落盘/日志）。
+    pub fn set_alert_channels(
+        &self,
+        channels: Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)>,
+    ) {
+        if let Ok(mut guard) = self.alert_channels.lock() {
+            *guard = Some(channels);
         }
     }
 
@@ -242,7 +256,11 @@ impl Jobs {
 
     pub fn escalate_once(&self) -> JobResult<EscalationOutcome> {
         let store = self.store()?;
-        let channels = ls_dispatch::channels_from_env();
+        let channels: Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> =
+            match self.alert_channels.lock().ok().and_then(|g| g.clone()) {
+                Some(injected) if !injected.is_empty() => injected,
+                _ => ls_dispatch::channels_from_env(),
+            };
         let filters = parse_alert_filters();
         let silences = active_silences(&store);
         let now_iso = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();

@@ -14,6 +14,7 @@ ls-proto = { path = "../ls-proto" }
 ls-core = { path = "../ls-core" }
 ls-track = { path = "../ls-track" }
 ls-ingest = { path = "../ls-ingest" }
+ls-dispatch = { path = "../ls-dispatch" }  # R2-305: 渠道快照转 ChannelConfig
 ls-infer = { path = "../ls-infer", features = ["tract", "ort"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tonic = "0.13"

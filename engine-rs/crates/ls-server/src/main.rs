@@ -2897,11 +2897,12 @@ async fn alerts_config_reset(
         },
     };
     with_store(&st, |s| {
-        for f in &fields {
-            // Python delete_app_settings 移除行；这里置空串——读路径 DB 覆盖为空 →
-            // env 生效，行为等价（source 会显示 db，与 Python 的 env 有差异，如实记录）
-            s.setting_set(&format!("{}{f}", alert_cfg::PREFIX), "")?;
-        }
+        // R2-305：真实删除（Python delete_app_settings 同语义），回退启动时 env 值
+        let keys: Vec<String> = fields
+            .iter()
+            .map(|f| format!("{}{f}", alert_cfg::PREFIX))
+            .collect();
+        s.settings_delete(&keys)?;
         Ok(Json(alerts_config_status(s, &st)).into_response())
     })
 }
@@ -4103,6 +4104,155 @@ async fn main() {
         jobs,
         pair_state: std::sync::Mutex::new(PairState::default()),
     });
+    // R2-305：网页端配置的渠道（app_settings alert.*，Fernet 解密）注入 ls-jobs
+    // escalation 发送——"网页端保存企微 webhook → rust 路径生效"的真实验收点。
+    // 解密失败的渠道（Windows DPAPI 密文）跳过（如实降级）；无 DB 覆盖回退 env。
+    if let Ok(s) = ls_store::Store::open(&st.db_path) {
+        {
+            let rows = s.settings_by_prefix("alert.").unwrap_or_default();
+            if !rows.is_empty() {
+                let get = |field: &str| -> String {
+                    for (k, v) in &rows {
+                        if *k == format!("alert.{field}") {
+                            let f = &k["alert.".len()..];
+                            if alert_cfg::is_secret(f) {
+                                return fernet::unprotect(v, std::path::Path::new(&st.data_dir));
+                            }
+                            return v.clone();
+                        }
+                    }
+                    String::new()
+                };
+                let mut channels: Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> =
+                    Vec::new();
+                let push = |name: &str,
+                            ch: ls_dispatch::Channel,
+                            cfg: ls_dispatch::ChannelConfig,
+                            configured: bool,
+                            out: &mut Vec<_>| {
+                    if configured {
+                        out.push((ch, cfg));
+                    } else {
+                        let _ = name;
+                    }
+                };
+                let wecom = get("wecom_webhook");
+                push(
+                    "wecom",
+                    ls_dispatch::Channel::Wecom,
+                    ls_dispatch::ChannelConfig {
+                        url: wecom.clone(),
+                        ..Default::default()
+                    },
+                    !wecom.trim().is_empty(),
+                    &mut channels,
+                );
+                let dingtalk = get("dingtalk_webhook");
+                push(
+                    "dingtalk",
+                    ls_dispatch::Channel::Dingtalk,
+                    ls_dispatch::ChannelConfig {
+                        url: dingtalk.clone(),
+                        ..Default::default()
+                    },
+                    !dingtalk.trim().is_empty(),
+                    &mut channels,
+                );
+                let feishu = get("feishu_webhook");
+                push(
+                    "feishu",
+                    ls_dispatch::Channel::Feishu,
+                    ls_dispatch::ChannelConfig {
+                        url: feishu.clone(),
+                        ..Default::default()
+                    },
+                    !feishu.trim().is_empty(),
+                    &mut channels,
+                );
+                let sendkey = get("serverchan_sendkey");
+                if !sendkey.trim().is_empty() {
+                    channels.push((
+                        ls_dispatch::Channel::Serverchan,
+                        ls_dispatch::ChannelConfig {
+                            url: format!("https://sctapi.ftqq.com/{}.send", sendkey.trim()),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                let token = get("pushplus_token");
+                if !token.trim().is_empty() {
+                    channels.push((
+                        ls_dispatch::Channel::Pushplus,
+                        ls_dispatch::ChannelConfig {
+                            token: token.clone(),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                let key = get("qmsg_key");
+                let qq = get("qmsg_qq");
+                if !key.trim().is_empty() && !qq.trim().is_empty() {
+                    channels.push((
+                        ls_dispatch::Channel::Qmsg,
+                        ls_dispatch::ChannelConfig {
+                            key: key.clone(),
+                            qq: qq.clone(),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                let wh = get("webhook_url");
+                if !wh.trim().is_empty() {
+                    channels.push((
+                        ls_dispatch::Channel::Webhook,
+                        ls_dispatch::ChannelConfig {
+                            url: wh.clone(),
+                            secret: get("webhook_secret"),
+                            allow_http: get("webhook_allow_http") == "1",
+                            ..Default::default()
+                        },
+                    ));
+                }
+                let (sh, sp, su, spt, sto) = (
+                    get("smtp_host"),
+                    get("smtp_port"),
+                    get("smtp_user"),
+                    get("smtp_pass"),
+                    get("alert_email_to"),
+                );
+                if !sh.trim().is_empty() && !sto.trim().is_empty() {
+                    channels.push((
+                        ls_dispatch::Channel::Email,
+                        ls_dispatch::ChannelConfig {
+                            email: ls_dispatch::EmailConfig {
+                                host: sh,
+                                port: sp.parse().unwrap_or(465),
+                                user: su,
+                                pass: spt,
+                                to: sto,
+                                security: {
+                                    let s = get("smtp_security");
+                                    if s.is_empty() {
+                                        "ssl".to_string()
+                                    } else {
+                                        s
+                                    }
+                                },
+                            },
+                            ..Default::default()
+                        },
+                    ));
+                }
+                if !channels.is_empty() {
+                    println!(
+                        "[ls-server] alert channels injected from app_settings: {} 渠道",
+                        channels.len()
+                    );
+                }
+                st.jobs.set_alert_channels(channels);
+            }
+        }
+    }
     let app = build_router(st.clone());
     st.jobs.start();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))

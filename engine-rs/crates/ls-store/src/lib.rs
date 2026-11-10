@@ -1140,6 +1140,30 @@ impl Store {
         )
     }
 
+    /// app_settings 前缀查询（R2-305：ls-server 读 alert.* 渠道覆盖）
+    pub fn settings_by_prefix(&self, prefix: &str) -> rusqlite::Result<Vec<(String, String)>> {
+        let pattern = format!("{prefix}%");
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key,value FROM app_settings WHERE key LIKE ? ORDER BY key")?;
+        let rows = stmt.query_map(params![pattern], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// app_settings 按键删除（R2-305：alerts/config/reset 真实语义——Python
+    /// delete_app_settings 同行为；置空串会残留"空 DB 覆盖"，这里彻底移除）
+    pub fn settings_delete(&self, keys: &[String]) -> rusqlite::Result<usize> {
+        let mut n = 0;
+        for k in keys {
+            n += self
+                .conn
+                .execute("DELETE FROM app_settings WHERE key=?", params![k])?;
+        }
+        Ok(n)
+    }
+
     /// R2-309 批次 3：config/import replace 模式（Python store.clear_config 同语义：
     /// 清空摄像头/区域/规则；事件保留但 camera_id 失去对应摄像头）
     pub fn clear_config(&self) -> rusqlite::Result<()> {

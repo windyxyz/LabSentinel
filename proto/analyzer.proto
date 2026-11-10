@@ -41,6 +41,34 @@ message Config {
   repeated ZoneConfig zones = 3;
   repeated RuleConfig rules = 4;
   CalendarConfig calendar = 5;    // 假期/工作日例外
+  // R2-305：已解密的告警渠道快照（网页配置 + env 合并后的生效值）。
+  // 仅经 127.0.0.1 gRPC + 一次性令牌传输；明文只进数据面内存，绝不落盘/日志。
+  AlertChannels alert_channels = 6;
+}
+
+// R2-305：渠道快照（与 ls-dispatch ChannelConfig / Python alert_config.FIELDS 对齐）。
+message AlertChannels {
+  repeated AlertChannel channels = 1;
+}
+
+message AlertChannel {
+  string channel = 1;             // wecom|dingtalk|feishu|serverchan|pushplus|qmsg|webhook|email
+  string url = 2;                 // 厂商/webhook URL（serverchan 由 sendkey 构造后下发）
+  string secret = 3;              // webhook HMAC 密钥（webhook_secret）
+  string token = 4;               // pushplus token
+  string key = 5;                 // qmsg key
+  string qq = 6;                  // qmsg 接收 QQ
+  bool allow_http = 7;            // webhook 允许 http（仅内网）
+  EmailChannel email = 8;         // email 渠道（SMTP）
+}
+
+message EmailChannel {
+  string host = 1;
+  int32 port = 2;
+  string user = 3;
+  string password = 4;            // 不用 pass：Python 关键字（protoc 不转义）
+  string to = 5;
+  string security = 6;            // ssl | starttls | none
 }
 
 message CameraConfig {
