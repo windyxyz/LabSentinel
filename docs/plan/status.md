@@ -77,7 +77,7 @@
 | 任务 | 状态 | 说明 |
 |---|---|---|
 | R2-307 路由覆盖率统计进 CI | ✅ | `ls-server --dump-routes` + `scripts/rust_route_coverage.py`（路径参数归一化 {param}/:id）；rust.yml 覆盖率 artifact（先跟踪不门禁） |
-| R2-309 ls-server 补齐（按路由组分批） | 🟡 | **批次 1+2+3 完成（64e9f1f / 6434f69 / be2a550）：17→99/106 = 93.4%**。批次 3 新增：config/import（merge/replace 按名去重）、evidence.zip 存证打包（手写 stored-ZIP+CRC32，单事件+批量）、plugins 404 真实语义、face 分支（env 驱动 403/503，与 Python _face_guard 同语义）、alert-test（ls-dispatch 真实发送）、ppe/download（锁文件白名单+SHA256+许可确认，Q-08 复刻）、folder-images 详情/原文件/缩略图/CSV、模板 preview/apply、shutdown、snapshot 503。**余量 7 条（均有真实外部依赖）**：alerts/config GET/PUT/reset ×3（enc:v1 跨语言加密，需 Rust Fernet/DPAPI 或 Python 代理）、discovery ×2（WS-Discovery UDP 组播+ffprobe）、export/monthly.pdf（PDF 生成）、folders/{cid}/scan（需推理管线）。距 L3 门槛 ≥95% 差 2 条；新集成测试 8 例（config/import 去重、ZIP 魔数、face 403、HMAC 签名、alert-test 空渠道等） |
+| R2-309 ls-server 补齐（按路由组分批） | ✅ | **批次 1~4 全部完成（64e9f1f / 6434f69 / be2a550 / 本批）：17→104/106 = 98.1%——越过 L3 门槛 ≥95%**（scripts/rust_route_coverage.py 实测）。批次 4：alerts/config GET/PUT/reset（新模块 fernet.rs——Fernet 兼容 AES-128-CBC+HMAC-SHA256，与 Python cryptography 互操作：POSIX secret.key 语义对齐；Windows DPAPI 密文如实降级「需重填」，Rust 写出密文 Python 总能解）、discovery 两端点（新模块 discovery.rs——std UdpSocket WS-Discovery Probe、DOCTYPE/ENTITY 加固、LAN 白名单过滤、TCP+ffprobe 探测）。**余量 2 条**：export/monthly.pdf（PDF 生成）、folders/{cid}/scan（需推理管线）——均有真实依赖，随 L3+ 迭代。新增 fernet 4 例 + discovery 3 例单元测试 + 批次 4 集成断言 |
 | R2-503 审计写入移出事件循环 | ✅ | Python：队列+单写线程；Rust：spawn_blocking await（异步等待不阻塞执行器） |
 | R2-504 第三方 Action 钉 SHA + Dependabot | ✅ | 7 个 Action 全部钉 commit SHA（API 实测当前 HEAD）；`.github/dependabot.yml`（pip/npm/cargo/actions 每周） |
 | N-34 重试语义测试稳定性 | ✅ | ls-dispatch `deliver_with_backoff`（退避注入 [0,0,0]）+ 断言前轮询计数收敛；集成测试 20s→2s |

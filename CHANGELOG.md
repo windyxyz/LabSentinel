@@ -24,10 +24,14 @@
   folder-images 详情/原文件/缩略图/CSV、alert-template/preview（render_alert 复刻）、
   rule-templates/apply（先校验后写）、system/shutdown、cameras/snapshot 503 占位。
   鉴权中间件对齐 Python（R2-103/R2-108 口径：Bearer 等价、claim 公开、读保护豁免 health）。
-  **余量 7 条（有真实外部依赖，如实标注）**：alerts/config GET/PUT/reset ×3
-  （enc:v1 跨语言加密语义，需 Rust Fernet/DPAPI 或 Python 代理）、discovery ×2
-  （WS-Discovery UDP 组播 + ffprobe）、export/monthly.pdf（PDF 生成）、
-  folders/{cid}/scan（需推理管线）。距离 L3 门槛（≥95%）差 2 条路由。
+  批次 4（+5 条，**越过 L3 门槛 ≥95%**）：alerts/config GET/PUT/reset
+  （新模块 fernet.rs——Fernet 兼容 AES-128-CBC+HMAC-SHA256，与 Python cryptography
+  互操作：POSIX secret.key 语义对齐，Windows DPAPI 密文如实降级「需重填」，
+  Rust 写出密文 Python 总能解）、discovery/cameras 与 discovery/probe
+  （新模块 discovery.rs——std UdpSocket WS-Discovery Probe、DOCTYPE/ENTITY 加固、
+  LAN 白名单过滤、TCP+ffprobe 探测）。
+  **余量 2 条（有真实外部依赖，如实标注）**：export/monthly.pdf（PDF 生成）、
+  folders/{cid}/scan（需推理管线）。
 - ls-store 扩展对应方法 + 修复 `update_delivery` 误用 `error` 列（Python 权威列为
   `last_error`，测试自建 schema 同步更正）。
 - N-34/R2-505：ls-dispatch 退避可注入（`deliver_with_backoff`），重试语义集成测试
