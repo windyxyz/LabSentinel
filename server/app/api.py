@@ -315,6 +315,17 @@ def _engine_backend_peek() -> str:
     return _eng_mod.PRELOAD.get("backend") or order.split(",")[0].strip()
 
 
+def _providers_peek() -> list[str]:
+    """R2-303：只读探测 onnxruntime 构建内建的执行提供者（不建 session、不加载模型，
+    缺 onnxruntime 时返回 []）。前端据此显示「GPU 加速：开启/未启用」（DML 变体
+    含 DmlExecutionProvider，CPU 变体只有 CPU/Azure）。"""
+    try:
+        import onnxruntime as _ort
+        return list(_ort.get_available_providers())
+    except Exception:  # noqa: BLE001 探测失败不拖垮 /api/system
+        return []
+
+
 def _sidecar_component() -> dict:
     """R2-204/F2-02/F2-03：rust 分析器可用性透出（UI 据此置灰切换开关）。"""
     from .analyzer_sidecar import _DEFAULT_EXE
@@ -339,6 +350,7 @@ def system():
         "version": _system_version(),
         "schema_version": store.schema_version(),  # 任务69
         "backend": _engine_backend_peek(),
+        "providers": _providers_peek(),  # R2-303：GPU(DML) 探测依据
         **(manager.status() if manager else {"cameras": []}),
         "today_counts": today,
         "unhandled_today": max(0, unhandled),  # 今日未处置（任务12）

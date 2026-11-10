@@ -87,7 +87,9 @@ def bench_python(duration_s: int, cameras: int) -> dict:
         cap.release()
     return {
         "ok": True,
-        "implementation": "python-cpu",
+        # R2-303/R2-306：按 Engine 实际选中的后端诚实标注（CPU 变体=cpu，
+        # DML 变体 venv=directml），不硬编码 "python-cpu"。
+        "implementation": f"python-{str(eng.backend).lower()}",
         "backend": eng.backend,
         "cameras": cameras,
         "duration_s": round(elapsed, 1),
@@ -126,6 +128,15 @@ def bench_rust(runner: Path, duration_s: int, cameras: int, label: str) -> dict:
             "note": "offline golden runner; per-camera fps not comparable to online path"}
 
 
+def _dml_available() -> bool:
+    """R2-303：当前 Python 环境是否含 DirectML EP（DML 变体锁 onnxruntime-directml）。"""
+    try:
+        import onnxruntime as ort
+        return "DmlExecutionProvider" in ort.get_available_providers()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="推理吞吐压测基线（R2-306）")
     ap.add_argument("--duration", type=int, default=60, help="每种实现测量秒数（默认 60；门槛用 1800）")
@@ -142,8 +153,10 @@ def main() -> int:
         rows.append(bench_python(a.duration, n))
     for label in ("rust-tract", "rust-ort"):
         rows.append(bench_rust(runner, a.duration, 1, label))
-    rows.append({"ok": False, "implementation": "python-dml",
-                 "reason": "n/a (需 dml 变体环境：requirements-win-dml.lock + DirectX 12 GPU)"})
+    if not _dml_available():
+        rows.append({"ok": False, "implementation": "python-dml",
+                     "reason": "n/a (需 dml 变体环境：requirements-win-dml.lock + DirectX 12 GPU)"})
+    # DML 可用时 python 行已按实际 backend（directml）如实标注，不再重复造 dml 行
     report = {
         "generated_ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "machine": _machine(),

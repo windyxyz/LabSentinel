@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, connectEvents, TYPE_TEXT } from '../api'
 import { notifyEvent, ensurePermission, permissionState, notifyEnabled, setNotifyEnabled } from '../notify'
 import AsyncState from '../components/AsyncState.vue'
@@ -38,6 +38,15 @@ function ignoreUpdate() {
 }
 onMounted(() => { checkUpdate() })
 const sys = ref(null)
+// R2-303：GPU 加速状态（依据 /api/system.providers，onnxruntime 构建内建 EP）
+const gpuOn = computed(() => (sys.value?.providers || []).includes('DmlExecutionProvider'))
+const gpuHint = computed(() => {
+  const providers = sys.value?.providers || []
+  const gpu = providers.filter((p) => !/CPU|Azure/i.test(p))
+  return gpuOn.value
+    ? `GPU 加速：开启（${gpu.join('/')}）`
+    : 'GPU 加速：未启用（CPU 推理；可选 GPU(DML) 变体包随 0.3.0 提供）'
+})
 const feed = ref([])
 const loading = ref(true)
 const error = ref('')
@@ -82,7 +91,11 @@ onUnmounted(() => clearInterval(pollTimer))
 <template>
   <AsyncState :loading="loading" :error="error" :notice="notice" @retry="reload">
     <div class="cards" v-if="sys">
-      <div class="card"><div class="muted">后端</div><div class="num">{{ sys.backend }}</div></div>
+      <div class="card" :title="`onnxruntime providers: ${(sys.providers || []).join(', ') || '探测失败'}`">
+        <div class="muted">后端</div>
+        <div class="num">{{ sys.backend }}</div>
+        <div class="muted" style="font-size:12px; margin-top:4px">{{ gpuHint }}</div>
+      </div>
       <div class="card"><div class="muted">今日事件</div><div class="num">{{ Object.values(sys.today_counts || {}).reduce((a, b) => a + b, 0) }}</div></div>
       <div class="card"><div class="muted">未处置</div><div class="num" :style="{ color: sys.unhandled_today > 0 ? 'var(--l2)' : undefined }">{{ sys.unhandled_today ?? 0 }}</div></div>
       <div class="card"><div class="muted">警告(L2)</div><div class="num">{{ sys.today_counts?.['2'] || 0 }}</div></div>
