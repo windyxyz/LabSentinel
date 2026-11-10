@@ -6,8 +6,8 @@
 
 ## [Unreleased]
 
-### Rust 控制面（R2-309 批次 1+2，2026-11-09）
-- **ls-server 路由 17→76/106（71.7%，scripts/rust_route_coverage.py 实测）**：
+### Rust 控制面（R2-309 批次 1+2+3，2026-11-09）
+- **ls-server 路由 17→99/106（93.4%，scripts/rust_route_coverage.py 实测）**：
   批次 1（61 条）：cameras 扩展（DELETE/group/analyzer/start/webrtc/camera-groups/bulk/
   usb-devices）、zones 与 rules CRUD、rule-templates、events 全套（bulk-status/timeline/
   快照/视频）、stats 四件套（daily/weekly/hourly/quality）+ metrics + CSV 导出、
@@ -17,11 +17,17 @@
   config/export（RTSP 凭证脱敏）、config/validate、media/sign（HMAC-SHA256 短期签名）、
   model/status、mqtt/genai/plugins/update 状态端点（rust 独立模式如实标注能力边界）、
   alerts/status（投递汇总）、alert-template、folder-images 列表与汇总、logs、ppe/status。
+  批次 3（+23 条）：config/import（merge/replace 按名去重）、**evidence.zip 存证打包**
+  （手写 stored-ZIP + CRC32，单事件与批量导出）、plugins 404 真实语义、face 分支
+  （env 驱动 403/503，与 Python _face_guard 同语义）、alert-test（ls-dispatch 真实发送）、
+  **ppe/download**（锁文件白名单 + SHA256 校验 + 许可确认，Q-08 复刻）、
+  folder-images 详情/原文件/缩略图/CSV、alert-template/preview（render_alert 复刻）、
+  rule-templates/apply（先校验后写）、system/shutdown、cameras/snapshot 503 占位。
   鉴权中间件对齐 Python（R2-103/R2-108 口径：Bearer 等价、claim 公开、读保护豁免 health）。
-  **余量 30 条**：face 5 条（需 CompreFace）、discovery 2 条（网络探测）、
-  evidence.zip/monthly.pdf（打包/PDF）、alert-test（真实外发）、ppe/download（下载+许可）、
-  folders/{cid}/scan（需推理管线）、alerts/config 读写（enc:v1 加密语义）等——
-  均依赖外部服务或跨语言密钥，随批次 3 处理。
+  **余量 7 条（有真实外部依赖，如实标注）**：alerts/config GET/PUT/reset ×3
+  （enc:v1 跨语言加密语义，需 Rust Fernet/DPAPI 或 Python 代理）、discovery ×2
+  （WS-Discovery UDP 组播 + ffprobe）、export/monthly.pdf（PDF 生成）、
+  folders/{cid}/scan（需推理管线）。距离 L3 门槛（≥95%）差 2 条路由。
 - ls-store 扩展对应方法 + 修复 `update_delivery` 误用 `error` 列（Python 权威列为
   `last_error`，测试自建 schema 同步更正）。
 - N-34/R2-505：ls-dispatch 退避可注入（`deliver_with_backoff`），重试语义集成测试
