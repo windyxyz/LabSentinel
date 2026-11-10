@@ -6,6 +6,37 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-11
+
+### 二轮余量收口（2026-11-11，78 号文档 §12 收尾批次）
+- **R2-303 GPU 收口**：`/api/system` 透出 onnxruntime `providers`（只读探测，
+  B-28 同口径，绝不触发模型加载）；Dashboard 后端卡显示 GPU 加速状态——
+  providers 含 `DmlExecutionProvider` → 「GPU 加速：开启」，CPU 变体提示
+  「可选 GPU(DML) 变体包随 0.3.0 提供」。DML 实机首测（AMD Radeon 880M 核显 /
+  onnxruntime-directml 1.24.4 / `--duration 30 --cameras 1,4`）：单路 **69.43fps**
+  （CPU 变体的 1.94×）、4 路 **17.5fps/路**（1.80×），远超 §14.3 DML 门槛
+  4.5fps/路；4 路总吞吐与单路几乎持平证明 GPU 未饱和。`tools/perf_baseline.py`
+  的实现标注改为按 Engine 实际后端输出（`python-<backend>`），python-dml 行
+  仅在缺 DML EP 的环境才出现 n/a；`docs/perf-baseline.md` 已并入实测数据。
+- **R2-502 收口**：WebrtcPlayer 信令全流程前端测试 8 例（子协议鉴权——有令牌
+  `['labsentinel','bearer.<t>']`/无令牌不请求、T-102 相对路径同源组装、
+  offer-answer base64 往返、ontrack 已连接与 attempts 清零、断线指数退避
+  500/1000ms、offer 10s 超时重连、ICE failed 3s 观察窗与窗口内恢复、卸载清理），
+  前端 34→**42 例**全绿。
+- **R2-309 余量收尾**：`/api/export/monthly.pdf` 落地——`ls-server` 新增手写最小
+  PDF 生成器 `pdf.rs`（零新增依赖，非嵌入 CIDFont `STSong-Light`/`UniGB-UCS2-H`
+  中文方案，文本 UTF-16BE hex；版式与 Python reportlab 版逐项对齐：标题/统计卡/
+  每日柱状/合规脚注），单测 5 例（结构/xref 偏移/版式对齐/空月/编码）+ 集成
+  测试 1 例（422/400/200/闰月/Content-Disposition）；路由覆盖 104→**105/106
+  = 99.1%**（scripts/rust_route_coverage.py）。`/api/folders/{cid}/scan` 保持
+  503 如实标注（需把推理管线接进 ls-server，随 L3+ 迭代）。
+- **遗留复核**：Mimosa 两处 medium「疑似跨文件污点」复核为误报并注释依据
+  （ls-server 审计 resource 只保留纯数字 id / ls-analyzer 存证文件名由 event_id
+  经 format! 固定模板生成，无穿越面）；Q-08 PPE 资产 release URL 实测 404
+  （`Windy-LabSentinel/assets` 仓库不存在），Python/Rust 两侧下载失败报错改为
+  指明来源 URL 与维护者动作（`scripts/assets.lock.json` 为唯一事实源）；
+  ADR-0009 已含模型来源差异（官方 vs 本地导出）与恢复计划，核对通过。
+
 ### 二轮收口复核（2026-11-10）
 - 状态台账 `docs/plan/status.md` 修正：R1 安全收口 5 项（R2-105/106/107/109/110）
   此前误记为「未开始」，实际已于 `3b1fcf9` 全部落地并附回归测试，逐项补证据；
