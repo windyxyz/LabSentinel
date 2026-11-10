@@ -36,13 +36,16 @@
 
 ## R1 安全收口
 
+> 状态修正（2026-11-10）：本组 5 项已于 `3b1fcf9`（R1+R2 安全收口批）全部落地并附回归测试，
+> 此前误记为 ⬜；逐项按代码与测试复核后改为 ✅。
+
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| R2-105 文件夹黑名单改系统根包含判断 | ⬜ | 待推进 |
-| R2-106 SecretStore 加固 | ⬜ | 待推进 |
-| R2-107 更新验签按 minisign 格式实现 | ⬜ | 待推进 |
-| R2-109 sidecar 令牌改环境变量传递 | ⬜ | 待推进 |
-| R2-110 配对码防爆破 | ⬜ | 待推进 |
+| R2-105 文件夹黑名单改系统根包含判断 | ✅ | `sources.py` 新增 `_system_roots()`/`_under()`（WINDIR/ProgramFiles/ProgramData/SystemRoot 与 POSIX /etc,/usr,/bin…），`check_folder_root` 改为"系统根包含判断"且含目录本身；`test_folder_system_roots.py` 4 例。2026-11-10 追加：该用例原先依赖 `tmp_path` 不在系统根下，本机 `TMP=c:\windows\temp`（位于 WINDIR）会让"普通目录应放行"两例被正确的安全检查误伤——已加 `no_system_roots` fixture 固定系统根/AppData，使断言与 TMP 位置无关（安全检查本身与另两例拒绝用例不变） |
+| R2-106 SecretStore 加固 | ✅ | `secretstore.protect()` 加密不可用→抛 `AlertConfigError`（拒绝明文），`secrets_rekey.py` 迁移工具，`LS_SECRET_SCOPE` 机器范围；`test_secretstore_no_plaintext.py` 覆盖 |
+| R2-107 更新验签按 minisign 格式实现 | ✅ | `update_check.py` 按 minisign `.minisig` 结构解析（第 2 行 base64 = alg+key_id+sig）、`Ed`/`ED` 双算法（ED 先 BLAKE2b-512 预哈希）、key_id 比对；`test_update_minisign.py` 含篡改/错 key 负例 |
+| R2-109 sidecar 令牌改环境变量传递 | ✅ | `analyzer_sidecar.py` 经 `child_env["LS_ANALYZER_TOKEN"]` 传递，命令行 `--token` 仅保留兼容 |
+| R2-110 配对码防爆破 | ✅ | `devices.py` 连续 5 次失败作废全部待配对码 + `claim` 按 IP 10 次/分钟单独限流；`test_pairing_bruteforce.py` 覆盖 |
 
 ## R2 GPU 与性能基线
 
@@ -69,7 +72,7 @@
 |---|---|---|
 | R2-203 设备管理前端 | ✅ | `web/src/views/Devices.vue`（配对码展示/设备列表/两步吊销）+ App.vue 标签 + api.js 封装；`tests/devices.test.js` 2 例 |
 | R2-204 分析器可用性透出 | ✅ | `/api/system.components.analyzer_sidecar{available,exe,version,watchdog_*}`；前端置灰待 rust 路由批次与 UI 联调 |
-| R2-502 前端测试补齐 | 🟡 | 28→30 例（Devices 2 例）；WebrtcPlayer 子协议/Wall/Models 下载流程仍未覆盖（列 R2-502 余量） |
+| R2-502 前端测试补齐 | 🟡 | 见 R5 同名行（最终 34 例，含 Wall/Models 4 例）；余量仅 WebrtcPlayer 子协议/断线重连 |
 | R2-601~605 Flutter / Tauri / VM / 真机验收 | ⏸ | 用户明确暂缓（Windows 优先） |
 
 ## R5 Rust L3 控制面
@@ -82,6 +85,39 @@
 | R2-504 第三方 Action 钉 SHA + Dependabot | ✅ | 7 个 Action 全部钉 commit SHA（API 实测当前 HEAD）；`.github/dependabot.yml`（pip/npm/cargo/actions 每周） |
 | N-34 重试语义测试稳定性 | ✅ | ls-dispatch `deliver_with_backoff`（退避注入 [0,0,0]）+ 断言前轮询计数收敛；集成测试 20s→2s |
 | R2-502 前端测试补齐 | 🟡 | 28→**34 例**（Devices 2、Wall 2、Models 2）；WebrtcPlayer 子协议/断线重连需 stub RTCPeerConnection 信令全流程，投入产出低暂缓（记录为余量） |
+
+## 二轮收口复核（2026-11-10）
+
+对照 `78-review-round2-plan-2026-11-07.md` §4/§12 逐项复核 `main @ b8211dc` 的实际状态。
+结论：**R0~R5 已基本全部落地**，本文此前 R1 五行误记为 ⬜（实为 `3b1fcf9` 已完成），
+已修正；R2-502 两处重复/口径不一（28→30 与 28→34）已合并到 R5 的 34 例口径。
+
+**本轮实测基线**（本机 Windows，venv Py3.12 / rustup 1.29.3 / node 24）：
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Python 全量 | `pytest tests -q`（`PYTHONUTF8=1 LS_LOG_FILE=0`） | **626 passed / 7 skipped / 0 failed**（修测试后复跑，见下） |
+| 前端 | `npx vitest run` + `npm run build` | **34/34 通过**，构建成功（189.20 kB / gzip 66.09 kB） |
+| Rust | `cargo test --workspace --all-features --no-fail-fast`（GNU 工具链 + w64devkit 配方） | **87 passed / 0 failed** |
+
+- Rust 直接跑 MSVC 工具链会因 Git Bash 的 `/usr/bin/link` 遮蔽 MSVC 的 `link.exe` 而失败
+  （`link: extra operand`），属调用环境问题；按 `scripts/build_rust.py` 的
+  `+stable-x86_64-pc-windows-gnu` + `LS_W64DEVKIT` + `-L …/self-contained -lucrt` 配方通过。
+- 本轮改动：`test_folder_system_roots.py` 增加 `no_system_roots` fixture——本机
+  `TMP=c:\windows\temp` 使 pytest 的 `tmp_path` 落在 WINDIR 下，被 R2-105（正确地）判为系统目录，
+  导致「普通目录应放行」两例失败。固定系统根/AppData 取值后，两种 TMP 位置下 4 例均通过；
+  **安全检查本身与另两例真实拒绝用例保持不变**。
+- Python 全量日志中 `[auto-backup] ✗ backup_data.py exit 1`（stderr 空）为测试切换
+  `settings.data_dir` 时后台自动备份线程的瞬态日志，非失败用例，不影响套件结果。
+
+**如实保留的余量**（非本轮范围，均有真实依赖）：
+
+1. L3 末 2 条路由：`/api/export/monthly.pdf`（Rust 侧 PDF 生成）、`/api/folders/{cid}/scan`
+   （需推理管线接线）——当前 104/106 = 98.1%，已越过 ≥95% 门槛。
+2. R2-303/R2-306：DML 前端探测提示、完整 1/4/8 路 × 30 分钟压测矩阵（需 GPU 硬件）。
+3. R2-502：WebrtcPlayer 子协议/断线重连信令全流程测试（需 stub RTCPeerConnection）。
+4. R2-308 黄金语料扩展（需 CC0 素材拍摄）；签名证书/minisign 密钥对/真实 RTSP 24h 等人工事项。
+5. 「明确暂缓项」：Docker/VM/Flutter/Tauri/局域网真机（用户 2026-11-08 决定，Windows 优先）。
 
 ## 本轮环境事件（2026-11-09）
 

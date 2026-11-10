@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### 二轮收口复核（2026-11-10）
+- 状态台账 `docs/plan/status.md` 修正：R1 安全收口 5 项（R2-105/106/107/109/110）
+  此前误记为「未开始」，实际已于 `3b1fcf9` 全部落地并附回归测试，逐项补证据；
+  R2-502 两处重复且口径不一（28→30 / 28→34）合并为最终的 34 例口径；新增
+  「二轮收口复核」段落记录 `main @ b8211dc` 的完成度核对与三套实测基线。
+- 测试健壮性：`test_folder_system_roots.py` 增加 `no_system_roots` fixture。本机
+  `TMP=c:\windows\temp` 使 pytest 的 `tmp_path` 落在 WINDIR 下，被 R2-105 正确地
+  判为系统目录，导致「普通目录应放行」两例失败；固定系统根/AppData 取值后，
+  两种 TMP 位置下 4 例均通过。安全检查本身与两个真实系统根拒绝用例不变。
+  → 干净检出下 Python 全量由 624 passed / 2 failed 恢复为全绿。
+
 ### Rust 控制面（R2-309 批次 1+2+3，2026-11-09）
 - **ls-server 路由 17→99/106（93.4%，scripts/rust_route_coverage.py 实测）**：
   批次 1（61 条）：cameras 扩展（DELETE/group/analyzer/start/webrtc/camera-groups/bulk/
