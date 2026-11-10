@@ -64,9 +64,9 @@
 
 | 项 | 结果 |
 |---|---|
-| Python 全量 | 626 passed / 7 skipped / 0 failed |
-| 前端（vitest + build） | **42/42** 通过；构建 189.20 kB / gzip 66.09 kB |
-| Rust 全量 | 见最终门禁（`docs/plan/status.md` 记录实际数） |
+| Python 全量 | 629 passed / 7 skipped / 0 failed |
+| 前端（vitest + build） | **44/44** 通过；构建成功 |
+| Rust 全量 | **93 passed / 0 failed**（`--workspace --all-features`，GNU 配方；clippy/fmt 通过） |
 | ls-server L3 覆盖率 | **105/106 = 99.1%** |
 | Python-DML 实测 | 单路 69.43fps / 4 路 17.5fps/路（§14.3 门槛 4.5） |
 

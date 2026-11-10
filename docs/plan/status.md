@@ -51,9 +51,9 @@
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| R2-306 压测基线（补 T-307） | 🟡 | `tools/perf_baseline.py` 新增；本机短时冒烟实测（Python-CPU 单路 35.8fps / 4 路 9.7fps/路，rust-tract 54.9s、rust-ort 4.4s 处理同一语料）；**完整 1/4/8 路 × 30 分钟矩阵待目标硬件重跑**（`--duration 1800`）；`docs/perf-baseline.md` 已建并如实标注口径限制 |
-| R2-303 Windows GPU 可选变体 | 🟡 | `requirements-win-dml.in/.lock` 生成（`onnxruntime-directml==1.24.4`，pip-audit 0 漏洞、ASCII）；`build_portable.py --variant cpu|dml` + release.yml matrix 两个 job；前端探测/设置页提示与首启推荐未做（待 DML 环境实测后收口） |
-| ADR-0009 | ✅ | `docs/adr/0009-alignment-vs-gpu-and-model-provenance.md`：分层容差验收、双变体、模型来源差异与恢复计划 |
+| R2-306 压测基线（补 T-307） | 🟡 | `tools/perf_baseline.py` 新增；短时冒烟实测——CPU 变体（Python 单路 35.8fps / 4 路 9.7fps/路）、**DML 变体 2026-11-11 实机首测（Radeon 880M：单路 69.43fps = CPU 1.94×，4 路 17.5fps/路 = CPU 1.80×，远超 4.5 门槛且 4 路总吞吐与单路持平）**、rust-tract/ort 离线语料 81.2s/4.0s（11-11 复测）；实现标注改为按 Engine 实际后端输出；**完整 1/4/8 路 × 30 分钟矩阵仍待目标硬件重跑**（`--duration 1800`，用户决策 CPU 长矩阵不跑、GPU 优先——DML 维度已按短测给出） |
+| R2-303 Windows GPU 可选变体 | ✅ | `requirements-win-dml.in/.lock`（`onnxruntime-directml==1.24.4`，pip-audit 0 漏洞、ASCII）；`build_portable.py --variant cpu\|dml` + release.yml matrix 两个 job；`/api/system` 透出 providers（`_providers_peek` 只读探测，B-28 同口径）+ Dashboard GPU 加速状态卡（含 DmlExecutionProvider → 开启，CPU 变体提示 0.3.0 可下载 GPU 变体包）；`test_system_providers.py` 3 例 + `dashboard_gpu.test.js` 2 例；DML 变体本机 scratch venv 实测通过（scratch venv 按 `--require-hashes` 全新安装后 providers 含 DmlExecutionProvider 并跑通压测） |
+| ADR-0009 | ✅ | `docs/adr/0009-alignment-vs-gpu-and-model-provenance.md`：分层容差验收、双变体、模型来源差异与恢复计划（2026-11-11 复核通过） |
 
 ## R3 Rust L1 可发布
 
@@ -72,7 +72,7 @@
 |---|---|---|
 | R2-203 设备管理前端 | ✅ | `web/src/views/Devices.vue`（配对码展示/设备列表/两步吊销）+ App.vue 标签 + api.js 封装；`tests/devices.test.js` 2 例 |
 | R2-204 分析器可用性透出 | ✅ | `/api/system.components.analyzer_sidecar{available,exe,version,watchdog_*}`；前端置灰待 rust 路由批次与 UI 联调 |
-| R2-502 前端测试补齐 | 🟡 | 见 R5 同名行（最终 34 例，含 Wall/Models 4 例）；余量仅 WebrtcPlayer 子协议/断线重连 |
+| R2-502 前端测试补齐 | ✅ | 34→**44 例**（2026-11-11 余量收口：WebrtcPlayer 信令全流程 8 例 + Dashboard GPU 提示 2 例；此前 34 例含 Devices 2、Wall 2、Models 2），vitest 全绿 |
 | R2-601~605 Flutter / Tauri / VM / 真机验收 | ⏸ | 用户明确暂缓（Windows 优先） |
 
 ## R5 Rust L3 控制面
@@ -80,11 +80,11 @@
 | 任务 | 状态 | 说明 |
 |---|---|---|
 | R2-307 路由覆盖率统计进 CI | ✅ | `ls-server --dump-routes` + `scripts/rust_route_coverage.py`（路径参数归一化 {param}/:id）；rust.yml 覆盖率 artifact（先跟踪不门禁） |
-| R2-309 ls-server 补齐（按路由组分批） | ✅ | **批次 1~4 全部完成（64e9f1f / 6434f69 / be2a550 / 本批）：17→104/106 = 98.1%——越过 L3 门槛 ≥95%**（scripts/rust_route_coverage.py 实测）。批次 4：alerts/config GET/PUT/reset（新模块 fernet.rs——Fernet 兼容 AES-128-CBC+HMAC-SHA256，与 Python cryptography 互操作：POSIX secret.key 语义对齐；Windows DPAPI 密文如实降级「需重填」，Rust 写出密文 Python 总能解）、discovery 两端点（新模块 discovery.rs——std UdpSocket WS-Discovery Probe、DOCTYPE/ENTITY 加固、LAN 白名单过滤、TCP+ffprobe 探测）。**余量 2 条**：export/monthly.pdf（PDF 生成）、folders/{cid}/scan（需推理管线）——均有真实依赖，随 L3+ 迭代。新增 fernet 4 例 + discovery 3 例单元测试 + 批次 4 集成断言 |
+| R2-309 ls-server 补齐（按路由组分批） | ✅ | **批次 1~4 + 收尾（64e9f1f / 6434f69 / be2a550 / 4c97d3f / 6c60ca3）：17→105/106 = 99.1%——越过 L3 门槛 ≥95%**（scripts/rust_route_coverage.py --exe 实测）。收尾批：`/api/export/monthly.pdf`（新模块 pdf.rs——手写最小 PDF，非嵌入 CIDFont STSong-Light/UniGB-UCS2-H 中文，版式与 Python reportlab 版对齐；5 单测 + 1 集成测试）。**余量 1 条**：folders/{cid}/scan（需推理管线接线）——保持 503 如实标注，随 L3+ 迭代 |
 | R2-503 审计写入移出事件循环 | ✅ | Python：队列+单写线程；Rust：spawn_blocking await（异步等待不阻塞执行器） |
 | R2-504 第三方 Action 钉 SHA + Dependabot | ✅ | 7 个 Action 全部钉 commit SHA（API 实测当前 HEAD）；`.github/dependabot.yml`（pip/npm/cargo/actions 每周） |
 | N-34 重试语义测试稳定性 | ✅ | ls-dispatch `deliver_with_backoff`（退避注入 [0,0,0]）+ 断言前轮询计数收敛；集成测试 20s→2s |
-| R2-502 前端测试补齐 | 🟡 | 28→**34 例**（Devices 2、Wall 2、Models 2）；WebrtcPlayer 子协议/断线重连需 stub RTCPeerConnection 信令全流程，投入产出低暂缓（记录为余量） |
+| R2-502 前端测试补齐 | ✅ | 28→**44 例**（Devices 2、Wall 2、Models 2、WebrtcPlayer 8、Dashboard GPU 2、其余既有 30）；WebrtcPlayer 子协议/断线重连信令全流程测试已补齐（stub RTCPeerConnection/WebSocket，见 R4 表） |
 
 ## 二轮收口复核（2026-11-10）
 
@@ -118,6 +118,76 @@
 3. R2-502：WebrtcPlayer 子协议/断线重连信令全流程测试（需 stub RTCPeerConnection）。
 4. R2-308 黄金语料扩展（需 CC0 素材拍摄）；签名证书/minisign 密钥对/真实 RTSP 24h 等人工事项。
 5. 「明确暂缓项」：Docker/VM/Flutter/Tauri/局域网真机（用户 2026-11-08 决定，Windows 优先）。
+
+## 三批收口（2026-11-11，78 号文档余量全部清完）
+
+78 号 §12 余量 + §15 发布清单中本机可执行项全部落地。范围决策（用户 2026-11-11）：
+**不含 Docker / VM / 安卓(Flutter)**；folders/{cid}/scan 保持 503；GPU 优先（CPU 90 分钟
+长矩阵不跑）；分批提交 main。
+
+| 批次 | commit | 内容与证据 |
+|---|---|---|
+| 收口复核基线 | f65f585 | 工作区遗留的「二轮收口复核」改动入库（R1 状态修正 / R2-502 口径合并 / no_system_roots fixture） |
+| R2-502 | f29bbf3 | WebrtcPlayer 信令全流程前端测试 8 例；vitest 34→42 全绿 + 构建通过 |
+| R2-303 | 68a7b26 | `/api/system` providers 透出 + Dashboard GPU 状态卡 + DML 实机首测（见 R2 表）；pytest 定向 13 通过 |
+| R2-309 收尾 + 遗留复核 | 6c60ca3 | monthly.pdf（pdf.rs 手写 PDF，5+1 测试）→ 覆盖率 **105/106=99.1%**；Mimosa 两处污点复核为误报并注释；PPE 502 报错指明来源；perf-baseline rust 行 11-11 复测 |
+| 0.2.0 发布准备 | 68708c3 | CHANGELOG 切 `## [0.2.0]`（release.yml 校验口径）+ `docs/release-notes-v0.2.0.md`（§15 全项如实标注） |
+| release_check 修正 | 4ba9656 | 密钥扫描 allowlist 增 `$(openssl rand -hex`（审阅文档示例命令误报）；自身测试 4 例通过 |
+
+**最终门禁实测**（本机 Windows，venv Py3.12.16 / rustup GNU 工具链 1.99.1 / node 24.22.2）：
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Python 全量 | `pytest tests -q`（`PYTHONUTF8=1 LS_LOG_FILE=0`） | **629 passed / 7 skipped / 0 failed**（626 基线 + 3 providers 用例） |
+| 前端全量 | `npx vitest run` + `npm run build` | **44/44 通过**（42+2），构建成功 |
+| Rust 全量 | `cargo test --workspace --all-features --no-fail-fast`（GNU 配方） | **93 passed / 0 failed**（基线 87 + ls-server 6） |
+| Rust 静态 | `clippy --workspace --all-targets --all-features -- -D warnings` + `fmt --check` | 通过 |
+| L3 覆盖率 | `rust_route_coverage.py --exe …` | **105/106 = 99.1%**（唯一缺口 POST /api/folders/{cid}/scan） |
+| release_check | `scripts/release_check.py` | 9 项 PASS；唯一 WARN=便携包 zip 未构建（发布构建步骤产物，预期） |
+| DML 变体 | scratch venv（win-dml.lock）+ `perf_baseline.py` | providers 含 DmlExecutionProvider；单路 69.43fps / 4 路 17.5fps/路 |
+
+### §15 发布检查清单留档（0.2.0）
+
+| 项 | 状态 |
+|---|---|
+| R2-001 锁文件可导入断言（win+linux） | ✅ 三锁含 grpcio/cryptography，`test_locked_imports.py` 随全量套件通过 |
+| R2-002 requirements.txt 不再与锁分叉 | ✅ 兼容 shim（`-r requirements.in`） |
+| R2-005 干净检出 pytest 0 失败 | ✅ 629/0（CI 双平台跑同套件） |
+| R2-006 中文系统 + PYTHONUTF8=1 解码 | ✅ `run_text()` 统一，套件 UnicodeDecodeError 0 |
+| R2-003 cargo test 本机/CI 直接运行 | ✅ 本机 GNU 配方 93/0；CI 走宿主默认工具链 |
+| R2-004 release 流水线 fork 跑通到 draft | ⬜ 本轮未执行（需 fork + 打 tag 触发，人工事项；流水线本体已修复并静态核查） |
+| R2-102 非回环无令牌拒绝启动 | ✅ `test_bind_enforcement.py` 8 例 |
+| R2-103 设备令牌可读 | ✅ `test_device_token_read.py` 4 例 |
+| R2-104 开令牌后实时画面可用 | ✅ 代码 + `test_webrtc_subprotocol.py` + 前端 8 例；实机浏览器截图留待（人工事项） |
+| Docker 修复或标注预览 | ✅ 标注「预览不随版」（用户决策；静态问题 N-07/N-08/N-19 保留在 78 号 §10.2 待办） |
+| Rust 产物不进正式 Release | ✅ 仅 `nightly-rust` artifact（7 天保留） |
+| CHANGELOG L3/L4 口径更正 | ✅ R2-501（17/97 时代）→ 本版 105/106 |
+| 发布说明默认 CPU 推理 | ✅ `docs/release-notes-v0.2.0.md`（含 DML 变体 0.3.0 与实测数据） |
+| §14 其余（签名 WARN） | ✅ 未签名预版声明在发布说明；证书到位前保持 draft |
+
+### 本轮工具链与环境事件（2026-11-11）
+
+- **工具链重建**：桌面副本环境与原开发环境（D:\111 时代）不同账户——`.venv` 指向
+  不存在的 Python312、无 node/rust。本轮重建全部为**用户级/仓库外**安装：
+  uv 管理 Python 3.12.16 重建 `.venv`（按 `requirements-win.lock --require-hashes`
+  53 包）+ pytest/cov/ruff/pip-audit；node v24.22.2 便携版（npmmirror 下载，
+  官方 SHASUMS256 校验）于 `C:\Users\User\devtools\node`；rustup + GNU 工具链
+  （TUNA 镜像）+ w64devkit 2.11.0（GitHub release）于 `C:\Users\User\devtools\`。
+- **GNU 工具链中文路径坑（重要经验）**：w64devkit 的 `ld.exe` 无法处理非 ASCII
+  路径（本仓库在 `D:\User\Desktop\TOOLS\监控识别\`，target 下 .o/.def 全部
+  `cannot find`）——`CARGO_TARGET_DIR` 指向 ASCII 路径（`C:\Users\User\devtools\ls-target`）
+  即可，源码树不动；完整配方（PATH 前插 w64devkit/bin、RUSTFLAGS self-contained
+  + `-lucrt`）与 `scripts/build_rust.py` 一致。`perf_baseline.py --rust-exe`/
+  `rust_route_coverage.py --exe` 均已传显式路径。
+- **GPU 首次实测**：AMD Radeon 880M（Ryzen AI 9 H365 核显）+ DML 变体锁可用，
+  数据见 `docs/perf-baseline.md`（符合 Q2-02 预期，1.0 默认推理可考虑 DML）。
+- **Q-08 PPE 资产确认不可用**：`Windy-LabSentinel/assets` GitHub 仓库不存在
+  （404），`yolo11n_ppe.onnx`/`.classes.txt` 按需下载依赖维护者上传资产或换源；
+  两侧下载失败报错已指明来源与动作。
+- **遗留未跟踪文件**：仓库根 `78-review-round2-plan-2026-11-07.md`（审阅文档
+  原始版）与 `docs/plan/` 入库版内容差异仅两处（入库版刻意移除了仓库外文档
+  引用块并把 `$()` 占位化）——原件留在根目录未删除（用户文件），release_check
+  的示例命令误报已按 allowlist 机制豁免。
 
 ## 本轮环境事件（2026-11-09）
 
