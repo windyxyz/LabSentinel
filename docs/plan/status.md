@@ -59,7 +59,7 @@
 | R2-301 Rust 统一二进制查找 | ✅ | `ls-core/src/bin.rs`（LS_FFMPEG → exe 同级 tools/ → tools/ffmpeg/ → PATH + `ensure_tools_on_path`）；ls-ingest 与 evidence.rs 全部改用；3 个单测 |
 | R2-302 存证编码修复 | ✅ | evidence.rs stderr 线程排水（防管道死锁）+ 失败信息附最后 500 字节 stderr；测试改 `ls_core::bin::available` 判定 |
 | R2-304 打包 ls-analyzer | ✅ | `build_portable.py --with-rust`：release ls-analyzer.exe + onnxruntime.dll 进 `bin/`；`portable_launcher` 注入 `LS_ANALYZER_EXE`/`ORT_DYLIB_PATH`；`analyzer_sidecar._default_exe()` 按便携 bin/ → cargo target 解析 |
-| R2-305 Rust 告警读取网页配置 | ⬜ | 需扩展 proto（Config 加 AlertChannels）+ 两侧代码再生成——并入 R2-309 契约批次 |
+| R2-305 Rust 告警读取网页配置 | ✅ | **223e044**：proto `Config` 新增 `AlertChannels`（8 渠道：url/secret/token/key/qq/allow_http/email）；Python `_proto_config` 下发**已解密**渠道快照（settings 含 alert_config.load 的 DB 覆盖；仅 127.0.0.1 gRPC + 令牌）；Rust `ls-analyzer::apply_config` 解析进数据面状态（空快照保持既有，2 新单测）；`ls-server` 启动读 `app_settings alert.*` 经 fernet.rs 解密**注入 ls-jobs escalation**（替代 env-only，网页配置渠道在 rust 路径真实生效）；`alerts/config/reset` 改真实 DELETE 语义；两侧 pb2/tonic 重生成（`pass`→`password` 避开 Python 关键字）；Python sidecar e2e 3 例 + proto 快照单测 |
 | R2-308 黄金语料扩展 | ⏸ | 需 CC0 素材拍摄（人工事项）；分层容差口径已在 ADR-0009 定义 |
 | R2-507 N-28 过时注释复核 | ✅ | main.rs:169 注释更正（PPE 级联已接入） |
 

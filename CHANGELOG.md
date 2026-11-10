@@ -38,6 +38,18 @@
   从 20s 真实等待降到 2s 并消除桩计数竞态。
 - 审计写入在中间件内 await spawn_blocking（响应返回前落库，异步等待不阻塞执行器）。
 
+### Rust 告警读取网页配置（R2-305，2026-11-10）
+- proto `Config` 扩展 `AlertChannels`（与 ls-dispatch ChannelConfig / Python
+  alert_config.FIELDS 对齐的 8 渠道字段），Python `_proto_config` 在 ApplyConfig
+  快照中下发**已解密**渠道（仅 127.0.0.1 gRPC + 一次性令牌，明文只进内存）；
+  Rust `ls-analyzer` 解析快照进数据面状态（空快照保持既有渠道）。
+- `ls-server` 启动时读 `app_settings` 的 `alert.*` 覆盖、经 Fernet 兼容解密后
+  **注入 ls-jobs**（escalation 发送优先用网页配置渠道，无配置回退 env）——
+  闭合「网页端保存的渠道在 Rust 路径完全不生效」（N-12）。
+- `alerts/config/reset` 改为真实删除 app_settings 行（此前置空串会残留“空覆盖”）；
+  Windows DPAPI 密文如实降级（解密失败 → 渠道需重填）。
+- 两侧契约代码重生成（`pass` 字段改名 `password`——Python 关键字不可作 kwargs）。
+
 ### 修复
 - T-202（B-05）：便携启动器托管 go2rtc.exe（端口探测防重复拉起、日志独立、
   锁文件记录 go2rtc pid 并随 --stop 同停）——便携版实时画面恢复可用。
