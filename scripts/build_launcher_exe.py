@@ -17,6 +17,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CS = HERE / "launcher_exe" / "LabSentinelLauncher.cs"
+MANIFEST = HERE / "launcher_exe" / "app.manifest"
 CSC_CANDIDATES = (
     r"Microsoft.NET\Framework64\v4.0.30319\csc.exe",
     r"Microsoft.NET\Framework\v4.0.30319\csc.exe",
@@ -50,7 +51,13 @@ def compile_exe(out_dir: Path) -> Path | None:
     out_dir.mkdir(parents=True, exist_ok=True)
     exe = out_dir / "LabSentinel.exe"
     cmd = [str(csc), "/nologo", "/target:winexe", "/optimize+",
-           "/out:" + str(exe), "/r:System.dll", "/r:System.Windows.Forms.dll", str(CS)]
+           "/out:" + str(exe), "/r:System.dll", "/r:System.Windows.Forms.dll"]
+    # 2026-11-11 反误报治理：注入原生清单（asInvoker + 应用身份），程序集属性
+    # （产品/版本/公司）已在 LabSentinelLauncher.cs 顶部——杀软启发式对
+    # "无版本信息、无清单的裸 winexe"最为敏感（见该文件头注释）。
+    if MANIFEST.exists():
+        cmd.append("/win32manifest:" + str(MANIFEST))
+    cmd.append(str(CS))
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="mbcs", errors="replace")
     if r.returncode != 0 or not exe.exists():
         log(f"[警告] csc 编译失败（exit {r.returncode}）——跳过 LabSentinel.exe，包仍可用 启动.bat")

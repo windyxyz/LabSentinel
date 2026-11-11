@@ -1,7 +1,14 @@
 // LabSentinel 便携包启动 EXE（任务55）：无控制台入口，双击体验像"软件"而不是脚本。
 //
 // 编译（见 scripts/build_launcher_exe.py，用 .NET Framework 自带 csc，C# 5 语法）：
-//   csc /nologo /target:winexe /r:System.Windows.Forms.dll /r:System.dll LabSentinelLauncher.cs
+//   csc /nologo /target:winexe /win32manifest:app.manifest /r:System.Windows.Forms.dll /r:System.dll LabSentinelLauncher.cs
+//
+// 2026-11-11 反误报（AV）治理：无签名、无版本资源、无清单的裸 winexe 拉起解释器
+// 执行用户目录脚本，是杀软启发式（HEUR:Trojan.Win32.Agent 类）的典型画像——卡巴斯基
+// 实测按此处置了整份便携包 runtime。程序集属性（产品/版本/公司）进入托管元数据、
+// /win32manifest 注入原生清单（asInvoker + 应用名描述），让 exe 具备可核验的正当身份；
+// 配合启动链自身的干净审计（无 -c 动态执行 / 无 runpy / urlopen 仅回环健康检查，
+// 见 docs/杀毒软件误报说明.md）。证书签名到位前，这是仓库内能做的最大减面项。
 //
 // 职责刻意保持最小：单实例/端口/健康检查/开浏览器全部由 Python 启动器（portable_launcher.py）
 // 负责——EXE 只是把"双击 pythonw 脚本"包成无黑框的应用程序入口，不重复实现任何逻辑。
@@ -10,7 +17,16 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Windows.Forms;
+
+[assembly: AssemblyTitle("LabSentinel")]
+[assembly: AssemblyDescription("LabSentinel 便携版启动器（本地实验室安全监控）")]
+[assembly: AssemblyProduct("LabSentinel")]
+[assembly: AssemblyCompany("LabSentinel Project")]
+[assembly: AssemblyCopyright("AGPL-3.0")]
+[assembly: AssemblyVersion("0.2.0.0")]
+[assembly: AssemblyFileVersion("0.2.0.0")]
 
 namespace LabSentinelLauncher
 {
