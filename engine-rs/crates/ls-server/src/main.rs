@@ -4180,7 +4180,8 @@ fn server_err() -> Response {
 
 #[tokio::main]
 async fn main() {
-    // Docker HEALTHCHECK：`labsentinel-server --healthcheck <db>` 只读探活即退出
+    // 健康自检（原为容器 HEALTHCHECK 设计，Docker 路线已终止——保留作通用探活）：
+    // `labsentinel-server --healthcheck <db>` 只读探活即退出
     let mut args = std::env::args().skip(1);
     if let Some(a) = args.next() {
         if a == "--healthcheck" {

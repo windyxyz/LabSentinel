@@ -212,9 +212,11 @@
 
 ## 明确暂缓项（本轮不执行）
 
-- R2-401 Docker 修复与实机验证：0.2.0 发布说明标注「Docker 预览，不随本版」，顺延 0.3.0。
+- **R2-401 Docker：⛔ 终止（用户 2026-11-11 决策，不再推进 Docker 开发）**——
+  `deploy/docker/`（compose.yaml / Dockerfile / Dockerfile.cuda / Dockerfile.rust）
+  已删除；`docs/部署指南-Linux.md` 改写为 systemd 唯一路线；release-notes 改为
+  「Docker 支持终止」。N-07/N-08/N-19 随产物移除而闭合（不再修复）。
 - R2-404 VM 安装验收留档；Flutter/Tauri 客户端；局域网真机验收。
-- Docker 静态问题（N-07/N-08/N-19）代码未改，保留在 §6/§10 审查详情中作为待办。
 
 ## 人工事项（代码可备、验收留待后续）
 

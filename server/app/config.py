@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     pdf_font: str | None = None  # PDF 中文字体路径（默认 C:\Windows\Fonts\msyh.ttc）
 
     # R2-102/N-03: uvicorn bind address as the SINGLE source of truth.
-    # The launcher / systemd / WinSW / Docker all pass --host "$LS_HOST".
+    # The launcher / systemd / WinSW all pass --host "$LS_HOST".
     # pydantic-settings reads LS_HOST from both the process env and server/.env,
     # unlike the old os.environ.get("LS_HOST") which missed the .env value.
     host: str = "127.0.0.1"

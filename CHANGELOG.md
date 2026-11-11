@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 终止 Docker 支持（2026-11-11，维护者决策）
+- 删除 `deploy/docker/`（compose.yaml / Dockerfile / Dockerfile.cuda / Dockerfile.rust），
+  不再推进容器化开发——原已知问题（容器内监听回环、go2rtc 配置卷不共享、
+  compose 双网络声明，78 号 N-07/N-08/N-19）随产物移除而闭合。
+- `docs/部署指南-Linux.md` 改写为 **systemd 原生部署唯一路线**（Docker 路线移除，
+  附自行封装指引）；`docs/release-notes-v0.2.0.md` 同步改为「Docker 支持终止」。
+- 78 号文档 R2-401 状态由「暂缓」改为「终止」。
+
 ## [0.2.0] - 2026-11-11
 
 ### 二轮余量收口（2026-11-11，78 号文档 §12 收尾批次）

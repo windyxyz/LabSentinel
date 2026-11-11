@@ -50,9 +50,10 @@
 
 ## 随版形态与边界
 
-- **Docker 预览不随本版**（Q2-01）：`deploy/docker/*` 存在已知静态问题
-  （compose go2rtc 双网络声明、容器内监听回环、go2rtc 配置卷不共享——78 号
-  N-07/N-08/N-19），实机验证未完成；0.3.0 修复后正式。
+- **Docker 支持终止**（维护者决策，2026-11-11）：`deploy/docker/*`（compose /
+  Dockerfile / Dockerfile.cuda / Dockerfile.rust）已从仓库移除，不再修复其已知
+  问题（绑定回环、go2rtc 配置卷不共享等）；Linux 部署请使用 systemd 原生路线
+  （`docs/部署指南-Linux.md`）。
 - **Rust 产物不进正式 Release**：`labsentinel-server` / `ls-analyzer` 仅作为
   nightly artifact（`release.yml nightly-rust` job，保留 7 天）；ls-server L3
   仍有 1 条路由未实现（`/api/folders/{cid}/scan` 需推理管线接线，维持 503）。
