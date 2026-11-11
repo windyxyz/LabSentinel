@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### 便携包启动链修复（2026-11-12，冒烟 8/8 全绿）
+- `smoke_portable.py` 首次完整跑通前连环暴露 4 个真实缺陷，全部修复：
+  ① `health_check.py` 漏随包（R2-402 拆分后 `install_portable.py` 同目录导入失败，
+  启动器一启动即 ModuleNotFoundError——冒烟「无 logs 目录」的真因）；
+  ② go2rtc 锁 JSON 覆盖 `launcher.lock` 的 `"pid port"` 单实例契约（锁失效、
+  go2rtc 进程泄漏）——拆独立 `go2rtc.lock` 并兼容旧格式；
+  ③ 服务改探针 `--serve` 启动后 PID 复用防护 markers 匹配不到，`--stop` 拒绝
+  停止真实服务（rc=0 但端口持续 LISTEN）——markers 补 `probe_runtime.py`，
+  身份核实 PowerShell 改 SystemRoot 绝对路径（冒烟剥离的 PATH 下裸 `powershell`
+  不可见）；
+  ④ build/deploy 共 5 处 `python -c` 动态代码串全部文件化（`probe_runtime.py`
+  探针统一承载，`--serve` 模式启动异常自动落盘 `serve-boot-error.txt`，
+  无控制台进程链排障不再黑箱）。
+- 冒烟断言对齐现状：T-406 无演示素材时 `cameras=0`+跳过播种日志为预期；
+  httpx `trust_env=False`（回环绝不走系统代理）+ 网络异常家族捕获；
+  `--stop` 后先等服务 PID 消失再走强杀复核。
+- **更正**：本机未安装卡巴斯基，此前会话「杀软删除产物」系探测路径错误
+  （产物嵌套 `portable/LabSentinel/`）；`docs/杀毒软件误报说明.md` 与
+  opentip 材料转为预防性参考（勿提交申诉）。
+
 ### Rust 控制面深审简化（2026-11-11）
 - **`web_dist` 死字段接线**：`AppState.web_dist` 此前只有赋值从未被路由使用
   （文件头注释声称的「静态 web/dist（SPA 回退 + 缓存策略）」一直未兑现）——

@@ -77,14 +77,16 @@
    恶意软件画像重叠，可能被启发式引擎（HEUR 类）命中——启动链已审计清白
    （无动态代码执行），`LabSentinel.exe` 已注入版本资源与应用清单；遇到告警请按
    **`docs/杀毒软件误报说明.md`** 处理（来源校验 / 排除路径 / 误报申诉通道）。
-   代码签名证书（T-403）是根治手段。
+   代码签名证书（T-403）是根治手段。**更正（2026-11-12）**：开发本机未安装
+   卡巴斯基，此前会话「杀软删除产物」系探测路径错误（已更正）；便携包冒烟
+   8/8 实证启动链工作正常。
 2. **Q-08 PPE 模型按需下载不可用**：`assets.lock.json` 中
    `yolo11n_ppe.onnx`/`.classes.txt` 指向的 `Windy-LabSentinel/assets` release
    实测 404（仓库未建立）——需维护者上传资产或改 URL；两侧下载失败报错已
    指明来源与处置动作。
-2. `assets.lock.json` 的 `yolo11n.onnx` 使用 Ultralytics 官方导出（sha256
+3. `assets.lock.json` 的 `yolo11n.onnx` 使用 Ultralytics 官方导出（sha256
    `634279b4…`），与本地黄金语料基准 `m0-spike/yolo11n.onnx`（`4758511e…`）
    不是同一文件——差异与恢复计划见 ADR-0009 §4。
-3. 完整 1/4/8 路 × 30 分钟压测矩阵（`--duration 1800`）、真实 RTSP 24h 挂机、
+4. 完整 1/4/8 路 × 30 分钟压测矩阵（`--duration 1800`）、真实 RTSP 24h 挂机、
    黄金语料 ≥10 段扩展（CC0 素材）、VM 安装验收留档、Flutter/Tauri 客户端：
    均按用户决策暂缓/待人工事项（`docs/plan/status.md`）。
