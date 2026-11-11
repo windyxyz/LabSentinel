@@ -224,6 +224,7 @@
 | Docker 终止 | 8958721 | `deploy/docker/`（compose/Dockerfile/Dockerfile.cuda/Dockerfile.rust）删除；`docs/部署指南-Linux.md` 改写为 systemd 唯一路线；release-notes/CHANGELOG/status.md R2-401 ⛔ 终止；config.py/main.rs 注释清理（--healthcheck 保留作通用探活）。N-07/N-08/N-19 随产物移除闭合 |
 | 启动器减面（原「AV 治理」） | e999095 | `LabSentinel.exe` 身份化（程序集属性 + /win32manifest asInvoker）；启动链审计清白（无 -c/exec/runpy，urlopen 仅回环）；`docs/杀毒软件误报说明.md`（保留作发布参考）。原「卡巴斯基删除」定性作废 |
 | Rust 深审简化 | 6a72810 | ① `web_dist` 死字段接线（LS_WEB_DIST + ServeDir SPA 回退；踩坑：`not_found_service` 会 SetStatus 强制 404，须用 `fallback`）；② R2-108 深审补齐（testserver 测试态门控）；③ 回归 2 例 |
+| Rust 深审简化·第二批 | fb1cfff | ① `detail_err` helper 收敛——`(StatusCode, Json(json!({"detail": "..."})))` 手写样板 70 处（纯字面量形态）批量收敛，带 code 字段/动态 msg 的复合错误体保留；② 兑现文件头「缓存策略」——静态服务 `static_cache_policy` 中间件：/assets/* hash 文件名 immutable 一年、index/SPA 回退 no-cache（发版即生效）；回归 1 例。实测 ls-server 24/24、workspace **96/0** + clippy/fmt 通过 |
 | 便携包启动链排障 | 见下方详述 | 冒烟 6/8→**8/8 全绿**，修复 4 个真实 bug + 2 处冒烟断言过时 |
 
 ## 便携包启动链排障（2026-11-12，冒烟 8/8 全绿）
