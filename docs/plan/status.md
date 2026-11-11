@@ -51,7 +51,7 @@
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| R2-306 压测基线（补 T-307） | 🟡 | `tools/perf_baseline.py` 新增；短时冒烟实测——CPU 变体（Python 单路 35.8fps / 4 路 9.7fps/路）、**DML 变体 2026-11-11 实机首测（Radeon 880M：单路 69.43fps = CPU 1.94×，4 路 17.5fps/路 = CPU 1.80×，远超 4.5 门槛且 4 路总吞吐与单路持平）**、rust-tract/ort 离线语料 81.2s/4.0s（11-11 复测）；实现标注改为按 Engine 实际后端输出；**完整 1/4/8 路 × 30 分钟矩阵仍待目标硬件重跑**（`--duration 1800`，用户决策 CPU 长矩阵不跑、GPU 优先——DML 维度已按短测给出） |
+| R2-306 压测基线（补 T-307） | 🟡 | `tools/perf_baseline.py` 新增；短时冒烟实测——CPU 变体（Python 单路 35.8fps / 4 路 9.7fps/路）、**DML 变体 2026-11-11 实机首测（Radeon 880M：单路 69.43fps = CPU 1.94×，4 路 17.5fps/路 = CPU 1.80×，8 路 8.06fps/路 ≥ §14.3 DML 验收门槛 4.5——8 路口径达标）**、rust-tract/ort 离线语料 81.2s/4.0s（11-11 复测）；实现标注改为按 Engine 实际后端输出；**完整 1/4/8 路 × 30 分钟矩阵仍待目标硬件重跑**（`--duration 1800`，用户决策 CPU 长矩阵不跑、GPU 优先——DML 全部三个路数口径已按 30s 短测给出） |
 | R2-303 Windows GPU 可选变体 | ✅ | `requirements-win-dml.in/.lock`（`onnxruntime-directml==1.24.4`，pip-audit 0 漏洞、ASCII）；`build_portable.py --variant cpu\|dml` + release.yml matrix 两个 job；`/api/system` 透出 providers（`_providers_peek` 只读探测，B-28 同口径）+ Dashboard GPU 加速状态卡（含 DmlExecutionProvider → 开启，CPU 变体提示 0.3.0 可下载 GPU 变体包）；`test_system_providers.py` 3 例 + `dashboard_gpu.test.js` 2 例；DML 变体本机 scratch venv 实测通过（scratch venv 按 `--require-hashes` 全新安装后 providers 含 DmlExecutionProvider 并跑通压测） |
 | ADR-0009 | ✅ | `docs/adr/0009-alignment-vs-gpu-and-model-provenance.md`：分层容差验收、双变体、模型来源差异与恢复计划（2026-11-11 复核通过） |
 
@@ -188,6 +188,20 @@
   原始版）与 `docs/plan/` 入库版内容差异仅两处（入库版刻意移除了仓库外文档
   引用块并把 `$()` 占位化）——原件留在根目录未删除（用户文件），release_check
   的示例命令误报已按 allowlist 机制豁免。
+
+## 追加验证批（2026-11-11 第二轮：本机可完成项再扫描）
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 跨语言测试激活 | ✅ | `CARGO_TARGET_DIR` 指向本机构建产物后，`test_store_bidirectional`（DB 三路径）、`test_contract_l3`、`test_analyzer_sidecar`（gRPC e2e）、`test_sidecar_proto_config` 共 **9 例此前 skip 的用例首次真实执行并全部通过**（8.35s） |
+| DML 8 路压测 | ✅ | 30s 总 64.45fps / **每路 8.06fps ≥ §14.3 DML 验收门槛 4.5**——8 路 720p@5fps 场景 DML 变体通过验收口径（`docs/perf-baseline.md` 已并入） |
+| pip-audit / npm audit 复跑 | ✅ | 均 No known vulnerabilities / 0 vulnerabilities（win 锁 + 生产依赖） |
+| 便携包本机实机构建 | ✅（构建）/ ⏸（独立冒烟） | `build_portable.py --variant cpu --zip --with-rust` 三次构建全过：内建冒烟（PATH 剥离导入 / grpc / cryptography / opencv 单发行版 / app.main 导入）全部 PASS；zip `LabSentinel-portable-20261111.zip` 252MB / 10122 条目；`--with-rust` 打包 `bin/ls-analyzer.exe`（release）+ `bin/onnxruntime.dll` |
+| 真 bug 修复（C# 入口） | ✅ | 独立冒烟首跑即抓到：`LabSentinelLauncher.cs` 旧实现相对路径 `runpy.run_path('scripts/portable_launcher.py')` 假设 cwd=包根，其他 cwd 启动 exe 时 APP_ROOT 漂移（实录漂移到开发机仓库根）——改绝对路径 + 显式 WorkingDirectory；`smoke_portable.py` exe 分支补 `cwd=pkg`（双保险）。**CI 上同样会挂，本批修复后 CI 冒烟才能过**（3619d12） |
+| release_manifest 必需清单校正 | ✅ | REQUIRED 未跟随 T-406/Q-07（演示视频不随包）与 Q-08（PPE 按需下载）——4 项假缺失导致 zip manifest FAIL（CI 也会挂）；已对齐现行政策并把 `bin/ls-analyzer.exe`/`bin/onnxruntime.dll`/`media/SOURCES.md` 列入可选（3619d12）；manifest 复算 `[OK] 必需条目齐全`，release_check 无 FAIL |
+| 独立冒烟（smoke_portable） | ⏸ | **卡巴斯基实时防护阻断（台账 2026-11-09 事件重演且更彻底）**：构建进程退出后 staging 便携 runtime 被静默删除（构建期间内建冒烟正常 → 独立执行即删，实验复现：重建后不启动则文件留存，`Start-Process runtime\python.exe` 触发删除）；首次 smoke 已完成其使命（抓到 C# 相对路径 bug）。待用户将 `Resources/dist/` 与构建 TEMP 加入 Kaspersky 信任区后本机重跑，或在 CI（GitHub runner 无 AV）验证 |
+
+工具链备注：`tools/onnxruntime/`（ort DLL 候选目录）加入 .gitignore（可再下载二进制，与 ffmpeg/go2rtc 同策略）；DLL 本机来源为 `requirements-win-dml.lock` venv 的 `onnxruntime/capi`（DML 版为 CPU EP 超集）。
 
 ## 本轮环境事件（2026-11-09）
 

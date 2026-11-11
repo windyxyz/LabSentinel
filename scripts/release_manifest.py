@@ -21,7 +21,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
-# 归一化（剥 LabSentinel/ 前缀后）的必需条目——对照 build_portable.copy_assets 实际产物
+# 归一化（剥 LabSentinel/ 前缀后）的必需条目——对照 build_portable.copy_assets 实际产物。
+# 2026-11-11 校正（本地实机构建 + release_check 发现）：REQUIRED 未跟随政策变更——
+#   T-406/Q-07：Mixkit 演示视频不再随包（版权风险，media/ 只留 SOURCES.md）；
+#   Q-08：yolo11n_ppe.* 不随包（许可确认后按需下载）。
 REQUIRED = [
     "runtime/python.exe",
     "runtime/pythonw.exe",
@@ -36,14 +39,12 @@ REQUIRED = [
     "停止.bat",
     "安装.bat",
     "tools/go2rtc.exe",
-    "media/lab-walk-24076.mp4",
-    "media/lab-equip-21453.mp4",
     "models/yolo11n.onnx",
-    "models/yolo11n_ppe.onnx",
-    "models/yolo11n_ppe.classes.txt",
 ]
-# 缺失只警告：LabSentinel.exe（无 csc 降级）、卸载.bat（安装器生成）、ffmpeg（构建可警告后补）
-OPTIONAL = ["LabSentinel.exe", "卸载.bat", "tools/ffmpeg.exe"]
+# 缺失只警告：LabSentinel.exe（无 csc 降级）、卸载.bat（安装器生成）、ffmpeg（构建可警告后补）、
+# bin/ls-analyzer.exe + bin/onnxruntime.dll（R2-304 --with-rust 实验产物）、media/SOURCES.md
+OPTIONAL = ["LabSentinel.exe", "卸载.bat", "tools/ffmpeg.exe",
+            "bin/ls-analyzer.exe", "bin/onnxruntime.dll", "media/SOURCES.md"]
 
 EXIT_OK, EXIT_FAIL = 0, 2
 
