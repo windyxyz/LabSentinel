@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
 ### 便携包启动链修复（2026-11-12，冒烟 8/8 全绿）
 - `smoke_portable.py` 首次完整跑通前连环暴露 4 个真实缺陷，全部修复：
   ① `health_check.py` 漏随包（R2-402 拆分后 `install_portable.py` 同目录导入失败，
@@ -26,7 +28,7 @@
   （产物嵌套 `portable/LabSentinel/`）；`docs/杀毒软件误报说明.md` 与
   opentip 材料转为预防性参考（勿提交申诉）。
 
-### Rust 控制面深审简化（2026-11-11）
+### Rust 控制面深审简化（2026-11-11/12）
 - **`web_dist` 死字段接线**：`AppState.web_dist` 此前只有赋值从未被路由使用
   （文件头注释声称的「静态 web/dist（SPA 回退 + 缓存策略）」一直未兑现）——
   `build_router` 现按 `LS_WEB_DIST`（与 Python 同名）挂载静态服务：
@@ -43,6 +45,12 @@
   `cargo test -p ls-server` **23/23**。纯描述性历史注释与如实标注的能力边界
   占位（start_camera 503 / mqtt-genai 状态端点）经复核保留——均为 L3+ 迭代项，
   非死代码。
+- **第二批（2026-11-12）**：① `detail_err` helper 收敛——手写
+  `(StatusCode, Json(json!({"detail": "..."})))` 样板 70 处（纯字面量形态）
+  批量收敛，带 `code` 字段的复合错误体保留；② 兑现文件头「缓存策略」——
+  静态服务补 `static_cache_policy` 中间件：`/assets/*`（hash 文件名）
+  `immutable, max-age=31536000`，index/SPA 回退 `no-cache`（发版即生效）；
+  回归 1 例。`cargo test -p ls-server` **24/24**、workspace **96/0**。
 
 ### 杀毒软件误报治理（2026-11-11）
 - **`LabSentinel.exe` 身份化**：注入程序集属性（产品/版本/公司/描述，版本随包
@@ -64,8 +72,6 @@
 - `docs/部署指南-Linux.md` 改写为 **systemd 原生部署唯一路线**（Docker 路线移除，
   附自行封装指引）；`docs/release-notes-v0.2.0.md` 同步改为「Docker 支持终止」。
 - 78 号文档 R2-401 状态由「暂缓」改为「终止」。
-
-## [0.2.0] - 2026-11-11
 
 ### 二轮余量收口（2026-11-11，78 号文档 §12 收尾批次）
 - **R2-303 GPU 收口**：`/api/system` 透出 onnxruntime `providers`（只读探测，
