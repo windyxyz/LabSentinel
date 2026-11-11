@@ -308,6 +308,9 @@ pub fn build_router(state: Shared) -> Router {
     // 2026-11-11：接线 web_dist（此前字段有赋值但从未被路由使用——文件头注释声称
     // 的「静态 web/dist」一直未兑现）。ls-server 独立模式由此直接出 Web UI：
     // - SPA 回退：未命中路径回 index.html（前端 vue-router history 模式）
+    // - 缓存策略（2026-11-12 兑现文件头注释）：/assets/*（Vite hash 文件名）→
+    //   `immutable, max-age=31536000`；index.html 与 SPA 回退 → `no-cache`
+    //   （每次协商校验，保证发版即生效）
     // - 放在 guard 中间件内：Host 白名单（防 DNS Rebinding）同样覆盖静态资源；
     //   读保护只拦 /api/*，页面本身公开（令牌由前端注入）
     // web_dist 为空（测试/内嵌模式）时不挂载，保持纯 API。
@@ -317,15 +320,34 @@ pub fn build_router(state: Shared) -> Router {
         // 注意用 .fallback() 而非 .not_found_service()：后者会用 SetStatus 把回退
         // 响应强制改写为 404（tower-http 0.5.2 serve_dir/mod.rs:236）——SPA 回退
         // 需要回退服务的原始 200。实测踩坑记录。
-        app = app.fallback_service(get_service(
-            ServeDir::new(&state.web_dist).fallback(ServeFile::new(index)),
-        ));
+        app = app.fallback_service(
+            get_service(ServeDir::new(&state.web_dist).fallback(ServeFile::new(index)))
+                .layer(middleware::from_fn(static_cache_policy)),
+        );
     }
     app.layer(middleware::from_fn_with_state(
         state.clone(),
         guard_middleware,
     ))
     .with_state(state)
+}
+
+/// 静态资源缓存策略（兑现文件头「缓存策略」注释，2026-11-12）：
+/// `/assets/*`（Vite hash 文件名，内容不可变）→ `immutable, max-age=31536000`；
+/// index.html 与 SPA 回退 → `no-cache`（每次协商校验，保证发版即生效）。
+/// 只对 2xx 加头（404/回退失败不缓存）。
+async fn static_cache_policy(req: axum::extract::Request, next: Next) -> Response {
+    let is_asset = req.uri().path().starts_with("/assets/");
+    let mut resp = next.run(req).await;
+    if resp.status().is_success() {
+        let v = if is_asset {
+            HeaderValue::from_static("public, max-age=31536000, immutable")
+        } else {
+            HeaderValue::from_static("no-cache")
+        };
+        resp.headers_mut().insert(header::CACHE_CONTROL, v);
+    }
+    resp
 }
 
 // ---- 中间件：Host/CSRF/鉴权（读保护+设备令牌）/安全头/request-id/审计 ----
@@ -350,11 +372,7 @@ async fn guard_middleware(
             .any(|h| h.eq_ignore_ascii_case(&host))
         && !(st.testing && host == "testserver")
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "host not allowed"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::BAD_REQUEST, "host not allowed").into_response();
     }
     let unsafe_m = method == axum::http::Method::POST
         || method == axum::http::Method::PUT
@@ -406,11 +424,11 @@ async fn guard_middleware(
         // R2-103 对齐：读保护时 admin/read/设备令牌均可读
         let provided = provided_token(&headers);
         if !check_read_token(&st, provided.as_deref()) {
-            return (
+            return detail_err(
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"detail": "需要管理令牌（X-Admin-Token 或 Authorization: Bearer）"})),
+                "需要管理令牌（X-Admin-Token 或 Authorization: Bearer）",
             )
-                .into_response();
+            .into_response();
         }
         actor = "read".into();
     }
@@ -511,22 +529,22 @@ fn check_write_token(st: &Shared, provided: Option<&str>) -> Result<String, Box<
     }
     if !st.read_token.is_empty() && provided == st.read_token {
         return Err(Box::new(
-            (
+            detail_err(
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"detail": "当前令牌无写权限（只读令牌）——请使用管理令牌"})),
+                "当前令牌无写权限（只读令牌）——请使用管理令牌",
             )
-                .into_response(),
+            .into_response(),
         ));
     }
     if let Some(name) = check_device_token(st, provided) {
         return Ok(format!("device:{name}"));
     }
     Err(Box::new(
-        (
+        detail_err(
             StatusCode::UNAUTHORIZED,
-            Json(json!({"detail": "需要管理令牌（X-Admin-Token 或 Authorization: Bearer）"})),
+            "需要管理令牌（X-Admin-Token 或 Authorization: Bearer）",
         )
-            .into_response(),
+        .into_response(),
     ))
 }
 
@@ -756,11 +774,7 @@ async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i64>) -> Res
         Ok(Some(c)) => Json(json!({"id": c.id, "name": c.name, "type": c.type_,
             "status": c.status, "analyzer": c.analyzer, "fps": null}))
         .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"detail": "camera not found"})),
-        )
-            .into_response(),
+        Ok(None) => detail_err(StatusCode::NOT_FOUND, "camera not found").into_response(),
         Err(_) => server_err(),
     }
 }
@@ -779,11 +793,7 @@ async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>) -> Respon
         _ => false,
     };
     if !valid || source.contains('#') || source.contains('\n') {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "source 非法"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::BAD_REQUEST, "source 非法").into_response();
     }
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("cam");
     match ls_store::Store::open(&st.db_path) {
@@ -805,22 +815,14 @@ async fn set_status(
     let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
     if !["new", "acked", "false_positive", "ignored"].contains(&status) {
         // T-505 契约对齐：Python 侧 EventStatusBody Literal → 422，两实现同契约
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "非法状态"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "非法状态").into_response();
     }
     let s = match ls_store::Store::open(&st.db_path) {
         Ok(s) => s,
         Err(_) => return server_err(),
     };
     match s.set_event_status(id, status, None, None) {
-        Ok(0) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"detail": "event not found"})),
-        )
-            .into_response(),
+        Ok(0) => detail_err(StatusCode::NOT_FOUND, "event not found").into_response(),
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(_) => server_err(),
     }
@@ -850,11 +852,7 @@ async fn config_summary(State(st): State<Shared>) -> Json<Value> {
 
 async fn backups_run(State(st): State<Shared>) -> Response {
     if !st.jobs.trigger_backup() {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"detail": "备份正在进行中"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::CONFLICT, "备份正在进行中").into_response();
     }
     Json(json!({"started": true})).into_response()
 }
@@ -943,19 +941,15 @@ async fn add_zone(State(st): State<Shared>, Json(body): Json<Value>) -> Response
         .to_string();
     let polygon = body.get("polygon").cloned().unwrap_or(Value::Null);
     if !polygon.is_array() || name.is_empty() {
-        return (
+        return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "name 与 polygon(数组) 必填"})),
+            "name 与 polygon(数组) 必填",
         )
-            .into_response();
+        .into_response();
     }
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "camera not found"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
         let zid = s.add_zone(cid, &name, &polygon.to_string())?;
         Ok(
@@ -970,11 +964,7 @@ async fn delete_zone(State(st): State<Shared>, AxPath(zid): AxPath<i64>) -> Resp
         if s.delete_zone(zid)? > 0 {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "zone not found"})),
-            )
-                .into_response())
+            Ok(detail_err(StatusCode::NOT_FOUND, "zone not found").into_response())
         }
     })
 }
@@ -1023,19 +1013,11 @@ async fn add_rule(State(st): State<Shared>, Json(body): Json<Value>) -> Response
         .unwrap_or("")
         .to_string();
     if behavior.is_empty() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "behavior 必填"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "behavior 必填").into_response();
     }
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "camera not found"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
         let rid = s.add_rule(
             cid,
@@ -1059,11 +1041,7 @@ async fn delete_rule(State(st): State<Shared>, AxPath(rid): AxPath<i64>) -> Resp
         if s.delete_rule(rid)? > 0 {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "rule not found"})),
-            )
-                .into_response())
+            Ok(detail_err(StatusCode::NOT_FOUND, "rule not found").into_response())
         }
     })
 }
@@ -1080,11 +1058,7 @@ async fn set_camera_group(
         .to_string();
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "camera not found"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
         s.set_camera_group(cid, &group)?;
         Ok(Json(json!({"id": cid, "group_name": group})).into_response())
@@ -1102,21 +1076,17 @@ async fn set_camera_analyzer(
         .unwrap_or("")
         .to_string();
     if impl_ != "python" && impl_ != "rust" {
-        return (
+        return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "analyzer 必须是 python|rust"})),
+            "analyzer 必须是 python|rust",
         )
-            .into_response();
+        .into_response();
     }
     with_store(&st, |s| {
         let cam = match s.camera(cid)? {
             Some(c) => c,
             None => {
-                return Ok((
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"detail": "camera not found"})),
-                )
-                    .into_response())
+                return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response())
             }
         };
         if cam.analyzer == impl_ {
@@ -1138,11 +1108,7 @@ async fn set_camera_analyzer(
 async fn start_camera(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "camera not found"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
         // rust 控制面独立模式没有分析 worker（数据面在 Python 服务 / sidecar）；
         // 如实返回 503 而不是假装启动成功（§11.3「声明完成必须附证据」约束）。
@@ -1159,16 +1125,12 @@ async fn start_camera(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Res
 
 async fn camera_webrtc(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
     with_store(&st, |s| match s.camera(cid)? {
-        None => Ok((
-            StatusCode::NOT_FOUND,
-            Json(json!({"detail": "camera not found"})),
-        )
-            .into_response()),
-        Some(c) if c.type_ == "folder" => Ok((
+        None => Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response()),
+        Some(c) if c.type_ == "folder" => Ok(detail_err(
             StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "图片文件夹源没有实时流；请在「图片识别」页查看关键图片"})),
+            "图片文件夹源没有实时流；请在「图片识别」页查看关键图片",
         )
-            .into_response()),
+        .into_response()),
         Some(_) => Ok(
             Json(json!({"camera_id": cid, "ws_url": format!("/ws/webrtc/{cid}")})).into_response(),
         ),
@@ -1198,11 +1160,11 @@ async fn cameras_bulk(State(st): State<Shared>, Json(body): Json<Value>) -> Resp
         || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
         || (action != "start" && action != "stop")
     {
-        return (
+        return detail_err(
             StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "ids 必须为去重非空列表且 ≤100 个；action=start|stop"})),
+            "ids 必须为去重非空列表且 ≤100 个；action=start|stop",
         )
-            .into_response();
+        .into_response();
     }
     with_store(&st, |s| {
         let mut missing = Vec::new();
@@ -1251,10 +1213,7 @@ async fn bulk_event_status(State(st): State<Shared>, Json(body): Json<Value>) ->
             .unwrap_or(false)
     {
         // 与 Python EventStatusBody Literal / bool 拒绝同契约 → 422
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "非法状态或 ids 含布尔"})),
-        )
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "非法状态或 ids 含布尔")
             .into_response();
     }
     with_store(&st, |s| {
@@ -1300,18 +1259,12 @@ fn serve_event_media(
                 let p = std::path::Path::new(&st.data_dir).join(&rel);
                 match std::fs::read(&p) {
                     Ok(bytes) => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
-                    Err(_) => (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"detail": "media file not found"})),
-                    )
-                        .into_response(),
+                    Err(_) => {
+                        detail_err(StatusCode::NOT_FOUND, "media file not found").into_response()
+                    }
                 }
             }
-            _ => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "event not found"})),
-            )
-                .into_response(),
+            _ => detail_err(StatusCode::NOT_FOUND, "event not found").into_response(),
         },
         Err(_) => server_err(),
     }
@@ -1369,11 +1322,11 @@ async fn stats_hourly(
 ) -> Response {
     let date = q.get("date").cloned().unwrap_or_default();
     if date.len() != 10 || date.is_empty() {
-        return (
+        return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "date 必须是 YYYY-MM-DD 格式"})),
+            "date 必须是 YYYY-MM-DD 格式",
         )
-            .into_response();
+        .into_response();
     }
     let cid: Option<i64> = q.get("camera_id").and_then(|v| v.parse().ok());
     with_store(&st, |s| {
@@ -1561,11 +1514,7 @@ async fn claim_pairing(State(st): State<Shared>, Json(body): Json<Value>) -> Res
         .take(32)
         .collect::<String>();
     if code.is_empty() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "code 必填"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "code 必填").into_response();
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1596,11 +1545,7 @@ async fn claim_pairing(State(st): State<Shared>, Json(body): Json<Value>) -> Res
         }
     };
     if !valid {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "配对码无效或已过期"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::BAD_REQUEST, "配对码无效或已过期").into_response();
     }
     let token = random_token();
     let hash = sha256_hex(token.as_bytes());
@@ -1633,11 +1578,7 @@ async fn revoke_device(State(st): State<Shared>, AxPath(did): AxPath<i64>) -> Re
         if s.revoke_device(did)? {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "device not found"})),
-            )
-                .into_response())
+            Ok(detail_err(StatusCode::NOT_FOUND, "device not found").into_response())
         }
     })
 }
@@ -1685,11 +1626,7 @@ async fn retry_delivery(State(st): State<Shared>, AxPath(did): AxPath<i64>) -> R
         if s.retry_delivery(did)? {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "delivery not found"})),
-            )
-                .into_response())
+            Ok(detail_err(StatusCode::NOT_FOUND, "delivery not found").into_response())
         }
     })
 }
@@ -1716,11 +1653,7 @@ async fn add_silence(State(st): State<Shared>, Json(body): Json<Value>) -> Respo
         .unwrap_or("")
         .to_string();
     if scope.is_empty() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "scope 必填"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "scope 必填").into_response();
     }
     let target = body.get("target").and_then(|v| v.as_str());
     let reason = body.get("reason").and_then(|v| v.as_str());
@@ -1730,11 +1663,7 @@ async fn add_silence(State(st): State<Shared>, Json(body): Json<Value>) -> Respo
         .unwrap_or("")
         .to_string();
     if until.is_empty() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "until_ts 必填"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "until_ts 必填").into_response();
     }
     with_store(&st, |s| {
         let sid = s.add_silence(&scope, target, reason, &until)?;
@@ -1747,11 +1676,7 @@ async fn delete_silence(State(st): State<Shared>, AxPath(sid): AxPath<i64>) -> R
         if s.delete_silence(sid)? {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "silence not found"})),
-            )
-                .into_response())
+            Ok(detail_err(StatusCode::NOT_FOUND, "silence not found").into_response())
         }
     })
 }
@@ -1784,11 +1709,11 @@ async fn set_calendar(State(st): State<Shared>, Json(body): Json<Value>) -> Resp
         .unwrap_or("")
         .to_string();
     if date.is_empty() || (mode != "workday" && mode != "holiday") {
-        return (
+        return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "date 必填；mode 必须是 workday|holiday"})),
+            "date 必填；mode 必须是 workday|holiday",
         )
-            .into_response();
+        .into_response();
     }
     with_store(&st, |s| {
         s.set_calendar_exception(&date, &mode, &note)?;
@@ -1801,11 +1726,7 @@ async fn delete_calendar(State(st): State<Shared>, AxPath(d): AxPath<String>) ->
         if s.delete_calendar_exception(&d)? {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "calendar exception not found"})),
-            )
-                .into_response())
+            Ok(detail_err(StatusCode::NOT_FOUND, "calendar exception not found").into_response())
         }
     })
 }
@@ -1835,20 +1756,12 @@ async fn add_template(State(st): State<Shared>, Json(body): Json<Value>) -> Resp
         .to_string();
     let config = body.get("config").cloned();
     if name.is_empty() || config.is_none() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "name 与 config 必填"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "name 与 config 必填").into_response();
     }
     with_store(&st, |s| {
         match s.add_rule_template(&name, &config.unwrap().to_string()) {
             Ok(id) => Ok(Json(json!({"id": id, "name": name})).into_response()),
-            Err(_) => Ok((
-                StatusCode::CONFLICT,
-                Json(json!({"detail": "模板名已存在"})),
-            )
-                .into_response()),
+            Err(_) => Ok(detail_err(StatusCode::CONFLICT, "模板名已存在").into_response()),
         }
     })
 }
@@ -1869,11 +1782,7 @@ async fn update_template(
         if n > 0 {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "template not found"})),
-            )
-                .into_response())
+            Ok(detail_err(StatusCode::NOT_FOUND, "template not found").into_response())
         }
     })
 }
@@ -1883,11 +1792,7 @@ async fn delete_template(State(st): State<Shared>, AxPath(tid): AxPath<i64>) -> 
         if s.delete_rule_template(tid)? {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
-            Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "template not found"})),
-            )
-                .into_response())
+            Ok(detail_err(StatusCode::NOT_FOUND, "template not found").into_response())
         }
     })
 }
@@ -2191,26 +2096,15 @@ async fn copy_camera_config(
         .unwrap_or("-copy")
         .to_string();
     if targets.is_empty() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "target_ids 必填"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "target_ids 必填").into_response();
     }
     if targets.contains(&cid) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "target_ids 不能包含源摄像头自身"})),
-        )
+        return detail_err(StatusCode::BAD_REQUEST, "target_ids 不能包含源摄像头自身")
             .into_response();
     }
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "camera not found"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
         for t in &targets {
             if s.camera(*t)?.is_none() {
@@ -2389,11 +2283,11 @@ async fn sign_media(
     let path = q.get("path").cloned().unwrap_or_default();
     if !path.starts_with("/api/") || path.contains('?') || path.contains('#') || path.contains(' ')
     {
-        return (
+        return detail_err(
             StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "path 只能是 /api/ 媒体路径（查询串自行拼接在签名后）"})),
+            "path 只能是 /api/ 媒体路径（查询串自行拼接在签名后）",
         )
-            .into_response();
+        .into_response();
     }
     let ttl = 300i64;
     let exp = std::time::SystemTime::now()
@@ -2910,11 +2804,7 @@ fn validate_alert_url(field: &str, url: &str) -> Result<(), String> {
 
 async fn alerts_config_put(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
     let Some(body_obj) = body.as_object() else {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "body 必须是对象"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "body 必须是对象").into_response();
     };
     let mut pending: Vec<(String, String)> = Vec::new(); // (field, serialized)
     for (channel, values) in body_obj {
@@ -2981,25 +2871,19 @@ async fn alerts_config_put(State(st): State<Shared>, Json(body): Json<Value>) ->
                     && !parts[1].is_empty()
                     && parts[1].contains('.');
                 if !ok {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"detail": "收件邮箱格式不正确"})),
-                    )
+                    return detail_err(StatusCode::BAD_REQUEST, "收件邮箱格式不正确")
                         .into_response();
                 }
             }
             if *field == "smtp_host" && (text.contains("://") || text.contains(' ')) {
-                return (
+                return detail_err(
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"detail": "SMTP 服务器只填主机名，如 smtp.qq.com"})),
+                    "SMTP 服务器只填主机名，如 smtp.qq.com",
                 )
-                    .into_response();
+                .into_response();
             }
             if *field == "qmsg_qq" && !text.chars().all(|c| c.is_ascii_digit()) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"detail": "Qmsg 接收 QQ 必须是数字"})),
-                )
+                return detail_err(StatusCode::BAD_REQUEST, "Qmsg 接收 QQ 必须是数字")
                     .into_response();
             }
             // 敏感字段加密（Fernet，与 POSIX 语义互操作）；失败拒绝保存（R2-106）
@@ -3007,11 +2891,11 @@ async fn alerts_config_put(State(st): State<Shared>, Json(body): Json<Value>) ->
                 match fernet::protect(&text, std::path::Path::new(&st.data_dir)) {
                     Some(enc) => enc,
                     None => {
-                        return (
+                        return detail_err(
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"detail": "加密组件不可用，拒绝明文保存密钥"})),
+                            "加密组件不可用，拒绝明文保存密钥",
                         )
-                            .into_response()
+                        .into_response()
                     }
                 }
             } else {
@@ -3093,19 +2977,11 @@ async fn discovery_probe(State(_st): State<Shared>, Json(body): Json<Value>) -> 
         .trim()
         .to_string();
     if host.is_empty() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "host 必填"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "host 必填").into_response();
     }
     let port = body.get("port").and_then(|v| v.as_i64()).unwrap_or(554);
     if !(1..=65535).contains(&port) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "port 必须在 1-65535"})),
-        )
-            .into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "port 必须在 1-65535").into_response();
     }
     let username = body.get("username").and_then(|v| v.as_str());
     let password = body.get("password").and_then(|v| v.as_str());
@@ -3137,11 +3013,7 @@ fn folder_row_json(r: &ls_store::FolderImageRow, path_full: bool) -> Value {
 async fn folder_image_detail(State(st): State<Shared>, AxPath(iid): AxPath<i64>) -> Response {
     with_store(&st, |s| match s.folder_image(iid)? {
         Some(r) => Ok(Json(folder_row_json(&r, true)).into_response()),
-        None => Ok((
-            StatusCode::NOT_FOUND,
-            Json(json!({"detail": "image record not found"})),
-        )
-            .into_response()),
+        None => Ok(detail_err(StatusCode::NOT_FOUND, "image record not found").into_response()),
     })
 }
 
@@ -3164,17 +3036,13 @@ async fn folder_image_file(State(st): State<Shared>, AxPath(iid): AxPath<i64>) -
                 )
                     .into_response())
             }
-            Err(_) => Ok((
+            Err(_) => Ok(detail_err(
                 StatusCode::NOT_FOUND,
-                Json(json!({"detail": "原图片文件不存在（可能已被系统清理）"})),
+                "原图片文件不存在（可能已被系统清理）",
             )
-                .into_response()),
-        },
-        None => Ok((
-            StatusCode::NOT_FOUND,
-            Json(json!({"detail": "image record not found"})),
-        )
             .into_response()),
+        },
+        None => Ok(detail_err(StatusCode::NOT_FOUND, "image record not found").into_response()),
     })
 }
 
@@ -3195,18 +3063,14 @@ async fn folder_image_thumb(State(st): State<Shared>, AxPath(iid): AxPath<i64>) 
                     data,
                 )
                     .into_response()),
-                Err(_) => Ok((
+                Err(_) => Ok(detail_err(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    Json(json!({"detail": "缩略图缓存不存在（rust 控制面不生成缩略图；原图走 /file）"})),
+                    "缩略图缓存不存在（rust 控制面不生成缩略图；原图走 /file）",
                 )
-                    .into_response()),
+                .into_response()),
             }
         }
-        None => Ok((
-            StatusCode::NOT_FOUND,
-            Json(json!({"detail": "image record not found"})),
-        )
-            .into_response()),
+        None => Ok(detail_err(StatusCode::NOT_FOUND, "image record not found").into_response()),
     })
 }
 
@@ -3357,20 +3221,16 @@ async fn apply_rule_template(
     let zone_id: Option<i64> = body.get("zone_id").and_then(|v| v.as_i64());
     with_store(&st, |s| {
         let Some(tpl) = s.get_rule_template(tid)? else {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "template not found"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "template not found").into_response());
         };
         let parsed: Value =
             serde_json::from_str(&tpl.config_json).unwrap_or(Value::Array(Vec::new()));
         let Some(rules) = parsed.as_array() else {
-            return Ok((
+            return Ok(detail_err(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({"detail": "模板 config_json 不是数组"})),
+                "模板 config_json 不是数组",
             )
-                .into_response());
+            .into_response());
         };
         // 先校验全部目标（Python 同语义：任一摄像头缺失/区域不归属即 4xx，不半写）
         for cid in &cam_ids {
@@ -3449,11 +3309,7 @@ async fn shutdown_server() -> Response {
 async fn camera_snapshot(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "camera not found"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
         // rust 控制面独立模式无分析 worker（无实时帧缓冲）；与 start_camera 同口径
         Ok((
@@ -3589,11 +3445,7 @@ fn read_media_file(st: &Shared, rel: &str) -> Option<(String, Vec<u8>)> {
 async fn event_evidence_zip(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
     with_store(&st, |s| {
         let Some(ev) = s.event_by_id(eid)? else {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "event not found"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "event not found").into_response());
         };
         let mut zip = ZipWriter::new();
         let mut parts = 0usize;
@@ -3619,11 +3471,10 @@ async fn event_evidence_zip(State(st): State<Shared>, AxPath(eid): AxPath<i64>) 
             meta.to_string().as_bytes(),
         );
         if parts == 0 {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "事件无存证文件（快照/视频不存在）"})),
-            )
-                .into_response());
+            return Ok(
+                detail_err(StatusCode::NOT_FOUND, "事件无存证文件（快照/视频不存在）")
+                    .into_response(),
+            );
         }
         Ok(([(header::CONTENT_TYPE, "application/zip")], zip.finish()).into_response())
     })
@@ -3653,11 +3504,7 @@ async fn export_evidence_zip(
             .filter(|e| e.snapshot.is_some() || e.video.is_some())
             .collect();
         if with_media.is_empty() {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(json!({"detail": "范围内无带存证的事件"})),
-            )
-                .into_response());
+            return Ok(detail_err(StatusCode::NOT_FOUND, "范围内无带存证的事件").into_response());
         }
         let mut zip = ZipWriter::new();
         let mut index = Vec::new();
@@ -3695,11 +3542,11 @@ async fn config_import(State(st): State<Shared>, Json(body): Json<Value>) -> Res
         .unwrap_or("merge")
         .to_string();
     if mode != "merge" && mode != "replace" {
-        return (
+        return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "mode 必须是 merge|replace"})),
+            "mode 必须是 merge|replace",
         )
-            .into_response();
+        .into_response();
     }
     if mode == "replace"
         && !body
@@ -3707,10 +3554,7 @@ async fn config_import(State(st): State<Shared>, Json(body): Json<Value>) -> Res
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "replace 模式必须 confirm_replace=true（将清空现有摄像头/区域/规则；事件保留但失去对应摄像头）"})),
-        )
+        return detail_err(StatusCode::BAD_REQUEST, "replace 模式必须 confirm_replace=true（将清空现有摄像头/区域/规则；事件保留但失去对应摄像头）")
             .into_response();
     }
     let data = body.get("data").cloned().unwrap_or(Value::Null);
@@ -3730,11 +3574,11 @@ async fn config_import(State(st): State<Shared>, Json(body): Json<Value>) -> Res
         .cloned()
         .unwrap_or_default();
     if cams.is_empty() && zones.is_empty() && rules.is_empty() {
-        return (
+        return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "data 至少包含 cameras/zones/rules 之一"})),
+            "data 至少包含 cameras/zones/rules 之一",
         )
-            .into_response();
+        .into_response();
     }
     with_store(&st, |s| {
         if mode == "replace" {
@@ -3835,11 +3679,11 @@ async fn config_import(State(st): State<Shared>, Json(body): Json<Value>) -> Res
 // ---- 插件占位（rust 独立模式无插件管理器：列表恒空 → 任何 pid 不存在，
 // 与 Python 对未知 pid 的 404 行为一致，不是假桩而是真实结果） ----
 fn plugin_not_found() -> Response {
-    (
+    detail_err(
         StatusCode::NOT_FOUND,
-        Json(json!({"detail": "plugin not found（rust 控制面无插件管理器，列表见 GET /api/plugins）"})),
+        "plugin not found（rust 控制面无插件管理器，列表见 GET /api/plugins）",
     )
-        .into_response()
+    .into_response()
 }
 
 async fn plugin_logs(AxPath(_pid): AxPath<String>) -> Response {
@@ -3859,20 +3703,22 @@ fn face_enabled() -> bool {
 
 fn face_guard() -> Result<(), Box<Response>> {
     if !face_enabled() {
-        return Err(Box::new((
-            StatusCode::FORBIDDEN,
-            Json(json!({"detail": "人脸比对功能未开启（LS_FACE_ENABLED=false）。开启方式与合规要求见 README。"})),
-        )
-            .into_response()));
+        return Err(Box::new(
+            detail_err(
+                StatusCode::FORBIDDEN,
+                "人脸比对功能未开启（LS_FACE_ENABLED=false）。开启方式与合规要求见 README。",
+            )
+            .into_response(),
+        ));
     }
     let key = std::env::var("LS_COMPREFACE_API_KEY").unwrap_or_default();
     if key.is_empty() {
         return Err(Box::new(
-            (
+            detail_err(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"detail": "人脸服务未配置（缺少 LS_COMPREFACE_API_KEY）"})),
+                "人脸服务未配置（缺少 LS_COMPREFACE_API_KEY）",
             )
-                .into_response(),
+            .into_response(),
         ));
     }
     // CompreFace HTTP 客户端在 Python 服务实现（注册/识别/1:N 全链）；rust 独立
@@ -4009,11 +3855,11 @@ async fn ppe_download(State(st): State<Shared>, Json(body): Json<Value>) -> Resp
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
-        return (
+        return detail_err(
             StatusCode::BAD_REQUEST,
-            Json(json!({"detail": "必须先确认实验服模型的数据集许可说明"})),
+            "必须先确认实验服模型的数据集许可说明",
         )
-            .into_response();
+        .into_response();
     }
     let lock_path = asset_lock_path(&st);
     let Ok(lock_raw) = std::fs::read_to_string(&lock_path) else {
@@ -4024,20 +3870,20 @@ async fn ppe_download(State(st): State<Shared>, Json(body): Json<Value>) -> Resp
             .into_response();
     };
     let Ok(lock) = serde_json::from_str::<Value>(&lock_raw) else {
-        return (
+        return detail_err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"detail": "assets.lock.json 解析失败"})),
+            "assets.lock.json 解析失败",
         )
-            .into_response();
+        .into_response();
     };
     let assets = match lock.get("assets").and_then(|v| v.as_object()) {
         Some(a) => a,
         None => {
-            return (
+            return detail_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"detail": "assets.lock.json 缺 assets"})),
+                "assets.lock.json 缺 assets",
             )
-                .into_response()
+            .into_response()
         }
     };
     // SSRF 防护对齐 Python _allowed_hosts：白名单域名只来自锁文件 urls
@@ -4185,6 +4031,14 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
             }
         }
     }
+}
+
+/// 统一 4xx/5xx JSON 错误体（`{"detail": msg}`）——2026-11-12 深审：手写
+/// `detail_err(StatusCode::X, "...").into_response()` 样板在
+/// 全文件出现约 70 次（纯字面量形态），收敛到此 helper（带 code 的复合错误体
+/// 与动态 msg 保留原写法）。
+fn detail_err(status: StatusCode, msg: &str) -> Response {
+    (status, Json(json!({"detail": msg}))).into_response()
 }
 
 fn server_err() -> Response {
@@ -5249,5 +5103,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r3.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn static_cache_policy_headers() {
+        // 2026-11-12：兑现文件头「缓存策略」——/assets/* hash 文件名 immutable，
+        // index/SPA 回退 no-cache（协商校验，发版即生效）。
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(web.join("assets")).unwrap();
+        std::fs::write(web.join("index.html"), "<html>lab-ui</html>").unwrap();
+        std::fs::write(
+            web.join("assets").join("index-abc123.js"),
+            b"console.log(1)",
+        )
+        .unwrap();
+        let db = dir.path().join("t.db");
+        let st = test_state_custom(
+            db.to_str().unwrap(),
+            "",
+            false,
+            dir.path().to_str().unwrap(),
+            true,
+            web.to_str().unwrap(),
+        );
+        let app = build_router(st);
+
+        // /assets/* → immutable 一年
+        let r = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/assets/index-abc123.js")
+                    .header("host", "127.0.0.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers()[axum::http::header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+
+        // 首页 → no-cache
+        let r2 = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header("host", "127.0.0.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        assert_eq!(r2.headers()[axum::http::header::CACHE_CONTROL], "no-cache");
+
+        // SPA 回退 → 同样 no-cache
+        let r3 = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/events")
+                    .header("host", "127.0.0.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), StatusCode::OK);
+        assert_eq!(r3.headers()[axum::http::header::CACHE_CONTROL], "no-cache");
     }
 }
