@@ -212,6 +212,7 @@
 |---|---|---|
 | Docker 终止 | 8958721 | `deploy/docker/`（compose/Dockerfile/Dockerfile.cuda/Dockerfile.rust）删除；`docs/部署指南-Linux.md` 改写为 systemd 唯一路线；release-notes/CHANGELOG/status.md R2-401 ⛔ 终止；config.py/main.rs 注释清理（--healthcheck 保留作通用探活）。N-07/N-08/N-19 随产物移除闭合 |
 | AV 治理 | e999095 | 启动链审计清白（无 -c/exec/runpy，urlopen 仅回环；runtime python 为 python.org 官方签名 embed）；`LabSentinel.exe` 身份化（程序集属性 + /win32manifest asInvoker，VersionInfo 四项实测齐全）；`docs/杀毒软件误报说明.md`（命中对照表/排除指引/申诉通道/维护者复现注意）；zip 发布产物 10122 条目全量 CRC 完整。**剩余路径**：卡巴斯基对本机 staging 的处置仍在（判定对象为便携 runtime 组合目录），需用户加信任区或 CI 验证——本机执行级冒烟暂缓如实记录 |
+| AV 二分定位 + 申诉材料 | 22c9860 | **二分实证：静态文件集不触发查杀**——发布 zip 拆 6 子集（runtime 单独/完整启动链/纯 Python 源码/第三方工具/Rust bin/bat 入口）写入 TEMP 观察 90s **全部存活**→触发点是执行行为（本地监听+拉起第三方二进制+taskkill 组合）而非内容特征；**结论：信任区排除可完全解决**。`scripts/opentip_hashes.py` 生成器 + `docs/opentip-申诉材料-0.2.0.md`（8 关键文件全量 SHA256 + 理由模板）入库。**待用户**：加信任区/提交申诉后告知 → 重跑 `smoke_portable.py` 实证并回填本行 |
 | Rust 深审简化 | 6a72810 | ① `web_dist` 死字段接线（此前只有赋值从未被路由使用——文件头注释声称的静态服务未兑现）：按 `LS_WEB_DIST` 挂 ServeDir + `.fallback(ServeFile(index))` SPA 回退（踩坑：`not_found_service` 会 SetStatus 强制 404，须用 `fallback`——tower-http 0.5.2 源码确认）；② R2-108 深审补齐——ls-server Host 白名单曾**无条件豁免 testserver**（Python 已测试态门控，批次 4 声称对齐但漏掉），`AppState.testing`（LS_TESTING=1）门控；③ 回归 2 例。纯描述占位（start_camera 503 等）复核保留 |
 
 **门禁实测**：`cargo test --workspace --all-features` **95 passed / 0 failed**（93→95）
