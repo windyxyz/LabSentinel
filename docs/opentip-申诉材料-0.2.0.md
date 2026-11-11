@@ -1,5 +1,10 @@
 # Kaspersky Open False Positive 申诉材料（LabSentinel 0.2.0 便携包）
 
+> **2026-11-12 注**：本材料为**预防性预备**（发版后若收到真实用户误报再提交）；
+> 开发本机未安装卡巴斯基，此前会话的「删除」判断已更正（见 docs/plan/status.md
+> 便携包启动链排障段）。发版后哈希变化时用 `python scripts/opentip_hashes.py`
+> 重新生成本文件。
+
 提交地址：https://opentip.kaspersky.com/（Submit False Positive / False Alarm）
 
 ## 申诉理由（可直接粘贴）
