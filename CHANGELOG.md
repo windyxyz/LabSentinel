@@ -6,6 +6,37 @@
 
 ## [Unreleased]
 
+### Rust 控制面深审简化（2026-11-11）
+- **`web_dist` 死字段接线**：`AppState.web_dist` 此前只有赋值从未被路由使用
+  （文件头注释声称的「静态 web/dist（SPA 回退 + 缓存策略）」一直未兑现）——
+  `build_router` 现按 `LS_WEB_DIST`（与 Python 同名）挂载静态服务：
+  `ServeDir + .fallback(ServeFile(index.html))` 实现 SPA 回退；空值不挂载保持
+  纯 API；静态资源在 guard 中间件内（Host 白名单同样覆盖）。**踩坑记录**：
+  SPA 回退须用 `ServeDir::fallback` 而非 `not_found_service`——后者用
+  `SetStatus` 把回退响应强制改写为 404（tower-http 0.5.2 serve_dir/mod.rs:236）。
+- **R2-108 深审补齐**：ls-server 的 Host 白名单曾**无条件豁免** `testserver`
+  主机名——Python 侧 R2-108 已按测试态门控（`settings.testing or
+  PYTEST_CURRENT_TEST`），批次 4 曾声称「鉴权中间件对齐 R2-108 口径」但此处
+  漏掉。现 `AppState.testing`（`LS_TESTING=1`）门控 testserver 豁免，与
+  Python 一致；生产态 testserver 一律 400。
+- 新增回归测试 2 例（testserver 门控三向断言 / 静态服务+SPA 回退+空值 404）；
+  `cargo test -p ls-server` **23/23**。纯描述性历史注释与如实标注的能力边界
+  占位（start_camera 503 / mqtt-genai 状态端点）经复核保留——均为 L3+ 迭代项，
+  非死代码。
+
+### 杀毒软件误报治理（2026-11-11）
+- **`LabSentinel.exe` 身份化**：注入程序集属性（产品/版本/公司/描述，版本随包
+  单源 0.2.0）与 `/win32manifest` 原生清单（asInvoker——不请求 UAC 提权、
+  supportedOS、PerMonitorV2 DPI）。无签名、无版本资源、无清单的裸 winexe
+  拉起解释器是杀软启发式的典型画像。
+- **启动链审计**：全部随包脚本无 `-c`/`exec`/`runpy` 动态执行；`urlopen` 仅
+  回环健康检查；`runtime\python.exe` 来自 python.org 官方签名 embed（SHA256
+  锁定）。
+- 新增 `docs/杀毒软件误报说明.md`：命中原因对照表、排除路径指引、误报申诉
+  通道（opentip.kaspersky.com / Microsoft WDSI）；维护者本机复现注意事项
+  （卡巴斯基会静默删除便携 runtime，构建期冒烟不受影响，发布产物 zip 经
+  全量 CRC 校验完整）。
+
 ### 终止 Docker 支持（2026-11-11，维护者决策）
 - 删除 `deploy/docker/`（compose.yaml / Dockerfile / Dockerfile.cuda / Dockerfile.rust），
   不再推进容器化开发——原已知问题（容器内监听回环、go2rtc 配置卷不共享、

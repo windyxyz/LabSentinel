@@ -22,10 +22,11 @@ use axum::extract::{
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, get_service, post, put};
 use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
+use tower_http::services::{ServeDir, ServeFile};
 
 /// 应用共享状态
 pub struct AppState {
@@ -44,6 +45,9 @@ pub struct AppState {
     pub jobs: Arc<ls_jobs::Jobs>,
     /// R2-309：配对码/失败计数/设备 touch 节流（进程内，与 Python devices.py 同语义）
     pub pair_state: std::sync::Mutex<PairState>,
+    /// R2-108 对齐（2026-11-11 深审补齐）：测试主机名 testserver 仅在测试态放行
+    /// （LS_TESTING=1，与 Python settings.testing / PYTEST_CURRENT_TEST 同口径）。
+    pub testing: bool,
 }
 
 #[derive(Default)]
@@ -301,14 +305,27 @@ pub fn build_router(state: Shared) -> Router {
     let ws = Router::new()
         .route("/ws/events", get(ws_events))
         .with_state(state.clone());
-    Router::new()
-        .nest("/api", api)
-        .merge(ws)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            guard_middleware,
-        ))
-        .with_state(state)
+    // 2026-11-11：接线 web_dist（此前字段有赋值但从未被路由使用——文件头注释声称
+    // 的「静态 web/dist」一直未兑现）。ls-server 独立模式由此直接出 Web UI：
+    // - SPA 回退：未命中路径回 index.html（前端 vue-router history 模式）
+    // - 放在 guard 中间件内：Host 白名单（防 DNS Rebinding）同样覆盖静态资源；
+    //   读保护只拦 /api/*，页面本身公开（令牌由前端注入）
+    // web_dist 为空（测试/内嵌模式）时不挂载，保持纯 API。
+    let mut app = Router::new().nest("/api", api).merge(ws);
+    if !state.web_dist.is_empty() {
+        let index = std::path::Path::new(&state.web_dist).join("index.html");
+        // 注意用 .fallback() 而非 .not_found_service()：后者会用 SetStatus 把回退
+        // 响应强制改写为 404（tower-http 0.5.2 serve_dir/mod.rs:236）——SPA 回退
+        // 需要回退服务的原始 200。实测踩坑记录。
+        app = app.fallback_service(get_service(
+            ServeDir::new(&state.web_dist).fallback(ServeFile::new(index)),
+        ));
+    }
+    app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        guard_middleware,
+    ))
+    .with_state(state)
 }
 
 // ---- 中间件：Host/CSRF/鉴权（读保护+设备令牌）/安全头/request-id/审计 ----
@@ -331,7 +348,7 @@ async fn guard_middleware(
             .trusted_hosts
             .iter()
             .any(|h| h.eq_ignore_ascii_case(&host))
-        && host != "testserver"
+        && !(st.testing && host == "testserver")
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -4234,12 +4251,16 @@ async fn main() {
         read_protected,
         trusted_hosts: vec!["127.0.0.1".into(), "localhost".into(), "::1".into()],
         allowed_origins: vec![],
-        web_dist: "web/dist".into(),
+        // 2026-11-11：与 Python 同名环境变量（LS_WEB_DIST），未设时按仓库相对布局。
+        web_dist: std::env::var("LS_WEB_DIST").unwrap_or_else(|_| "web/dist".into()),
         data_dir,
         version,
         events_tx: broadcast::channel(256).0,
         jobs,
         pair_state: std::sync::Mutex::new(PairState::default()),
+        testing: std::env::var("LS_TESTING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
     });
     // R2-305：网页端配置的渠道（app_settings alert.*，Fernet 解密）注入 ls-jobs
     // escalation 发送——"网页端保存企微 webhook → rust 路径生效"的真实验收点。
@@ -4418,6 +4439,19 @@ mod tests {
         read_protected: bool,
         data_dir: &str,
     ) -> Shared {
+        test_state_custom(db, admin_token, read_protected, data_dir, true, "")
+    }
+
+    /// 变体：可指定 testing（R2-108 回归用——生产态 testserver 必须被拒）与
+    /// web_dist（静态服务回归用）；空串 = 不挂载静态服务。
+    fn test_state_custom(
+        db: &str,
+        admin_token: &str,
+        read_protected: bool,
+        data_dir: &str,
+        testing: bool,
+        web_dist: &str,
+    ) -> Shared {
         Arc::new(AppState {
             db_path: db.into(),
             admin_token: admin_token.into(),
@@ -4425,7 +4459,7 @@ mod tests {
             read_protected,
             trusted_hosts: vec!["127.0.0.1".into(), "localhost".into()],
             allowed_origins: vec![],
-            web_dist: String::new(),
+            web_dist: web_dist.into(),
             data_dir: data_dir.into(),
             version: "0.2.0".into(),
             events_tx: broadcast::channel(16).0,
@@ -4434,6 +4468,7 @@ mod tests {
                 ls_jobs::JobsConfig::default_for_db(std::path::Path::new(db)),
             )),
             pair_state: std::sync::Mutex::new(PairState::default()),
+            testing,
         })
     }
 
@@ -5073,5 +5108,146 @@ mod tests {
         // 闰年 2 月（29 天）同样可用
         let r = req(&app, "GET", "/api/export/monthly.pdf?month=2024-02", None).await;
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    // ==== 2026-11-11 深审简化批：R2-108 对齐 + web_dist 接线 ====
+
+    #[tokio::test]
+    async fn testserver_host_gated_by_testing() {
+        // R2-108 对齐（深审发现 Rust 侧 testserver 曾无条件豁免，Python 已按测试态门控）
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        // 生产态（testing=false）：testserver → 400
+        let st = test_state_custom(
+            db.to_str().unwrap(),
+            "",
+            false,
+            dir.path().to_str().unwrap(),
+            false,
+            "",
+        );
+        let app = build_router(st);
+        let r = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/health/live")
+                    .header("host", "testserver")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::BAD_REQUEST,
+            "生产态 testserver 必须被拒"
+        );
+        // 对照：白名单内主机放行
+        let r2 = axum::http::Request::builder()
+            .uri("/api/health/live")
+            .header("host", "127.0.0.1")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let r2 = app.oneshot(r2).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        // 测试态（testing=true）：testserver 放行
+        let dir2 = tempfile::tempdir().unwrap();
+        let st2 = test_state(dir2.path().join("t2.db").to_str().unwrap());
+        let app2 = build_router(st2);
+        let r3 = app2
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/health/live")
+                    .header("host", "testserver")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), StatusCode::OK, "测试态 testserver 放行");
+    }
+
+    #[tokio::test]
+    async fn web_dist_static_serving_and_spa_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<html>lab-ui</html>").unwrap();
+        std::fs::write(web.join("app.js"), b"console.log(1)").unwrap();
+        let db = dir.path().join("t.db");
+        let st = test_state_custom(
+            db.to_str().unwrap(),
+            "",
+            false,
+            dir.path().to_str().unwrap(),
+            true,
+            web.to_str().unwrap(),
+        );
+        let app = build_router(st);
+        // 首页直接命中
+        let r = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header("host", "127.0.0.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let b = http_body_util::BodyExt::collect(r.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(b.as_ref(), b"<html>lab-ui</html>");
+        // 未命中路径 → SPA 回退 index.html（vue-router history 模式）
+        let app2 = build_router(test_state_custom(
+            db.to_str().unwrap(),
+            "",
+            false,
+            dir.path().to_str().unwrap(),
+            true,
+            web.to_str().unwrap(),
+        ));
+        let r2 = app2
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/events")
+                    .header("host", "127.0.0.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b2 = http_body_util::BodyExt::collect(r2.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(b2.as_ref(), b"<html>lab-ui</html>");
+        // web_dist 为空 → 不挂载静态服务（/ 与未命中路径都 404）
+        let dir3 = tempfile::tempdir().unwrap();
+        let st3 = test_state_custom(
+            dir3.path().join("t3.db").to_str().unwrap(),
+            "",
+            false,
+            dir3.path().to_str().unwrap(),
+            true,
+            "",
+        );
+        let app3 = build_router(st3);
+        let r3 = app3
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header("host", "127.0.0.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), StatusCode::NOT_FOUND);
     }
 }
