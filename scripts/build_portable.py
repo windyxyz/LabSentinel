@@ -215,6 +215,13 @@ def copy_assets() -> None:
     here = Path(__file__).resolve().parent
     shutil.copy2(here / "portable_launcher.py", DIST / "scripts" / "portable_launcher.py")
     shutil.copy2(here / "install_portable.py", DIST / "scripts" / "install_portable.py")
+    # R2-402 升级健康检查拆为独立模块（install_portable.py 第 26 行同目录导入）；
+    # 漏拷会让 launcher 启动即 ModuleNotFoundError（2026-11-11 冒烟步骤 3a 实证：
+    # "无 logs 目录" = 进程在写日志前就崩了）——必须随包。
+    shutil.copy2(here / "health_check.py", DIST / "scripts" / "health_check.py")
+    # 2026-11-11 反误报治理：build 冒烟探针改为文件执行，探针亦需随脚本目录
+    # 提供（发布体检/排障可复用；不进包对启动无影响，随包便于现场诊断）。
+    shutil.copy2(here / "probe_runtime.py", DIST / "scripts" / "probe_runtime.py")
     shutil.copy2(here / "installer.py", DIST / "scripts" / "installer.py")  # 安装器 UI 层（任务120）
     shutil.copy2(here / "seed_demo.py", DIST / "scripts" / "seed_demo.py")  # 播种单源（任务51）
     shutil.copy2(here / "doctor.py", DIST / "scripts" / "doctor.py")  # 自检工具（任务70）
@@ -242,30 +249,17 @@ def smoke() -> None:
     env = {"PATH": r"C:\Windows\System32",
            "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
            "TEMP": os.environ.get("TEMP", str(RUNTIME)), "PYTHONUTF8": "1"}
-    code = ("import fastapi,uvicorn,cv2,numpy,supervision,onnxruntime;"
-            "print('providers=', onnxruntime.get_available_providers())")
-    r = subprocess.run([str(RUNTIME / "python.exe"), "-c", code], env=env,
-                       capture_output=True, text=True, cwd=str(RUNTIME))
+    # 2026-11-11 反误报治理：三段 `python -c 动态代码串` 改为文件执行（探针脚本）——
+    # 卡巴斯基对「python.exe -c 动态代码串」启发式敏感（2026-11-09 install_portable
+    # 先例；2026-11-11 staging 删除时间线与 build 冒烟的 -c 执行完全吻合），静态
+    # 二分实证证明文件集本身无特征（见 docs/杀毒软件误报说明.md）。
+    probe = ROOT / "scripts" / "probe_runtime.py"
+    r = subprocess.run([str(RUNTIME / "python.exe"), str(probe),
+                        "--app-dir", str(DIST / "app" / "server")],
+                       env=env, capture_output=True, text=True, cwd=str(RUNTIME))
     deploy.log("    " + (r.stdout.strip() or r.stderr.strip()[-300:]))
-    assert r.returncode == 0, "依赖导入冒烟失败"
-    # T-002 断言：paho/reportlab 可导入 + opencv 只有一份发行版（B-03 去重）
-    # R2-001/N-01: grpc（sidecar）与 cryptography（密钥加密/更新验签）必须随锁进包
-    code2 = ("import paho.mqtt.client, reportlab, grpc, cryptography;"
-             "import importlib.metadata as md;"
-             "d=[x.metadata['Name'] for x in md.distributions() "
-             "   if x.metadata['Name'].lower().startswith('opencv')];"
-             "assert len(d)==1, d; print('paho/reportlab/grpc/cryptography OK, opencv dists=', d)")
-    r = subprocess.run([str(RUNTIME / "python.exe"), "-c", code2], env=env,
-                       capture_output=True, text=True, cwd=str(RUNTIME))
-    deploy.log("    " + (r.stdout.strip() or r.stderr.strip()[-300:]))
-    assert r.returncode == 0, "paho/reportlab/opencv 单发行版 断言失败"
-    r = subprocess.run(
-        [str(RUNTIME / "python.exe"), "-c",
-         "import sys; sys.path.insert(0, '.'); import app.main; print('app.main import OK')"],
-        env=env, capture_output=True, text=True, cwd=str(DIST / "app" / "server"))
-    deploy.log("    " + (r.stdout.strip() or r.stderr.strip()[-300:]))
-    assert r.returncode == 0, "app.main 导入失败"
-    deploy.log("    （_pth 隔离模式不带 cwd；运行时由 uvicorn 自行插入 cwd，故冒烟显式 insert 模拟）")
+    assert r.returncode == 0, "runtime 冒烟探针失败（依赖导入/opencv 单发行版/app.main）"
+    deploy.log("    （_pth 隔离模式不带 cwd；运行时由 uvicorn 自行插入 cwd，探针显式 insert 模拟）")
     # config 模块级 data_dir.mkdir 会在导入时创建空数据目录——不属于构建产物，清掉（任务45 再外置）
     stray = DIST / "app" / "server" / "data"
     if stray.exists():

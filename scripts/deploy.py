@@ -197,7 +197,8 @@ def _venv_runnable(p: Path) -> bool:
     """T-008：venv 可运行性验证（存在 ≠ 可用：pyvenv.cfg 指向不存在的宿主 Python 时，
     python.exe 启动即报 "No Python at ..."）。失败按"未找到"处理，触发重建。"""
     try:
-        r = subprocess.run([str(venv_python(p)), "-c", "import sys"],
+        # 2026-11-11 反误报治理：`-c "import sys"` 动态代码串 → `-V`（等价的可运行性验证）
+        r = subprocess.run([str(venv_python(p)), "-V"],
                            capture_output=True, timeout=30)
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -744,10 +745,10 @@ def cmd_check(quiet: bool = False) -> int:
     if v:
         # R2-002/N-20: the unified lock pins onnxruntime CPU on Windows; DirectML
         # becomes an optional variant again in R2-303, so do not require Dml here.
-        code = ("import fastapi,uvicorn,cv2,numpy,httpx,supervision,pydantic_settings,"
-                "onnxruntime,grpc,cryptography;"
-                "assert onnxruntime.get_available_providers()")
-        r = subprocess.run([str(venv_python(v)), "-c", code], capture_output=True, text=True)
+        # 2026-11-11 反误报治理：`-c 动态代码串` → 文件执行（probe_runtime.py，与
+        # build_portable.smoke 同一探针；不带 --app-dir 即纯依赖体检）。
+        probe = Path(__file__).resolve().parent / "probe_runtime.py"
+        r = subprocess.run([str(venv_python(v)), str(probe)], capture_output=True, text=True)
         add("服务端依赖（锁文件）", r.returncode == 0,
             r.stderr.strip().splitlines()[-1] if r.returncode and r.stderr
             else f"python scripts/deploy.py install（{_platform_lock()}）")

@@ -199,31 +199,71 @@
 | 便携包本机实机构建 | ✅（构建）/ ⏸（独立冒烟） | `build_portable.py --variant cpu --zip --with-rust` 三次构建全过：内建冒烟（PATH 剥离导入 / grpc / cryptography / opencv 单发行版 / app.main 导入）全部 PASS；zip `LabSentinel-portable-20261111.zip` 252MB / 10122 条目；`--with-rust` 打包 `bin/ls-analyzer.exe`（release）+ `bin/onnxruntime.dll` |
 | 真 bug 修复（C# 入口） | ✅ | 独立冒烟首跑即抓到：`LabSentinelLauncher.cs` 旧实现相对路径 `runpy.run_path('scripts/portable_launcher.py')` 假设 cwd=包根，其他 cwd 启动 exe 时 APP_ROOT 漂移（实录漂移到开发机仓库根）——改绝对路径 + 显式 WorkingDirectory；`smoke_portable.py` exe 分支补 `cwd=pkg`（双保险）。**CI 上同样会挂，本批修复后 CI 冒烟才能过**（3619d12） |
 | release_manifest 必需清单校正 | ✅ | REQUIRED 未跟随 T-406/Q-07（演示视频不随包）与 Q-08（PPE 按需下载）——4 项假缺失导致 zip manifest FAIL（CI 也会挂）；已对齐现行政策并把 `bin/ls-analyzer.exe`/`bin/onnxruntime.dll`/`media/SOURCES.md` 列入可选（3619d12）；manifest 复算 `[OK] 必需条目齐全`，release_check 无 FAIL |
-| 独立冒烟（smoke_portable） | ⏸ | **卡巴斯基实时防护阻断（台账 2026-11-09 事件重演且更彻底）**：构建进程退出后 staging 便携 runtime 被静默删除（构建期间内建冒烟正常 → 独立执行即删，实验复现：重建后不启动则文件留存，`Start-Process runtime\python.exe` 触发删除）；首次 smoke 已完成其使命（抓到 C# 相对路径 bug）。待用户将 `Resources/dist/` 与构建 TEMP 加入 Kaspersky 信任区后本机重跑，或在 CI（GitHub runner 无 AV）验证 |
+| 独立冒烟（smoke_portable） | ✅ **8/8 全绿**（2026-11-12） | 早期失败全部为真实缺陷（见「便携包启动链排障」表 1-4）+ 冒烟断言过时（5-6），修复后 `LabSentinel-portable-20261112.zip` 8 步全 PASS。原「卡巴斯基阻断」定性作废（本机无卡巴斯基；「文件被删」是探测路径错误） |
 
 工具链备注：`tools/onnxruntime/`（ort DLL 候选目录）加入 .gitignore（可再下载二进制，与 ffmpeg/go2rtc 同策略）；DLL 本机来源为 `requirements-win-dml.lock` venv 的 `onnxruntime/capi`（DML 版为 CPU EP 超集）。
 
 ## 三向推进批（2026-11-11 第三轮：Rust 深审简化 / Docker 终止 / AV 治理）
 
+> **重大更正（2026-11-12，用户提供事实）**：本机**没有安装卡巴斯基**——
+> 「卡巴斯基删除便携 runtime」整条叙事是误判。真实根因见下方「便携包启动链排障」：
+> ① 探测「文件被删」时用错路径（`build_portable.py:41` 的 DIST 嵌套
+> `portable/LabSentinel/`，探测查的是 `portable/LabSentinel.exe`，恒 False）；
+> ② 冒烟失败的真实原因是**四个真实 bug**（已全部修复，冒烟 8/8 全绿）。
+> 二分定位「静态子集全部存活」结论仍然成立且如今有了正确解释：本就无查杀。
+> AV 治理批次交付的 exe 身份化/启动链审计/误报说明文档仍有效（预防性减面），
+> 但 opentip 材料/信任区建议**无需执行**；`docs/杀毒软件误报说明.md` 与
+> `docs/opentip-申诉材料-0.2.0.md` 保留作未来发布参考（勿提交申诉）。
+> 卡巴斯基相关记忆条目已更正。
+
 用户决策：继续推进 Rust 重构（深度审阅 + 简化无用逻辑）；**不再推进 Docker 开发，
-清理相关产物**；解决杀毒软件误报。
+清理相关产物**；解决启动链问题。
 
 | 批次 | commit | 内容与证据 |
 |---|---|---|
 | Docker 终止 | 8958721 | `deploy/docker/`（compose/Dockerfile/Dockerfile.cuda/Dockerfile.rust）删除；`docs/部署指南-Linux.md` 改写为 systemd 唯一路线；release-notes/CHANGELOG/status.md R2-401 ⛔ 终止；config.py/main.rs 注释清理（--healthcheck 保留作通用探活）。N-07/N-08/N-19 随产物移除闭合 |
-| AV 治理 | e999095 | 启动链审计清白（无 -c/exec/runpy，urlopen 仅回环；runtime python 为 python.org 官方签名 embed）；`LabSentinel.exe` 身份化（程序集属性 + /win32manifest asInvoker，VersionInfo 四项实测齐全）；`docs/杀毒软件误报说明.md`（命中对照表/排除指引/申诉通道/维护者复现注意）；zip 发布产物 10122 条目全量 CRC 完整。**剩余路径**：卡巴斯基对本机 staging 的处置仍在（判定对象为便携 runtime 组合目录），需用户加信任区或 CI 验证——本机执行级冒烟暂缓如实记录 |
-| AV 二分定位 + 申诉材料 | 22c9860 | **二分实证：静态文件集不触发查杀**——发布 zip 拆 6 子集（runtime 单独/完整启动链/纯 Python 源码/第三方工具/Rust bin/bat 入口）写入 TEMP 观察 90s **全部存活**→触发点是执行行为（本地监听+拉起第三方二进制+taskkill 组合）而非内容特征；**结论：信任区排除可完全解决**。`scripts/opentip_hashes.py` 生成器 + `docs/opentip-申诉材料-0.2.0.md`（8 关键文件全量 SHA256 + 理由模板）入库。**待用户**：加信任区/提交申诉后告知 → 重跑 `smoke_portable.py` 实证并回填本行 |
-| Rust 深审简化 | 6a72810 | ① `web_dist` 死字段接线（此前只有赋值从未被路由使用——文件头注释声称的静态服务未兑现）：按 `LS_WEB_DIST` 挂 ServeDir + `.fallback(ServeFile(index))` SPA 回退（踩坑：`not_found_service` 会 SetStatus 强制 404，须用 `fallback`——tower-http 0.5.2 源码确认）；② R2-108 深审补齐——ls-server Host 白名单曾**无条件豁免 testserver**（Python 已测试态门控，批次 4 声称对齐但漏掉），`AppState.testing`（LS_TESTING=1）门控；③ 回归 2 例。纯描述占位（start_camera 503 等）复核保留 |
+| 启动器减面（原「AV 治理」） | e999095 | `LabSentinel.exe` 身份化（程序集属性 + /win32manifest asInvoker）；启动链审计清白（无 -c/exec/runpy，urlopen 仅回环）；`docs/杀毒软件误报说明.md`（保留作发布参考）。原「卡巴斯基删除」定性作废 |
+| Rust 深审简化 | 6a72810 | ① `web_dist` 死字段接线（LS_WEB_DIST + ServeDir SPA 回退；踩坑：`not_found_service` 会 SetStatus 强制 404，须用 `fallback`）；② R2-108 深审补齐（testserver 测试态门控）；③ 回归 2 例 |
+| 便携包启动链排障 | 见下方详述 | 冒烟 6/8→**8/8 全绿**，修复 4 个真实 bug + 2 处冒烟断言过时 |
 
-**门禁实测**：`cargo test --workspace --all-features` **95 passed / 0 failed**（93→95）
-+ clippy `-D warnings` + fmt 通过；`cargo test -p ls-server` 23/23；Python 全量
-**636 passed / 0 skipped / 0 failed**（跨语言激活后 skip 归零）。
+## 便携包启动链排障（2026-11-12，冒烟 8/8 全绿）
+
+`smoke_portable.py` 首次在隔离环境完整跑通前，连环暴露 **4 个真实 bug + 2 处断言过时**，
+全部修复并实测：
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| 1 | C# 启动器相对路径假设（`runpy.run_path('scripts/...')` 依赖 cwd=包根）——其他 cwd 启动 exe 时 APP_ROOT 漂移到开发机仓库根 | `LabSentinelLauncher.cs` 改绝对路径 + 显式 WorkingDirectory；smoke exe 分支补 `cwd=pkg` 双保险 |
+| 2 | **`health_check.py` 漏随包**——R2-402 拆出的模块被 `install_portable.py` 同目录导入，`build_portable` 复制清单没跟上：launcher 启动即 ModuleNotFoundError（冒烟「无 logs 目录」的真因） | 补 `shutil.copy2(health_check.py)`；AST 扫描校验随包脚本同目录导入依赖闭环 |
+| 3 | **go2rtc 锁覆盖 launcher.lock**——`write_go2rtc_lock` 把 JSON 写进 `launcher.lock` 覆盖 `"pid port"` 契约：单实例锁失效、smoke 步骤 3a 永远等不到合法锁、go2rtc 无法回收（多轮冒烟各泄漏一个 go2rtc 进程） | 拆独立 `go2rtc.lock`；`read_lock` 兼容旧 JSON 残留锁；stop 兼容回收 |
+| 4 | **PID 复用防护误拒停止**——服务改由探针 `--serve` 启动后 cmdline 变化，`LAUNCHER_PROC_MARKERS`（portable_launcher.py / uvicorn app.main:app）匹配不到 → `--stop` 把真实服务判为「非 LabSentinel 进程」拒绝停止（rc=0 但端口持续 LISTEN，步骤 6 实证） | markers 增 `probe_runtime.py`；`_powershell_exe()` 改绝对路径（冒烟剥离的 PATH=C:\Windows\System32 下裸 `powershell` 不可见，身份核实恒失败） |
+| 5 | 冒烟步骤 5 断言过时——T-406/Q-07 起演示视频不随包，seed 跳过播种是预期，旧断言仍要求 cameras≥4 | 断言对齐：cameras=0 且日志有「跳过播种」= PASS |
+| 6 | 冒烟步骤 6 两处脆弱：`except OSError` 捕不住 httpx 异常家族；stop 后正在退出的进程查询命令行返回 None 被误判「残留」 | `trust_env=False`（回环绝不走系统代理）+ 捕获 Exception 家族；stop 后先等服务 PID 消失再走强杀复核 |
+
+**排障基建**（本次新增，长期有效）：`probe_runtime.py --serve` 模式——任何启动异常写
+`<LS_DATA_DIR>/logs/serve-boot-error.txt` 后非零退出，launcher 就绪循环 `poll()` 直接
+拿到失败原因（本次靠它抓到 `NameError: ROOT`）。服务启动改探针文件执行顺带完成
+`-c` 动态代码串治理（build_portable 3 处 + deploy.py 2 处全部消除）。
+
+**最终冒烟实测**（`Resources/dist/LabSentinel-portable-20261112.zip`，8/8 PASS）：
+隔离解包 → LabSentinel.exe 启动 → 锁出现 → /api/system 200（backend=cpu version=0.2.0）
+→ 前端首页+资源 200 → 播种断言（T-406 口径）→ --stop rc=0 端口释放+锁删除 → 隔离断言
+（真实 LOCALAPPDATA 零污染）。构建产物 zip 252MB / 10122+ 条目。
+
+**流程教训（已内化）**：① `make_zip` 按日期命名，跨天重建后必须冒烟**新日期** zip——
+本轮曾连续 6 次冒烟旧日期 zip 导致修复未被验证；② 排障断言（Test-Path）必须先核对
+产物真实布局（DIST 嵌套 LabSentinel/）；③ **本机无卡巴斯基**（维护者 2026-11-12
+确认）——本文「三向推进批」之前的「卡巴斯基删除/阻断」记录全部作废，真实原因见
+「便携包启动链排障」表；`docs/杀毒软件误报说明.md` 与 opentip 材料保留作发布参考
+（**勿提交申诉**）。
 
 ## 本轮环境事件（2026-11-09）
 
-- **卡巴斯基启发式查杀**：`install_portable.py` 内嵌「-c 动态代码串 + urlopen + Popen」被
-  Kaspersky 判为 HEUR:TrojanDownloader/Python.Agent.ao，pytest 执行即删文件（3 次）。
-  已重构为独立 `scripts/health_check.py` 模块（loopback URL 白名单），此后未再触发。
+- **卡巴斯基启发式查杀（2026-11-12 更正：此事件真实性存疑——本机确认无卡巴斯基，
+  当时的「文件被删」很可能同样是观测/路径问题）**：`install_portable.py` 内嵌
+  「-c 动态代码串 + urlopen + Popen」的**代码模式**确实是被启发式引擎针对的高危
+  形态，重构为独立 `scripts/health_check.py` 模块（loopback URL 白名单）本身是
+  正确的加固，保留。
   经验已入库项目记忆；该文件现跑安装测试稳定通过。
 
 ## 明确暂缓项（本轮不执行）

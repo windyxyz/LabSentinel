@@ -43,7 +43,11 @@ def http_get(base: str, path: str, timeout: float = 5.0) -> tuple[int, bytes]:
     if host not in ("127.0.0.1", "::1", "localhost"):  # 冒烟只打本机隔离实例
         raise SystemExit(f"[smoke] 仅允许回环地址，收到: {host}")
     import httpx
-    with httpx.Client(base_url=base.rstrip("/"), timeout=timeout) as client:
+    # trust_env=False：冒烟目标恒为回环，绝不能走系统代理（本机装了 FlClash 等
+    # 代理时，httpx 默认信任环境代理会把 127.0.0.1 请求发给代理 → ConnectError，
+    # 2026-11-12 冒烟 3b 实证）。另外捕获 httpx 异常家族——它不是 OSError 子类，
+    # 旧代码 except OSError 捕不住导致 traceback 直接炸出。
+    with httpx.Client(base_url=base.rstrip("/"), timeout=timeout, trust_env=False) as client:
         r = client.get(path)  # 相对路径，base 已校验回环
     return r.status_code, r.content
 
@@ -215,7 +219,7 @@ def main() -> int:
                     detail = f"backend={sysinfo.get('backend')} version={sysinfo.get('version')} port={lock_port}"
                     break
                 time.sleep(1)  # 2026-10-30 审阅：非 200 也要等，否则连发空转后立即判负
-            except OSError:
+            except Exception:  # noqa: BLE001 网络层异常（含 httpx 家族）一律等下一轮
                 time.sleep(1)
         if not step("3b /api/system 200 且 backend/version 非空", ok, detail):
             keep_reason = "服务未就绪"
@@ -235,7 +239,8 @@ def main() -> int:
         except OSError as e:
             step("4 前端首页+资源", False, repr(e))
 
-        # [5] 首启播种
+        # [5] 首启播种——T-406/Q-07 起演示视频不随包：seed_demo 无素材时跳过播种
+        # （launcher 日志有「跳过播种」佐证），cameras=0 是预期；有素材时播种 4 路。
         db = cfg_dir / "data" / "labsentinel.db"
         n_cams = -1
         if db.exists():
@@ -244,7 +249,14 @@ def main() -> int:
                 n_cams = con.execute("select count(*) from cameras").fetchone()[0]
             finally:
                 con.close()
-        step("5 首启播种", n_cams >= 1, f"cameras={n_cams}（预期 4）")
+        seeded_log = False
+        for lgf in (cfg_dir / "logs").glob("launcher-*.log"):
+            if "跳过播种" in lgf.read_text(encoding="utf-8", errors="replace"):
+                seeded_log = True
+        ok5 = n_cams >= 1 or (n_cams == 0 and seeded_log)
+        step("5 首启播种", ok5,
+             f"cameras={n_cams}（有演示素材预期 4；T-406 无素材预期 0+跳过播种日志="
+             f"{'有' if seeded_log else '无'}）")
 
         # [6] 停止
         rc = subprocess.run(stop_cmd, env=env, stdin=DEVNULL, stdout=DEVNULL,
@@ -261,8 +273,17 @@ def main() -> int:
                     proc.kill()
                 except OSError:
                     pass
-        # 锁内服务 PID 若等待窗后仍活，确认属 LabSentinel 才强杀（防 PID 复用误杀）
-        failed_pids = reap_leftover_pids([lock_pid])
+        # 锁内服务 PID：--stop 后应已终止——先等其消失（最多 10s），仍活才走
+        # 强杀复核（防 PID 复用误杀）。正在退出的进程查询命令行会返回 None
+        # （"身份不明"），不能据此判失败（2026-11-12 冒烟实证的误报）。
+        import portable_launcher as pl
+        gone_wait = False
+        for _ in range(10):
+            if not pl.pid_alive(int(lock_pid)):
+                gone_wait = True
+                break
+            time.sleep(1)
+        failed_pids = reap_leftover_pids([lock_pid]) if not gone_wait else []
         if failed_pids:
             print(f"[残留] PID {failed_pids} 强杀后仍存活，请人工处理")
         released = False

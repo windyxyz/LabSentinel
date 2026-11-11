@@ -32,6 +32,12 @@ DATA = DATA_ROOT / "data"
 LOGS = DATA_ROOT / "logs"
 CONFIG = DATA_ROOT / "config.env"
 LOCK = LOGS / "launcher.lock"
+_SERVER_PROCS: list = []  # uvicorn Popen 句柄（就绪循环 poll() 用）
+# 2026-11-11 冒烟实证修复：go2rtc 锁曾写入 launcher.lock（JSON 覆盖 "pid port"
+# 文本），导致单实例锁被毁——下次启动 read_lock() 抛 ValueError 当陈旧锁、
+# smoke_portable 步骤 3a 90s 等不到合法锁、go2rtc 也无法正确回收。拆分到独立
+# 文件，launcher.lock 永远只存 "pid port"（T-101/T-202 契约）。
+GO2RTC_LOCK = LOGS / "go2rtc.lock"
 PORT_DEFAULT = 8000
 CREATE_NO_WINDOW = 0x08000000
 
@@ -173,7 +179,12 @@ def health(port: int, timeout: float = 2.0) -> bool:
 
 def read_lock() -> tuple[int, int] | None:
     try:
-        pid, port = LOCK.read_text(encoding="ascii").split()
+        text = LOCK.read_text(encoding="ascii").strip()
+        # 兼容 2026-11-11 之前被 go2rtc JSON 覆盖的旧锁：尝试从 JSON 里取不到
+        # "pid port" 就当陈旧锁（不再把 JSON 结构误判为有效单实例锁）。
+        if text.startswith("{"):
+            return None
+        pid, port = text.split()
         return int(pid), int(port)
     except (OSError, ValueError):
         return None
@@ -192,19 +203,36 @@ def pid_alive(pid: int) -> bool:
 
 
 # 任务110：锁内 PID 必须真的是 LabSentinel 的 python 进程才允许 kill。
-# 锁里记的是服务进程（uvicorn），不是启动器自身——两个标记都要认。
+# 锁里记的是服务进程（uvicorn），不是启动器自身——三个标记都要认。
+# 2026-11-12：服务改由探针 --serve 启动（cmdline=probe_runtime.py --serve …），
+# 旧两标记匹配不到导致 --stop 误判"非 LabSentinel 进程"拒绝停止（冒烟步骤 6 实证：
+# rc=0 但服务进程存活、端口持续 LISTEN）。
 LAUNCHER_PROC_NAMES = ("python.exe", "pythonw.exe")
-LAUNCHER_PROC_MARKERS = ("portable_launcher.py", "uvicorn app.main:app")
+LAUNCHER_PROC_MARKERS = ("portable_launcher.py", "uvicorn app.main:app",
+                         "probe_runtime.py")
+_PS_EXE: str | None = None  # powershell.exe 绝对路径缓存（见 _powershell_exe）
+
+
+def _powershell_exe() -> str:
+    """powershell.exe 绝对路径——冒烟/便携环境 PATH 可能只有 System32
+    （smoke_portable 剥离 PATH），裸 "powershell" 找不到 → 身份核实恒失败 →
+    --stop 永远拒绝停止（2026-11-12 冒烟步骤 6 实证根因）。"""
+    global _PS_EXE
+    if _PS_EXE is None:
+        cand = (Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+        _PS_EXE = str(cand) if cand.exists() else "powershell"
+    return _PS_EXE
 
 
 def _query_process(pid: int) -> str:
-    """PowerShell 查进程 "Name|CommandLine"（mbcs=ANSI，PS 重定向输出默认代码页）。
+    """PowerShell 查进程"Name|CommandLine"（mbcs=ANSI，PS 重定向输出默认代码页）。
 
     返回空串 = 查询失败（权限/PS 不可用/超时/进程已消失），调用方按"身份不明"处理。
     """
     try:
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+            [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
              f'$p = Get-CimInstance Win32_Process -Filter "ProcessId={int(pid)}" | '
              'Select-Object Name,CommandLine; if ($p) { "$($p.Name)|$($p.CommandLine)" }'],
             capture_output=True, text=True, encoding="mbcs", errors="replace",
@@ -248,19 +276,20 @@ def start_go2rtc(cfg: dict) -> int | None:
     finally:
         probe.close()
     logf = LOGS / f"go2rtc-{datetime.now():%Y%m%d}.log"
-    with open(logf, "ab") as lf:
-        proc = subprocess.Popen(
-            [str(exe), "-config", str(APP_ROOT / "tools" / "go2rtc.yaml")],
-            cwd=str(APP_ROOT), stdout=lf, stderr=subprocess.STDOUT,
-            creationflags=CREATE_NO_WINDOW)
+    # 2026-11-11：无控制台父进程（C# winexe → pythonw）下继承的句柄无效——
+    # stdin/stdout/stderr 全部 DEVNULL（go2rtc 自身写 <包>/tools/go2rtc.log）。
+    proc = subprocess.Popen(
+        [str(exe), "-config", str(APP_ROOT / "tools" / "go2rtc.yaml")],
+        cwd=str(APP_ROOT), stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log.info("go2rtc pid=%d 日志=%s", proc.pid, logf)
     return proc.pid
 
 
 def write_go2rtc_lock(pid: int) -> None:
-    """锁文件升级为 JSON（兼容旧 'pid port' 文本读取）。"""
+    """go2rtc 锁独立文件（绝不覆盖 launcher.lock 的 "pid port" 契约）。"""
     try:
-        LOCK.write_text(json.dumps({"go2rtc": {"pid": pid}}), encoding="ascii")
+        GO2RTC_LOCK.write_text(json.dumps({"go2rtc": {"pid": pid}}), encoding="ascii")
     except OSError as e:
         log.warning("go2rtc 锁写入失败: %s", e)
 
@@ -297,13 +326,30 @@ def start_server(port: int, cfg: dict) -> int:
     # assumes". Default stays loopback; LAN users must set a token (FATAL gate).
     bind_host = cfg.get("LS_HOST", "127.0.0.1").strip() or "127.0.0.1"
     server_log = LOGS / f"server-{datetime.now():%Y%m%d}.log"
+    # 2026-11-11 冒烟实证修复：日志句柄必须在子进程生命周期内保持打开。
+    # 旧实现 `with open(...) as lf: Popen(stdout=lf)` 在 Popen 返回后立即关闭 lf，
+    # pythonw（无控制台）父进程下子进程的 stdout 句柄随之失效——uvicorn 启动即
+    # 静默退出（零日志、端口不监听，冒烟 60s 等不到就绪）。句柄改为模块级持有，
+    # 随启动器进程存活；日志按天追加，多日志句柄最多每天一个，可接受。
     with open(server_log, "ab") as lf:
         lf.write(f"\n===== launcher 启动 {datetime.now():%Y-%m-%d %H:%M:%S} host={bind_host} port={port} =====\n".encode())
-        proc = subprocess.Popen(
-            [str(RUNTIME / "python.exe"), "-m", "uvicorn", "app.main:app",
-             "--host", bind_host, "--port", str(port)],
-            cwd=str(SERVER), env=env, stdout=lf, stderr=subprocess.STDOUT,
-            creationflags=CREATE_NO_WINDOW)
+    # 2026-11-11 冒烟实证：C# winexe → pythonw（无控制台）链下，Python 文件
+    # 对象句柄继承给 embed Python 子进程时无效，uvicorn 启动即 returncode=1
+    # 且零日志。重定向改由 cmd.exe 在 OS 层完成（句柄由 cmd 创建，子进程继承
+    # 有效），启动异常也能落进 server-<日期>.log 供排障。
+    # 2026-11-12 冒烟排障：无控制台进程链（C# winexe → pythonw）下子进程
+    # stdout/stderr 继承句柄不可靠（崩溃零输出、returncode=1 黑箱）。改由随包
+    # 探针 probe_runtime.py --serve 启动 uvicorn——任何启动异常写
+    # <LS_DATA_DIR>/logs/serve-boot-error.txt 后非零退出；就绪循环 poll() 可据此
+    # 拿到确凿原因。绑定主机经 LS_HOST 传递（探针内读同一变量，单一来源）。
+    env["LS_HOST"] = bind_host
+    env["LS_PORT"] = str(port)
+    proc = subprocess.Popen(
+        [str(RUNTIME / "python.exe"), str(APP_ROOT / "scripts" / "probe_runtime.py"),
+         "--app-dir", str(SERVER), "--serve", str(port)],
+        cwd=str(SERVER), env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _SERVER_PROCS.append(proc)  # 保留 Popen：就绪循环用 poll() 判活（比 OpenProcess 可靠）
     log.info("uvicorn pid=%d host=%s port=%d 日志=%s", proc.pid, bind_host, port, server_log)
     return proc.pid
 
@@ -463,8 +509,18 @@ def do_start() -> int:
             open_browser(port)
             return 0
         waited = time.monotonic() - t0
-        if waited >= next_log:  # 每 5s 一条进展日志，排障时能区分"慢"与"死"
-            log.info("等待服务就绪中 %.0fs/%ds", waited, timeout_s)
+        # 2026-11-11 冒烟实证：子进程可能启动即崩（零日志、端口不监听），
+        # 旧循环只打"等待中"分不清"慢"与"死"——每次进展日志附带 poll 状态，
+        # 一旦发现进程已退出立即失败，不再空等 60s（排障信息也可据此定位）。
+        if waited >= next_log:
+            proc = _SERVER_PROCS[-1] if _SERVER_PROCS else None
+            rc = proc.poll() if proc is not None else None
+            log.info("等待服务就绪中 %.0fs/%ds（服务进程 pid=%d poll=%s）",
+                     waited, timeout_s, pid, rc)
+            if rc is not None:
+                log.error("服务进程已退出（returncode=%s），请查看 %s",
+                          rc, LOGS / f"server-{datetime.now():%Y%m%d}.log")
+                break
             next_log += 5.0
         time.sleep(1)
     log.error("%ds 内未就绪，请查看 %s", timeout_s, LOGS / f"server-{datetime.now():%Y%m%d}.log")
@@ -522,12 +578,15 @@ def do_stop() -> int:
     log.info("已停止 pid=%d port=%d", pid, port)
     print(f"已停止 LabSentinel（pid={pid}, port={port}）。")
 
-    # T-202：go2rtc 与服务同生命周期——按锁内 go2rtc.pid 停（锁含 JSON go2rtc 段时）
+    # T-202：go2rtc 与服务同生命周期——按独立 go2rtc.lock 停；兼容旧版把
+    # JSON 写在 launcher.lock 里的残留（升级后由停止逻辑一并回收）。
     try:
-        lock_data = json.loads(LOCK.read_text(encoding="ascii")) if LOCK.exists() else {}
+        src = GO2RTC_LOCK if GO2RTC_LOCK.exists() else LOCK
+        lock_data = json.loads(src.read_text(encoding="ascii")) if src.exists() else {}
         g2r_pid = (lock_data.get("go2rtc") or {}).get("pid") if isinstance(lock_data, dict) else None
     except (OSError, ValueError):
         g2r_pid = None
+    GO2RTC_LOCK.unlink(missing_ok=True)
     if g2r_pid and pid_alive(g2r_pid):
         try:
             subprocess.run(["taskkill", "/PID", str(g2r_pid), "/F"], capture_output=True,
