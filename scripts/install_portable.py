@@ -794,6 +794,14 @@ def do_upgrade(src: Path, install_dir: Path | None = None,
             ctx.cleanup()
 
 
+def _installed_version(install: Path) -> str:
+    """finalize --archive：读安装树当前版本（<install>/app/VERSION；缺省回退仓库 VERSION）。"""
+    try:
+        return (install / "app" / "VERSION").read_text("ascii").strip() or VERSION_DEFAULT
+    except OSError:
+        return VERSION_DEFAULT
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="LabSentinel 便携版安装/升级/卸载/回滚（无管理员）")
     ap.add_argument("action", choices=["install", "upgrade", "uninstall", "rollback", "finalize"])
@@ -809,6 +817,8 @@ def main() -> int:
     ap.add_argument("--autostart", action="store_true", help="安装时开启开机自启（HKCU）")
     ap.add_argument("--no-autostart", action="store_true", help="明确不开自启（默认行为；与 --autostart 互斥）")
     ap.add_argument("--purge-data", action="store_true", help="卸载时同时删除用户数据")
+    ap.add_argument("--archive", action="store_true",
+                    help="finalize 专用：归档当前旧版本到 versions/<ver>/（Inno ssInstall 时机）")
     ap.add_argument("--silent", action="store_true", help="静默安装：无交互提示，结果仍打印 stdout")
     ap.add_argument("--no-shortcuts", action="store_true", help="跳过桌面/开始菜单快捷方式")
     ap.add_argument("--dry-run", action="store_true", help="只打印将执行的动作，不写任何文件/注册表")
@@ -834,10 +844,23 @@ def main() -> int:
                           desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir,
                           health_cmd=a.health_cmd)
     if a.action == "finalize":
-        # B2/ADR-0010：Inno Setup 安装完调用——文件已由 [Files] 就位，此处只做
-        # 真实健康检查（启动新版本 uvicorn → 轮询 /api/health/ready → 停止），
-        # 失败返回非 0（Inno [Run] 检查退出码即中止安装并回滚）。
-        # 复用 health_check 模块（R2-402），不重新复制/归档文件。
+        # B2/ADR-0010：Inno Setup 调用，两个时机、复用 T-404 既有能力：
+        #   --archive（ssInstall，文件复制前）：归档当前旧版到 versions/<ver>/
+        #     + 备份 DB，作为升级回滚点；
+        #   --verify（ssPostInstall，文件复制后）：真实健康检查（启动新版本
+        #     uvicorn → 轮询 /api/health/ready → 停止），失败自动 rollback()
+        #     并让 Inno [Run] 拿到非 0 退出码中止安装。
+        if a.archive:
+            if not a.install_dir.exists():
+                log("[跳过] 首次安装，无需归档")
+                return 0
+            ver = _installed_version(a.install_dir)
+            archived = _archive_current(a.install_dir, ver)
+            if archived is None:
+                log("[警告] 旧版本归档失败（继续安装，但本次升级无回滚点）")
+            else:
+                log(f"[OK] 旧版本已归档 → {archived}")
+            return 0
         spec = health_check.default_health_cmd(a.install_dir)
         if spec is None:
             log("[跳过] runtime 缺失（桩环境），finalize 无健康检查可做")
@@ -848,6 +871,9 @@ def main() -> int:
         r = subprocess.run(argv, env=env, capture_output=True, text=True)
         if r.returncode != 0 or (r.stdout and "ready=False" in r.stdout):
             log(f"[失败] 新版本健康检查未通过（rc={r.returncode}）: {r.stdout.strip()[:200]}")
+            if not a.dry_run:
+                rc = rollback(a.install_dir)
+                log(f"[回滚] rc={rc}（数据目录未动）")
             return 3
         log("[OK] finalize 健康检查通过")
         return 0

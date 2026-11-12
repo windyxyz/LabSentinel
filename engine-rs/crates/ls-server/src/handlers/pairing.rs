@@ -3,18 +3,10 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Path as AxPath, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 pub(crate) async fn create_pairing(State(st): State<Shared>) -> Response {
     // 6 位数字码（5 分钟有效；写守卫已在中间件完成）
@@ -133,4 +125,3 @@ pub(crate) async fn revoke_device(State(st): State<Shared>, AxPath(did): AxPath<
 }
 
 // ---- 审计/投递/静默/日历 ----
-

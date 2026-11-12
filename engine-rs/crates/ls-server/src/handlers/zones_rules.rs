@@ -3,18 +3,10 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Path as AxPath, Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 pub(crate) fn zone_json(t: &(i64, i64, String, String)) -> Value {
     let polygon = serde_json::from_str::<Value>(&t.3).unwrap_or(Value::String(t.3.clone()));
@@ -75,7 +67,6 @@ pub(crate) async fn delete_zone(State(st): State<Shared>, AxPath(zid): AxPath<i6
 }
 
 #[allow(clippy::type_complexity)]
-
 pub(crate) fn rule_json(
     t: &(
         i64,
@@ -207,7 +198,10 @@ pub(crate) async fn update_template(
     })
 }
 
-pub(crate) async fn delete_template(State(st): State<Shared>, AxPath(tid): AxPath<i64>) -> Response {
+pub(crate) async fn delete_template(
+    State(st): State<Shared>,
+    AxPath(tid): AxPath<i64>,
+) -> Response {
     with_store(&st, |s| {
         if s.delete_rule_template(tid)? {
             Ok(Json(json!({"ok": true})).into_response())
@@ -307,4 +301,3 @@ pub(crate) async fn apply_rule_template(
         Ok(Json(json!({"ok": true, "created": created, "skipped": skipped})).into_response())
     })
 }
-

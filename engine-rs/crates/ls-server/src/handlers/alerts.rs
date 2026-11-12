@@ -1,20 +1,14 @@
 // alert config (get/put/reset) + template render/preview + alert_test (alert_cfg meta shipped along).
 // 2026-11-12 batch A split. All fns pub(crate) for router registration.
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
+use crate::fernet;
 use crate::state::Shared;
+use crate::url;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 pub(crate) async fn alerts_status(State(st): State<Shared>) -> Response {
     with_store(&st, |s| {
@@ -295,7 +289,10 @@ pub(crate) fn validate_alert_url(field: &str, url: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) async fn alerts_config_put(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn alerts_config_put(
+    State(st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
     let Some(body_obj) = body.as_object() else {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "body 必须是对象").into_response();
     };
@@ -494,7 +491,10 @@ pub(crate) fn render_alert_row(
     out
 }
 
-pub(crate) async fn alert_template_preview(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn alert_template_preview(
+    State(st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
     let _ = &st; // 模板文本取默认值（settings 单一来源在 Python 侧；rust 用同默认串）
     let ts = body
         .get("ts")
@@ -595,4 +595,3 @@ pub(crate) async fn alert_test(
 }
 
 // ---- PPE 按需下载（Q-08 复刻：锁文件白名单 + SHA256 + 许可确认） ----
-

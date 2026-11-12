@@ -3,18 +3,10 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Path as AxPath, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 pub(crate) async fn cameras(State(st): State<Shared>) -> Response {
     let s = match ls_store::Store::open(&st.db_path) {
@@ -353,7 +345,10 @@ pub(crate) async fn copy_camera_config(
     })
 }
 
-pub(crate) async fn camera_snapshot(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
+pub(crate) async fn camera_snapshot(
+    State(st): State<Shared>,
+    AxPath(cid): AxPath<i64>,
+) -> Response {
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
             return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
@@ -369,4 +364,3 @@ pub(crate) async fn camera_snapshot(State(st): State<Shared>, AxPath(cid): AxPat
 }
 
 // ==== R2-309 批次 3：配置导入/存证打包/插件占位/face 分支/告警自检/PPE 下载 ====
-

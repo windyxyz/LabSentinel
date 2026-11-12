@@ -271,4 +271,3 @@ pub fn build_router(state: Shared) -> Router {
     ))
     .with_state(state)
 }
-

@@ -1,17 +1,11 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
+use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 
 /// 静态资源缓存策略（兑现文件头「缓存策略」注释，2026-11-12）：
@@ -195,7 +189,10 @@ pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
 
 /// 写守卫：返回 (actor) 或 401/403 响应（与 require_admin/require_triage 同语义）。
 /// Err 用 Box 装箱（result_large_err：axum Response 体较大）。
-pub(crate) fn check_write_token(st: &Shared, provided: Option<&str>) -> Result<String, Box<Response>> {
+pub(crate) fn check_write_token(
+    st: &Shared,
+    provided: Option<&str>,
+) -> Result<String, Box<Response>> {
     if st.admin_token.is_empty() {
         return Ok("anonymous(auth-off)".into());
     }
@@ -264,4 +261,3 @@ pub(crate) fn extract_target(path: &str) -> Option<String> {
         None
     }
 }
-

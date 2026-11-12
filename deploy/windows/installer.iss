@@ -73,13 +73,22 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSent
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"; \
   ValueType: string; ValueName: "HelpLink"; ValueData: "docs\部署FAQ.md"; Flags: uninsdeletekey
 
+[UninstallDelete]
+; 用户数据（%LOCALAPPDATA%\LabSentinel）与 versions/ 归档**不随卸载删除**——
+; {app} 之外的目录本就不在卸载范围，此处显式列出仅作说明；需清理时手工删除：
+;   数据：%LOCALAPPDATA%\LabSentinel\（DB/截图/视频/标注池/日志/FIRST_RUN_TOKEN）
+;   版本归档：{app}\versions\（回滚点，卸载时保留便于排查后重装）
+; Type: files; Name: "{app}\versions\*"  ← 刻意不写：保留回滚点
+
 [Run]
-; 升级健康检查（R2-402 复用）：真实启动新版本 uvicorn → /api/health/ready → 停止；
-; 失败 NonZero 退出码 → Inno 中止安装并回滚。skipifsilent 让静默 CI 安装跳过交互自检。
+; 升级链路（T-404/ADR-0010）：
+;   1) [Code] BeforeInstallCopy → finalize --archive（归档旧版，见 CurStepChanged ssInstall）
+;   2) 文件复制（[Files]）
+;   3) 此处 finalize --verify：真实启动新版本 uvicorn → /api/health/ready → 停止；
+;      失败自动 rollback() 到 versions/ 归档并以非 0 退出码让 Inno 中止安装。
 Filename: "{app}\runtime\python.exe"; \
-  Parameters: "scripts\install_portable.py finalize --install-dir ""{app}"" --silent"; \
-  WorkingDir: "{app}"; Flags: runhidden; StatusMsg: "正在校验新版本…"; \
-  Check: not WizardSilent
+  Parameters: "scripts\install_portable.py finalize --verify --install-dir ""{app}"" --silent"; \
+  WorkingDir: "{app}"; Flags: runhidden; StatusMsg: "正在校验新版本…"
 Filename: "{app}\LabSentinel.exe"; Description: "立即启动 LabSentinel"; \
   Flags: nowait postinstall skipifsilent unchecked
 
@@ -89,14 +98,20 @@ Filename: "{app}\LabSentinel.exe"; Parameters: "--stop"; WorkingDir: "{app}"; \
   Flags: runhidden; RunOnceId: "StopLabSentinel"
 
 [Code]
-// 可选服务安装：勾选后提权调用 WinSW（若随包带 winsw.exe）；否则给出手工指引。
-// 默认不勾选——Session 0 下 USB 摄像头不可用，服务模式仅建议 RTSP/文件夹源
-// （见 deploy/windows/labsentinel-service.xml 头部说明）。
+// 升级归档：文件复制**前**（ssInstall）归档当前旧版到 versions/<ver>/（T-404 回滚点）。
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   WinSW: String;
 begin
+  if CurStep = ssInstall then
+  begin
+    // 旧版归档（首次安装无旧版时 install_portable 内部跳过）；失败不阻断安装，
+    // 仅失去回滚点（与 do_upgrade 的 T-404 语义一致）
+    Exec(ExpandConstant('{app}\runtime\python.exe'),
+         'scripts\install_portable.py finalize --archive --install-dir "{app}"',
+         ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('installservice') then
   begin
     WinSW := ExpandConstant('{app}\tools\winsw.exe');

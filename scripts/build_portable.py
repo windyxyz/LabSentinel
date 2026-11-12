@@ -293,16 +293,19 @@ def make_zip() -> Path:
 def find_iscc() -> Path | None:
     """ADR-0010：定位 Inno Setup 命令行编译器（ISCC.exe）。
 
-    顺序：ISCC_PATH 环境变量 → 常见安装路径（Inno Setup 6 x86/x64）→ PATH。
-    本机/CI 未装时返回 None，--installer 仅警告跳过（zip-only 仍成功）。
+    顺序：ISCC_PATH 环境变量 → 常见安装路径（Inno Setup 5/6/7，x86/x64 与各盘符）→ PATH。
+    本机实测装在 `D:\\Program Files\\Inno Setup 7\\ISCC.exe`（IS7），故版本号与盘符都
+    需覆盖；CI 由 choco 装 6。未装时返回 None，--installer 仅警告跳过（zip-only 仍成功）。
     """
     import shutil
     override = os.environ.get("ISCC_PATH")
     if override and Path(override).is_file():
         return Path(override)
-    for base in (os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-                 os.environ.get("ProgramFiles", r"C:\Program Files")):
-        for ver in ("6", "5"):
+    bases = [os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+             os.environ.get("ProgramFiles", r"C:\Program Files"),
+             r"D:\Program Files", r"C:\Program Files (x86)"]
+    for base in bases:
+        for ver in ("7", "6", "5"):
             p = Path(base) / f"Inno Setup {ver}" / "ISCC.exe"
             if p.is_file():
                 return p

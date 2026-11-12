@@ -3,18 +3,10 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Path as AxPath, Query, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 pub(crate) async fn folder_images_list(
     State(st): State<Shared>,
@@ -131,7 +123,10 @@ pub(crate) fn folder_row_json(r: &ls_store::FolderImageRow, path_full: bool) -> 
     v
 }
 
-pub(crate) async fn folder_image_detail(State(st): State<Shared>, AxPath(iid): AxPath<i64>) -> Response {
+pub(crate) async fn folder_image_detail(
+    State(st): State<Shared>,
+    AxPath(iid): AxPath<i64>,
+) -> Response {
     with_store(&st, |s| match s.folder_image(iid)? {
         Some(r) => Ok(Json(folder_row_json(&r, true)).into_response()),
         None => Ok(detail_err(StatusCode::NOT_FOUND, "image record not found").into_response()),
@@ -139,7 +134,10 @@ pub(crate) async fn folder_image_detail(State(st): State<Shared>, AxPath(iid): A
 }
 
 /// 与 Python folder_readable_path 同口径：记录的 path 是真实文件路径
-pub(crate) async fn folder_image_file(State(st): State<Shared>, AxPath(iid): AxPath<i64>) -> Response {
+pub(crate) async fn folder_image_file(
+    State(st): State<Shared>,
+    AxPath(iid): AxPath<i64>,
+) -> Response {
     with_store(&st, |s| match s.folder_image(iid)? {
         Some(r) => match std::fs::read(&r.path) {
             Ok(data) => {
@@ -167,7 +165,10 @@ pub(crate) async fn folder_image_file(State(st): State<Shared>, AxPath(iid): AxP
     })
 }
 
-pub(crate) async fn folder_image_thumb(State(st): State<Shared>, AxPath(iid): AxPath<i64>) -> Response {
+pub(crate) async fn folder_image_thumb(
+    State(st): State<Shared>,
+    AxPath(iid): AxPath<i64>,
+) -> Response {
     with_store(&st, |s| match s.folder_image(iid)? {
         Some(_r) => {
             // Python 侧缩略图缓存在 <data>/thumbs/img_{id}.jpg；rust 独立模式
@@ -240,4 +241,3 @@ pub(crate) async fn folder_images_csv(
         Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], out).into_response())
     })
 }
-

@@ -1,20 +1,14 @@
 // health/system/metrics/diagnostics/meta/signing/status placeholder endpoints/face/ppe/ws.
 // 2026-11-12 batch A split. All fns pub(crate) for router registration.
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
+use crate::discovery;
 use crate::state::Shared;
+use crate::url;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Path as AxPath, Query, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 pub(crate) async fn health_live() -> Json<Value> {
     Json(json!({"status": "ok"}))
@@ -292,7 +286,10 @@ pub(crate) async fn discovery_cameras(
     .into_response()
 }
 
-pub(crate) async fn discovery_probe(State(_st): State<Shared>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn discovery_probe(
+    State(_st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
     let host = body
         .get("host")
         .and_then(|v| v.as_str())
@@ -575,4 +572,3 @@ pub(crate) async fn ppe_download(State(st): State<Shared>, Json(body): Json<Valu
         .into_response())
     })
 }
-

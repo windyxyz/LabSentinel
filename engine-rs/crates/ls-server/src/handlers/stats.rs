@@ -3,18 +3,10 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 pub(crate) async fn stats_summary(State(st): State<Shared>) -> Json<Value> {
     let s = match ls_store::Store::open(&st.db_path) {
@@ -218,4 +210,3 @@ pub(crate) async fn stats_quality(
 }
 
 // ---- 配对/设备（T-620/R2-309） ----
-

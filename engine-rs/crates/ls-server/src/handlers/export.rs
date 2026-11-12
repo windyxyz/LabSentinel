@@ -1,20 +1,13 @@
 // CSV export + monthly PDF (pdf:: delegation).
 // 2026-11-12 batch A split. All fns pub(crate) for router registration.
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
+use crate::pdf;
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
-use serde_json::{json, Value};
-use std::sync::Arc;
+use serde_json::json;
 
 pub(crate) async fn export_events_csv(State(st): State<Shared>) -> Response {
     with_store(&st, |s| {
@@ -173,4 +166,3 @@ pub(crate) async fn export_monthly_pdf(
             .into_response())
     })
 }
-

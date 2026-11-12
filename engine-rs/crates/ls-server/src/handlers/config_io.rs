@@ -3,18 +3,10 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{
-    ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
-};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 pub(crate) async fn config_summary(State(st): State<Shared>) -> Json<Value> {
     // 不回显敏感值（T-109 等价）
@@ -239,4 +231,3 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
 
 // ---- 插件占位（rust 独立模式无插件管理器：列表恒空 → 任何 pid 不存在，
 // 与 Python 对未知 pid 的 404 行为一致，不是假桩而是真实结果） ----
-

@@ -3,18 +3,14 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use crate::{discovery, fernet, pdf};
 use axum::extract::{
     ws::{WebSocket, WebSocketUpgrade},
     Path as AxPath, Query, State,
 };
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use tokio::sync::broadcast;
 
 pub(crate) async fn events(State(st): State<Shared>, Query(q): Query<EventsQuery>) -> Response {
     let s = match ls_store::Store::open(&st.db_path) {
@@ -77,7 +73,10 @@ pub(crate) async fn set_status(
     }
 }
 
-pub(crate) async fn bulk_event_status(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn bulk_event_status(
+    State(st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
     let status = body
         .get("status")
         .and_then(|v| v.as_str())
@@ -286,7 +285,10 @@ pub(crate) fn read_media_file(st: &Shared, rel: &str) -> Option<(String, Vec<u8>
     Some((name, data))
 }
 
-pub(crate) async fn event_evidence_zip(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
+pub(crate) async fn event_evidence_zip(
+    State(st): State<Shared>,
+    AxPath(eid): AxPath<i64>,
+) -> Response {
     with_store(&st, |s| {
         let Some(ev) = s.event_by_id(eid)? else {
             return Ok(detail_err(StatusCode::NOT_FOUND, "event not found").into_response());
@@ -402,4 +404,3 @@ pub(crate) async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver
         }
     }
 }
-

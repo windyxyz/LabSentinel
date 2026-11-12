@@ -241,6 +241,15 @@ def check_zip(res, zip_path: Path | None) -> None:
                 f"{zp.name} sha256={info['sha256'][:12]}… 缺必需={len(info['missing_required'])} "
                 f"缺可选={info['missing_optional']}",
                 "必需条目缺失按 58 报告处理" if rc != 0 else "")
+    # ADR-0010：setup.exe 双形态（可选产物——本机无 ISCC 时缺省，WARN 不阻断）
+    setup = zp.with_name(zp.name.replace("portable-", "setup-").replace(".zip", ".exe"))
+    if setup.is_file():
+        sz = setup.stat().st_size / 1e6
+        results_add(res, "安装包 setup.exe", "PASS", f"{setup.name} {sz:.1f}MB（ADR-0010 双形态）")
+    else:
+        results_add(res, "安装包 setup.exe", "WARN",
+                    f"{setup.name} 不存在（--installer 未编译或 ISCC 缺失）",
+                    "CI（choco install innosetup）或本地 Inno Setup 编译后重跑")
 
 
 def check_t409(res) -> None:

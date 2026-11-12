@@ -1,12 +1,8 @@
 // 2026-11-12 batch A split (util). No self-glob here.
 use crate::state::Shared;
-use crate::{discovery, fernet, pdf};
-use axum::extract::{Path as AxPath, Query, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -171,4 +167,3 @@ pub(crate) fn server_err() -> Response {
     )
         .into_response()
 }
-
