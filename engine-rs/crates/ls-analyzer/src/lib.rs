@@ -4,5 +4,6 @@
 //! 拆分纪律（RA1 首切）：pipeline/evidence 保持纯函数式、不引 tokio 运行时
 //! 依赖，事件出口由调用方以回调注入（见 ls-server worker.rs RA1.1）。
 
+pub mod detector;
 pub mod evidence;
 pub mod pipeline;

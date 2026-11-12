@@ -146,6 +146,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/events/:eid/snapshot", get(event_snapshot))
         .route("/events/:eid/video", get(event_video))
         .route("/cameras", get(cameras).post(add_camera))
+        .route("/cameras/:id", delete(delete_camera)) // RA1.2：清单有此路由但从未注册（恒 404），随 worker 生命周期补齐
         .route("/cameras/:id/status", get(camera_status))
         .route("/cameras/:id/group", put(set_camera_group))
         .route("/cameras/:id/analyzer", put(set_camera_analyzer))

@@ -12,7 +12,7 @@ mod golden;
 
 // RA1.0（ADR-0011）：pipeline/evidence 拆入 lib 目标（src/lib.rs），bin 经
 // `use` 引用——进程内复用（ls-server worker）与 sidecar 共用同一份实现。
-use ls_analyzer::{evidence, pipeline};
+use ls_analyzer::{detector, evidence, pipeline};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ use ls_proto::analyzer::{
     EvidenceRequest, EvidenceResult, Jpeg,
 };
 
-use pipeline::{CameraPipeline, CameraSpec, Candidate, Detector, NullDetector, RuleSpec, ZoneSpec};
+use pipeline::{CameraPipeline, CameraSpec, Candidate, Detector, RuleSpec, ZoneSpec};
 
 #[derive(Clone, Debug)]
 struct CamState {
@@ -175,30 +175,8 @@ fn env_f32(key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-/// YOLO 检测器（tract/ort 双后端，见 make_detector / YoloPpeRunner：PPE 级联已接入）。
-struct YoloDetector {
-    model: YoloModel,
-}
-
-impl Detector for YoloDetector {
-    fn detect(&mut self, frame: &ls_ingest::Frame) -> Vec<pipeline::PersonDetection> {
-        match self.model.detect(&frame.data, frame.width, frame.height) {
-            Ok(dets) => dets
-                .into_iter()
-                .map(|d| pipeline::PersonDetection {
-                    box_: d.box_,
-                    score: d.score,
-                    ppe: pipeline::PpeStatus::Unknown,
-                })
-                .collect(),
-            Err(e) => {
-                eprintln!("[ls-analyzer] 推理失败（本帧跳过）: {e}");
-                Vec::new()
-            }
-        }
-    }
-}
-
+/// YOLO 检测器已迁入 lib（RA1.2 参数化：`detector::{YoloDetector, DetectorConfig}`）；
+/// bin 侧仅保留 env 组装包装，语义原样。
 /// T-325/Q-14：PPE 级联检测器（YoloModel + 类名→索引映射）。
 ///
 /// 与 Python `vision.ppe_boxes` 同口径：违规类一次整图推理（conf=LS_PPE_CONF，
@@ -283,17 +261,8 @@ fn anchored_child(dir: &std::path::Path, name: &str) -> Option<std::path::PathBu
     Some(target)
 }
 
-/// 模型路径规范化与锚点校验（T-325 安全加固）：必须是**已存在的普通文件**，
-/// 且 canonicalize 成功（消除相对路径/cwd 歧义与符号链接指向目录的读取尝试）。
-/// 返回规范化路径；不满足返回 None（调用方回退空检测/仅人员检测）。
-fn anchor_model_file(raw: &std::path::Path) -> Option<std::path::PathBuf> {
-    let path = std::fs::canonicalize(raw).ok()?;
-    if !path.is_file() {
-        return None;
-    }
-    Some(path)
-}
-
+/// 模型路径锚点校验已迁入 lib（RA1.2：`detector::anchor_model_file`）；
+/// main.rs 内 PPE 构造经 `detector::` 路径引用。
 /// 读模型目录的类别名（model.json 的 `classes` 指向的文件；一行一个）。
 ///
 /// 安全锚点：`classes` 只接受**模型目录内的直接文件名**（`anchored_child`），
@@ -328,7 +297,7 @@ fn load_class_names(model_path: &std::path::Path) -> Vec<String> {
 /// 构造 PPE 检测器：LS_PPE_MODEL 存在且能解析类名时启用，否则 None（仅人员检测）。
 fn make_ppe_runner() -> Option<Box<dyn pipeline::PpeRunner>> {
     let raw = std::env::var("LS_PPE_MODEL").ok().map(PathBuf::from)?;
-    let Some(path) = anchor_model_file(&raw) else {
+    let Some(path) = detector::anchor_model_file(&raw) else {
         println!(
             "[ls-analyzer] PPE 模型路径无效/不可读（仅人员检测）: {}",
             raw.display()
@@ -391,36 +360,11 @@ fn make_ppe_runner() -> Option<Box<dyn pipeline::PpeRunner>> {
 
 /// 构造检测器：模型路径由 AnalyzerImpl 实例注入（生产从 LS_MODEL_FP32 / 仓库布局
 /// 启动时解析一次；测试可各自指定或设 None，避免进程级 set_var 并发竞态）。
+/// RA1.2：模型构造参数化迁入 lib（`detector::make_detector`）；bin 侧仅保留
+/// env → DetectorConfig 的组装包装（sidecar 进程协议不变：LS_IMGSZ 等环境变量照旧）。
 fn make_detector(path: Option<&PathBuf>) -> Box<dyn Detector> {
-    let Some(raw) = path else {
-        println!("[ls-analyzer] 未配置模型——使用空检测器");
-        return Box::new(NullDetector);
-    };
-    // T-325 安全加固：模型路径规范化 + 普通文件锚点（相对路径/目录/符号链接逃逸拒绝）
-    let Some(path) = anchor_model_file(raw) else {
-        println!(
-            "[ls-analyzer] 模型路径无效/不可读（空检测）: {}",
-            raw.display()
-        );
-        return Box::new(NullDetector);
-    };
-    let imgsz = env_u32("LS_IMGSZ", 640);
-    let conf = env_f32("LS_CONF_THRES", 0.40);
-    let iou = env_f32("LS_IOU_THRES", 0.50);
-    let min_area = env_f32("LS_MIN_BOX_AREA", 1200.0);
-    match YoloModel::load(&path, imgsz, conf, iou, min_area, None) {
-        Ok(model) => {
-            println!(
-                "[ls-analyzer] 模型已加载: {}（imgsz={imgsz} conf={conf} iou={iou}）",
-                path.display()
-            );
-            Box::new(YoloDetector { model })
-        }
-        Err(e) => {
-            println!("[ls-analyzer] 模型加载失败（回退空检测）: {e}");
-            Box::new(NullDetector)
-        }
-    }
+    let cfg = detector::DetectorConfig::from_env(path.cloned());
+    detector::make_detector(&cfg)
 }
 
 /// 启动/重启一路摄像头数据面线程（无配置时仅记录 running，兼容旧客户端）。

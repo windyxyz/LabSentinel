@@ -49,6 +49,7 @@ pub(crate) fn test_state_custom(
         )),
         pair_state: std::sync::Mutex::new(PairState::default()),
         testing,
+        workers: crate::worker::Workers::default(),
     })
 }
 

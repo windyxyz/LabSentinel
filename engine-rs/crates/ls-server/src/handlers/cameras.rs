@@ -134,16 +134,17 @@ pub(crate) async fn start_camera(State(st): State<Shared>, AxPath(cid): AxPath<i
         if s.camera(cid)?.is_none() {
             return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
-        // rust 控制面独立模式没有分析 worker（数据面在 Python 服务 / sidecar）；
-        // 如实返回 503 而不是假装启动成功（§11.3「声明完成必须附证据」约束）。
-        Ok((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                json!({"detail": "rust 控制面独立模式无分析 worker；启动摄像头请使用 Python 服务",
-                        "code": "no_worker"}),
-            ),
-        )
-            .into_response())
+        // RA1.2（ADR-0011）：进程内 worker 真实现（帧循环在专用线程；启动失败
+        // 退避重连，超限写 error）。响应契约 = Python `{"ok": true}`。
+        match crate::worker::WorkerConfig::from_db(s, cid) {
+            Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response()),
+            Ok(None) => Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response()),
+            Ok(Some(cfg)) => match crate::worker::start_worker(&st, cfg) {
+                Ok(()) => Ok(Json(json!({"ok": true})).into_response()),
+                Err(e) if e == "已在运行" => Ok(Json(json!({"ok": true})).into_response()),
+                Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response()),
+            },
+        }
     })
 }
 
@@ -193,20 +194,28 @@ pub(crate) async fn cameras_bulk(State(st): State<Shared>, Json(body): Json<Valu
     with_store(&st, |s| {
         let mut missing = Vec::new();
         let mut failed = Vec::new();
+        let mut ok: Vec<i64> = Vec::new();
         for cid in &ids {
             if s.camera(*cid)?.is_none() {
                 missing.push(*cid);
                 continue;
             }
-            // 独立控制面无分析 worker：如实计入 failed（与 Python failed 列表同形）
-            failed.push(json!({"id": cid, "error":
-                "rust 控制面独立模式无分析 worker（启停请使用 Python 服务）"}));
+            // RA1.2：start/stop 走进程内 worker（Python bulk 契约：ok/missing/failed）
+            let res = if action == "start" {
+                match crate::worker::WorkerConfig::from_db(s, *cid) {
+                    Err(e) => Err(e),
+                    Ok(None) => Err("camera disappeared".into()),
+                    Ok(Some(cfg)) => crate::worker::start_worker(&st, cfg).map(|_| ()),
+                }
+            } else {
+                crate::worker::stop_worker(&st, *cid);
+                Ok(())
+            };
+            match res {
+                Ok(()) => ok.push(*cid),
+                Err(e) => failed.push(json!({"id": cid, "error": e})),
+            }
         }
-        let ok: Vec<i64> = ids
-            .iter()
-            .filter(|i| !missing.contains(i) && !failed.iter().any(|f| f["id"] == **i))
-            .copied()
-            .collect();
         Ok(Json(json!({"ok": ok, "missing": missing, "failed": failed})).into_response())
     })
 }
@@ -349,17 +358,43 @@ pub(crate) async fn camera_snapshot(
     State(st): State<Shared>,
     AxPath(cid): AxPath<i64>,
 ) -> Response {
-    with_store(&st, |s| {
-        if s.camera(cid)?.is_none() {
-            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
-        }
-        // rust 控制面独立模式无分析 worker（无实时帧缓冲）；与 start_camera 同口径
-        Ok((
+    // 存在性校验（与 Python 同口径 404）
+    let exists = ls_store::Store::open(&st.db_path)
+        .ok()
+        .and_then(|s| s.camera(cid).ok().flatten())
+        .is_some();
+    if !exists {
+        return detail_err(StatusCode::NOT_FOUND, "camera not found").into_response();
+    }
+    // RA1.2：worker 运行中 → 最新抽帧 JPEG；未运行 → 503（与 start_camera 同口径）
+    match st.workers.get(cid) {
+        None => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"detail": "rust 控制面独立模式无分析 worker（无实时帧）；实时画面/截图请使用 Python 服务",
+            Json(json!({"detail": "摄像头未运行（无实时帧）；先启动摄像头",
                         "code": "no_worker"})),
         )
-            .into_response())
+            .into_response(),
+        Some(h) => match h.latest_jpeg.lock().ok().and_then(|s| s.clone()) {
+            None => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"detail": "暂无可用帧（刚启动或抽帧未命中）", "code": "no_frame"})),
+            )
+                .into_response(),
+            Some(jpeg) => {
+                ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], jpeg).into_response()
+            }
+        },
+    }
+}
+
+/// DELETE /cameras/{cid}（RA1.2 补路由：清单里一直有、router 从未注册——请求恒 404）。
+/// Python 契约：manager.stop_camera → 级联清理（区域/规则）→ `{"ok": true}`；
+/// 文件夹派生图/缩略图清理属 Python 文件系统语义，Rust 侧仅 DB 级联（ls-store 同口径）。
+pub(crate) async fn delete_camera(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
+    crate::worker::stop_worker(&st, cid);
+    with_store(&st, |s| {
+        s.delete_camera(cid)?;
+        Ok(Json(json!({"ok": true})).into_response())
     })
 }
 

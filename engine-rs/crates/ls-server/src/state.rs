@@ -22,6 +22,8 @@ pub struct AppState {
     /// R2-108 对齐（2026-11-11 深审补齐）：测试主机名 testserver 仅在测试态放行
     /// （LS_TESTING=1，与 Python settings.testing / PYTEST_CURRENT_TEST 同口径）。
     pub testing: bool,
+    /// RA1.2（ADR-0011）：进程内分析 worker 注册表（start/stop_camera 真实现）
+    pub workers: crate::worker::Workers,
 }
 
 #[derive(Default)]
@@ -36,4 +38,3 @@ pub struct PairState {
 }
 
 pub type Shared = Arc<AppState>;
-

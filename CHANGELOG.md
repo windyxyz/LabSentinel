@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+### Rust 重构 RA1.2：worker 生命周期（ADR-0011，2026-11-13）
+- **ls-server `start_camera` 摘 503**：`WorkerConfig::from_db` 从 DB 组装
+  （cameras/zones（polygon 解析）/rules（含 RA1.1 的 days_of_week）/calendar），
+  专用线程跑帧循环（取流 → 检测 → 管线 → EventSink 落地 + 存证收尾线程回填
+  MP4）——Rust 控制面独立模式首次可真实启动摄像头分析。
+- **重启策略对齐 Python CameraManager**：退避序列 1/5/30/60s、存活 >5s 重置
+  计数、超 `max_restarts` → `cameras.status='error'`（given_up）+ 注册表自清理；
+  文件非循环源播完自然 `stopped`；stop 路径强杀 ffmpeg slot 即时打断退避。
+  已知粒度差异（RA1.2 接受）：Python 为「worker 线程 + Manager 外层重启」两级，
+  Rust 合并为单线程内重启（外部可观测行为一致）。
+- **detector 参数化**（make_detector env 依赖摘除）：`DetectorConfig` 迁入
+  ls-analyzer lib（`detector.rs`），sidecar 走 `from_env` 包装（env 协议不变），
+  ls-server 从 env `LS_MODEL_PATH`/`LS_ANALYSIS_FPS` 等组装（与 Python 全局
+  设置同源同默认）。
+- **补齐 DELETE /cameras/{cid}**：清单里有此路由但 router 从未注册（请求恒
+  404）——现在停 worker → ls-store 级联删 → `{"ok":true}`（Python 契约）。
+- bulk start/stop 接 worker；`camera_snapshot` 返回 worker 最新抽帧 JPEG
+  （503 no_worker 语义保留给未运行状态）。
+- 门禁：ls-server 33 例（+6 生命周期/组装/快照测试）、workspace **105 passed /
+  0 failed** + clippy `-D warnings` + fmt 全绿。
+
 ### Rust 重构 RA1 首切（ADR-0011，2026-11-13）
 - **ls-analyzer 拆 lib 目标**：pipeline（规则/候选/迟滞冷却）与 evidence（存证
   环/encode_mp4）从 bin 拆入 `src/lib.rs`（零逻辑改动），供 ls-server 进程内

@@ -15,8 +15,10 @@ ls-dispatch = { path = "../ls-dispatch" }
 ls-core = { path = "../ls-core" }
 ls-jobs = { path = "../ls-jobs" }
 # RA1（ADR-0011）：进程内分析 worker——复用 ls-analyzer lib 目标的
-# pipeline（Candidate/规则）与 evidence（存证环/encode_mp4）
+# pipeline（Candidate/规则）与 evidence（存证环/encode_mp4）；
+# ls-ingest 供 worker 生命周期（Ingest/ChildSlot ffmpeg 托管）
 ls-analyzer = { path = "../ls-analyzer" }
+ls-ingest = { path = "../ls-ingest" }
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }

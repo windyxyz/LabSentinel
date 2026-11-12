@@ -14,9 +14,11 @@
       `set_event_video` + `rules_all` 补 `days_of_week`；ls-server `worker.rs`
       `EventSink`（去重 4096/截图/入库/WS 广播/finalize encode_mp4 回填）——
       workspace 99 passed + clippy/fmt 绿
-- [ ] RA1.2 worker 生命周期：start_camera/stop_camera 真实现（配置读 DB、
-      重试/配置版本重推/watchdog 对齐 Python 语义；WorkerConfig 参数化
-      make_detector 的 env 依赖）
+- [x] RA1.2 worker 生命周期：start_camera 摘 503（WorkerConfig 从 DB 组装
+      cameras/zones/rules/calendar、退避重连 1/5/30/60s + 存活>5s 重置 + 超限
+      given_up→error 对齐 Python CameraManager、detector 参数化 DetectorConfig
+      进 lib、DELETE /cameras/:id 补注册、bulk/snapshot 接 worker）——
+      ls-server 33 例 + workspace 105 passed + clippy/fmt 绿
 - [ ] RA1.3 告警链路：规则命中 → ls-dispatch 投递（8 渠道）+ escalation
 - [ ] RA1.4 folders/scan 实现（ls-ingest folder 源已有，摘 503）
 - [ ] RA1.5 门禁：路由 106/106（folders/scan 摘牌）+ 黄金语料向量一致 +
