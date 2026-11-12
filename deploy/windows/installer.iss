@@ -64,7 +64,9 @@ UninstallDisplayIcon={app}\LabSentinel.exe
 ; 卸载不删用户数据（数据在 %LOCALAPPDATA%\LabSentinel，独立于 {app}）
 
 [Languages]
-Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 中文 .isl 随仓库（deploy/windows/languages/）——choco 的 innosetup 包不含
+; unofficial translations（CI 实测 Couldn't open include file）；本机 IS7 内置故未暴露
+Name: "chinese"; MessagesFile: "compiler:Default.isl,Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
