@@ -103,7 +103,7 @@ jobs:
       - name: manifest（干净树来源记录）
         run: |
           python scripts/release_manifest.py
-      - uses: actions/upload-artifact@0c366cb4fc8897159c94880f94b55bc716ad6a66  # v4
+      - uses: actions/upload-artifact@ea165f86565b76e97b873000e6baea89c262ce50  # v4
         with:
           name: LabSentinel-portable-${{ matrix.variant }}
           path: |
@@ -130,7 +130,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
       - name: build_rust.py --zip (experimental)
         run: python scripts/build_rust.py --zip
-      - uses: actions/upload-artifact@0c366cb4fc8897159c94880f94b55bc716ad6a66  # v4
+      - uses: actions/upload-artifact@ea165f86565b76e97b873000e6baea89c262ce50  # v4
         with:
           name: labsentinel-rust-nightly
           path: Resources/dist/labsentinel-rust-*.zip
@@ -143,7 +143,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@2a5974104b6d5dbdb2f9468a3e54da3bdd241578  # v4
+      - uses: actions/download-artifact@95858c9b8adda176dd3fcd19dfe85b75b1a163b0  # v4
         with:
           pattern: LabSentinel-portable-*
           merge-multiple: true
