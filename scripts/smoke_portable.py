@@ -27,7 +27,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEVNULL = subprocess.DEVNULL
-CREATE_NO_WINDOW = 0x08000000
+# staging runtime 是 _pth 隔离模式（禁用 cwd/site 自动导入）——reap_leftover_pids
+# 同目录导入 portable_launcher 需显式注入 scripts/ 目录（CI 实测缺失即 ModuleNotFoundError）
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_scripts_dir = str(Path(__file__).resolve().parent)
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -106,13 +111,8 @@ def _force_kill_pid(pid: int) -> None:
 def reap_leftover_pids(pids, wait_s: float = 30.0, alive=None, matcher=None,
                        killer=None) -> list[int]:
     """--stop 后残留收尾（任务110）：等待窗内未退出的 PID，确认仍是 LabSentinel 的
-    python 进程（防 PID 复用误杀）才 taskkill /T /F。返回强杀后仍存活的 PID（交人工）。"""
-    # staging runtime 是 _pth 隔离模式（禁用 cwd/site 自动导入）——scripts/ 目录
-    # 须显式注入 sys.path 才能同目录导入 portable_launcher（CI 实测）。
-    import sys as _sys
-    _scripts = str(Path(__file__).resolve().parent)
-    if _scripts not in _sys.path:
-        _sys.path.insert(0, _scripts)
+    python 进程（防 PID 复用误杀）才 taskkill /T /F。返回强杀后仍存活的 PID（交人工）。
+    （portable_launcher 的 sys.path 注入已在模块级完成。）"""
     import portable_launcher as pl
     alive = alive or pl.pid_alive
     matcher = matcher or pl._pid_matches_launcher
@@ -287,7 +287,7 @@ def main() -> int:
         # 锁内服务 PID：--stop 后应已终止——先等其消失（最多 10s），仍活才走
         # 强杀复核（防 PID 复用误杀）。正在退出的进程查询命令行会返回 None
         # （"身份不明"），不能据此判失败（2026-11-12 冒烟实证的误报）。
-        import portable_launcher as pl
+        pl = portable_launcher
         gone_wait = False
         for _ in range(10):
             if not pl.pid_alive(int(lock_pid)):
