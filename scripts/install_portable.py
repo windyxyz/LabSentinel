@@ -796,7 +796,7 @@ def do_upgrade(src: Path, install_dir: Path | None = None,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="LabSentinel 便携版安装/升级/卸载/回滚（无管理员）")
-    ap.add_argument("action", choices=["install", "upgrade", "uninstall", "rollback"])
+    ap.add_argument("action", choices=["install", "upgrade", "uninstall", "rollback", "finalize"])
     ap.add_argument("--from", dest="from_src", type=Path,
                     help="upgrade 专用：便携包 zip 或目录")
     ap.add_argument("--health-cmd", nargs="+", default=None,
@@ -833,6 +833,24 @@ def main() -> int:
                           shortcuts=not a.no_shortcuts, dry_run=a.dry_run, force=a.force,
                           desktop_dir=a.desktop_dir, start_menu_dir=a.start_menu_dir,
                           health_cmd=a.health_cmd)
+    if a.action == "finalize":
+        # B2/ADR-0010：Inno Setup 安装完调用——文件已由 [Files] 就位，此处只做
+        # 真实健康检查（启动新版本 uvicorn → 轮询 /api/health/ready → 停止），
+        # 失败返回非 0（Inno [Run] 检查退出码即中止安装并回滚）。
+        # 复用 health_check 模块（R2-402），不重新复制/归档文件。
+        spec = health_check.default_health_cmd(a.install_dir)
+        if spec is None:
+            log("[跳过] runtime 缺失（桩环境），finalize 无健康检查可做")
+            return 0
+        argv, env = spec
+        if a.health_cmd:  # 测试/演练覆盖：直接跑指定命令
+            argv, env = a.health_cmd, None
+        r = subprocess.run(argv, env=env, capture_output=True, text=True)
+        if r.returncode != 0 or (r.stdout and "ready=False" in r.stdout):
+            log(f"[失败] 新版本健康检查未通过（rc={r.returncode}）: {r.stdout.strip()[:200]}")
+            return 3
+        log("[OK] finalize 健康检查通过")
+        return 0
     if a.action == "rollback":  # T-404
         return rollback(a.install_dir)
     # 受管根白名单校验在 main 内完成（布尔判定，env 不再流入 do_uninstall 的删除调用图）

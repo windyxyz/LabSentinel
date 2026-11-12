@@ -1,7 +1,26 @@
-# 59 · 便携版安装 / 升级 / 卸载指南（任务 46）
+# 59 · 便携版 / 安装包 安装、升级、卸载指南（任务 46）
 
-> 适用：`dist/LabSentinel-portable-*.zip` 解压后的目录（含 `runtime\` 嵌入式 Python，无需安装 Python/Node）。
-> 全程**不需要管理员权限**：只写用户目录与 HKCU 注册表。
+> 适用：① `LabSentinel-setup-<ver>.exe` 安装包（ADR-0010，Inno Setup 6 编译）；
+> ② `dist/LabSentinel-portable-*.zip` 解压后的目录（含 `runtime\` 嵌入式 Python）。
+> 两者共用同一份程序文件（staging 双形态），全程**不需要管理员权限**：只写用户目录与 HKCU 注册表。
+> 便携 zip 形态的说明见下文各节；安装包形态见文末专节。
+
+## 安装包形态（ADR-0010，0.2.0 起）
+
+- 产物：`LabSentinel-setup-<ver>.exe`（与便携 zip 同一 staging 编译）。
+- 安装：双击 → 选目录（默认 `%LOCALAPPDATA%\Programs\LabSentinel\`）→ 可选
+  「创建桌面快捷方式」/「安装为 Windows 服务」（默认不勾，服务模式仅建议
+  RTSP/文件夹源：Session 0 下 USB 摄像头不可用，见
+  `deploy/windows/labsentinel-service.xml`）→ 自动写开始菜单与控制面板卸载项。
+- 升级：同 AppId 自动装回原目录并覆盖文件（`UsePreviousAppDir`）；用户数据
+  （`%LOCALAPPDATA%\LabSentinel\`）不受影响。装完自动跑一次真实健康检查
+  （启动新版本 uvicorn 轮询 `/api/health/ready`），失败中止并回滚。
+- 卸载：控制面板「卸载程序」→ LabSentinel；或开始菜单「卸载 LabSentinel」。
+  卸载保留用户数据，需清理时手工删除 `%LOCALAPPDATA%\LabSentinel\`。
+- 未签名预览版：SmartScreen 可能提示「未知发布者」，校验
+  `SHA256SUMS` 后可继续；证书（T-403）到位后安装器与卸载器一起签名。
+- 构建：`python scripts/build_portable.py --zip --installer`（需 ISCC.exe；
+  未装时警告跳过 setup.exe，zip 照常产出）。CI 由 `choco install innosetup` 提供。
 
 ## 安装
 

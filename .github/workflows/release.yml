@@ -63,11 +63,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           python -I scripts/fetch_assets.py --name yolo11n.onnx --out (Join-Path $dir "yolo11n.onnx")
           if ($LASTEXITCODE -ne 0) { throw "模型下载/校验失败" }
-      - name: portable build（含锁文件全新安装 + 冒烟断言）
+      - name: Inno Setup 6（ADR-0010：setup.exe 双形态编译前置）
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe 未找到（choco 安装失败）" }
+      - name: portable build（含锁文件全新安装 + 冒烟断言 + setup.exe）
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "ls-models"
-          python scripts/build_portable.py --zip --variant ${{ matrix.variant }} --python (Get-Command python).Source --models-dir $dir
+          python scripts/build_portable.py --zip --installer --variant ${{ matrix.variant }} --python (Get-Command python).Source --models-dir $dir
           if ($LASTEXITCODE -ne 0) { throw "便携包构建失败" }
       # T-410：Windows 冒烟进 CI——用刚产出的 zip 真实启动→健康/前端/DB 断言→停止；
       # 随后 install/uninstall 到隔离临时目录，验证安装标记与安全卸载。
@@ -102,6 +108,7 @@ jobs:
           name: LabSentinel-portable-${{ matrix.variant }}
           path: |
             Resources/dist/LabSentinel-portable-*.zip
+            Resources/dist/LabSentinel-setup-*.exe
             Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt
             Resources/dist/RELEASE-MANIFEST.json
           if-no-files-found: error

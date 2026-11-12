@@ -290,6 +290,52 @@ def make_zip() -> Path:
     return out
 
 
+def find_iscc() -> Path | None:
+    """ADR-0010：定位 Inno Setup 命令行编译器（ISCC.exe）。
+
+    顺序：ISCC_PATH 环境变量 → 常见安装路径（Inno Setup 6 x86/x64）→ PATH。
+    本机/CI 未装时返回 None，--installer 仅警告跳过（zip-only 仍成功）。
+    """
+    import shutil
+    override = os.environ.get("ISCC_PATH")
+    if override and Path(override).is_file():
+        return Path(override)
+    for base in (os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                 os.environ.get("ProgramFiles", r"C:\Program Files")):
+        for ver in ("6", "5"):
+            p = Path(base) / f"Inno Setup {ver}" / "ISCC.exe"
+            if p.is_file():
+                return p
+    found = shutil.which("ISCC.exe")
+    return Path(found) if found else None
+
+
+def make_installer() -> Path | None:
+    """用 deploy/windows/installer.iss 从同一 staging 产出 setup.exe。"""
+    iss = ROOT / "deploy" / "windows" / "installer.iss"
+    if not iss.is_file():
+        deploy.log(f"[警告] 安装器脚本缺失: {iss}")
+        return None
+    iscc = find_iscc()
+    if iscc is None:
+        deploy.log("[警告] 未找到 ISCC.exe（Inno Setup 6）——跳过 setup.exe 编译，"
+                   "zip 便携形态照常产出；CI 由 choco install innosetup 提供")
+        return None
+    version = (ROOT / "VERSION").read_text("ascii").strip()
+    out = ROOT / "Resources" / "dist" / f"LabSentinel-setup-{version}.exe"
+    deploy.log(f"[安装器] ISCC 编译 → {out.name} (iscc={iscc})")
+    r = subprocess.run(
+        [str(iscc), "/Q", f"/DLsAppVersion={version}",
+         f"/DLsSourceDir={DIST}", f"/DLsOutputDir={out.parent}", str(iss)],
+        capture_output=True, text=True, encoding="mbcs", errors="replace")
+    if r.returncode != 0 or not out.is_file():
+        deploy.log(f"[警告] ISCC 编译失败（exit {r.returncode}）："
+                   f"{(r.stdout or '').strip()[-300:]}")
+        return None
+    deploy.log(f"[安装器] 完成 {out.stat().st_size / 1e6:.1f}MB")
+    return out
+
+
 def main() -> int:
     global _PYTHON_OVERRIDE, _VARIANT, _WITH_RUST
     ap = argparse.ArgumentParser(description="便携运行时构建器（任务44）")
@@ -303,6 +349,8 @@ def main() -> int:
                     help="R2-303：推理变体（cpu=统一锁 / dml=DirectML 可选包）")
     ap.add_argument("--with-rust", action="store_true",
                     help="R2-304：把 ls-analyzer 打进 bin/（实验产物）")
+    ap.add_argument("--installer", action="store_true",
+                    help="ADR-0010：用 Inno Setup (ISCC.exe) 编译 setup.exe（zip 双形态；未装 ISCC 则警告跳过）")
     a = ap.parse_args()
     _PYTHON_OVERRIDE = a.python
     _VARIANT = a.variant
@@ -324,6 +372,8 @@ def main() -> int:
     report()
     if a.zip:
         make_zip()
+    if a.installer:
+        make_installer()
     deploy.log("[便携构建] 完成")
     return 0
 
