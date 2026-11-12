@@ -329,7 +329,10 @@ def make_installer() -> Path | None:
                    "zip 便携形态照常产出；CI 由 choco install innosetup 提供")
         return None
     version = (ROOT / "VERSION").read_text("ascii").strip()
-    out = ROOT / "Resources" / "dist" / f"LabSentinel-setup-{version}.exe"
+    # 变体后缀对齐 make_zip（cpu 无后缀 / dml 加 -dml）：CI 双变体 artifact
+    # merge-multiple 下载到同一目录，同名 setup 会互相覆盖（run 43242535539 实证）
+    suffix = f"-{_VARIANT}" if _VARIANT != "cpu" else ""
+    out = ROOT / "Resources" / "dist" / f"LabSentinel-setup-{version}{suffix}.exe"
     deploy.log(f"[安装器] ISCC 编译 → {out.name} (iscc={iscc})")
     r = subprocess.run(
         [str(iscc), "/Q", f"/DLsAppVersion={version}",

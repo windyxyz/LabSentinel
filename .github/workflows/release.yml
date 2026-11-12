@@ -104,11 +104,19 @@ jobs:
       - name: SHA256SUMS
         shell: pwsh
         run: |
-          $pattern = if ("${{ matrix.variant }}" -eq "dml") { "LabSentinel-portable-*-dml.zip" } else { "LabSentinel-portable-*.zip" }
-          $zip = Get-ChildItem Resources/dist/$pattern | Where-Object { $_.Name -notlike "*-dml.zip" -or "${{ matrix.variant }}" -eq "dml" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($zip.Name)" | Out-File -FilePath Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt -Encoding ascii
-          Get-Content Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt
+          # zip + setup 双哈希；按变体过滤（cpu 无后缀 / dml 带 -dml，与 make_zip/make_installer 命名对齐）
+          $dml = "${{ matrix.variant }}" -eq "dml"
+          $files = @(Get-ChildItem Resources/dist/LabSentinel-portable-*.zip,
+                              Resources/dist/LabSentinel-setup-*.exe |
+                     Where-Object { ($_.Name -like "*-dml.*") -eq $dml })
+          if ($files.Count -lt 2) { throw "产物缺失（zip+setup 应各一）" }
+          $sums = "Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt"
+          Remove-Item $sums -ErrorAction SilentlyContinue
+          foreach ($f in $files) {
+            $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($f.Name)" | Out-File -FilePath $sums -Encoding ascii -Append
+          }
+          Get-Content $sums
       - name: manifest（干净树来源记录）
         run: |
           python scripts/release_manifest.py
@@ -162,5 +170,6 @@ jobs:
           draft: true  # 签名作业接入前保持草稿，人工校验后发布
           files: |
             dist/LabSentinel-portable-*.zip
+            dist/LabSentinel-setup-*.exe
             dist/SHA256SUMS-*.txt
             dist/RELEASE-MANIFEST.json
