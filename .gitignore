@@ -54,6 +54,11 @@ tools/onnxruntime/
 
 # ---- 误建环境残留（防御）----
 server/LabSentinelgpu-venv/
+# 训练 venv（gpu/m0/npu）曾被误建到仓库根（2026-11-12）；正式位置在 D:\LabSentinel\
+LabSentinel/
+# docs 改名遗留副本（00-vision/30-architecture 的旧名版，内容已并入正本）
+docs/vision.md
+docs/架构设计.md
 
 # ---- Mixkit 派生演示素材（仅个人使用，不入库；70-release-plan）----
 Resources/效果演示/*.mp4
