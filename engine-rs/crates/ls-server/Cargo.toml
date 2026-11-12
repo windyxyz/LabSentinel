@@ -30,6 +30,6 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 base64 = "0.22"  # Fernet key/token 编解码
 
 [dev-dependencies]
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 rusqlite = { version = "0.31", features = ["bundled"] }
