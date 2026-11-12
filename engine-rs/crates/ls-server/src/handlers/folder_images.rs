@@ -110,6 +110,40 @@ pub(crate) async fn folder_images_summary(
     })
 }
 
+/// POST /folders/{cid}/scan（RA1.3 摘 503）：wake-or-start（Python folder_scan 契约）。
+/// 运行中的 folder worker → 置 wake（下轮立即扫描）；未运行 → 启动 folder worker。
+pub(crate) async fn folder_scan(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
+    use std::sync::atomic::Ordering;
+    with_store(&st, |s| {
+        let Some(cam) = s.camera(cid)? else {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
+        };
+        if cam.type_ != "folder" {
+            return Ok(
+                detail_err(StatusCode::BAD_REQUEST, "该摄像头不是图片文件夹源").into_response(),
+            );
+        }
+        if let Some(h) = st.workers.get(cid) {
+            h.wake.store(true, Ordering::SeqCst);
+            return Ok(
+                Json(json!({"ok": true, "started": false, "msg": "已触发立即扫描"}))
+                    .into_response(),
+            );
+        }
+        match crate::worker::WorkerConfig::from_db(s, cid) {
+            Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response()),
+            Ok(None) => Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response()),
+            Ok(Some(cfg)) => match crate::worker::start_worker(&st, cfg) {
+                Ok(()) => Ok(Json(
+                    json!({"ok": true, "started": true, "msg": "图片文件夹接入已启动"}),
+                )
+                .into_response()),
+                Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response()),
+            },
+        }
+    })
+}
+
 pub(crate) fn folder_row_json(r: &ls_store::FolderImageRow, path_full: bool) -> Value {
     let mut v = json!({"id": r.id, "camera_id": r.camera_id, "name": r.name,
         "ts": r.ts, "processed_ts": r.processed_ts, "width": r.width,

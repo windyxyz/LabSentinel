@@ -137,6 +137,28 @@ impl EventSink {
         if let Ok(Some(row)) = store.event_by_id(eid) {
             let _ = st.events_tx.send(event_json(&row).to_string());
         }
+        // RA1.3：告警首发派发（外部 8 渠道；静默/过滤/限流复用 ls-jobs 链路，
+        // 与 escalation 共享渠道快照和限流器）。投递失败只影响外部通知，
+        // 不影响事件已入库/已广播的事实。
+        let cam_name = store
+            .camera(cand.camera_id)
+            .ok()
+            .flatten()
+            .map(|c| c.name)
+            .unwrap_or_default();
+        let dev = ls_dispatch::DispatchEvent {
+            id: eid,
+            camera_id: cand.camera_id,
+            type_: cand.behavior.clone(),
+            level: cand.level,
+            detail: cand.detail.clone(),
+            ts: cand.ts_iso.clone(),
+            camera_name: cam_name,
+        };
+        let submitted = st.jobs.dispatch_event(&store, &dev);
+        if submitted > 0 {
+            println!("[ls-worker] event#{eid} 首发派发 {submitted} 渠道");
+        }
         Ok(Some(eid))
     }
 
@@ -188,6 +210,8 @@ pub struct WorkerHandle {
     pub ffmpeg: ls_ingest::ChildSlot,
     /// 最新抽帧 JPEG（camera_snapshot 用；evidence stride 命中时更新）
     pub latest_jpeg: Mutex<Option<Vec<u8>>>,
+    /// RA1.3：folder worker 立即扫描唤醒（POST /folders/{cid}/scan）
+    pub wake: Arc<AtomicBool>,
 }
 
 /// 全局 worker 注册表（AppState.workers）。
@@ -338,6 +362,7 @@ impl WorkerConfig {
 }
 
 /// 启动 worker（handler 入口）：组装配置 → 注册句柄 → 起分析线程。
+/// folder 源走扫描登记线程（RA1.3），rtsp/file/usb 走 ffmpeg 帧循环。
 pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
     let cid = cfg.camera_id;
     if st.workers.get(cid).is_some() {
@@ -347,12 +372,20 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         stop: Arc::new(AtomicBool::new(false)),
         ffmpeg: Arc::new(Mutex::new(None)),
         latest_jpeg: Mutex::new(None),
+        wake: Arc::new(AtomicBool::new(false)),
     });
     st.workers.insert(cid, Arc::clone(&handle));
     let st2 = Arc::clone(st);
-    let spawned = std::thread::Builder::new()
-        .name(format!("ls-worker-{cid}"))
-        .spawn(move || worker_loop(st2, cfg, handle));
+    let is_folder = cfg.spec.type_ == "folder";
+    let spawned = if is_folder {
+        std::thread::Builder::new()
+            .name(format!("ls-folder-{cid}"))
+            .spawn(move || folder_loop(st2, cfg, handle))
+    } else {
+        std::thread::Builder::new()
+            .name(format!("ls-worker-{cid}"))
+            .spawn(move || worker_loop(st2, cfg, handle))
+    };
     match spawned {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -624,6 +657,144 @@ fn spawn_finalize(st: &Shared, evidence: &Arc<ls_analyzer::evidence::Evidence>, 
 
 /// post 等待 = VIDEO_POST_S + 0.5s 容差（evidence.feed 的 done 判定同值）+ 1s 余量。
 const VIDEO_POST_WAIT_S: f64 = ls_analyzer::evidence::VIDEO_POST_S + 1.5;
+
+// ---------------------------------------------------------------------------
+// RA1.3：folder worker（扫描登记 → folder_images；识别推理 RA2）
+// 对齐 Python FolderWorker 的调度语义（轮询 + wake 即扫 + 目录缺失 error 重试
+// + stop → stopped）；识别字段如实 0 占位——Python 侧本就声明「folder 源暂不
+// 在 Rust 数据面支持范围」（pipeline.py:674），RA2 引图像解码依赖后补推理。
+// ---------------------------------------------------------------------------
+
+/// UNIX 秒 → ISO "YYYY-MM-DDTHH:MM:SS"（UTC 口径；std 无本地时区。同一路相机
+/// 同一时刻只由一个实现写入，字典序/day 截断与 Python 混写仍成立）。
+fn iso_secs(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}")
+}
+
+/// 可中断等待：stop → false；wake → true（提前醒，调用方消费标志）。
+fn sleep_interruptible_wake(stop: &AtomicBool, wake: &AtomicBool, d: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + d;
+    while std::time::Instant::now() < deadline {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        if wake.load(Ordering::SeqCst) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    !stop.load(Ordering::SeqCst)
+}
+
+fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
+    let Ok(store) = ls_store::Store::open(&st.db_path) else {
+        return;
+    };
+    let _ = store.set_camera_status(cfg.camera_id, "starting");
+    let root = PathBuf::from(cfg.spec.source.trim());
+    let interval = env_f64("LS_FOLDER_POLL_S", 3.0).max(0.5);
+    let scan_cfg = ls_ingest::folder::FolderScanConfig::default();
+    let internal = Some(PathBuf::from(&st.data_dir)); // 截图/视频数据目录不入库
+    let mut marked: Option<String> = None;
+    let mut set_status = |v: &str| {
+        if marked.as_deref() != Some(v) {
+            let _ = store.set_camera_status(cfg.camera_id, v);
+            marked = Some(v.into());
+        }
+    };
+    loop {
+        if handle.stop.load(Ordering::SeqCst) {
+            break;
+        }
+        handle.wake.store(false, Ordering::SeqCst); // 消费上一轮唤醒
+        if !root.is_dir() {
+            set_status("error"); // Python：目录缺失 → error 状态持续重试
+            if !sleep_interruptible_wake(
+                &handle.stop,
+                &handle.wake,
+                std::time::Duration::from_secs_f64(interval.max(5.0)),
+            ) {
+                break;
+            }
+            continue;
+        }
+        set_status("running");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let cands = ls_ingest::folder::scan_candidates(&root, &scan_cfg, now, internal.as_deref());
+        let mut scanned = 0usize;
+        for c in &cands {
+            if handle.stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let ts = iso_secs(now as u64);
+            let name = c.path.file_name().map(|n| n.to_string_lossy().into_owned());
+            let mtime_ns = (c.mtime_s * 1e9) as i64;
+            match store.add_folder_image(
+                cfg.camera_id,
+                &c.path.to_string_lossy(),
+                name.as_deref(),
+                mtime_ns,
+                c.size as i64,
+                &ts,
+                &ts,
+                None,
+                None,
+                0,
+                0,
+                0,
+                0,
+                "[]",
+                "[]",
+                false,
+                false,
+                None,
+                None,
+            ) {
+                Ok(_) => scanned += 1,
+                Err(e) => eprintln!(
+                    "[ls-folder] cam-{} 登记失败 {}: {e}",
+                    cfg.camera_id,
+                    c.path.display()
+                ),
+            }
+        }
+        if !cands.is_empty() {
+            println!(
+                "[ls-folder] cam-{} 本轮扫描 {} 候选（已登记的由唯一键幂等跳过）",
+                cfg.camera_id,
+                cands.len()
+            );
+        }
+        let _ = scanned;
+        if !sleep_interruptible_wake(
+            &handle.stop,
+            &handle.wake,
+            std::time::Duration::from_secs_f64(interval),
+        ) {
+            break;
+        }
+    }
+    let _ = store.set_camera_status(cfg.camera_id, "stopped");
+    if let Ok(mut m) = st.workers.map.lock() {
+        m.remove(&cfg.camera_id);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -898,6 +1069,243 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(!stop_worker(&st, 1), "幂等停止");
+    }
+
+    // ---- RA1.3：folder worker + 首发派发 ----
+
+    /// folder_images 表建表（seed_schema 未含；列与 Python store.MIGRATIONS 一致）。
+    fn seed_folder_images(db: &std::path::Path) {
+        let c = rusqlite::Connection::open(db).unwrap();
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS folder_images(\
+             id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, path TEXT UNIQUE, \
+             name TEXT, mtime_ns INTEGER, size INTEGER, ts TEXT, processed_ts TEXT, \
+             width INTEGER, height INTEGER, persons INTEGER DEFAULT 0, in_zone INTEGER DEFAULT 0, \
+             ppe_no INTEGER DEFAULT 0, ppe_wearing INTEGER DEFAULT 0, zones TEXT, \
+             violations TEXT, key INTEGER DEFAULT 0, violation INTEGER DEFAULT 0, \
+             event_id INTEGER, snapshot TEXT, error TEXT);",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn add_folder_image_is_idempotent_on_camera_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("t.db");
+        seed_folder_images(&db);
+        let s = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+        let id1 = s
+            .add_folder_image(
+                1,
+                "/d/a.jpg",
+                Some("a.jpg"),
+                111,
+                222,
+                "2026-11-13T00:00:00",
+                "2026-11-13T00:00:00",
+                None,
+                None,
+                0,
+                0,
+                0,
+                0,
+                "[]",
+                "[]",
+                false,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        let id2 = s
+            .add_folder_image(
+                1,
+                "/d/a.jpg",
+                Some("a.jpg"),
+                111,
+                222,
+                "2026-11-13T00:00:01",
+                "2026-11-13T00:00:01",
+                None,
+                None,
+                0,
+                0,
+                0,
+                0,
+                "[]",
+                "[]",
+                false,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(id1, id2, "唯一键冲突返回既有 id");
+        let n: i64 = s
+            .conn()
+            .query_row("SELECT COUNT(*) FROM folder_images", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn folder_worker_registers_images_and_stops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("t.db");
+        // data_dir 与受监视图片目录同级——worker 的 internal_dir=数据目录
+        // （截图/视频不入册），受监视目录不能嵌在它下面
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let st = test_state_custom(
+            db.to_str().unwrap(),
+            "",
+            false,
+            data.to_str().unwrap(),
+            true,
+            "",
+        );
+        seed_schema(&db);
+        seed_folder_images(&db);
+        // 图片目录：两张图 + 一个非图片扩展名干扰项
+        let imgs = tmp.path().join("imgs");
+        std::fs::create_dir_all(&imgs).unwrap();
+        std::fs::write(imgs.join("a.jpg"), b"jpeg-a").unwrap();
+        std::fs::write(imgs.join("b.png"), b"png-b").unwrap();
+        std::fs::write(imgs.join("c.txt"), b"not-image").unwrap();
+        let mut cfg = {
+            let s = ls_store::Store::open(&st.db_path).unwrap();
+            let cid = s
+                .add_camera_full("cam-folder", imgs.to_str().unwrap(), "folder", "")
+                .unwrap();
+            WorkerConfig::from_db(&s, cid).unwrap().unwrap()
+        };
+        assert_eq!(cfg.spec.type_, "folder");
+        cfg.max_restarts = 0;
+        start_worker(&st, cfg).unwrap();
+        // 轮询：两张图入册（≤5s）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let s = ls_store::Store::open(&st.db_path).unwrap();
+            let n: i64 = s
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM folder_images WHERE camera_id=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if n >= 2 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "5s 内应登记 2 张");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let s = ls_store::Store::open(&st.db_path).unwrap();
+        let bad: i64 = s
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM folder_images WHERE path LIKE '%c.txt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, 0, "非图片扩展名不入册");
+        // 识别字段如实 0（RA1.3 无推理；RA2 回填）
+        let persons: i64 = s
+            .conn()
+            .query_row("SELECT persons FROM folder_images LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(persons, 0);
+        assert!(stop_worker(&st, 1));
+    }
+
+    #[tokio::test]
+    async fn folder_scan_wake_or_start_contract() {
+        use crate::tests::helpers::{body_json, req, test_state};
+        use crate::*;
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        seed_schema(&db);
+        {
+            let s = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+            let fid = s
+                .add_camera_full(
+                    "cam-folder",
+                    dir.path().join("imgs").to_str().unwrap(),
+                    "folder",
+                    "",
+                )
+                .unwrap();
+            let _ = fid;
+            let _ = s
+                .add_camera_full("cam-rtsp", "rtsp://x", "rtsp", "")
+                .unwrap();
+        }
+        let app = build_router(test_state(db.to_str().unwrap()));
+        // 非文件夹源 → 400
+        let r = req(&app, "POST", "/api/folders/2/scan", None).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "rtsp 源 scan 拒绝");
+        // 文件夹源未运行 → started=true（folder worker 启动）
+        let r = req(&app, "POST", "/api/folders/1/scan", None).await;
+        assert_eq!(r.status(), StatusCode::OK, "RA1.3：scan 摘 503");
+        let j = body_json(r).await;
+        assert_eq!(j["ok"], true);
+        assert_eq!(j["started"], true, "未运行 → 启动");
+        // 再次 scan → started=false（wake 已运行 worker）
+        let r = req(&app, "POST", "/api/folders/1/scan", None).await;
+        let j = body_json(r).await;
+        assert_eq!(j["started"], false, "运行中 → wake");
+        assert_eq!(j["msg"], "已触发立即扫描");
+        // 不存在的相机 → 404
+        let r = req(&app, "POST", "/api/folders/99/scan", None).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn dispatch_event_no_channels_is_noop() {
+        // 无渠道配置（env 空 + 未注入）→ 0 投递、不建 delivery 行（不崩即契约）
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("t.db");
+        seed_schema(&db);
+        let st = test_state_custom(
+            db.to_str().unwrap(),
+            "",
+            false,
+            tmp.path().to_str().unwrap(),
+            true,
+            "",
+        );
+        let store = ls_store::Store::open(&st.db_path).unwrap();
+        let eid = store
+            .add_event(&ls_store::NewEvent {
+                camera_id: 1,
+                type_: "person_enter",
+                level: 2,
+                track_id: 1,
+                detail: "x",
+                snapshot: None,
+                ts: "2026-11-13T00:00:00",
+            })
+            .unwrap();
+        let dev = ls_dispatch::DispatchEvent {
+            id: eid,
+            camera_id: 1,
+            type_: "person_enter".into(),
+            level: 2,
+            detail: "x".into(),
+            ts: "2026-11-13T00:00:00".into(),
+            camera_name: "cam".into(),
+        };
+        let n = st.jobs.dispatch_event(&store, &dev);
+        assert_eq!(n, 0, "无渠道配置 → 0 投递");
+        let rows: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM alert_deliveries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "无渠道不建投递行");
     }
 
     #[tokio::test]

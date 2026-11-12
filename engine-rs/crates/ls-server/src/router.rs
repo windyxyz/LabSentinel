@@ -99,6 +99,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/alert-template"),
     ("GET", "/api/folder-images"),
     ("GET", "/api/folder-images/summary"),
+    ("POST", "/api/folders/:cid/scan"), // RA1.3：最后一条摘牌（folder worker 扫描登记）
     ("GET", "/api/logs"),
     ("GET", "/api/models/ppe/status"),
     // ---- R2-309 批次 3 ----
@@ -208,6 +209,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/alert-template", get(alert_template_get))
         .route("/folder-images", get(folder_images_list))
         .route("/folder-images/summary", get(folder_images_summary))
+        .route("/folders/:cid/scan", post(folder_scan)) // RA1.3：摘最后一条 503
         .route("/logs", get(logs_tail))
         .route("/models/ppe/status", get(ppe_status))
         // ---- R2-309 批次 3 ----

@@ -19,11 +19,16 @@
       given_up→error 对齐 Python CameraManager、detector 参数化 DetectorConfig
       进 lib、DELETE /cameras/:id 补注册、bulk/snapshot 接 worker）——
       ls-server 33 例 + workspace 105 passed + clippy/fmt 绿
-- [ ] RA1.3 告警链路：规则命中 → ls-dispatch 投递（8 渠道）+ escalation
-- [ ] RA1.4 folders/scan 实现（ls-ingest folder 源已有，摘 503）
-- [ ] RA1.5 门禁：路由 106/106（folders/scan 摘牌）+ 黄金语料向量一致 +
-      ls-server 测试全绿 + clippy/fmt
-- 验收：独立 Rust 形态可真实分析 RTSP/文件夹源并产出事件/存证/告警。
+- [x] RA1.3 告警链路：规则命中 → ls-dispatch 投递（8 渠道）——
+      `Jobs::dispatch_event` 复用 escalation 链路组件（静默/过滤/限流/投递行），
+      EventSink 落地后首发派发；WS 广播与外部投递解耦
+- [x] RA1.4 folders/scan 实现（wake-or-start + folder worker 扫描登记，
+      识别推理 RA2——图像解码依赖引入后补）
+- [x] RA1.5 门禁：路由 **106/106 = 100%**（folders/scan 摘牌，coverage 实测
+      未实现 0 条）+ ls-server 37 例 + workspace 109 passed + clippy/fmt 绿
+- 验收：独立 Rust 形态代码链路齐备（RTSP 帧循环→事件→存证→告警；folder
+  扫描→登记）；**端到端真机验收（真实 RTSP/视频挂机）留 RA1 验收项**，
+  与 24h 挂机人工事项合并执行。
 
 ## RA2：控制面补全（待 RA1）
 

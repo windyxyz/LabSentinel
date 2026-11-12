@@ -254,6 +254,65 @@ impl Jobs {
         escalation::status_json(&store, &self.cfg.escalation, last.as_ref())
     }
 
+    /// RA1.3（ADR-0011）：单事件首发派发（worker 候选事件 → 8 渠道外部投递）。
+    /// 复用 escalation 同一链路组件：注入渠道（或 env 回退）→ 静默 → 渠道过滤 →
+    /// 限流门 → add_delivery → deliver → update_delivery。返回成功投递的渠道数。
+    /// （escalation 的「未处置事件升级提醒」仍走 escalate_once；两者共享渠道快照
+    /// 与限流器，事件不重复入队——首发只针对新落地事件。）
+    pub fn dispatch_event(&self, store: &Store, ev: &ls_dispatch::DispatchEvent) -> usize {
+        let channels: Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> =
+            match self.alert_channels.lock().ok().and_then(|g| g.clone()) {
+                Some(injected) if !injected.is_empty() => injected,
+                _ => ls_dispatch::channels_from_env(),
+            };
+        let filters = parse_alert_filters();
+        let silences = active_silences(store);
+        let now_iso = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        if let Some(idx) = ls_dispatch::match_silence(&silences, ev, &now_iso) {
+            println!(
+                "[alert] event#{} 首发命中静默 #{}——外部渠道不推送",
+                ev.id, silences[idx].target
+            );
+            return 0;
+        }
+        let mut submitted = 0;
+        for (ch, ch_cfg) in &channels {
+            if let Some(reason) = ls_dispatch::channel_filtered(*ch, ev, &filters) {
+                println!(
+                    "[alert] event#{} 渠道 {} 被过滤（{reason}）——不建投递行",
+                    ev.id,
+                    ch.name()
+                );
+                continue;
+            }
+            let (allowed, pending) = lock(&self.rate).gate(*ch);
+            if !allowed {
+                continue; // 超限：计数留待下一窗口摘要
+            }
+            let mut text = format!(
+                "[L{}] {}（cam-{} {}）\n{}\n{}",
+                ev.level, ev.type_, ev.camera_id, ev.camera_name, ev.detail, ev.ts
+            );
+            if pending > 0 {
+                text.push_str(&format!("\n（上一窗口合并 {pending} 条）"));
+            }
+            let did = store.add_delivery(ev.id, ch.name()).ok();
+            let d = ls_dispatch::deliver(*ch, ch_cfg, ev.level, &text);
+            if let Some(id) = did {
+                let _ = store.update_delivery(
+                    id,
+                    if d.ok { "ok" } else { "failed" },
+                    d.attempts as i64,
+                    d.error.as_deref(),
+                );
+            }
+            if d.ok {
+                submitted += 1;
+            }
+        }
+        submitted
+    }
+
     pub fn escalate_once(&self) -> JobResult<EscalationOutcome> {
         let store = self.store()?;
         let channels: Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> =

@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Rust 重构 RA1.3：告警首发派发 + folders/scan（ADR-0011，2026-11-13）
+- **告警首发派发**：`ls-jobs::Jobs::dispatch_event`——worker 候选事件落地后经
+  与 escalation 同一链路组件（注入渠道快照/env 回退 → 静默匹配 → 渠道过滤 →
+  限流门 → add_delivery → deliver → update_delivery）推送 8 渠道；WS 广播
+  （events_tx）与外部投递解耦——投递失败不影响事件已入库/已广播。
+- **folders/scan 摘 503**（最后一条 503）：`POST /api/folders/{cid}/scan`
+  wake-or-start（Python folder_scan 契约）；**folder worker**（Rust 紧凑版）——
+  轮询 + wake 即扫 + 目录缺失 error 持续重试 + stop → stopped，扫描
+  （ls-ingest `scan_candidates`，Python `_candidates` 同口径：扩展名白名单/
+  大小上限/静置期/递归/数据目录豁免）→ `add_folder_image` 登记入库
+  （唯一键幂等）。**如实口径**：识别字段 0 占位——推理需图像解码依赖，RA2
+  接识别管线后回填（Python 侧本就声明 folder 源暂不在 Rust 数据面范围）。
+- **路由覆盖 106/106 = 100%**（L3 门槛 95% 早已越过；`rust_route_coverage.py`
+  实测「未实现 0 条」；超出 OpenAPI 的 `GET /api/ws/events` 为既有契约文档项）。
+- 门禁：ls-server 37 例（+4）、workspace **109 passed / 0 failed** + clippy
+  `-D warnings` + fmt 全绿。
+
 ### Rust 重构 RA1.2：worker 生命周期（ADR-0011，2026-11-13）
 - **ls-server `start_camera` 摘 503**：`WorkerConfig::from_db` 从 DB 组装
   （cameras/zones（polygon 解析）/rules（含 RA1.1 的 days_of_week）/calendar），

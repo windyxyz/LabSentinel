@@ -1213,6 +1213,71 @@ impl Store {
         }
     }
 
+    /// RA1.3：folder worker 扫描登记（对齐 Python store.add_folder_image：
+    /// INSERT OR IGNORE，唯一键（camera_id,path）冲突返回既有 id——幂等）。
+    /// zones/violations 为 JSON 文本；识别字段由调用方给（Rust 独立模式暂无
+    /// 推理 → persons 等为 0 的如实占位，RA2 接识别管线后回填真实值）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_folder_image(
+        &self,
+        camera_id: i64,
+        path: &str,
+        name: Option<&str>,
+        mtime_ns: i64,
+        size: i64,
+        ts: &str,
+        processed_ts: &str,
+        width: Option<i64>,
+        height: Option<i64>,
+        persons: i64,
+        in_zone: i64,
+        ppe_no: i64,
+        ppe_wearing: i64,
+        zones: &str,
+        violations: &str,
+        key: bool,
+        violation: bool,
+        snapshot: Option<&str>,
+        error: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO folder_images(\
+             camera_id,path,name,mtime_ns,size,ts,processed_ts,width,height,\
+             persons,in_zone,ppe_no,ppe_wearing,zones,violations,key,violation,snapshot,error) \
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![
+                camera_id,
+                path,
+                name,
+                mtime_ns,
+                size,
+                ts,
+                processed_ts,
+                width,
+                height,
+                persons,
+                in_zone,
+                ppe_no,
+                ppe_wearing,
+                zones,
+                violations,
+                key as i64,
+                violation as i64,
+                snapshot,
+                error
+            ],
+        )?;
+        if self.conn.changes() > 0 {
+            Ok(self.conn.last_insert_rowid())
+        } else {
+            self.conn.query_row(
+                "SELECT id FROM folder_images WHERE camera_id=? AND path=?",
+                params![camera_id, path],
+                |r| r.get(0),
+            )
+        }
+    }
+
     /// zones 单查（rule-template apply 校验区域归属用）
     pub fn zone(&self, zid: i64) -> rusqlite::Result<Option<(i64, i64, String, String)>> {
         let mut stmt = self
