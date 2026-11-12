@@ -16,6 +16,10 @@ import os
 import socket
 import subprocess
 import sys
+
+# 跨平台子进程文本编码：mbcs 仅 Windows 有（Linux CI 导入即 LookupError）——
+# 非 Windows 用 utf-8 + errors=replace 兜底；本模块功能仍以 Windows 为主。
+PROC_ENCODING = "mbcs" if sys.platform == "win32" else "utf-8"
 import time
 import urllib.request
 import webbrowser
@@ -236,7 +240,7 @@ def _query_process(pid: int) -> str:
             [_powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
              f'$p = Get-CimInstance Win32_Process -Filter "ProcessId={int(pid)}" | '
              'Select-Object Name,CommandLine; if ($p) { "$($p.Name)|$($p.CommandLine)" }'],
-            capture_output=True, text=True, encoding="mbcs", errors="replace",
+            capture_output=True, text=True, encoding=PROC_ENCODING, errors="replace",
             timeout=5, creationflags=CREATE_NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired):
         return ""

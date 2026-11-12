@@ -22,6 +22,10 @@ import os
 import shutil
 import subprocess
 import sys
+
+# 跨平台子进程文本编码：mbcs 仅 Windows 有（Linux CI 导入即 LookupError）——
+# 非 Windows 用 utf-8 + errors=replace 兜底；本模块功能仍以 Windows 为主。
+PROC_ENCODING = "mbcs" if sys.platform == "win32" else "utf-8"
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -330,7 +334,7 @@ def make_installer() -> Path | None:
     r = subprocess.run(
         [str(iscc), "/Q", f"/DLsAppVersion={version}",
          f"/DLsSourceDir={DIST}", f"/DLsOutputDir={out.parent}", str(iss)],
-        capture_output=True, text=True, encoding="mbcs", errors="replace")
+        capture_output=True, text=True, encoding=PROC_ENCODING, errors="replace")
     if r.returncode != 0 or not out.is_file():
         deploy.log(f"[警告] ISCC 编译失败（exit {r.returncode}）："
                    f"{(r.stdout or '').strip()[-300:]}")

@@ -13,6 +13,10 @@ import os
 import shutil
 import subprocess
 import sys
+
+# 跨平台子进程文本编码：mbcs 仅 Windows 有（Linux CI 导入即 LookupError）——
+# 非 Windows 用 utf-8 + errors=replace 兜底；本模块功能仍以 Windows 为主。
+PROC_ENCODING = "mbcs" if sys.platform == "win32" else "utf-8"
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -58,7 +62,7 @@ def compile_exe(out_dir: Path) -> Path | None:
     if MANIFEST.exists():
         cmd.append("/win32manifest:" + str(MANIFEST))
     cmd.append(str(CS))
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="mbcs", errors="replace")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding=PROC_ENCODING, errors="replace")
     if r.returncode != 0 or not exe.exists():
         log(f"[警告] csc 编译失败（exit {r.returncode}）——跳过 LabSentinel.exe，包仍可用 启动.bat")
         if r.stdout.strip():

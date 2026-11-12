@@ -17,6 +17,10 @@ import os
 import shutil
 import subprocess
 import sys
+
+# 跨平台子进程文本编码：mbcs 仅 Windows 有（Linux CI 导入即 LookupError）——
+# 非 Windows 用 utf-8 + errors=replace 兜底；本模块功能仍以 Windows 为主。
+PROC_ENCODING = "mbcs" if sys.platform == "win32" else "utf-8"
 import tempfile
 import time
 from datetime import datetime
@@ -82,7 +86,7 @@ def run_text(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
 def ps(script: str) -> None:
     exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     r = subprocess.run([exe, "-NoProfile", "-Command", script],
-                       capture_output=True, text=True, encoding="mbcs", errors="replace",
+                       capture_output=True, text=True, encoding=PROC_ENCODING, errors="replace",
                        creationflags=CREATE_NO_WINDOW)
     if r.returncode != 0:
         # PS 输出是 GBK：PYTHONUTF8=1 下不指定 mbcs 解码会崩（build_launcher_exe 同款修法）
@@ -94,7 +98,7 @@ def desktop_dir() -> Path:
     exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     r = subprocess.run([exe, "-NoProfile", "-Command",
                         '[Environment]::GetFolderPath("Desktop")'],
-                       capture_output=True, text=True, encoding="mbcs", errors="replace",
+                       capture_output=True, text=True, encoding=PROC_ENCODING, errors="replace",
                        creationflags=CREATE_NO_WINDOW)
     return Path((r.stdout or "").strip() or (Path.home() / "Desktop"))
 

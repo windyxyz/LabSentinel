@@ -14,6 +14,10 @@ import os
 import shutil
 import subprocess
 import sys
+
+# 跨平台子进程文本编码：mbcs 仅 Windows 有（Linux CI 导入即 LookupError）——
+# 非 Windows 用 utf-8 + errors=replace 兜底；本模块功能仍以 Windows 为主。
+PROC_ENCODING = "mbcs" if sys.platform == "win32" else "utf-8"
 import time
 from pathlib import Path
 
@@ -33,7 +37,7 @@ def msg(text: str, title: str = "LabSentinel 安装器", style: int = MB_OK) -> 
 def _ps(args: list[str]) -> str:
     exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     r = subprocess.run([exe, *args], capture_output=True, text=True,
-                       encoding="mbcs", errors="replace",
+                       encoding=PROC_ENCODING, errors="replace",
                        creationflags=install_portable.CREATE_NO_WINDOW)
     return (r.stdout or "").strip()
 
