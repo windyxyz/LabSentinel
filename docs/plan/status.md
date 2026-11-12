@@ -345,10 +345,11 @@ stdout+stderr 一并打印后才看到真实 include 错误；本机与 CI 的�
 6. install_portable 升级前 `--stop` 无 timeout。
 
 **Rust-first 战略（用户 2026-11-13 指令）**：推进全面 Rust 重构（确实无法重构
-的功能除外），新开发一律直接写 Rust 不再 Python-first。现有基线：数据面
-（ls-analyzer sidecar）已灰度、控制面 ls-server 105/106 对齐但独立模式缺分析
-worker。路线 = ADR-0011 落盘 + 分阶段计划（L3 补齐 → L4 单二进制 → 启动链
-评估豁免清单）。
+的功能除外），新开发一律直接写 Rust 不再 Python-first。决策与豁免清单已落盘
+**ADR-0011**（docs/adr/0011-rust-first-complete-refactor.md），分阶段执行计划
+**docs/plan/rust-first-roadmap-2026-11-13.md**（RA1 分析 worker → RA2 控制面
+补全 → RA3 L4 单二进制 → RA4 部署链替换；RA1.0 设计勘察进行中）。过渡期 Python
+只修 bug 不加功能。
 
 ## 本轮环境事件（2026-11-09）
 
