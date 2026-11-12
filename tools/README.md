@@ -190,3 +190,19 @@ v1 的词表文件 `m0-spike/yolo11n_ppe.classes.txt` 已就位。
 D:/LabSentinel/gpu-venv/Scripts/python.exe tools/train_ppe.py \
     --data datasets/merged/data.yaml --epochs 1 --name runs/ppe_gpu_smoke --device dml
 ```
+
+## 九、黄金语料归档工具（S7 验收留档，非日常流水线）
+
+以下 4 个脚本服务于 2026-11-06 的 `docs/验证记录-S7-L1黄金语料对齐.md`
+（Python ↔ Rust 检测/跟踪逐帧对齐验证），**不参与生产运行、不在 CI 中调用**，
+仅保留用于复现历史验收结论。日常训练/推理/评估请用上文一至八节的工具。
+
+| 脚本 | 用途 | 复现入口 |
+|---|---|---|
+| `golden_diff.py` | 比对两份 gold jsonl 事件流，输出一致率与差异明细 | 验证记录 §逐帧对齐 |
+| `detect_compare.py` | Python 与 Rust 检测框 IoU / 置信度差值对比（58/58 ≥ 0.99） | 验证记录 §检测对齐 |
+| `export_track_vectors.py` | 从标注语料导出跟踪向量（合成语料用） | 验证记录 §跟踪向量 |
+| `export_real_track_vector.py` | 从真实视频导出跟踪向量（大语料 track-agnostic 85%） | 验证记录 §真实语料 |
+
+> 归档口径：R2-308 计划补齐 ≥10 段场景（遮挡/夜间/断流等）时，这些脚本会重新
+> 成为主力；当前保留原地，不删除、不纳入常规 README 主流程。

@@ -1,7 +1,7 @@
 # 45 · 模型接入手册（新模型 → 上线，照做即可）
 
 > v0.1（2026-10-26）· 场景：v2/v3 模型训练完成后，**零改代码**接入现有系统。
-> 前置：训练工具链见 `tools/train_ppe.py`；评估见 `tools/eval_report.py`；门禁见 历史里程碑清单（已删除）。
+> 前置：训练工具链见 `tools/train_ppe.py`；评估见 `tools/eval_report.py`；门禁见 78 号文档 §T-321。
 
 ## 0. 命名与放置约定（唯一约定，违反会导致服务端找不到模型）
 
@@ -56,7 +56,7 @@ LS_PPE_WEARING_CONF=0.20           # 穿戴证据阈值
 [engine] backend=directml model=...yolo11n_ppe.onnx init=0.2s (accel: run 串行锁启用)
 [engine] ppe model loaded: ...yolo11n_ppe.onnx
 ```
-（当前 PpeEngine 的 names 若仍硬编码，说明 历史里程碑清单（已删除） #2 未做——先完成该参数化任务，再走本手册。）
+（当前 PpeEngine 的 names 若仍硬编码，说明 78 号文档 §T-321 #2 未做——先完成该参数化任务，再走本手册。）
 
 ## 3. 上线前门禁（全部通过才算接入完成）
 
