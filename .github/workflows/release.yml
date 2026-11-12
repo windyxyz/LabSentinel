@@ -86,15 +86,18 @@ jobs:
         run: |
           $pattern = if ("${{ matrix.variant }}" -eq "dml") { "LabSentinel-portable-*-dml.zip" } else { "LabSentinel-portable-*.zip" }
           $zip = Get-ChildItem Resources/dist/$pattern | Where-Object { $_.Name -notlike "*-dml.zip" -or "${{ matrix.variant }}" -eq "dml" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          python scripts/smoke_portable.py --zip $zip.FullName --timeout 90
+          # smoke 依赖 httpx（运行时依赖，只在 staging site-packages 里）——
+          # setup-python 的裸 Python 没有；用 staging 自带的 runtime 跑冒烟自举
+          $staging = "Resources/dist/portable/LabSentinel"
+          & "$staging/runtime/python.exe" scripts/smoke_portable.py --zip $zip.FullName --timeout 90
       - name: T-410 install/uninstall 冒烟（隔离目录）
         shell: pwsh
         run: |
           $pkg = Get-Item Resources/dist/portable/LabSentinel
           $dir = Join-Path $env:RUNNER_TEMP "ls-install-smoke"
-          python scripts/install_portable.py install --source $pkg.FullName --install-dir $dir --no-shortcuts --no-autostart
+          & "$pkg/runtime/python.exe" scripts/install_portable.py install --source $pkg.FullName --install-dir $dir --no-shortcuts --no-autostart
           if ($LASTEXITCODE -ne 0) { throw "install 失败" }
-          python scripts/install_portable.py uninstall --install-dir $dir
+          & "$pkg/runtime/python.exe" scripts/install_portable.py uninstall --install-dir $dir
           if ($LASTEXITCODE -ne 0) { throw "uninstall 失败" }
       - name: SHA256SUMS
         shell: pwsh
