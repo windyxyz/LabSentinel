@@ -1192,7 +1192,7 @@ dependencies = [
  "ls-ingest",
  "ls-proto",
  "ls-track",
- "prost 0.13.5",
+ "prost 0.14.4",
  "serde",
  "serde_json",
  "tokio",
@@ -1264,7 +1264,7 @@ dependencies = [
 name = "ls-proto"
 version = "0.1.0"
 dependencies = [
- "prost 0.13.5",
+ "prost 0.14.4",
  "protoc-bin-vendored",
  "tonic",
  "tonic-build",

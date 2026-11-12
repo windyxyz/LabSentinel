@@ -18,7 +18,7 @@ ls-dispatch = { path = "../ls-dispatch" }  # R2-305: 渠道快照转 ChannelConf
 ls-infer = { path = "../ls-infer", features = ["tract", "ort"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tonic = "0.13"
-prost = "0.13"
+prost = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { workspace = true }
