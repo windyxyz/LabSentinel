@@ -6,6 +6,11 @@ import time
 
 import pytest
 
+# keepawake 走 Win32 SetThreadExecutionState（ctypes.windll.kernel32），
+# Linux 上 start() 恒返回 False——整文件跳过。
+pytestmark = pytest.mark.skipif(sys.platform != "win32",
+                                reason="Windows 防休眠功能（Win32）")
+
 from app import keepawake
 
 ES_CONTINUOUS = keepawake.ES_CONTINUOUS
