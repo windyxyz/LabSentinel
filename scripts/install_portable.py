@@ -44,7 +44,9 @@ RUN_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 UNINSTALL_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"
 # 2026-10-31 VM 实测：pythonw（无控制台）下每个 reg/powershell/taskkill 子进程都会闪一个
 # 控制台窗——统一 CREATE_NO_WINDOW；交互控制台场景该标志无副作用
-CREATE_NO_WINDOW = 0x08000000
+# 2026-11-13：非 Windows 平台 creationflags 非法（subprocess 直接 ValueError）——
+# 置 0（Linux CI 跑 installer 测试时 import 本模块不炸；功能仍仅 Windows 生效）
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 # 临时目录/默认安装根在导入期解析一次：main 的 argparse 默认值不直接写 os.environ
 # 表达式（切断"env → CLI 参数 → 删除链"的静态污点边；真实值不变）。
 import tempfile as _tempfile

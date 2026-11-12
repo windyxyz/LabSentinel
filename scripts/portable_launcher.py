@@ -39,7 +39,8 @@ _SERVER_PROCS: list = []  # uvicorn Popen 句柄（就绪循环 poll() 用）
 # 文件，launcher.lock 永远只存 "pid port"（T-101/T-202 契约）。
 GO2RTC_LOCK = LOGS / "go2rtc.lock"
 PORT_DEFAULT = 8000
-CREATE_NO_WINDOW = 0x08000000
+# 非 Windows creationflags 非法（Linux CI 导入本模块的测试会炸）——置 0
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 # 播种单源（任务51）：schema/演示摄像头/区域/规则统一在 scripts/seed_demo.py 维护
 sys.path.insert(0, str(Path(__file__).resolve().parent))
