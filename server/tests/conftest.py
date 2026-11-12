@@ -48,4 +48,11 @@ def isolate_settings_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "annotation_pool_dir", data / "annotation_pool")
     # lifespan 会重写 tools/go2rtc.yaml（真实文件！测试期间指到 tmp）
     monkeypatch.setattr(settings, "go2rtc_yaml", tmp_path / "go2rtc.yaml")
+    # 写限流桶是模块级全局（main._rate_windows，client_ip → deque）——CI linux 上
+    # TestClient 全部来自 testclient 且跑得快，120/60s 桶被前面用例耗尽后，
+    # 后续写请求全 429（实测 face/discovery 用例 assert 429 in (401,403) 失败）。
+    # 每用例清空，恢复"每个用例独立预算"的语义。
+    import app.main as _main
+    if hasattr(_main, "_rate_windows"):
+        _main._rate_windows.clear()
     yield
