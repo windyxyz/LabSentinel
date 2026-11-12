@@ -329,20 +329,24 @@ def make_installer() -> Path | None:
                    "zip 便携形态照常产出；CI 由 choco install innosetup 提供")
         return None
     version = (ROOT / "VERSION").read_text("ascii").strip()
-    # 变体后缀对齐 make_zip（cpu 无后缀 / dml 加 -dml）：CI 双变体 artifact
-    # merge-multiple 下载到同一目录，同名 setup 会互相覆盖（run 43242535539 实证）
+    dist_dir = ROOT / "Resources" / "dist"
+    # .iss OutputBaseFilename 固定为无后缀名；产物若需变体后缀（dml 对齐 zip 命名，
+    # 防 CI 双变体 artifact merge-multiple 同名互相覆盖）则编译后重命名
+    compiled = dist_dir / f"LabSentinel-setup-{version}.exe"
     suffix = f"-{_VARIANT}" if _VARIANT != "cpu" else ""
-    out = ROOT / "Resources" / "dist" / f"LabSentinel-setup-{version}{suffix}.exe"
+    out = dist_dir / f"LabSentinel-setup-{version}{suffix}.exe"
     deploy.log(f"[安装器] ISCC 编译 → {out.name} (iscc={iscc})")
     r = subprocess.run(
         [str(iscc), "/Q", f"/DLsAppVersion={version}",
-         f"/DLsSourceDir={DIST}", f"/DLsOutputDir={out.parent}", str(iss)],
+         f"/DLsSourceDir={DIST}", f"/DLsOutputDir={dist_dir}", str(iss)],
         capture_output=True, text=True, encoding=PROC_ENCODING, errors="replace")
-    if r.returncode != 0 or not out.is_file():
+    if r.returncode != 0 or not compiled.is_file():
         deploy.log(f"[警告] ISCC 编译失败（exit {r.returncode}）："
                    f"stdout={(r.stdout or '').strip()[-400:]} "
                    f"stderr={(r.stderr or '').strip()[-400:]}")
         return None
+    if out != compiled:
+        compiled.replace(out)
     deploy.log(f"[安装器] 完成 {out.stat().st_size / 1e6:.1f}MB")
     return out
 
