@@ -8,6 +8,24 @@
 
 ## [0.2.0] - 2026-11-12
 
+### 结构化拆分 + 安装包化 + 清理（第四轮，2026-11-12）
+- **ls-server 细粒度拆分**：`engine-rs/crates/ls-server/src/main.rs` 5179→1349 行，
+  新增共享层 `state.rs / router.rs / middleware.rs / util.rs` 与
+  `handlers/` 11 个功能域模块（events/cameras/zones_rules/stats/pairing/ops/
+  alerts/config_io/export/folder_images/misc_status），`alert_cfg` 内嵌 mod 随迁；
+  机械搬移零逻辑改动（fn 统一 `pub(crate)`、根 re-export 门面），便于按域归档管理。
+  门禁：ls-server 24/24、workspace 96/0 + clippy/fmt，路由覆盖率 105/106 不回退。
+- **Inno Setup 双形态打包**（ADR-0010）：同一 staging 由
+  `build_portable.py --zip --installer` 产出便携 zip 与 `LabSentinel-setup-<ver>.exe`；
+  `deploy/windows/installer.iss`（按用户安装、覆盖升级、快捷方式/卸载项、可选服务
+  勾选页、`finalize` 健康检查、SignTool 占位）；CI 加 `choco install innosetup`；
+  59-portable-install/部署指南补双形态章节。调研覆盖 Jellyfin/mpv.net/Tautulli/
+  Navidrome 等「本地服务 + Web UI」打包实践。
+- **清理**：删除仓库根 78 号审阅原件（docs/plan 正本保留）与 `%SBOX%` 空目录；
+  `docs/30-architecture.md` 重写为 0.2.0 双运行时现状；tools/README 补黄金语料
+  归档工具章节；45-model-onboarding 悬空引用修正；TEMP 冒烟残留清理；
+  release_check 移除已无对象的 openssl allowlist（复跑无 FAIL）。
+
 ### 便携包启动链修复（2026-11-12，冒烟 8/8 全绿）
 - `smoke_portable.py` 首次完整跑通前连环暴露 4 个真实缺陷，全部修复：
   ① `health_check.py` 漏随包（R2-402 拆分后 `install_portable.py` 同目录导入失败，

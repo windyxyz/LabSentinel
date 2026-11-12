@@ -1,8 +1,21 @@
 # LabSentinel 任务状态台账（R2 轮）
 
-> 本文件是 `78-review-round2-plan-2026-11-07.md` §4「首轮任务完成度核对」与
-> §12「精细化任务清单」的持续更新版。每批任务完成后更新对应行，附实际运行证据。
+> 本文件是 `78-review-round2-plan-2026-11-07.md`（已移至 docs/plan/ 归档正本）
+> §4「首轮任务完成度核对」与 §12「精细化任务清单」的持续更新版。
+> 每批任务完成后更新对应行，附实际运行证据。
 > 口径：✅ 完成并验证 · 🟡 部分/有条件 · ⬜ 未开始 · ⏸ 明确暂缓（用户 2026-11-08 决定）。
+
+## 第四轮：结构化拆分 + 安装包化 + 清理（2026-11-12，用户决策全量推进）
+
+| 批次 | commit | 内容与证据 |
+|---|---|---|
+| A · main.rs 拆分 | cbbbe30 | `ls-server/src/main.rs` 5179→1349 行；新增 `state.rs/router.rs/middleware.rs/util.rs` + `handlers/` 11 域模块 + `handlers/mod.rs`；`alert_cfg` 内嵌 mod 随迁；机械搬移零逻辑改动（fn `pub(crate)`、根 re-export 门面、router 用 `axum::middleware::` 限定避免模块名冲突）；`cargo fix` 清超集 use。验证：ls-server 24/24、workspace 96/0、clippy -D warnings + fmt、路由覆盖率 105/106、`--dump-routes`/`--selftest-db` 接口不变 |
+| B · Inno Setup 双形态 | dedae39 | ADR-0010 入库（调研覆盖 Jellyfin NSIS+NSSM / mpv.net Inno+zip 双形态 / Tautulli Python 服务 NSIS / Navidrome WinSW / fsplayer·NipaPlay·Ruffle·NextPlayer 查证）；`deploy/windows/installer.iss`（按用户/覆盖升级/快捷方式/HKCU 卸载项/可选服务勾选页/finalize 健康检查/SignTool 占位）；`install_portable.py finalize` 复用 health_check；`build_portable.py --installer`（find_iscc 探测，未装警告跳过 zip-only）；release.yml 加 choco ISCC 步骤与 setup.exe artifact；59-portable-install/部署指南补双形态。验证：py_compile、本机无 ISCC 警告跳过实测、安装器回归 5 passed；**ISCC 编译待 CI 验证**（本机未装 Inno Setup，如实保留） |
+| C · 清理 | 83e93d8 | 删根目录 78 原件（docs/plan 正本保留）与 `%SBOX%` 空目录；release_check 移除 openssl allowlist（复跑 11 PASS/0 FAIL）；`docs/30-architecture.md` 重写为 0.2.0 双运行时现状；tools/README 补「黄金语料归档工具」章节（4 近孤儿脚本原地保留）；45-model-onboarding 悬空引用改指 78 号 §T-321；TEMP 冒烟残留与孤儿 go2rtc 清理 |
+
+**遗留**：ISCC.exe 编译 setup.exe 需 CI（GitHub runner `choco install innosetup`）实证，
+本机未装；数字签名（T-403）仍为人工事项。历史文档（40-roadmap/70-release-plan/
+验证记录/20-research/m0-spike）按用户决策保留不动。
 
 ## 二轮审查基线与本轮目标
 

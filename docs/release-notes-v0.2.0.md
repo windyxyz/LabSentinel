@@ -36,6 +36,13 @@
   跑通前修复 4 个真实缺陷（`health_check.py` 漏随包、go2rtc 锁覆盖单实例
   锁、PID 防护拒停探针启动的服务、5 处 `python -c` 动态代码串文件化），
   并对齐 2 处冒烟断言（T-406 无演示素材播种口径 / 回环不走系统代理）。
+- **安装包形态（ADR-0010）**：同一 staging 产物同时出便携 zip 与
+  `LabSentinel-setup-<ver>.exe`（Inno Setup 6，mpv.net/Tautulli 双形态先例）；
+  按用户安装、覆盖升级、开始菜单/控制面板卸载项、可选 Windows 服务勾选页，
+  装完自动真实健康检查；升级/回滚能力复用现有 Python 安装器。CI 由
+  `choco install innosetup` 编译（本地未装 ISCC 如实标注待 CI 验证）。
+- **Rust 控制面归档化管理**：ls-server 巨石 main.rs（5179 行）拆为共享层 +
+  11 个功能域模块（1349 行主文件），便于按域归档与后续演进；门禁全绿。
 
 ## 行为变化（升级须知）
 
