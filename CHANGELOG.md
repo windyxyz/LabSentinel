@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### 文档重组（2026-11-13）
+- `docs/` 按用途分组：`guide/`（部署/安装与卸载/运维/Runbook/FAQ/杀软说明/快速开始）、
+  `dev/`（架构设计/API 参考/MQTT/插件/模型接入/数据飞轮/需求/术语表）、
+  `releases/`（发布说明/风险登记册/性能基线）、`archive/`（历史留存：愿景/M0 路线图/
+  v0.1 发布草稿/S7 验证记录/预研/opentip 申诉预备）；`plan/`（活跃台账）不变。
+- 新增 `docs/README.md` 文档索引；重写仓库根 README（0.2.0 口径：安装包/便携包/
+  源码三种方式、Rust 控制面状态、已知限制）；架构文档并入 dev/ 并更新模块地图
+  （ls-server handlers/ 11 域拆分后）。
+- 全仓引用同步（25 文件）；release_check 断链 81 条全部可达（0 FAIL）。
+- 安装器（ADR-0010）双模式收口：向导可选「仅为我/为所有用户」（后者开始菜单写
+  {commonprograms}、卸载键落 HKLM，其余用户可见），多语言（简体中文/English），
+  完成页开始菜单+桌面快捷方式双勾选（默认全勾）；ALLUSERS/per-user 双沙箱
+  安装-卸载实测通过；控制面板条目由 Inno 原生键维护（去除手写重复键）。
+
 ## [0.2.0] - 2026-11-12
 
 ### 结构化拆分 + 安装包化 + 清理（第四轮，2026-11-12）
@@ -22,7 +36,7 @@
   59-portable-install/部署指南补双形态章节。调研覆盖 Jellyfin/mpv.net/Tautulli/
   Navidrome 等「本地服务 + Web UI」打包实践。
 - **清理**：删除仓库根 78 号审阅原件（docs/plan 正本保留）与 `%SBOX%` 空目录；
-  `docs/30-architecture.md` 重写为 0.2.0 双运行时现状；tools/README 补黄金语料
+  `docs/dev/架构设计.md` 重写为 0.2.0 双运行时现状；tools/README 补黄金语料
   归档工具章节；45-model-onboarding 悬空引用修正；TEMP 冒烟残留清理；
   release_check 移除已无对象的 openssl allowlist（复跑无 FAIL）。
 
@@ -43,7 +57,7 @@
   httpx `trust_env=False`（回环绝不走系统代理）+ 网络异常家族捕获；
   `--stop` 后先等服务 PID 消失再走强杀复核。
 - **更正**：本机未安装卡巴斯基，此前会话「杀软删除产物」系探测路径错误
-  （产物嵌套 `portable/LabSentinel/`）；`docs/杀毒软件误报说明.md` 与
+  （产物嵌套 `portable/LabSentinel/`）；`docs/guide/杀毒软件误报说明.md` 与
   opentip 材料转为预防性参考（勿提交申诉）。
 
 ### Rust 控制面深审简化（2026-11-11/12）
@@ -78,7 +92,7 @@
 - **启动链审计**：全部随包脚本无 `-c`/`exec`/`runpy` 动态执行；`urlopen` 仅
   回环健康检查；`runtime\python.exe` 来自 python.org 官方签名 embed（SHA256
   锁定）。
-- 新增 `docs/杀毒软件误报说明.md`：命中原因对照表、排除路径指引、误报申诉
+- 新增 `docs/guide/杀毒软件误报说明.md`：命中原因对照表、排除路径指引、误报申诉
   通道（opentip.kaspersky.com / Microsoft WDSI）；维护者本机复现注意事项
   （卡巴斯基会静默删除便携 runtime，构建期冒烟不受影响，发布产物 zip 经
   全量 CRC 校验完整）。
@@ -87,8 +101,8 @@
 - 删除 `deploy/docker/`（compose.yaml / Dockerfile / Dockerfile.cuda / Dockerfile.rust），
   不再推进容器化开发——原已知问题（容器内监听回环、go2rtc 配置卷不共享、
   compose 双网络声明，78 号 N-07/N-08/N-19）随产物移除而闭合。
-- `docs/部署指南-Linux.md` 改写为 **systemd 原生部署唯一路线**（Docker 路线移除，
-  附自行封装指引）；`docs/release-notes-v0.2.0.md` 同步改为「Docker 支持终止」。
+- `docs/guide/部署指南-Linux.md` 改写为 **systemd 原生部署唯一路线**（Docker 路线移除，
+  附自行封装指引）；`docs/releases/release-notes-v0.2.0.md` 同步改为「Docker 支持终止」。
 - 78 号文档 R2-401 状态由「暂缓」改为「终止」。
 
 ### 二轮余量收口（2026-11-11，78 号文档 §12 收尾批次）
@@ -100,7 +114,7 @@
   （CPU 变体的 1.94×）、4 路 **17.5fps/路**（1.80×），远超 §14.3 DML 门槛
   4.5fps/路；4 路总吞吐与单路几乎持平证明 GPU 未饱和。`tools/perf_baseline.py`
   的实现标注改为按 Engine 实际后端输出（`python-<backend>`），python-dml 行
-  仅在缺 DML EP 的环境才出现 n/a；`docs/perf-baseline.md` 已并入实测数据。
+  仅在缺 DML EP 的环境才出现 n/a；`docs/releases/perf-baseline.md` 已并入实测数据。
 - **R2-502 收口**：WebrtcPlayer 信令全流程前端测试 8 例（子协议鉴权——有令牌
   `['labsentinel','bearer.<t>']`/无令牌不请求、T-102 相对路径同源组装、
   offer-answer base64 往返、ontrack 已连接与 attempts 清零、断线指数退避
@@ -266,7 +280,7 @@
 - T-610（Q-10）：Linux 分发三件套——`deploy/docker/Dockerfile`（CPU+OpenVINO）、
   `Dockerfile.cuda`（TensorRT/CUDA + 独立哈希锁 requirements-cuda.lock）、
   `compose.yaml`（go2rtc 共享回环）、`deploy/systemd/labsentinel.service`（加固 unit）、
-  `docs/部署指南-Linux.md`（含 §13.7 验收清单）。
+  `docs/guide/部署指南-Linux.md`（含 §13.7 验收清单）。
 - T-335：Rust CI（rust.yml：双平台 cargo test + clippy -D warnings + fmt check，
   workspace 零告警——修 12 处手写代码告警、生成代码在 ls-proto 内豁免）。
 - T-334：`tools/README-ENGINE-BOUNDARY.md`——Python 训练链与 Rust 引擎的唯一交付契约

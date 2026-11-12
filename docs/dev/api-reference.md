@@ -182,7 +182,7 @@ days 1-90 钳制；缺数据天补零。
 - `GET /api/plugins`：清单+enabled/running/pid/returncode/last_error/permissions；
 - `POST /api/plugins/{id}/enable|disable|start|stop`；`GET /api/plugins/{id}/logs?tail=200`；
 - 红线：插件=代码执行——默认禁用、令牌按权限注入（不进清单/日志）、入口必须在插件目录内；
-  完整指南见 [74-plugin-guide](74-plugin-guide.md)。
+  完整指南见 [74-plugin-guide](plugin-guide.md)。
 
 ### MQTT 事件总线（任务125，默认关闭）
 
@@ -190,7 +190,7 @@ days 1-90 钳制；缺数据天补零。
   queue_depth,host,topic_prefix,error}`（未配置也 200）；
 - 主题 `{prefix}/events/{camera_id}/{type}` + `{prefix}/status`（online/offline，LWT）；
   payload v1（`v`/`device_type` 契约只加不减）——完整规范见
-  [73-mqtt-protocol](73-mqtt-protocol.md)；事件总线独立于告警链（不受静默/渠道过滤影响）。
+  [73-mqtt-protocol](mqtt-protocol.md)；事件总线独立于告警链（不受静默/渠道过滤影响）。
 
 ### GenAI 复核（任务124，默认关闭）
 
@@ -271,7 +271,7 @@ data 外文件）→ 跳过并在 README 写明，**仍 200**；事件不存在 
 ——分母是**已处置**事件（已确认/误报/忽略），不含未处置；窗口内无已处置事件时为 0。
 它是"已处置中误报占比"，**不是**"每天误报次数"（后者看 `daily[].false_positive`）。
 模型止损线（误报 ≤20%/天）的"天数"口径由 24h 验收按 `daily` 统计；本比率用于观察处置质量趋势
-（交叉引用：历史模型评估记录（已删除）、docs/摄像头24h验收清单.md）。
+（交叉引用：历史模型评估记录（已删除）、docs/guide/摄像头24h验收清单.md）。
 
 ### GET /api/stats/daily?days=7&start_ts=&end_ts=（任务21 增强）
 

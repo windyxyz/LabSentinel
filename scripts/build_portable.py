@@ -252,7 +252,7 @@ def smoke() -> None:
     # 2026-11-11 反误报治理：三段 `python -c 动态代码串` 改为文件执行（探针脚本）——
     # 卡巴斯基对「python.exe -c 动态代码串」启发式敏感（2026-11-09 install_portable
     # 先例；2026-11-11 staging 删除时间线与 build 冒烟的 -c 执行完全吻合），静态
-    # 二分实证证明文件集本身无特征（见 docs/杀毒软件误报说明.md）。
+    # 二分实证证明文件集本身无特征（见 docs/guide/杀毒软件误报说明.md）。
     probe = ROOT / "scripts" / "probe_runtime.py"
     r = subprocess.run([str(RUNTIME / "python.exe"), str(probe),
                         "--app-dir", str(DIST / "app" / "server")],

@@ -19,7 +19,7 @@
 //! - **plugins**（插件子进程管理）：暂不迁移。清单校验/环境白名单/生命周期与
 //!   Windows 句柄语义强绑定（T-112/T-602），且属低频管理操作、无热路径收益；
 //!   L3 控制面迁移时用 `std::process` + 显式白名单环境重做（语义表已在
-//!   `server/app/plugins.py` 与 `docs/74-plugin-guide.md`，可直接翻译）。
+//!   `server/app/plugins.py` 与 `docs/dev/plugin-guide.md`，可直接翻译）。
 
 pub mod backup;
 pub mod escalation;

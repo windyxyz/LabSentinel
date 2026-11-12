@@ -35,7 +35,9 @@ LS_TOKEN_SET = re.compile(r"^#?\s*LS_ADMIN_TOKEN=.+$")
 TEXT_SUFFIXES = {".md", ".py", ".js", ".ts", ".vue", ".bat", ".txt", ".yml", ".yaml",
                  ".json", ".html", ".css", ".example"}
 SKIP_DIRS = {"dist", "node_modules", ".git", "m0-spike", "runs", "datasets", "logs",
-             "效果演示", "Resources", "__pycache__", ".venv", "docs" + os.sep + "assets"}
+             "效果演示", "Resources", "__pycache__", ".venv", "docs" + os.sep + "assets",
+             # 训练 venv 误建到仓库根（.gitignore 已忽略；第三方代码的 TODO 不属于本项目）
+             "LabSentinel"}
 LINK_RE = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)\s]+)\)|!\[[^\]]*\]\(([^)\s]+)\)")
 
 
@@ -219,7 +221,7 @@ def check_required_files(res) -> None:
     # 2026-11 文档清理：历史交接/核对报告已删除，必需文件只保留现行文档
     required = ["LICENSE", "NOTICE", "README.md", "server/.env.example",
                 "server/requirements.txt", "web/package.json",
-                "docs/运维手册.md", "docs/部署指南.md", "docs/验证记录-S7-L1黄金语料对齐.md"]
+                "docs/guide/运维手册.md", "docs/guide/部署指南.md", "docs/archive/验证记录-S7-L1黄金语料对齐.md"]
     missing = [f for f in required if not (ROOT / f).exists()]
     if missing:
         results_add(res, "必需文件", "FAIL", "缺：" + ", ".join(missing), "补齐后重跑")

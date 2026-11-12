@@ -52,7 +52,7 @@ python tools\camera_soak.py --preflight --base-url http://127.0.0.1:8000 --camer
 4. 预期结果：列表出现新行；点「启动」后状态 `running`、fps 与子码流标称一致、
    「实时画面」出图；
 - 失败先查：状态列红字 `last_error`（401=账号、404/超时=路径、`cannot open`=编码不支持）
-  → 完整字段看 `GET /api/cameras/{id}/status`（[口径](35-api-reference.md) §8.3）。
+  → 完整字段看 `GET /api/cameras/{id}/status`（[口径](api-reference.md) §8.3）。
 
 ## 3. 画安全区与规则
 
@@ -65,7 +65,7 @@ python tools\camera_soak.py --preflight --base-url http://127.0.0.1:8000 --camer
 3. 每条规则配：`level`（1 提示/2 警告/3 严重）、`cooldown`（同区同 track 冷却秒数，建议 ≥30）、
    `time_start/time_end`（只在实验室使用时段启用，夜间红外会放大误报）；
 4. 多路同布局：用摄像头复制接口一键带过区域+规则（`POST /api/cameras/{id}/copy`，
-   见 [35-api-reference](35-api-reference.md)）；
+   见 [35-api-reference](api-reference.md)）；
 5. 预期：启动后走一圈，Events 页出现 enter/enter_no_ppe 事件、截图与时间正确。
 
 ## 4. 告警验证（先自测后真实）
@@ -123,7 +123,7 @@ python tools\camera_soak.py --all --duration 24h --interval 30
 
 - 停单路：「摄像头」页点「停止」（守护不拉已手动停止的摄像头）；
 - 恢复旧配置：配置导出/导入（`POST /api/config/import`，merge/replace 双模式，
-  [35-api-reference](35-api-reference.md) §10）；导入前先 `GET /api/config/export` 留底；
+  [35-api-reference](api-reference.md) §10）；导入前先 `GET /api/config/export` 留底；
 - 数据备份：`python scripts\backup_data.py`（备份 API 保证 WAL 一致，别直接拷 .db）；
 - 卸载服务：便携版「卸载.bat」/ 控制面板卸载（数据目录自动改名备份，不直接删）；
-  全流程见 [59-portable-install](59-portable-install.md)。
+  全流程见 [59-portable-install](安装与卸载.md)。

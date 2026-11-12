@@ -2,7 +2,7 @@
 
 用法：
     python tools/perf_baseline.py --duration 60 --cameras 1,4,8
-    python tools/perf_baseline.py --duration 1800 --cameras 1,4,8 --out docs/perf-baseline.md
+    python tools/perf_baseline.py --duration 1800 --cameras 1,4,8 --out docs/releases/perf-baseline.md
 
 测量口径（与 76 号 §13.5 / 78 号 §14.3 一致）：
 - 每路 720p 文件源 @5fps，记录每路分析 fps、CPU%、RSS、句柄数；

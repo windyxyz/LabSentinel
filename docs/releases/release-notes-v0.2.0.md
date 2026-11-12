@@ -30,7 +30,7 @@
 - **GPU 变体实测**（R2-303）：可选 DML 变体锁 `requirements-win-dml.lock`
   （onnxruntime-directml 1.24.4）。Radeon 880M 核显实测：单路 **69.43fps**
   （CPU 1.94×）、4 路 **17.5fps/路**（1.80×），远超 4.5fps/路 门槛
-  （`docs/perf-baseline.md`）。
+  （`docs/releases/perf-baseline.md`）。
 - **便携包启动链 8/8 冒烟全绿**（发布前实证）：`smoke_portable.py` 隔离
   解包 → 启动 → 就绪 → API/前端/播种断言 → 停止 → 隔离零污染，首次完整
   跑通前修复 4 个真实缺陷（`health_check.py` 漏随包、go2rtc 锁覆盖单实例
@@ -65,7 +65,7 @@
 - **Docker 支持终止**（维护者决策，2026-11-11）：`deploy/docker/*`（compose /
   Dockerfile / Dockerfile.cuda / Dockerfile.rust）已从仓库移除，不再修复其已知
   问题（绑定回环、go2rtc 配置卷不共享等）；Linux 部署请使用 systemd 原生路线
-  （`docs/部署指南-Linux.md`）。
+  （`docs/guide/部署指南-Linux.md`）。
 - **Rust 产物不进正式 Release**：`labsentinel-server` / `ls-analyzer` 仅作为
   nightly artifact（`release.yml nightly-rust` job，保留 7 天）；ls-server L3
   仍有 1 条路由未实现（`/api/folders/{cid}/scan` 需推理管线接线，维持 503）。
@@ -88,7 +88,7 @@
 1. **杀毒软件启发式误报**：便携包的「启动器 EXE → 解释器托管本地服务」形态与
    恶意软件画像重叠，可能被启发式引擎（HEUR 类）命中——启动链已审计清白
    （无动态代码执行），`LabSentinel.exe` 已注入版本资源与应用清单；遇到告警请按
-   **`docs/杀毒软件误报说明.md`** 处理（来源校验 / 排除路径 / 误报申诉通道）。
+   **`docs/guide/杀毒软件误报说明.md`** 处理（来源校验 / 排除路径 / 误报申诉通道）。
    代码签名证书（T-403）是根治手段。**更正（2026-11-12）**：开发本机未安装
    卡巴斯基，此前会话「杀软删除产物」系探测路径错误（已更正）；便携包冒烟
    8/8 实证启动链工作正常。

@@ -145,7 +145,7 @@ CHANGELOG 和 `Dockerfile.rust` 注释中"L3/L4 已替换 Python 运行时"的�
 | T-304 ORT 调优 | ✅ | — | — |
 | T-305 告警限流 | ✅ | — | — |
 | T-306 迟滞 | ✅ | — | — |
-| T-307 压测基线 | ⬜ | 没有基线数据文档（`docs/perf-baseline.md` 不存在）；T-328 切 CPU 后性能影响无人测量 | N-20 |
+| T-307 压测基线 | ⬜ | 没有基线数据文档（`docs/releases/perf-baseline.md` 不存在）；T-328 切 CPU 后性能影响无人测量 | N-20 |
 | T-308 存证 JPEG | ✅ | — | — |
 | T-310 AnalyzerBackend | ✅ | — | — |
 | PF-08 审计写入阻塞事件循环 | ⬜ | `main.py:271` 仍在 async 中间件里同步写 SQLite | N-24 |
@@ -389,7 +389,7 @@ targets = ["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu", "x86_64-unknown-li
 
 ### 9.1 N-20（P1）GPU 加速丢失
 T-328 方案 A 的逻辑是"同一个 ORT 版本 → Python/Rust 检测逐位一致 → 黄金语料一致率达标"。这个目标本身合理，但代价是 Windows 默认推理从 DirectML 变成 CPU：
-- 原 v0.1 的 M0 实测与架构都基于 DirectML（`docs/30-architecture.md` 推理锁机制、`engine.py` 注释）。
+- 原 v0.1 的 M0 实测与架构都基于 DirectML（`docs/dev/架构设计.md` 推理锁机制、`engine.py` 注释）。
 - 现在 Windows 锁里只有 `onnxruntime==1.31.1`（无 DmlExecutionProvider），`LS_BACKEND_ORDER=directml` 也只会自动降级到 CPU。
 - Rust 默认 tract：纯 CPU 解释执行，通常明显慢于 ORT CPU（**待 R2-306 实测**）。
 
@@ -652,7 +652,7 @@ T-328 方案 A 的逻辑是"同一个 ORT 版本 → Python/Rust 检测逐位一
 #### R2-306 压测基线（补 T-307）
 - P1 / PERF
 - **步骤**：`tools/camera_soak.py` 跑 1/4/8 路 720p 文件源 @5fps，各 30 分钟，三种实现：Python-CPU、Python-DML（R2-303 后）、Rust-tract、Rust-ort；
-  记录每路分析 fps、事件端到端 P95、CPU%、RSS、句柄数；结果写 `docs/perf-baseline.md`（附机器配置）。
+  记录每路分析 fps、事件端到端 P95、CPU%、RSS、句柄数；结果写 `docs/releases/perf-baseline.md`（附机器配置）。
 - **门槛**：沿用 76 号 §13.5，并新增"Rust 路径吞吐 ≥ Python 同后端 1.5 倍"作为推荐切换的条件。
 
 ### R3 Rust L1 可发布

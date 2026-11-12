@@ -1,4 +1,4 @@
-"""模型就绪自检（任务32，docs/45-model-onboarding.md §3 上线门禁）。
+"""模型就绪自检（任务32，docs/dev/model-onboarding.md §3 上线门禁）。
 
 只读检查：不启停服务、不做推理（onnxruntime 仅 CPU 建 session 读形状）、不改任何文件、
 不打印 .env 敏感值（只判断非空/存在性）。

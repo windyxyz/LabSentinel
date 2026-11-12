@@ -424,7 +424,7 @@ async function watchLive(cam) {
       <button :disabled="alertTesting" @click="runAlertTest">{{ alertTesting ? '测试中…' : '发送测试告警' }}</button>
       <span v-if="alertTestMsg" class="muted">{{ alertTestMsg }}</span>
     </div>
-    <p class="muted" style="margin-top:2px">渠道申请与配置方法见仓库 docs/部署指南.md「4. 告警渠道配置」。</p>
+    <p class="muted" style="margin-top:2px">渠道申请与配置方法见仓库 docs/guide/部署指南.md「4. 告警渠道配置」。</p>
 
     <h3 style="margin:14px 0 10px">失败投递（最近 10 条）</h3>
     <table v-if="failedDeliveries.length">
@@ -527,7 +527,7 @@ async function watchLive(cam) {
     <p class="muted" style="margin:0 0 6px">
       插件=代码执行：默认禁用、管理员显式启用。清单放
       <code>&lt;数据目录&gt;/plugins/&lt;id&gt;/plugin.json</code>，
-      指南见 docs/74-plugin-guide.md。</p>
+      指南见 docs/dev/plugin-guide.md。</p>
     <div class="row" style="margin-bottom:6px">
       <button class="ghost" @click="loadPlugins">刷新插件</button>
       <span v-if="pluginsError" class="muted">{{ pluginsError }}</span>

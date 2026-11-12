@@ -11,7 +11,7 @@
 |---|---|---|
 | A · main.rs 拆分 | cbbbe30 | `ls-server/src/main.rs` 5179→1349 行；新增 `state.rs/router.rs/middleware.rs/util.rs` + `handlers/` 11 域模块 + `handlers/mod.rs`；`alert_cfg` 内嵌 mod 随迁；机械搬移零逻辑改动（fn `pub(crate)`、根 re-export 门面、router 用 `axum::middleware::` 限定避免模块名冲突）；`cargo fix` 清超集 use。验证：ls-server 24/24、workspace 96/0、clippy -D warnings + fmt、路由覆盖率 105/106、`--dump-routes`/`--selftest-db` 接口不变 |
 | B · Inno Setup 双形态 | dedae39 | ADR-0010 入库（调研覆盖 Jellyfin NSIS+NSSM / mpv.net Inno+zip 双形态 / Tautulli Python 服务 NSIS / Navidrome WinSW / fsplayer·NipaPlay·Ruffle·NextPlayer 查证）；`deploy/windows/installer.iss`（按用户/覆盖升级/快捷方式/HKCU 卸载项/可选服务勾选页/finalize 健康检查/SignTool 占位）；`install_portable.py finalize` 复用 health_check；`build_portable.py --installer`（find_iscc 探测，未装警告跳过 zip-only）；release.yml 加 choco ISCC 步骤与 setup.exe artifact；59-portable-install/部署指南补双形态。验证：py_compile、本机无 ISCC 警告跳过实测、安装器回归 5 passed；**ISCC 编译待 CI 验证**（本机未装 Inno Setup，如实保留） |
-| C · 清理 | 83e93d8 | 删根目录 78 原件（docs/plan 正本保留）与 `%SBOX%` 空目录；release_check 移除 openssl allowlist（复跑 11 PASS/0 FAIL）；`docs/30-architecture.md` 重写为 0.2.0 双运行时现状；tools/README 补「黄金语料归档工具」章节（4 近孤儿脚本原地保留）；45-model-onboarding 悬空引用改指 78 号 §T-321；TEMP 冒烟残留与孤儿 go2rtc 清理 |
+| C · 清理 | 83e93d8 | 删根目录 78 原件（docs/plan 正本保留）与 `%SBOX%` 空目录；release_check 移除 openssl allowlist（复跑 11 PASS/0 FAIL）；`docs/dev/架构设计.md` 重写为 0.2.0 双运行时现状；tools/README 补「黄金语料归档工具」章节（4 近孤儿脚本原地保留）；45-model-onboarding 悬空引用改指 78 号 §T-321；TEMP 冒烟残留与孤儿 go2rtc 清理 |
 
 **遗留**：ISCC.exe 编译 setup.exe 需 CI（GitHub runner `choco install innosetup`）实证，
 本机未装；数字签名（T-403）仍为人工事项。历史文档（40-roadmap/70-release-plan/
@@ -144,7 +144,7 @@
 | R2-502 | f29bbf3 | WebrtcPlayer 信令全流程前端测试 8 例；vitest 34→42 全绿 + 构建通过 |
 | R2-303 | 68a7b26 | `/api/system` providers 透出 + Dashboard GPU 状态卡 + DML 实机首测（见 R2 表）；pytest 定向 13 通过 |
 | R2-309 收尾 + 遗留复核 | 6c60ca3 | monthly.pdf（pdf.rs 手写 PDF，5+1 测试）→ 覆盖率 **105/106=99.1%**；Mimosa 两处污点复核为误报并注释；PPE 502 报错指明来源；perf-baseline rust 行 11-11 复测 |
-| 0.2.0 发布准备 | 68708c3 | CHANGELOG 切 `## [0.2.0]`（release.yml 校验口径）+ `docs/release-notes-v0.2.0.md`（§15 全项如实标注） |
+| 0.2.0 发布准备 | 68708c3 | CHANGELOG 切 `## [0.2.0]`（release.yml 校验口径）+ `docs/releases/release-notes-v0.2.0.md`（§15 全项如实标注） |
 | release_check 修正 | 4ba9656 | 密钥扫描 allowlist 增 `$(openssl rand -hex`（审阅文档示例命令误报）；自身测试 4 例通过 |
 
 **最终门禁实测**（本机 Windows，venv Py3.12.16 / rustup GNU 工具链 1.99.1 / node 24.22.2）：
@@ -175,7 +175,7 @@
 | Docker 修复或标注预览 | ✅ 标注「预览不随版」（用户决策；静态问题 N-07/N-08/N-19 保留在 78 号 §10.2 待办） |
 | Rust 产物不进正式 Release | ✅ 仅 `nightly-rust` artifact（7 天保留） |
 | CHANGELOG L3/L4 口径更正 | ✅ R2-501（17/97 时代）→ 本版 105/106 |
-| 发布说明默认 CPU 推理 | ✅ `docs/release-notes-v0.2.0.md`（含 DML 变体 0.3.0 与实测数据） |
+| 发布说明默认 CPU 推理 | ✅ `docs/releases/release-notes-v0.2.0.md`（含 DML 变体 0.3.0 与实测数据） |
 | §14 其余（签名 WARN） | ✅ 未签名预版声明在发布说明；证书到位前保持 draft |
 
 ### 本轮工具链与环境事件（2026-11-11）
@@ -193,7 +193,7 @@
   + `-lucrt`）与 `scripts/build_rust.py` 一致。`perf_baseline.py --rust-exe`/
   `rust_route_coverage.py --exe` 均已传显式路径。
 - **GPU 首次实测**：AMD Radeon 880M（Ryzen AI 9 H365 核显）+ DML 变体锁可用，
-  数据见 `docs/perf-baseline.md`（符合 Q2-02 预期，1.0 默认推理可考虑 DML）。
+  数据见 `docs/releases/perf-baseline.md`（符合 Q2-02 预期，1.0 默认推理可考虑 DML）。
 - **Q-08 PPE 资产确认不可用**：`Windy-LabSentinel/assets` GitHub 仓库不存在
   （404），`yolo11n_ppe.onnx`/`.classes.txt` 按需下载依赖维护者上传资产或换源；
   两侧下载失败报错已指明来源与动作。
@@ -207,7 +207,7 @@
 | 项 | 结果 | 证据 |
 |---|---|---|
 | 跨语言测试激活 | ✅ | `CARGO_TARGET_DIR` 指向本机构建产物后，`test_store_bidirectional`（DB 三路径）、`test_contract_l3`、`test_analyzer_sidecar`（gRPC e2e）、`test_sidecar_proto_config` 共 **9 例此前 skip 的用例首次真实执行并全部通过**（8.35s） |
-| DML 8 路压测 | ✅ | 30s 总 64.45fps / **每路 8.06fps ≥ §14.3 DML 验收门槛 4.5**——8 路 720p@5fps 场景 DML 变体通过验收口径（`docs/perf-baseline.md` 已并入） |
+| DML 8 路压测 | ✅ | 30s 总 64.45fps / **每路 8.06fps ≥ §14.3 DML 验收门槛 4.5**——8 路 720p@5fps 场景 DML 变体通过验收口径（`docs/releases/perf-baseline.md` 已并入） |
 | pip-audit / npm audit 复跑 | ✅ | 均 No known vulnerabilities / 0 vulnerabilities（win 锁 + 生产依赖） |
 | 便携包本机实机构建 | ✅（构建）/ ⏸（独立冒烟） | `build_portable.py --variant cpu --zip --with-rust` 三次构建全过：内建冒烟（PATH 剥离导入 / grpc / cryptography / opencv 单发行版 / app.main 导入）全部 PASS；zip `LabSentinel-portable-20261111.zip` 252MB / 10122 条目；`--with-rust` 打包 `bin/ls-analyzer.exe`（release）+ `bin/onnxruntime.dll` |
 | 真 bug 修复（C# 入口） | ✅ | 独立冒烟首跑即抓到：`LabSentinelLauncher.cs` 旧实现相对路径 `runpy.run_path('scripts/portable_launcher.py')` 假设 cwd=包根，其他 cwd 启动 exe 时 APP_ROOT 漂移（实录漂移到开发机仓库根）——改绝对路径 + 显式 WorkingDirectory；`smoke_portable.py` exe 分支补 `cwd=pkg`（双保险）。**CI 上同样会挂，本批修复后 CI 冒烟才能过**（3619d12） |
@@ -225,7 +225,7 @@
 > ② 冒烟失败的真实原因是**四个真实 bug**（已全部修复，冒烟 8/8 全绿）。
 > 二分定位「静态子集全部存活」结论仍然成立且如今有了正确解释：本就无查杀。
 > AV 治理批次交付的 exe 身份化/启动链审计/误报说明文档仍有效（预防性减面），
-> 但 opentip 材料/信任区建议**无需执行**；`docs/杀毒软件误报说明.md` 与
+> 但 opentip 材料/信任区建议**无需执行**；`docs/guide/杀毒软件误报说明.md` 与
 > `docs/opentip-申诉材料-0.2.0.md` 保留作未来发布参考（勿提交申诉）。
 > 卡巴斯基相关记忆条目已更正。
 
@@ -234,8 +234,8 @@
 
 | 批次 | commit | 内容与证据 |
 |---|---|---|
-| Docker 终止 | 8958721 | `deploy/docker/`（compose/Dockerfile/Dockerfile.cuda/Dockerfile.rust）删除；`docs/部署指南-Linux.md` 改写为 systemd 唯一路线；release-notes/CHANGELOG/status.md R2-401 ⛔ 终止；config.py/main.rs 注释清理（--healthcheck 保留作通用探活）。N-07/N-08/N-19 随产物移除闭合 |
-| 启动器减面（原「AV 治理」） | e999095 | `LabSentinel.exe` 身份化（程序集属性 + /win32manifest asInvoker）；启动链审计清白（无 -c/exec/runpy，urlopen 仅回环）；`docs/杀毒软件误报说明.md`（保留作发布参考）。原「卡巴斯基删除」定性作废 |
+| Docker 终止 | 8958721 | `deploy/docker/`（compose/Dockerfile/Dockerfile.cuda/Dockerfile.rust）删除；`docs/guide/部署指南-Linux.md` 改写为 systemd 唯一路线；release-notes/CHANGELOG/status.md R2-401 ⛔ 终止；config.py/main.rs 注释清理（--healthcheck 保留作通用探活）。N-07/N-08/N-19 随产物移除闭合 |
+| 启动器减面（原「AV 治理」） | e999095 | `LabSentinel.exe` 身份化（程序集属性 + /win32manifest asInvoker）；启动链审计清白（无 -c/exec/runpy，urlopen 仅回环）；`docs/guide/杀毒软件误报说明.md`（保留作发布参考）。原「卡巴斯基删除」定性作废 |
 | Rust 深审简化 | 6a72810 | ① `web_dist` 死字段接线（LS_WEB_DIST + ServeDir SPA 回退；踩坑：`not_found_service` 会 SetStatus 强制 404，须用 `fallback`）；② R2-108 深审补齐（testserver 测试态门控）；③ 回归 2 例 |
 | Rust 深审简化·第二批 | fb1cfff | ① `detail_err` helper 收敛——`(StatusCode, Json(json!({"detail": "..."})))` 手写样板 70 处（纯字面量形态）批量收敛，带 code 字段/动态 msg 的复合错误体保留；② 兑现文件头「缓存策略」——静态服务 `static_cache_policy` 中间件：/assets/* hash 文件名 immutable 一年、index/SPA 回退 no-cache（发版即生效）；回归 1 例。实测 ls-server 24/24、workspace **96/0** + clippy/fmt 通过 |
 | 便携包启动链排障 | 见下方详述 | 冒烟 6/8→**8/8 全绿**，修复 4 个真实 bug + 2 处冒烟断言过时 |
@@ -268,7 +268,7 @@
 本轮曾连续 6 次冒烟旧日期 zip 导致修复未被验证；② 排障断言（Test-Path）必须先核对
 产物真实布局（DIST 嵌套 LabSentinel/）；③ **本机无卡巴斯基**（维护者 2026-11-12
 确认）——本文「三向推进批」之前的「卡巴斯基删除/阻断」记录全部作废，真实原因见
-「便携包启动链排障」表；`docs/杀毒软件误报说明.md` 与 opentip 材料保留作发布参考
+「便携包启动链排障」表；`docs/guide/杀毒软件误报说明.md` 与 opentip 材料保留作发布参考
 （**勿提交申诉**）。
 
 ## 本轮环境事件（2026-11-09）
@@ -284,7 +284,7 @@
 
 - **R2-401 Docker：⛔ 终止（用户 2026-11-11 决策，不再推进 Docker 开发）**——
   `deploy/docker/`（compose.yaml / Dockerfile / Dockerfile.cuda / Dockerfile.rust）
-  已删除；`docs/部署指南-Linux.md` 改写为 systemd 唯一路线；release-notes 改为
+  已删除；`docs/guide/部署指南-Linux.md` 改写为 systemd 唯一路线；release-notes 改为
   「Docker 支持终止」。N-07/N-08/N-19 随产物移除而闭合（不再修复）。
 - R2-404 VM 安装验收留档；Flutter/Tauri 客户端；局域网真机验收。
 
