@@ -215,6 +215,9 @@ def pid_alive(pid: int) -> bool:
 LAUNCHER_PROC_NAMES = ("python.exe", "pythonw.exe")
 LAUNCHER_PROC_MARKERS = ("portable_launcher.py", "uvicorn app.main:app",
                          "probe_runtime.py")
+# --stop 强杀后的进程消亡窗（秒）：taskkill /F 是异步终止，杀后立即查活会把
+# 垂死进程误判存活。测试可 monkeypatch 此值缩短等待。
+STOP_DEATH_WAIT_S = 5.0
 _PS_EXE: str | None = None  # powershell.exe 绝对路径缓存（见 _powershell_exe）
 
 
@@ -434,12 +437,17 @@ def relaunch_installed(install: Path) -> int:
 
 
 def stop_process(pid: int) -> None:
-    """停止服务进程（先优雅后强杀，与 --stop 一致）。"""
+    """停止服务进程（先雅停后强杀，与 --stop 一致；核实真死并落日志）。"""
     subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True,
                    creationflags=CREATE_NO_WINDOW)
     time.sleep(2)
     subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
                    creationflags=CREATE_NO_WINDOW)
+    deadline = time.time() + STOP_DEATH_WAIT_S
+    while pid_alive(pid) and time.time() < deadline:
+        time.sleep(0.25)
+    if pid_alive(pid):
+        log.warning("强杀后 pid=%d 仍存活（端口可能仍被占用），请人工处理", pid)
 
 
 def do_start() -> int:
@@ -579,12 +587,29 @@ def do_stop() -> int:
     time.sleep(2)
     subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
                    creationflags=CREATE_NO_WINDOW)
+    # 2026-11-13 实证（CI dml 冒烟步骤 6 残留 PID）：taskkill 退出码被吞会让
+    # 「已停止」变成谎言——强杀是异步终止，必须核实进程真死（消亡窗+重试一次）
+    # 才删锁；仍存活则锁保留（下次 --stop 可重试）并如实返回非 0。
+    for _ in range(2):
+        if not pid_alive(pid):
+            break
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
+                       creationflags=CREATE_NO_WINDOW)
+        deadline = time.time() + STOP_DEATH_WAIT_S / 2
+        while pid_alive(pid) and time.time() < deadline:
+            time.sleep(0.25)
+    if pid_alive(pid):
+        log.error("强杀后 pid=%d 仍存活，锁保留（服务可能仍占端口 %d）", pid, port)
+        print(f"[失败] 服务进程 pid={pid} 强杀后仍存活；锁已保留，"
+              "请重试 --stop 或用任务管理器处理后手动删除锁。")
+        return 1
     LOCK.unlink(missing_ok=True)
     log.info("已停止 pid=%d port=%d", pid, port)
     print(f"已停止 LabSentinel（pid={pid}, port={port}）。")
 
     # T-202：go2rtc 与服务同生命周期——按独立 go2rtc.lock 停；兼容旧版把
-    # JSON 写在 launcher.lock 里的残留（升级后由停止逻辑一并回收）。
+    # JSON 写在 launcher.lock 里的残留。旧版数据在 launcher.lock 内，必须
+    # 先读后删（原实现先 unlink 再回读，legacy 路径永远读不到）。
     try:
         src = GO2RTC_LOCK if GO2RTC_LOCK.exists() else LOCK
         lock_data = json.loads(src.read_text(encoding="ascii")) if src.exists() else {}
@@ -596,7 +621,13 @@ def do_stop() -> int:
         try:
             subprocess.run(["taskkill", "/PID", str(g2r_pid), "/F"], capture_output=True,
                            creationflags=CREATE_NO_WINDOW)
-            log.info("已停止 go2rtc pid=%d", g2r_pid)
+            deadline = time.time() + STOP_DEATH_WAIT_S / 2
+            while pid_alive(g2r_pid) and time.time() < deadline:
+                time.sleep(0.25)
+            if pid_alive(g2r_pid):
+                log.warning("go2rtc pid=%d 强杀后仍存活，请人工处理", g2r_pid)
+            else:
+                log.info("已停止 go2rtc pid=%d", g2r_pid)
         except OSError as e:
             log.warning("go2rtc 停止失败: %s", e)
     return 0

@@ -85,13 +85,30 @@ def stop_env(tmp_path, monkeypatch):
     return {"lock": lock, "calls": calls}
 
 def test_do_stop_kills_only_on_match(stop_env, monkeypatch):
-    monkeypatch.setattr(pl, "pid_alive", lambda pid: True)
+    # pid_alive 序列：首查存活（进入停止路径），强杀核实后已死
+    calls = {"n": 0}
+
+    def alive(pid):
+        calls["n"] += 1
+        return calls["n"] <= 1
+
+    monkeypatch.setattr(pl, "pid_alive", alive)
     monkeypatch.setattr(pl, "_pid_matches_launcher", lambda pid: True)
     rc = pl.do_stop()
     assert rc == 0
     assert stop_env["calls"], "匹配时必须调用 taskkill"
     assert any("/PID" in c and "4242" in c for c in stop_env["calls"])
     assert not stop_env["lock"].exists()  # 停止后删锁
+
+def test_do_stop_survivor_keeps_lock_returns_1(stop_env, monkeypatch):
+    """强杀后进程仍存活：锁保留（下次 --stop 可重试），如实返回非 0
+    （2026-11-13 修复：此前 taskkill 退出码被吞，rc=0 但服务仍活着）。"""
+    monkeypatch.setattr(pl, "STOP_DEATH_WAIT_S", 0.02)
+    monkeypatch.setattr(pl, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(pl, "_pid_matches_launcher", lambda pid: True)
+    rc = pl.do_stop()
+    assert rc == 1
+    assert stop_env["lock"].exists(), "进程未死绝不能删锁"
 
 def test_do_stop_refuses_and_deletes_lock_on_mismatch(stop_env, monkeypatch):
     monkeypatch.setattr(pl, "pid_alive", lambda pid: True)
@@ -166,8 +183,8 @@ def test_reap_kills_confirmed_ours():
 def test_reap_reports_survivor():
     out = sp.reap_leftover_pids(
         [4242], wait_s=0, alive=lambda p: True,
-        matcher=lambda p: True,
-        killer=lambda p: None)  # 杀了也没死
+        matcher=lambda p: True, death_wait_s=0,
+        killer=lambda p: None)  # 杀了也没死（消亡窗=0：不留真实等待）
     assert out == [4242]
 
 def test_reap_skips_reused_pid():

@@ -109,9 +109,10 @@ def _force_kill_pid(pid: int) -> None:
 
 
 def reap_leftover_pids(pids, wait_s: float = 30.0, alive=None, matcher=None,
-                       killer=None) -> list[int]:
+                       killer=None, death_wait_s: float = 5.0) -> list[int]:
     """--stop 后残留收尾（任务110）：等待窗内未退出的 PID，确认仍是 LabSentinel 的
     python 进程（防 PID 复用误杀）才 taskkill /T /F。返回强杀后仍存活的 PID（交人工）。
+    death_wait_s：强杀后的进程消亡窗（taskkill 异步终止，立即查活会误报垂死进程）。
     （portable_launcher 的 sys.path 注入已在模块级完成。）"""
     import portable_launcher as pl
     alive = alive or pl.pid_alive
@@ -127,7 +128,15 @@ def reap_leftover_pids(pids, wait_s: float = 30.0, alive=None, matcher=None,
         if matcher(p) is not True:  # None（查询失败）同样拒绝——宁可漏杀不可误杀
             print(f"[残留] pid={p} 已非 LabSentinel 进程或身份不明，跳过强杀（请人工确认）")
             continue
-        killer(p)
+        # taskkill /F 是异步终止——杀后立即查活会把垂死进程误判为残留
+        # （2026-11-13 CI dml 冒烟步骤 6 实证）；给消亡窗并重试一次强杀。
+        for _ in range(2):
+            killer(p)
+            deadline = time.time() + death_wait_s
+            while alive(p) and time.time() < deadline:
+                time.sleep(0.25)
+            if not alive(p):
+                break
         if alive(p):
             failed.append(p)
     return failed

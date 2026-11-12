@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### 停止链可靠性（2026-11-13）
+- **`--stop` 不再说谎**：`portable_launcher.do_stop` 此前吞掉 taskkill 退出码，
+  强杀失败也删锁、返回 0（用户看到「已停止」但服务仍活着、端口仍占用）——
+  现在强杀后核实进程真死（5s 消亡窗 + 重试一次）才删锁；仍存活则锁保留
+  （下次 `--stop` 可重试）并如实返回非 0。`stop_process`（启动超时清理）
+  同步核实并落日志。CI dml 冒烟步骤 6 的「残留 PID」实证触发本次修复。
+- 冒烟收尾防误报：`smoke_portable.reap_leftover_pids` 强杀后立即查活会把
+  垂死进程误判为残留（taskkill 异步终止）——加消亡窗 + 重试，消除 CI 抖动。
+- 安装/卸载链感知停止结果：覆盖升级前置停止与卸载三级降级均检查 `--stop`
+  返回码，失败时降级重试并明确告警（升级遇文件占用不再莫名其妙）。
+- 附带修复：`do_stop` 旧版 go2rtc 残留回收先删 launcher.lock 再回读导致
+  legacy 路径永远读不到 go2rtc PID——改为先读后删。
+- 测试契约同步：强杀核实路径 + 幸存者保留锁返回 1 的新增用例
+  （test_stop_pid_safety 15 例全绿；安装/冒烟/停止组 57 例全绿）。
+
 ### 文档重组（2026-11-13）
 - `docs/` 按用途分组：`guide/`（部署/安装与卸载/运维/Runbook/FAQ/杀软说明/快速开始）、
   `dev/`（架构设计/API 参考/MQTT/插件/模型接入/数据飞轮/需求/术语表）、
@@ -19,6 +34,10 @@
   {commonprograms}、卸载键落 HKLM，其余用户可见），多语言（简体中文/English），
   完成页开始菜单+桌面快捷方式双勾选（默认全勾）；ALLUSERS/per-user 双沙箱
   安装-卸载实测通过；控制面板条目由 Inno 原生键维护（去除手写重复键）。
+- 发布工程（CI 实证）：release workflow 双变体各自编译 setup.exe（dml 变体
+  编译后重命名对齐 zip 命名，防 artifact merge 同名覆盖），SHA256SUMS 升级为
+  zip+setup 双哈希，publish 上传清单补 setup；中文语言文件随仓库
+  `deploy/windows/languages/`（choco 的 innosetup 不含 unofficial translations）。
 
 ## [0.2.0] - 2026-11-12
 

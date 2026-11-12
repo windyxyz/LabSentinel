@@ -305,8 +305,13 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
     stop_script = install / "scripts" / "portable_launcher.py"
     if upgrading and stopper.exists() and stop_script.exists():
         try:
-            subprocess.run([str(stopper), str(stop_script), "--stop"], capture_output=True,
-                           creationflags=CREATE_NO_WINDOW)
+            r = subprocess.run([str(stopper), str(stop_script), "--stop"],
+                               capture_output=True, creationflags=CREATE_NO_WINDOW)
+            # 2026-11-13 起 --stop 如实返回非 0（强杀后进程仍存活）：升级继续，
+            # 但明确告警——覆盖被占用文件会失败回滚，别让用户莫名其妙
+            if r.returncode != 0:
+                log(f"  [警告] 停止运行中的服务未完全成功（rc={r.returncode}）——"
+                    "若升级报文件占用，请手动停止服务后重试")
         except OSError:
             pass  # runtime 损坏/非可执行（如测试假包）：升级按无服务继续
         time.sleep(1)  # 等句柄释放
@@ -646,19 +651,23 @@ def do_uninstall(install: Path, purge: bool) -> int:
     stopped = False
     if exe.exists():  # 任务55：优先 EXE 停止入口
         try:
-            subprocess.run([str(exe), "--stop"], capture_output=True,
-                           creationflags=CREATE_NO_WINDOW)
-            stopped = True
+            r = subprocess.run([str(exe), "--stop"], capture_output=True,
+                               creationflags=CREATE_NO_WINDOW)
+            stopped = r.returncode == 0
+            if not stopped:
+                trace(f"exe --stop rc={r.returncode}（服务可能仍存活），降级重试")
         except OSError as e:
             trace(f"exe --stop failed: {e}")
     if not stopped:
         for py in (sys.executable, install / "runtime" / "python.exe"):
             try:
                 if py and Path(py).exists() and launcher.exists():
-                    subprocess.run([str(py), str(launcher), "--stop"], capture_output=True,
-                           creationflags=CREATE_NO_WINDOW)
-                    stopped = True
-                    break
+                    r = subprocess.run([str(py), str(launcher), "--stop"],
+                                       capture_output=True, creationflags=CREATE_NO_WINDOW)
+                    stopped = r.returncode == 0
+                    if stopped:
+                        break
+                    trace(f"python --stop rc={r.returncode}（服务可能仍存活）")
             except OSError as e:
                 trace(f"python --stop failed ({py}): {e}")
     if not stopped:  # 兜底：按锁文件 PID 强杀（所有 spawn 路径都被锁时的唯一出路）
