@@ -287,7 +287,7 @@ def main() -> int:
         # 锁内服务 PID：--stop 后应已终止——先等其消失（最多 10s），仍活才走
         # 强杀复核（防 PID 复用误杀）。正在退出的进程查询命令行会返回 None
         # （"身份不明"），不能据此判失败（2026-11-12 冒烟实证的误报）。
-        pl = portable_launcher
+        import portable_launcher as pl  # noqa: PLC0415  模块级 sys.path 注入后可安全导入
         gone_wait = False
         for _ in range(10):
             if not pl.pid_alive(int(lock_pid)):
