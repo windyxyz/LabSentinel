@@ -94,7 +94,9 @@ jobs:
         shell: pwsh
         run: |
           $pkg = Get-Item Resources/dist/portable/LabSentinel
-          $dir = Join-Path $env:RUNNER_TEMP "ls-install-smoke"
+          # 卸载白名单只放行 LOCALAPPDATA/PROGRAMFILES 下的二级目录（防误删，2026-11-13
+          # 实测 D:\a\_temp 被 [拒绝]）——用 LOCALAPPDATA\Programs 下符合受管语义的目录
+          $dir = Join-Path $env:LOCALAPPDATA "Programs\ls-install-smoke"
           & "$pkg/runtime/python.exe" scripts/install_portable.py install --source $pkg.FullName --install-dir $dir --no-shortcuts --no-autostart
           if ($LASTEXITCODE -ne 0) { throw "install 失败" }
           & "$pkg/runtime/python.exe" scripts/install_portable.py uninstall --install-dir $dir
