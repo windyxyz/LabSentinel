@@ -107,6 +107,12 @@ def reap_leftover_pids(pids, wait_s: float = 30.0, alive=None, matcher=None,
                        killer=None) -> list[int]:
     """--stop 后残留收尾（任务110）：等待窗内未退出的 PID，确认仍是 LabSentinel 的
     python 进程（防 PID 复用误杀）才 taskkill /T /F。返回强杀后仍存活的 PID（交人工）。"""
+    # staging runtime 是 _pth 隔离模式（禁用 cwd/site 自动导入）——scripts/ 目录
+    # 须显式注入 sys.path 才能同目录导入 portable_launcher（CI 实测）。
+    import sys as _sys
+    _scripts = str(Path(__file__).resolve().parent)
+    if _scripts not in _sys.path:
+        _sys.path.insert(0, _scripts)
     import portable_launcher as pl
     alive = alive or pl.pid_alive
     matcher = matcher or pl._pid_matches_launcher
