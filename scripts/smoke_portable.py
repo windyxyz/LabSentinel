@@ -210,6 +210,7 @@ def main() -> int:
         ok = False
         detail = ""
         dl = time.time() + a.timeout  # 任务119：窗口与 --timeout 一致（> 启动器就绪窗口），冷启动 ~29s 不再擦边
+        last_err = ""
         while time.time() < dl:
             try:
                 st, body = http_get(api, "/api/system")
@@ -218,9 +219,13 @@ def main() -> int:
                     ok = bool(sysinfo.get("backend")) and bool(sysinfo.get("version"))
                     detail = f"backend={sysinfo.get('backend')} version={sysinfo.get('version')} port={lock_port}"
                     break
+                last_err = f"HTTP {st}"
                 time.sleep(1)  # 2026-10-30 审阅：非 200 也要等，否则连发空转后立即判负
-            except Exception:  # noqa: BLE001 网络层异常（含 httpx 家族）一律等下一轮
+            except Exception as e:  # noqa: BLE001 网络层异常（含 httpx 家族）一律等下一轮
+                last_err = f"{type(e).__name__}: {e}"
                 time.sleep(1)
+        if last_err:
+            detail = f"{detail} | last_err={last_err[:160]}" if ok else f"last_err={last_err[:160]}"
         if not step("3b /api/system 200 且 backend/version 非空", ok, detail):
             keep_reason = "服务未就绪"
             print_log_tails(cfg_dir)
