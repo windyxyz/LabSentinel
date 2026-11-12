@@ -74,13 +74,15 @@ def validate_settings() -> list[dict]:
             add("FAIL", key, f"不可写: {e}", "检查目录权限/杀软拦截")
 
     # 模型
+    # LS_PPE_MODEL="" 空串被 pydantic 转成 Path('.')（truthy）——CI 实测 linux
+    # 收集期在 with_suffix 抛 "empty name"。空路径视同未配置（回归 2026-11-13）。
     ppe = settings.ppe_model or settings.model_fp32
-    if not ppe:
+    if not ppe or Path(str(ppe)) == Path("."):
         add("WARN", "ppe_model", "未配置实验服模型", "仅人员检测，无实验服识别")
     else:
         p = Path(str(ppe))
         if not p.exists():
-            add("FAIL", "ppe_model", f"不存在: {p}", "检查路径或下载模型（docs/45）")
+            add("FAIL", "ppe_model", f"不存在: {p}", "检查路径或下载模型（docs/dev/45）")
         elif p.stat().st_size < _MIN_MODEL_BYTES:
             add("FAIL", "ppe_model", f"过小 ({p.stat().st_size / 1e6:.1f}MB)", "模型文件可能损坏")
         else:
