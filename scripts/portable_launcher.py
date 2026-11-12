@@ -42,6 +42,36 @@ _SERVER_PROCS: list = []  # uvicorn Popen 句柄（就绪循环 poll() 用）
 # smoke_portable 步骤 3a 90s 等不到合法锁、go2rtc 也无法正确回收。拆分到独立
 # 文件，launcher.lock 永远只存 "pid port"（T-101/T-202 契约）。
 GO2RTC_LOCK = LOGS / "go2rtc.lock"
+
+
+def stop_go2rtc_if_any(legacy: dict | None = None) -> None:
+    """按 go2rtc.lock 停止托管的 go2rtc（强杀+消亡窗核实）。
+
+    do_stop 主路径 / 无锁早退 / do_start 超时清理三处共用——2026-11-13 P2（审查
+    实证）：失败路径此前只停 uvicorn 不停 go2rtc → 孤儿常驻 1984，且后续 --stop
+    在无 launcher.lock 时早退永远够不到它。legacy：旧版把 JSON 写在 launcher.lock
+    里的残留数据（do_stop 删锁前读出传入，兼容升级路径）。
+    """
+    lock_data: dict = {}
+    if GO2RTC_LOCK.exists():
+        try:
+            lock_data = json.loads(GO2RTC_LOCK.read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            lock_data = {}
+    elif isinstance(legacy, dict):
+        lock_data = legacy
+    g2r_pid = (lock_data.get("go2rtc") or {}).get("pid") if isinstance(lock_data, dict) else None
+    GO2RTC_LOCK.unlink(missing_ok=True)
+    if g2r_pid and pid_alive(g2r_pid):
+        subprocess.run(["taskkill", "/PID", str(g2r_pid), "/F"], capture_output=True,
+                       creationflags=CREATE_NO_WINDOW)
+        deadline = time.time() + STOP_DEATH_WAIT_S / 2
+        while pid_alive(g2r_pid) and time.time() < deadline:
+            time.sleep(0.25)
+        if pid_alive(g2r_pid):
+            log.warning("go2rtc pid=%d 强杀后仍存活，请人工处理", g2r_pid)
+        else:
+            log.info("已停止 go2rtc pid=%d", g2r_pid)
 PORT_DEFAULT = 8000
 # 非 Windows creationflags 非法（Linux CI 导入本模块的测试会炸）——置 0
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -495,7 +525,12 @@ def do_start() -> int:
                 open_browser(lock[1])
                 return 0
             time.sleep(2)
-        log.info("锁内 pid=%d 存活但健康检查连续失败，视为陈旧锁，清理后重启", lock[0])
+        log.info("锁内 pid=%d 存活但健康检查连续失败——先停止旧实例（防双实例共写库）"
+                 "再清锁重启", lock[0])
+        try:
+            stop_process(lock[0])
+        except Exception as e:  # noqa: BLE001
+            log.warning("停止旧实例失败: %s", e)
         LOCK.unlink(missing_ok=True)
     elif lock:
         LOCK.unlink(missing_ok=True)
@@ -554,6 +589,7 @@ def do_start() -> int:
     except Exception as e:  # noqa: BLE001
         log.warning("停止服务进程失败: %s", e)
     LOCK.unlink(missing_ok=True)
+    stop_go2rtc_if_any()  # 2026-11-13 P2：超时清理此前漏掉 go2rtc（孤儿占 1984）
     return 1
 
 
@@ -561,6 +597,7 @@ def do_stop() -> int:
     setup_logging()
     lock = read_lock()
     if not lock:
+        stop_go2rtc_if_any()  # 2026-11-13 P2：无 launcher.lock 时也要回收 go2rtc
         print("未发现运行中的 LabSentinel（无锁文件）。")
         return 0
     pid, port = lock
@@ -607,29 +644,13 @@ def do_stop() -> int:
     log.info("已停止 pid=%d port=%d", pid, port)
     print(f"已停止 LabSentinel（pid={pid}, port={port}）。")
 
-    # T-202：go2rtc 与服务同生命周期——按独立 go2rtc.lock 停；兼容旧版把
-    # JSON 写在 launcher.lock 里的残留。旧版数据在 launcher.lock 内，必须
-    # 先读后删（原实现先 unlink 再回读，legacy 路径永远读不到）。
+    # T-202：go2rtc 与服务同生命周期——旧版把 JSON 写在 launcher.lock 里，必须
+    # 先读后删（原实现先 unlink 再回读，legacy 路径永远读不到）；统一走助手。
     try:
-        src = GO2RTC_LOCK if GO2RTC_LOCK.exists() else LOCK
-        lock_data = json.loads(src.read_text(encoding="ascii")) if src.exists() else {}
-        g2r_pid = (lock_data.get("go2rtc") or {}).get("pid") if isinstance(lock_data, dict) else None
+        legacy = json.loads(LOCK.read_text(encoding="ascii")) if LOCK.exists() else {}
     except (OSError, ValueError):
-        g2r_pid = None
-    GO2RTC_LOCK.unlink(missing_ok=True)
-    if g2r_pid and pid_alive(g2r_pid):
-        try:
-            subprocess.run(["taskkill", "/PID", str(g2r_pid), "/F"], capture_output=True,
-                           creationflags=CREATE_NO_WINDOW)
-            deadline = time.time() + STOP_DEATH_WAIT_S / 2
-            while pid_alive(g2r_pid) and time.time() < deadline:
-                time.sleep(0.25)
-            if pid_alive(g2r_pid):
-                log.warning("go2rtc pid=%d 强杀后仍存活，请人工处理", g2r_pid)
-            else:
-                log.info("已停止 go2rtc pid=%d", g2r_pid)
-        except OSError as e:
-            log.warning("go2rtc 停止失败: %s", e)
+        legacy = {}
+    stop_go2rtc_if_any(legacy=legacy if isinstance(legacy, dict) else None)
     return 0
 
 

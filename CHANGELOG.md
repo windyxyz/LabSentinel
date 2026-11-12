@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### 全面审查加固（2026-11-13）
+- **进程生命周期 P1**：卸载兜底强杀补身份核实（PID 复用绝不误杀）+消亡窗+锁保留；
+  `deploy.py kill_ports` 按端口盲杀改杀前核实命令行；`--purge-data` 锚点校验加
+  「目录内真的像 LabSentinel 数据根」第二道门（自定义安装目录同名无关目录绝不删）。
+- **P2**：陈旧锁先停旧实例再清（防双实例共写库）；go2rtc 三条失败路径统一回收；
+  health_check 探针超时按落盘子进程 PID 兜底强杀；finalize 健康检查补 90s 超时
+  （Inno 安装不再永久卡住）；升级前备份核 rc+zip 非空；冒烟步骤 4 捕 httpx 异常族。
+- **P3 快赢**：reg delete rc 如实上报；portable_stop.bat 失败回退+rc 回传；
+  rc_regression 去 shell=True；冒烟 --stop 超时捕获；ffprobe 输出校验。
+- **一致性**：rust.yml 补 `workflow_call`（security-weekly 周审计此前解析期即失败、
+  从未真正跑过）；release_check 断链扫描递归全 docs（archive 豁免）+ 版本核对路径
+  与 setup 期望名修正；**修复 21 条断链（18 文件 37 处，复跑 0 FAIL）**；
+  孤儿文档收录索引、scripts/README 补 12 条目、release-notes 头部改实际发布口径。
+
 ### 停止链可靠性（2026-11-13）
 - **`--stop` 不再说谎**：`portable_launcher.do_stop` 此前吞掉 taskkill 退出码，
   强杀失败也删锁、返回 0（用户看到「已停止」但服务仍活着、端口仍占用）——

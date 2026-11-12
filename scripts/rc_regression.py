@@ -7,6 +7,7 @@
 """
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -53,8 +54,10 @@ def run_regression(fast=False, smoke=False, zip_path=None, py_exe=None) -> list[
         pytest_py = r"D:\LabSentinel\m0-venv\Scripts\python.exe"
     _run("pytest", [pytest_py, "-m", "pytest", "tests/", "-q"], server_dir, 600, results)
 
-    # 2. web build
-    _run("npm build", ["npm", "run", "build"], web_dir, 300, results, shell=True)
+    # 2. web build（2026-11-13 P3：list + shell=True 在 POSIX 上首参后全变 shell
+    # 位置参数，实际执行裸 npm 可能假通过——用 which 解析 npm.cmd 去掉 shell）
+    npm = shutil.which("npm") or "npm"
+    _run("npm build", [npm, "run", "build"], web_dir, 300, results)
 
     # 3. release_check
     _run("release_check", [sys.executable, str(ROOT / "scripts" / "release_check.py"),

@@ -21,6 +21,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -28,6 +29,10 @@ from urllib.parse import urlparse
 
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _ALLOWED_PATH_PREFIX = "/api/"
+# uvicorn 子进程 PID 落盘：外层 subprocess.run(timeout) 只能杀探针本身，
+# 孙进程（uvicorn）会成孤儿占着临时端口——调用方超时兜底按此文件强杀
+# （2026-11-13 P2 审查实证）。健康检查是串行的，固定文件名无竞态。
+_PIDFILE = Path(tempfile.gettempdir()) / "ls-health-probe.pid"
 
 
 def _loopback_url(port: int, path: str) -> str:
@@ -82,6 +87,10 @@ def _boot_main() -> int:
          "--host", "127.0.0.1", "--port", str(port)],
         cwd=server_cwd, env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _PIDFILE.write_text(str(proc.pid), encoding="ascii")
+    except OSError:
+        pass  # 落盘失败只影响外层超时兜底，正常路径 finally 仍会终止子进程
     ok = False
     try:
         url = _loopback_url(port, "/api/health/ready")
@@ -102,6 +111,7 @@ def _boot_main() -> int:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        _PIDFILE.unlink(missing_ok=True)
     print(f"[health] ready={ok}")
     return 0 if ok else 1
 

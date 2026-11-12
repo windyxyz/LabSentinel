@@ -721,13 +721,37 @@ def check_model_files() -> bool:
     return not missing
 
 
+def _pid_is_ours(pid: str, port: int) -> bool:
+    """端口回收前的身份核实（2026-11-13 P1 审查实证：原按端口盲杀，8000/1984/5173
+    都是常见开发端口，会误杀无关应用）。LabSentinel python（uvicorn/probe/vite
+    标记，与 launcher 同源）或本仓 tools/ 下的 go2rtc 才允许杀；宁漏杀不误杀。"""
+    import portable_launcher as _pl
+    try:
+        if _pl._pid_matches_launcher(int(pid)) is True:
+            return True
+        out = subprocess.run(
+            [_pl._powershell_exe(), "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\").CommandLine"],
+            capture_output=True, text=True, errors="replace", timeout=10).stdout or ""
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    cmd = out.strip()
+    return bool(cmd) and "go2rtc" in cmd.lower() and str(ROOT).lower() in cmd.lower()
+
+
 def kill_ports() -> None:
     for port in PORTS:
         out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True).stdout or ""
         pids = {ln.split()[-1] for ln in out.splitlines()
                 if f":{port} " in ln and "LISTENING" in ln}
         for pid in pids:
-            subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True)
+            if not _pid_is_ours(pid, port):
+                log(f"  [跳过] 端口 {port} 的 pid={pid} 非 LabSentinel/go2rtc 进程，不杀")
+                continue
+            r = subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True)
+            if r.returncode != 0:
+                log(f"  [警告] pid={pid}（端口 {port}）强杀失败 rc={r.returncode}，"
+                    "后续步骤若报文件/端口占用请先手动停止")
 
 
 # ---------- 命令 ----------

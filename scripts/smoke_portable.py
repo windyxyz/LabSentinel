@@ -256,7 +256,9 @@ def main() -> int:
                 asset_st, _ = http_get(api, assets[0])
             step("4 前端首页+资源", marker_ok and asset_st == 200,
                  f"根标记={'命中' if marker_ok else '缺失'} 资源 {assets[0] if assets else '无'} → {asset_st}")
-        except OSError as e:
+        except Exception as e:  # noqa: BLE001 http_get 抛 httpx 异常家族（非 OSError
+            # 子类，步骤 3b 已实证）——与 3b 同口径捕获，避免步骤 4 异常崩出跳过
+            # 停止/隔离断言/清理（2026-11-13 P2 审查实证）
             step("4 前端首页+资源", False, repr(e))
 
         # [5] 首启播种——T-406/Q-07 起演示视频不随包：seed_demo 无素材时跳过播种
@@ -279,9 +281,14 @@ def main() -> int:
              f"{'有' if seeded_log else '无'}）")
 
         # [6] 停止
-        rc = subprocess.run(stop_cmd, env=env, stdin=DEVNULL, stdout=DEVNULL,
-                            stderr=DEVNULL, creationflags=CREATE_NO_WINDOW,
-                            timeout=60).returncode
+        try:
+            rc = subprocess.run(stop_cmd, env=env, stdin=DEVNULL, stdout=DEVNULL,
+                                stderr=DEVNULL, creationflags=CREATE_NO_WINDOW,
+                                timeout=60).returncode
+        except subprocess.TimeoutExpired:
+            # 2026-11-13 P3（审查实证）：--stop 挂死不捕获会 traceback 崩出，
+            # 跳过停止判定/隔离断言/清理——判失败继续走收尾兜底强杀
+            rc = -1
         # 任务110：入口进程 30s 等待窗内应自行退出；不退就句柄级 kill（Popen 句柄无 PID 复用风险）
         entry_gone = True
         if proc is not None and proc.poll() is None:

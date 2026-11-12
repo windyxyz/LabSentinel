@@ -118,8 +118,15 @@ def main() -> int:
         dur = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", str(vp)], capture_output=True, text=True,
-             check=False)
-        secs = float(dur.stdout.strip())
+            check=False)
+        # 2026-11-13 P3（审查实证）：ffprobe 缺失/失败时 float('') 裸崩 ValueError
+        # 断掉整条断言链——先校验 returncode 与可解析性
+        assert dur.returncode == 0 and dur.stdout.strip(), \
+            f"ffprobe 失败（rc={dur.returncode}）：{(dur.stderr or '')[:120]}"
+        try:
+            secs = float(dur.stdout.strip())
+        except ValueError as e:
+            raise AssertionError(f"ffprobe 输出不可解析: {dur.stdout.strip()[:60]!r}") from e
         print(f"[e2e] 存证视频 {vp.name} {vp.stat().st_size}B 时长={secs:.2f}s")
         assert 2.0 <= secs <= 7.0, f"视频时长异常: {secs}"
 

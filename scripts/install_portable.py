@@ -208,8 +208,15 @@ def set_uninstall_registry(install: Path, version: str) -> bool:
 
 
 def remove_uninstall_registry() -> None:
-    subprocess.run(["reg", "delete", UNINSTALL_KEY, "/f"], capture_output=True,
-                   creationflags=CREATE_NO_WINDOW)
+    r = subprocess.run(["reg", "delete", UNINSTALL_KEY, "/f"], capture_output=True,
+                       creationflags=CREATE_NO_WINDOW)
+    # 2026-11-13 P3（审查实证）：rc 被吞会让卸载项被安全软件锁定时静默残留
+    err = (r.stderr or b"")
+    if isinstance(err, bytes):
+        err = err.decode("gbk", "replace")
+    if r.returncode != 0:
+        log(f"  [警告] 控制面板卸载项删除失败（rc={r.returncode}）：{err.strip()[:80]}"
+            "——可能被安全软件锁定，请手动清理")
 
 
 def installed_location() -> Path | None:
@@ -243,9 +250,14 @@ def set_autostart(install: Path, on: bool) -> None:
             log(f"  开机自启：写入失败（{r.stderr.strip()[:60] or '拒绝访问'}）——"
                 "可能被安全软件/启动项管理锁定；可手动把快捷方式放入 shell:startup")
     else:
-        subprocess.run(["reg", "delete", RUN_KEY, "/v", "LabSentinel", "/f"],
-                       capture_output=True, creationflags=CREATE_NO_WINDOW)
-        log("  开机自启：已关闭/清除")
+        r = subprocess.run(["reg", "delete", RUN_KEY, "/v", "LabSentinel", "/f"],
+                           capture_output=True, creationflags=CREATE_NO_WINDOW)
+        # 2026-11-13 P3（审查实证）：删除失败仍报「已关闭」会残留开机自启项
+        if r.returncode == 0:
+            log("  开机自启：已关闭/清除")
+        else:
+            log(f"  [警告] 开机自启项删除失败（rc={r.returncode}）——"
+                "可能被安全软件锁定，请手动检查 HKCU Run\\LabSentinel")
 
 
 def _validate_install_dir(p: Path) -> str | None:
@@ -464,12 +476,19 @@ def _backup_db_before_upgrade(install: Path) -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         script = install / "scripts" / "backup_data.py"
         if script.exists():
-            subprocess.run([str(install / "runtime" / "python.exe"), str(script),
-                            "backup", "--data-dir", str(data_root / "data"),
-                            "--out", str(out), "--no-media"],
-                           capture_output=True, timeout=120,
-                           creationflags=CREATE_NO_WINDOW)
-            log(f"  [备份] 升级前数据已备份：{out}")
+            r = subprocess.run([str(install / "runtime" / "python.exe"), str(script),
+                                "backup", "--data-dir", str(data_root / "data"),
+                                "--out", str(out), "--no-media"],
+                               capture_output=True, timeout=120,
+                               creationflags=CREATE_NO_WINDOW)
+            # 2026-11-13 P2（审查实证）：备份 rc 不检查会让「已备份」变成空壳
+            # zip——DB 被占用时 backup 非零退出，回滚时无 DB 可恢复。
+            if r.returncode == 0 and out.is_file() and out.stat().st_size > 0:
+                log(f"  [备份] 升级前数据已备份：{out}")
+            else:
+                log(f"  [警告] 升级前备份未成功（rc={r.returncode}，"
+                    f"zip={'有' if out.is_file() else '无'}）——升级继续，"
+                    "但健康检查失败回滚时可能无 DB 备份可恢复")
         else:
             import sqlite3 as _sq
             dst = db.with_suffix(".db.pre-upgrade.bak")
@@ -511,6 +530,18 @@ def _health_check(install: Path, cmd: list[str], env: dict | None = None) -> boo
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"  [健康检查] 执行失败: {e}")
+        if isinstance(e, subprocess.TimeoutExpired):
+            # 2026-11-13 P2（审查实证）：超时只杀探针进程，探针 Popen 的 uvicorn
+            # 孙进程会成孤儿占着临时端口——按探针落盘的子进程 PID 兜底强杀。
+            import tempfile as _tf
+            pidfile = _tf.gettempdir() / "ls-health-probe.pid"
+            try:
+                cpid = int(pidfile.read_text("ascii").strip())
+                subprocess.run(["taskkill", "/PID", str(cpid), "/F"],
+                               capture_output=True, creationflags=CREATE_NO_WINDOW)
+                pidfile.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
         return False
 
 
@@ -674,13 +705,30 @@ def do_uninstall(install: Path, purge: bool) -> int:
         lock = install.parent.parent / "LabSentinel" / "logs" / "launcher.lock"
         try:
             pid = int(lock.read_text(encoding="ascii").split()[0])
-            subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True,
-                           creationflags=CREATE_NO_WINDOW)
-            time.sleep(2)
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True,
-                           creationflags=CREATE_NO_WINDOW)
-            lock.unlink(missing_ok=True)
-            trace(f"fallback taskkill pid={pid}")
+            # 2026-11-13 P1（审查实证）：原实现盲杀+吞 rc+无条件删锁——PID 复用会
+            # 误杀无关进程，杀失败仍继续删文件。与 do_stop 同防线：先核实身份，
+            # 强杀后给消亡窗，仍存活则锁保留并明示（文件删除交由 rd 重试兜底）。
+            import portable_launcher as _pl
+            if _pl._pid_matches_launcher(pid) is True:
+                subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True,
+                               creationflags=CREATE_NO_WINDOW)
+                time.sleep(2)
+                for _ in range(2):
+                    subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                                   capture_output=True, creationflags=CREATE_NO_WINDOW)
+                    deadline = time.time() + _pl.STOP_DEATH_WAIT_S / 2
+                    while _pl.pid_alive(pid) and time.time() < deadline:
+                        time.sleep(0.25)
+                    if not _pl.pid_alive(pid):
+                        break
+                if _pl.pid_alive(pid):
+                    log(f"  [警告] 服务进程 pid={pid} 强杀后仍存活，锁保留——"
+                        "部分文件可能因占用残留，请手动停止后重跑卸载")
+                else:
+                    lock.unlink(missing_ok=True)
+                    trace(f"fallback taskkill pid={pid}")
+            else:
+                trace(f"fallback: pid={pid} 非 LabSentinel 进程（锁陈旧/PID 复用），未杀")
         except (OSError, ValueError, IndexError) as e:
             trace(f"fallback taskkill failed: {e}")
     trace("stopped")
@@ -727,12 +775,21 @@ def do_uninstall(install: Path, purge: bool) -> int:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         trace("detached spawned")
     if purge:
-        # 锚点校验：名字固定 LabSentinel 且为祖父目录的直接子项；env 不参与删除判定
-        if data.name == "LabSentinel" and data.parent.resolve() == install.parent.parent.resolve():
+        # 锚点校验两道（2026-11-13 P1 审查实证）：① 名字固定 LabSentinel 且为祖父
+        # 目录的直接子项；② 目录内必须真的像 LabSentinel 数据根（config.env 或
+        # data/labsentinel.db 或 logs/）——自定义安装目录时 install.parent.parent
+        # 下可能碰巧有同名无关目录，原校验由构造恒真，绝不整树删除。
+        looks_like_data = any(
+            (data / m).exists()
+            for m in ("config.env", os.path.join("data", "labsentinel.db"), "logs"))
+        if (data.name == "LabSentinel"
+                and data.parent.resolve() == install.parent.parent.resolve()
+                and looks_like_data):
             _rmtree_retry(data, under=data.parent)
             log("  数据已删除（--purge-data）" + ("" if not data.exists() else "（部分文件仍被占用，重试后未清空）"))
         else:
-            log(f"  [提示] 数据目录位置异常（{data}），跳过自动删除，请人工确认后手动删除")
+            log(f"  [提示] 数据目录位置异常或不像 LabSentinel 数据（{data}），"
+                "跳过自动删除，请人工确认后手动删除")
     else:
         log(f"  数据保留在 {data}（含 config.env/事件/截图；确认不要可手动删除，或 --purge-data）")
     # 进程内只删未锁定部分（app/models/tools/scripts/LICENSE/NOTICE/入口 bat；
@@ -883,9 +940,17 @@ def main() -> int:
         argv, env = spec
         if a.health_cmd:  # 测试/演练覆盖：直接跑指定命令
             argv, env = a.health_cmd, None
-        r = subprocess.run(argv, env=env, capture_output=True, text=True)
-        if r.returncode != 0 or (r.stdout and "ready=False" in r.stdout):
-            log(f"[失败] 新版本健康检查未通过（rc={r.returncode}）: {r.stdout.strip()[:200]}")
+        # 2026-11-13 P2（审查实证）：探针挂死则 Inno Setup 安装永久卡住——90s
+        # 超时按检查失败处理，走回滚（与 _health_check 的 60s 口径一致）。
+        try:
+            r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=90)
+            failed = r.returncode != 0 or (r.stdout and "ready=False" in r.stdout)
+            detail = f"rc={r.returncode}）: {(r.stdout or '').strip()[:200]}"
+        except subprocess.TimeoutExpired:
+            failed = True
+            detail = "90s 超时）: 探针无响应"
+        if failed:
+            log(f"[失败] 新版本健康检查未通过（{detail}")
             if not a.dry_run:
                 rc = rollback(a.install_dir)
                 log(f"[回滚] rc={rc}（数据目录未动）")
