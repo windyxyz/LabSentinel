@@ -1,6 +1,13 @@
-# 测试工作流（T-004，合并原 ci.yml）：双平台 pytest + ruff 门禁 + pip-audit + 前端构建/审计 + OpenAPI 快照校验。
+# 测试工作流（T-004，合并原 ci.yml）：pytest + ruff 门禁 + pip-audit + 前端构建/审计 + OpenAPI 快照校验。
 # 发布/便携包构建走 release.yml（T-402 已重写；旧 portable.yml 已删除）。
 # 门禁说明：ruff 先取 E9/F821/PLE（真错误），规则集随 T-509 收紧。
+#
+# 2026-11-13 平台口径收紧：pytest 与 pip-audit 限定 **windows-latest**——
+# 项目是 Windows-first（安装器/启动链/doctor/plugins 语义全部绑定便携布局，
+# reg/taskkill/creationflags/mbcs 均为 Windows 专属），Linux runner 上的
+# 500+ 用例把 Windows 专属语义跑出七层连环失败（PosixPath('.')/creationflags/
+# mbcs/reg.exe/keepawake Win32/…），逐例跳过不可维护。Linux 保留 ruff（纯静态、
+# 跨平台）+ openapi-check（契约快照）+ web 三条真正跨平台的门禁。
 name: tests
 on:
   push:
@@ -13,10 +20,7 @@ permissions:
 
 jobs:
   pytest:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -26,10 +30,8 @@ jobs:
           cache: pip
       - name: Install (from hash-pinned lock)
         run: |
-          pip install --require-hashes --no-deps -r server/requirements-${{ runner.os == 'Windows' && 'win' || 'linux' }}.lock
+          pip install --require-hashes --no-deps -r server/requirements-win.lock
           pip install pytest pytest-cov ruff pip-audit
-      - name: ruff gate
-        run: ruff check server/app scripts tools --select E9,F821,PLE
       - name: pytest
         working-directory: server
         run: python -m pytest tests -q
@@ -37,7 +39,19 @@ jobs:
           LS_LOG_FILE: "0"
           LS_PPE_MODEL: ""
       - name: pip-audit (fail on high/critical in locked runtime deps)
-        run: pip-audit -r server/requirements-${{ runner.os == 'Windows' && 'win' || 'linux' }}.lock --strict
+        run: pip-audit -r server/requirements-win.lock --strict
+
+  ruff-linux:
+    # 纯静态语法/未定义名门禁（跨平台零依赖语义），保留 Linux runner 做双平台交叉
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check server/app scripts tools --select E9,F821,PLE
 
   web:
     runs-on: ubuntu-latest
