@@ -1,6 +1,7 @@
 """LabSentinel 服务端配置。"""
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -11,6 +12,15 @@ class Settings(BaseSettings):
     model_fp32: Path = BASE_DIR.parent / "m0-spike" / "yolo11n.onnx"
     model_int8: Path = BASE_DIR.parent / "m0-spike" / "yolo11n_xint8_hd.onnx"
     ppe_model: Path | None = None  # 实验服模型（Roboflow 数据集微调导出后配置）
+    # LS_PPE_MODEL="" 空串经 pydantic Path|None 转成 Path('.')（truthy！），
+    # 下游 with_suffix/exists 全炸（CI windows/linux 双实测）。根根治：空串→None。
+
+    @field_validator("ppe_model", mode="after")
+    @classmethod
+    def _empty_ppe_to_none(cls, v):
+        if v is not None and str(v).strip(".") == "":
+            return None
+        return v
     ppe_class_names: str = "lab coat"  # 逗号分隔，穿戴证据类别名
     ppe_violation_class: str = "no lab coat"  # 显式违规类别名（只有它才触发告警）
     ppe_conf: float = 0.30  # 违规判定阈值（高置信才告警）

@@ -428,7 +428,8 @@ def model_status():
     # classes 文件（与 PpeEngine 一致：模型同目录 <stem>.classes.txt）
     classes_file = None
     ppe_p = settings.ppe_model or settings.model_fp32
-    if ppe_p:
+    # 空 Path('.')（LS_PPE_MODEL="" 的 pydantic 产物）同样跳过——with_suffix 会抛
+    if ppe_p and Path(str(ppe_p)) != Path("."):
         stem = Path(str(ppe_p)).with_suffix("")
         cand = stem.with_suffix(".classes.txt")
         if not cand.exists():
