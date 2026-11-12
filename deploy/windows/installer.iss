@@ -1,4 +1,4 @@
-; LabSentinel Windows 安装器（ADR-0010 / 批次 B，2026-11-12；多语言+双模式版 2026-11-13）
+﻿; LabSentinel Windows 安装器（ADR-0010 / 批次 B，2026-11-12；多语言+双模式版 2026-11-13）
 ; 同一 staging（Resources/dist/portable/LabSentinel/）出 setup.exe + 便携 zip 双形态。
 ; 由 scripts/build_portable.py --installer 调用 ISCC.exe 编译；版本由 /DLsAppVersion= 传入。
 ; 参考样板：mpv.net（Inno + 同源 zip）、Tautulli（Python 服务 NSIS）、Jellyfin（可选服务）。
