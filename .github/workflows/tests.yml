@@ -42,7 +42,10 @@ jobs:
           # charmap encode——强制 UTF-8（2026-11-13 CI 实测）
           PYTHONIOENCODING: "utf-8"
       - name: pip-audit (fail on high/critical in locked runtime deps)
-        run: pip-audit -r server/requirements-win.lock --strict
+        # --disable-pip：跳过 pip-audit 内部 venv 安装（--require-hashes 会因锁的
+        # override —— supervision→opencv 未钉版 —— 拒绝解析，2026-11-13 CI 实测），
+        # 直接对锁文件解析出的版本集审计；本地实测 0 漏洞通过。
+        run: pip-audit -r server/requirements-win.lock --strict --disable-pip
 
   ruff-linux:
     # 纯静态语法/未定义名门禁（跨平台零依赖语义），保留 Linux runner 做双平台交叉
