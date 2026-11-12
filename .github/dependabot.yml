@@ -20,3 +20,7 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # force-push 重写历史后 Dependabot 曾自动开升级分支（checkout v7）——
+    # 改为只出安全更新提醒、不自动开 PR（open-pull-requests-limit: 0），
+    # 版本升级随 release.yml 钉 SHA 策略手动评审。
+    open-pull-requests-limit: 0
