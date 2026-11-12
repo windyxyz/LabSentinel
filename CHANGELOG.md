@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### Rust 重构 RA1 首切（ADR-0011，2026-11-13）
+- **ls-analyzer 拆 lib 目标**：pipeline（规则/候选/迟滞冷却）与 evidence（存证
+  环/encode_mp4）从 bin 拆入 `src/lib.rs`（零逻辑改动），供 ls-server 进程内
+  复用——RA3「去 sidecar gRPC 自环」的路径铺垫；gRPC 服务本体仍在 main.rs。
+- **ls-store 补两口径**：`set_event_video`（对齐 Python store.py，视频回填）；
+  `rules_all` 补选 `days_of_week`（原静默缺口会让时段规则周末误触发），
+  `rule_json` 同步输出该字段。
+- **ls-server `worker.rs`（RA1.2 骨架）**：`EventSink` 事件落地——4096 去重
+  窗口（evidence_key|behavior|track_id，对齐 Python 桥）、截图落
+  data/snapshots、`add_event` → `event_json` WS 广播（无绝对路径泄漏）、
+  `finalize` 复用 encode_mp4 写 `videos/ev_{eid}.mp4` 后回填 DB。3 个新测试
+  覆盖去重/广播/空帧错误路径；`start_camera` 503 摘除留给 RA1.3（worker
+  生命周期接线）。
+- 门禁：workspace `cargo test` **99 passed / 0 failed**（基线 ≥96）+ clippy
+  `-D warnings` + fmt 全绿。
+
 ### P3 收尾批（2026-11-13）
 - 编码簇 14 处 `text=True` 无 errors 的 subprocess 调用统一加 `errors="replace"`
   （中文路径/GBK 输出在非中文 locale 下中途崩）。

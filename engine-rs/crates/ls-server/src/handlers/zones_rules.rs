@@ -79,11 +79,12 @@ pub(crate) fn rule_json(
         Option<String>,
         i64,
         i64,
+        Option<String>, // days_of_week（RA1.1 补列，与 Python store.rules 同口径）
     ),
 ) -> Value {
     json!({"id": t.0, "camera_id": t.1, "zone_id": t.2, "behavior": t.3,
            "level": t.4, "cooldown_s": t.5, "time_start": t.6, "time_end": t.7,
-           "threshold": t.8, "enabled": t.9 != 0})
+           "threshold": t.8, "enabled": t.9 != 0, "days_of_week": t.10})
 }
 
 pub(crate) async fn rules_list(

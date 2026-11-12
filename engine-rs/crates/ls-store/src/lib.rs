@@ -91,6 +91,14 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 事件视频回填（RA1.1，对齐 Python store.set_event_video：存 data_dir
+    /// 相对路径，serve_event_media 用 data_dir.join 解析）。
+    pub fn set_event_video(&self, eid: i64, path: &str) -> rusqlite::Result<()> {
+        self.conn
+            .execute("UPDATE events SET video=? WHERE id=?", params![path, eid])?;
+        Ok(())
+    }
+
     pub fn events(
         &self,
         limit: i64,
@@ -396,8 +404,10 @@ impl Store {
 
     // ---- rules ----
     pub fn rules_all(&self) -> rusqlite::Result<Vec<RuleFullRow>> {
+        // RA1.1（ADR-0011）：补选 days_of_week——Python store.rules 读该列
+        // （weekday/时段过滤依赖它），原缺口会让时段规则周末误触发（静默差异）。
         let mut stmt = self.conn.prepare(
-            "SELECT id,camera_id,zone_id,behavior,level,COALESCE(cooldown_s,0),time_start,time_end,COALESCE(threshold,0),enabled FROM rules ORDER BY camera_id,id")?;
+            "SELECT id,camera_id,zone_id,behavior,level,COALESCE(cooldown_s,0),time_start,time_end,COALESCE(threshold,0),enabled,days_of_week FROM rules ORDER BY camera_id,id")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -410,6 +420,7 @@ impl Store {
                 r.get(7)?,
                 r.get(8)?,
                 r.get(9)?,
+                r.get(10)?,
             ))
         })?;
         rows.collect()
@@ -1260,7 +1271,8 @@ fn map_folder_image(r: &Row<'_>) -> rusqlite::Result<FolderImageRow> {
 }
 
 /// 全量规则行：(id, camera_id, zone_id, behavior, level, cooldown_s,
-/// time_start, time_end, threshold, enabled)
+/// time_start, time_end, threshold, enabled, days_of_week)
+/// （days_of_week=CSV 文本 "1,2,3,4,5,6,7"，与 Python store.rules 同口径；RA1.1 补）
 pub type RuleFullRow = (
     i64,
     i64,
@@ -1272,6 +1284,7 @@ pub type RuleFullRow = (
     Option<String>,
     i64,
     i64,
+    Option<String>,
 );
 
 /// 时间线一天：(date, [(hour, total, l3), …24])

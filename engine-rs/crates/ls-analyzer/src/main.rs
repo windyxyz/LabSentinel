@@ -8,9 +8,11 @@
 //! 启动即打印 "READY port=<p>" 行，供父进程健康判定。
 #![allow(clippy::result_large_err)]
 
-mod evidence;
 mod golden;
-mod pipeline;
+
+// RA1.0（ADR-0011）：pipeline/evidence 拆入 lib 目标（src/lib.rs），bin 经
+// `use` 引用——进程内复用（ls-server worker）与 sidecar 共用同一份实现。
+use ls_analyzer::{evidence, pipeline};
 
 use std::collections::HashMap;
 use std::path::PathBuf;

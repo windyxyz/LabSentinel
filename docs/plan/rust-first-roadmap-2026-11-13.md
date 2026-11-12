@@ -8,11 +8,15 @@
 
 把「分析 worker」接进 Rust 控制面，替换 Python CameraWorker/sidecar 编排：
 
-- [ ] RA1.0 设计勘察（管线内幕/ls-server 接缝/proto 契约/方案 A/B/C 对比）
-- [ ] RA1.1 事件出口改造：EventCandidate 直写 ls-store（事件行/截图/视频路径约定
-      对齐 Python store.MIGRATIONS schema，ADR-0008 兼容）
+- [x] RA1.0 设计勘察（管线内幕/ls-server 接缝/proto 契约/方案 A/B/C 对比；
+      结论 C→A：pipeline/evidence 拆 lib + 进程内 worker，弃 sidecar 自环）
+- [x] RA1.1 事件出口改造（首切）：ls-analyzer 拆 lib；ls-store 补
+      `set_event_video` + `rules_all` 补 `days_of_week`；ls-server `worker.rs`
+      `EventSink`（去重 4096/截图/入库/WS 广播/finalize encode_mp4 回填）——
+      workspace 99 passed + clippy/fmt 绿
 - [ ] RA1.2 worker 生命周期：start_camera/stop_camera 真实现（配置读 DB、
-      重试/配置版本重推/watchdog 对齐 Python 语义）
+      重试/配置版本重推/watchdog 对齐 Python 语义；WorkerConfig 参数化
+      make_detector 的 env 依赖）
 - [ ] RA1.3 告警链路：规则命中 → ls-dispatch 投递（8 渠道）+ escalation
 - [ ] RA1.4 folders/scan 实现（ls-ingest folder 源已有，摘 503）
 - [ ] RA1.5 门禁：路由 106/106（folders/scan 摘牌）+ 黄金语料向量一致 +

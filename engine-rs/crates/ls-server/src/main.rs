@@ -30,6 +30,7 @@ mod middleware;
 mod router;
 mod state;
 mod util;
+mod worker;
 
 mod url {
     /// 从 URL 提取 host（标准库解析；与 Python urlparse(url).hostname 等价的宽松实现）
