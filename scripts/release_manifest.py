@@ -38,12 +38,12 @@ REQUIRED = [
     "启动.bat",
     "停止.bat",
     "安装.bat",
-    "tools/go2rtc.exe",
     "models/yolo11n.onnx",
 ]
-# 缺失只警告：LabSentinel.exe（无 csc 降级）、卸载.bat（安装器生成）、ffmpeg（构建可警告后补）、
+# 缺失只警告：LabSentinel.exe（无 csc 降级）、卸载.bat（安装器生成）、ffmpeg/go2rtc
+# （二进制组件被 .gitignore，CI 干净 checkout 需另行获取，2026-11-13 CI 实测）——
 # bin/ls-analyzer.exe + bin/onnxruntime.dll（R2-304 --with-rust 实验产物）、media/SOURCES.md
-OPTIONAL = ["LabSentinel.exe", "卸载.bat", "tools/ffmpeg.exe",
+OPTIONAL = ["LabSentinel.exe", "卸载.bat", "tools/ffmpeg.exe", "tools/go2rtc.exe",
             "bin/ls-analyzer.exe", "bin/onnxruntime.dll", "media/SOURCES.md"]
 
 EXIT_OK, EXIT_FAIL = 0, 2
