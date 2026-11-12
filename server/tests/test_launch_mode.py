@@ -170,6 +170,10 @@ def test_uninstall_stop_fallback_taskkill(tmp_path, monkeypatch):
 
     monkeypatch.setattr(install_portable.subprocess, "run", fake_run)
     monkeypatch.setattr(install_portable.time, "sleep", lambda s: None)
+    # 2026-11-13 P1 起：兜底强杀前有身份核实（防 PID 复用误杀）——本测试
+    # 验证的是「兜底会杀」而非身份链路，mock 锁内 PID 为 LabSentinel 进程。
+    import portable_launcher as _pl
+    monkeypatch.setattr(_pl, "_pid_matches_launcher", lambda pid: True)
     rc = install_portable.do_uninstall(src, purge=False)
     assert rc == 0
     assert killed, "兜底 taskkill 未执行"

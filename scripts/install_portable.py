@@ -211,7 +211,7 @@ def remove_uninstall_registry() -> None:
     r = subprocess.run(["reg", "delete", UNINSTALL_KEY, "/f"], capture_output=True,
                        creationflags=CREATE_NO_WINDOW)
     # 2026-11-13 P3（审查实证）：rc 被吞会让卸载项被安全软件锁定时静默残留
-    err = (r.stderr or b"")
+    err = getattr(r, "stderr", b"") or b""
     if isinstance(err, bytes):
         err = err.decode("gbk", "replace")
     if r.returncode != 0:

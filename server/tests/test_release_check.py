@@ -67,11 +67,14 @@ def test_links_pass_fail_and_ignores(tmp_path):
 
 def test_versions_warn_on_doc_mismatch(tmp_path):
     r = make_repo(tmp_path)
-    (r / "docs" / "release-notes-v0.1.0-alpha.md").write_text("# v0.9.9-beta notes", encoding="utf-8")
+    # 2026-11-13 docs 重组：历史发布说明在 docs/archive/（release_check 同步改路径）
+    arch = r / "docs" / "archive"
+    arch.mkdir(exist_ok=True)
+    (arch / "release-notes-v0.1.0-alpha.md").write_text("# v0.9.9-beta notes", encoding="utf-8")
     res = run_checks(r)
     ver = by_name(res, "版本一致性")
     assert ver["status"] == "WARN" and "0.9.9" in ver["detail"]
-    (r / "docs" / "release-notes-v0.1.0-alpha.md").write_text("# v0.1.0-alpha notes", encoding="utf-8")
+    (arch / "release-notes-v0.1.0-alpha.md").write_text("# v0.1.0-alpha notes", encoding="utf-8")
     ver2 = by_name(run_checks(r), "版本一致性")
     assert ver2["status"] == "PASS"
 
