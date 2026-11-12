@@ -81,7 +81,7 @@ jobs:
             --exe engine-rs/target/debug/labsentinel-server | tee route-coverage.txt
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/engine-rs/target
-      - uses: actions/upload-artifact@ea165f86565b76e97b873000e6baea89c262ce50  # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: rust-route-coverage
           path: route-coverage.txt
