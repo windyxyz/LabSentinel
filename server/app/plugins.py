@@ -279,6 +279,16 @@ class PluginManager:
                 pass
             return False, f"启动失败: {e}"
         with self._lock:
+            existing = self._procs.get(pid)
+            if existing is not None and existing["proc"].poll() is None:
+                # 2026-11-13 P3（审查实证）：检查（持锁）与写入（持锁）之间 spawn
+                # 不持锁——另一线程已起实例时杀掉本线程的重复进程，绝不覆盖句柄
+                # （否则先起进程的引用被顶掉成孤儿）。
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                return False, "已在运行（并发启动已折叠）"
             self._procs[pid] = {"proc": proc, "started_at": time.time(),
                                 "last_error": None, "returncode": None}
         return True, f"pid={proc.pid}"

@@ -317,13 +317,18 @@ def do_install(src: Path, autostart: bool, install_dir: Path | None = None,
     stop_script = install / "scripts" / "portable_launcher.py"
     if upgrading and stopper.exists() and stop_script.exists():
         try:
+            # 2026-11-13 P3（审查实证）：无 timeout 时 --stop 挂死会让升级永久卡住
             r = subprocess.run([str(stopper), str(stop_script), "--stop"],
-                               capture_output=True, creationflags=CREATE_NO_WINDOW)
+                               capture_output=True, creationflags=CREATE_NO_WINDOW,
+                               timeout=30)
             # 2026-11-13 起 --stop 如实返回非 0（强杀后进程仍存活）：升级继续，
             # 但明确告警——覆盖被占用文件会失败回滚，别让用户莫名其妙
             if r.returncode != 0:
                 log(f"  [警告] 停止运行中的服务未完全成功（rc={r.returncode}）——"
                     "若升级报文件占用，请手动停止服务后重试")
+        except subprocess.TimeoutExpired:
+            log("  [警告] 停止运行中的服务超时（30s）——若升级报文件占用，"
+                "请手动停止服务后重试")
         except OSError:
             pass  # runtime 损坏/非可执行（如测试假包）：升级按无服务继续
         time.sleep(1)  # 等句柄释放
@@ -943,7 +948,7 @@ def main() -> int:
         # 2026-11-13 P2（审查实证）：探针挂死则 Inno Setup 安装永久卡住——90s
         # 超时按检查失败处理，走回滚（与 _health_check 的 60s 口径一致）。
         try:
-            r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=90)
+            r = subprocess.run(argv, env=env, capture_output=True, text=True, errors="replace", timeout=90)
             failed = r.returncode != 0 or (r.stdout and "ready=False" in r.stdout)
             detail = f"rc={r.returncode}）: {(r.stdout or '').strip()[:200]}"
         except subprocess.TimeoutExpired:

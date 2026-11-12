@@ -85,7 +85,7 @@ def zip_version(zf: zipfile.ZipFile, orig: dict[str, str]) -> str:
 def git_info() -> tuple[str | None, bool]:
     def run(*args):
         try:
-            r = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, text=True, timeout=15)
+            r = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, text=True, errors="replace", timeout=15)
             return r.stdout.strip() if r.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired):
             return None

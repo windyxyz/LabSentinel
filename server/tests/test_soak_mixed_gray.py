@@ -101,7 +101,7 @@ def test_crash_recovery_no_false_positive(monkeypatch):
     def fake_get(base, path, timeout=5):
         if path == "/api/system":
             state["calls"] += 1
-            return {"sidecar": {"running": True, "restarts": 0}}
+            return {"sidecar": {"running": True, "restarts": 0, "pid": 4242}}
         return {"status": "ok"}
 
     monkeypatch.setattr(s, "get_json", fake_get)
@@ -113,13 +113,18 @@ def test_crash_recovery_no_false_positive(monkeypatch):
     monkeypatch.setattr(s, "get_json", lambda b, p, timeout=5: {})
     assert any("缺 sidecar watchdog" in p
                for p in s.check_crash_recovery("http://127.0.0.1:8001"))
+    # 缺 pid（旧版本服务）→ 拒绝按映像名盲杀，跳过演练（2026-11-13 P3）
+    monkeypatch.setattr(s, "get_json",
+                        lambda b, p, timeout=5: {"sidecar": {"running": True, "restarts": 0}})
+    assert any("缺 sidecar pid" in p
+               for p in s.check_crash_recovery("http://127.0.0.1:8001"))
     # 真恢复：restarts 递增 → 通过
     state2 = {"n": 0}
 
     def fake_get2(base, path, timeout=5):
         if path == "/api/system":
             state2["n"] += 1
-            return {"sidecar": {"running": True,
+            return {"sidecar": {"running": True, "pid": 4242,
                                 "restarts": 0 if state2["n"] == 1 else 1}}
         return {"status": "ok"}
 

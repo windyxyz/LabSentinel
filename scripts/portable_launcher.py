@@ -215,14 +215,32 @@ def health(port: int, timeout: float = 2.0) -> bool:
 def read_lock() -> tuple[int, int] | None:
     try:
         text = LOCK.read_text(encoding="ascii").strip()
-        # 兼容 2026-11-11 之前被 go2rtc JSON 覆盖的旧锁：尝试从 JSON 里取不到
-        # "pid port" 就当陈旧锁（不再把 JSON 结构误判为有效单实例锁）。
+        # 兼容 2026-11-11 之前被 go2rtc JSON 覆盖的旧锁：JSON 结构没有 "pid port"
+        # 服务锁语义，判 None（do_stop 的无锁路径会用 stop_go2rtc_if_any 回收
+        # 其中可能内嵌的 go2rtc pid——2026-11-13 P3 审查实证）。
         if text.startswith("{"):
             return None
         pid, port = text.split()
         return int(pid), int(port)
     except (OSError, ValueError):
         return None
+
+
+def _read_legacy_json_lock() -> dict | None:
+    """旧版 launcher.lock 里的 JSON（go2rtc 覆盖期产物），供无锁停止路径回收。"""
+    try:
+        data = json.loads(LOCK.read_text(encoding="ascii"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _atomic_write_lock(content: str) -> None:
+    """锁写入原子化（2026-11-13 P3）：write_text 非原子，读方可能读到半行。
+    临时文件 + os.replace（同目录同卷改名原子）。"""
+    tmp = LOCK.with_name(LOCK.name + ".tmp")
+    tmp.write_text(content, encoding="ascii")
+    os.replace(tmp, LOCK)
 
 
 def pid_alive(pid: int) -> bool:
@@ -540,11 +558,11 @@ def do_start() -> int:
     g2r = start_go2rtc(cfg)  # T-202（B-05）：便携版实时画面——启动器托管 go2rtc
     pid = start_server(port, cfg)
     try:
-        LOCK.write_text(f"{pid} {port}", encoding="ascii")
+        _atomic_write_lock(f"{pid} {port}")
     except OSError as e:
         log.warning("锁写入失败（重试一次）: %s", e)
         time.sleep(0.5)
-        LOCK.write_text(f"{pid} {port}", encoding="ascii")
+        _atomic_write_lock(f"{pid} {port}")
 
     if g2r:
         write_go2rtc_lock(g2r)
@@ -597,7 +615,10 @@ def do_stop() -> int:
     setup_logging()
     lock = read_lock()
     if not lock:
-        stop_go2rtc_if_any()  # 2026-11-13 P2：无 launcher.lock 时也要回收 go2rtc
+        # 2026-11-13 P3（审查实证）：旧版 JSON 锁被 read_lock 判 None——其中可能
+        # 内嵌 go2rtc pid，回收后再报「未发现」，否则 go2rtc 永远够不到。
+        legacy = _read_legacy_json_lock()
+        stop_go2rtc_if_any(legacy=legacy)
         print("未发现运行中的 LabSentinel（无锁文件）。")
         return 0
     pid, port = lock

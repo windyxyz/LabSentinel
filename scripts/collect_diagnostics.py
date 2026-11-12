@@ -94,7 +94,7 @@ def sys_memory_bytes() -> int | None:
 def git_commit() -> str:
     try:
         r = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(ROOT),
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, errors="replace", timeout=10)
         return r.stdout.strip() if r.returncode == 0 else "(unknown)"
     except (OSError, subprocess.TimeoutExpired):
         return "(unknown)"

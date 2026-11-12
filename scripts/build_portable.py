@@ -260,7 +260,7 @@ def smoke() -> None:
     probe = ROOT / "scripts" / "probe_runtime.py"
     r = subprocess.run([str(RUNTIME / "python.exe"), str(probe),
                         "--app-dir", str(DIST / "app" / "server")],
-                       env=env, capture_output=True, text=True, cwd=str(RUNTIME))
+                       env=env, capture_output=True, text=True, errors="replace", cwd=str(RUNTIME))
     deploy.log("    " + (r.stdout.strip() or r.stderr.strip()[-300:]))
     assert r.returncode == 0, "runtime 冒烟探针失败（依赖导入/opencv 单发行版/app.main）"
     deploy.log("    （_pth 隔离模式不带 cwd；运行时由 uvicorn 自行插入 cwd，探针显式 insert 模拟）")

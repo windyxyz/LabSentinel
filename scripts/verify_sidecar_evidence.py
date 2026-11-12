@@ -117,7 +117,7 @@ def main() -> int:
         import subprocess
         dur = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", str(vp)], capture_output=True, text=True,
+             "-of", "csv=p=0", str(vp)], capture_output=True, text=True, errors="replace",
             check=False)
         # 2026-11-13 P3（审查实证）：ffprobe 缺失/失败时 float('') 裸崩 ValueError
         # 断掉整条断言链——先校验 returncode 与可解析性

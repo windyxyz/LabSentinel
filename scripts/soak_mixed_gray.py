@@ -147,15 +147,19 @@ def check_crash_recovery(base: str, timeout_s: int = 10) -> list[str]:
         before = sysinfo.get("sidecar") or {}
         if "running" not in before or "restarts" not in before:
             return ["/api/system 缺 sidecar watchdog 观测字段（无法验证崩溃恢复）"]
+        if not before.get("pid"):
+            return ["/api/system 缺 sidecar pid（旧版本服务？无法按 PID 精确演练）"]
         restarts_before = int(before["restarts"])
     except (urllib.error.URLError, ValueError, KeyError) as e:
         return [f"kill 前读取 sidecar 状态失败: {e}"]
     try:
+        # 2026-11-13 P3（审查实证）：原按映像名 taskkill /IM 全机杀——多安装/
+        # 多演练机器会误伤其他 LabSentinel 的 sidecar；改按本服务上报的 PID。
         subprocess.check_call(
-            ["taskkill", "/F", "/IM", "ls-analyzer.exe"],
+            ["taskkill", "/F", "/PID", str(before["pid"])],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.CalledProcessError):
-        return ["未找到运行中的 ls-analyzer.exe（跳过崩溃演练）"]
+        return ["按 PID kill 失败（进程可能已退出，跳过崩溃演练）"]
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:

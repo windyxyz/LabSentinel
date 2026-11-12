@@ -161,7 +161,7 @@ def find_system_python() -> str | None:
     for cand in ("py -3.12", "py -3.11", "py -3.10", "py -3", "python", "python3"):
         try:
             out = subprocess.run(cand.split() + ["--version"], capture_output=True,
-                                 text=True, timeout=30)
+                                 text=True, errors="replace", timeout=30)
             ver = (out.stdout or out.stderr).strip()
             if out.returncode == 0 and ver.startswith("Python 3"):
                 minor = ver.split(".")[1]
@@ -411,7 +411,7 @@ def _link_node_dir(src_dir: Path) -> None:
         return
     try:
         r = subprocess.run(["cmd", "/c", "mklink", "/J", str(NODE_DIR), str(src_dir)],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, errors="replace")
     except OSError as e:
         log(f"         [提示] 无法建立 Node 目录联接: {e}")
         return
@@ -424,7 +424,7 @@ def _link_node_dir(src_dir: Path) -> None:
 def _node_version(node: Path) -> str:
     try:
         return subprocess.run([str(node), "--version"], capture_output=True,
-                              text=True, timeout=30).stdout.strip()
+                              text=True, errors="replace", timeout=30).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -462,7 +462,7 @@ def _promote_extracted_dir(extracted: Path, dest: Path) -> None:
 def ensure_node() -> None:
     if _node_ok():
         log("  [跳过] Node.js 已安装: " + subprocess.run(
-            ["node", "--version"], capture_output=True, text=True).stdout.strip())
+            ["node", "--version"], capture_output=True, text=True, errors="replace").stdout.strip())
         return
     if (NODE_DIR / "node.exe").exists():
         os.environ["PATH"] = str(NODE_DIR) + os.pathsep + os.environ.get("PATH", "")
@@ -535,7 +535,7 @@ def _link_dir(src_dir: Path, link: Path) -> bool:
         return (link / "ffmpeg.exe").exists()
     try:
         r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(src_dir)],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, errors="replace")
     except OSError:
         return False
     return r.returncode == 0
@@ -741,7 +741,7 @@ def _pid_is_ours(pid: str, port: int) -> bool:
 
 def kill_ports() -> None:
     for port in PORTS:
-        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True).stdout or ""
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, errors="replace").stdout or ""
         pids = {ln.split()[-1] for ln in out.splitlines()
                 if f":{port} " in ln and "LISTENING" in ln}
         for pid in pids:
@@ -772,7 +772,7 @@ def cmd_check(quiet: bool = False) -> int:
         # 2026-11-11 反误报治理：`-c 动态代码串` → 文件执行（probe_runtime.py，与
         # build_portable.smoke 同一探针；不带 --app-dir 即纯依赖体检）。
         probe = Path(__file__).resolve().parent / "probe_runtime.py"
-        r = subprocess.run([str(venv_python(v)), str(probe)], capture_output=True, text=True)
+        r = subprocess.run([str(venv_python(v)), str(probe)], capture_output=True, text=True, errors="replace")
         add("服务端依赖（锁文件）", r.returncode == 0,
             r.stderr.strip().splitlines()[-1] if r.returncode and r.stderr
             else f"python scripts/deploy.py install（{_platform_lock()}）")

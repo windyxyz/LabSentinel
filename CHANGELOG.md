@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+### P3 收尾批（2026-11-13）
+- 编码簇 14 处 `text=True` 无 errors 的 subprocess 调用统一加 `errors="replace"`
+  （中文路径/GBK 输出在非中文 locale 下中途崩）。
+- sidecar 通道就绪超时就地回收进程+复位端口（此前等 watchdog 下轮兜底，
+  直调路径复用被占端口连环失败）；watchdog 状态补 `pid` 字段。
+- plugins 双 start 竞态：并发启动折叠（杀重复进程，绝不覆盖句柄成孤儿）。
+- 旧版 JSON 锁（go2rtc 覆盖期产物）在 `--stop` 无锁路径回收内嵌 go2rtc；
+  launcher.lock 写入原子化（临时文件+os.replace）。
+- soak 崩溃演练改按服务上报 PID 精确 kill（原按映像名全机杀会误伤其他安装）；
+  升级前 `--stop` 补 30s 超时（挂死不再永久卡住升级）。
+- 已知留置（RA 重构消解）：`_free_port` bind→close→子进程 bind 的 TOCTOU
+  窗口——正确修法是 fd 传递，随 RA1 进程内 worker 自然消失。
+
 ### 全面审查加固（2026-11-13）
 - **进程生命周期 P1**：卸载兜底强杀补身份核实（PID 复用绝不误杀）+消亡窗+锁保留；
   `deploy.py kill_ports` 按端口盲杀改杀前核实命令行；`--purge-data` 锚点校验加

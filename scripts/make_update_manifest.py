@@ -60,7 +60,7 @@ def sign(path: Path, key: str | None) -> None:
         print("       部署 minisign 后重跑；客户端在公钥存在时强制验签（T-110）")
         return
     r = subprocess.run([exe, "-S", "-s", key, "-m", str(path)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, errors="replace")
     if r.returncode != 0:
         raise SystemExit(f"[失败] minisign 签名失败: {r.stderr[:200]}")
     print(f"[签名] {path}.minisig")

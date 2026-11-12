@@ -72,12 +72,16 @@ class SidecarAnalyzer(AnalyzerBackend):
         return os.environ.get("LS_ANALYZER_VERSION") or "unknown"
 
     def watchdog_status(self) -> dict:
-        """T-327：供 /api/system 与 soak 演练观测（不依赖默认 True 的宽松判定）。"""
+        """T-327：供 /api/system 与 soak 演练观测（不依赖默认 True 的宽松判定）。
+        pid 供 soak 崩溃演练按 PID 精确 kill（2026-11-13 P3：按映像名全机杀会
+        误伤同机其他安装的 ls-analyzer 实例）。"""
         alive = self._proc is not None and self._proc.poll() is None
         return {"running": bool(self._started and alive),
                 "restarts": self._restarts,
                 "last_restart_ts": self._last_restart_ts or None,
-                "config_version": self._cfg_version}
+                "config_version": self._cfg_version,
+                # getattr：测试桩 FakeProc 无 pid 属性（2026-11-13）
+                "pid": getattr(self._proc, "pid", None) if alive else None}
 
     # ---- 进程生命周期 ----
     def start(self) -> None:
@@ -134,9 +138,21 @@ class SidecarAnalyzer(AnalyzerBackend):
         self._out_thread.start()
         import grpc
         channel = grpc.insecure_channel(f"127.0.0.1:{self._port}")
-        grpc.channel_ready_future(channel).result(timeout=10)
-        from . import analyzer_pb2_grpc
-        self._stub = analyzer_pb2_grpc.AnalyzerStub(channel)
+        try:
+            grpc.channel_ready_future(channel).result(timeout=10)
+            from . import analyzer_pb2_grpc
+            self._stub = analyzer_pb2_grpc.AnalyzerStub(channel)
+        except Exception:
+            # 2026-11-13 P3（审查实证）：通道就绪超时不回收已 spawn 的 sidecar
+            # （watchdog 兜底要等下一轮 ensure_running），且 _port 不复位会让
+            # 直调路径复用被占端口连环失败——就地停进程+复位再抛。
+            channel.close()
+            try:
+                self.stop()
+            except Exception:  # noqa: BLE001 清理失败不掩盖原始异常
+                pass
+            self._port = 0
+            raise
         self._started = True
 
     def _drain_stdout(self) -> None:

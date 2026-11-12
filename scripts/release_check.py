@@ -359,7 +359,7 @@ def _git_out(args: list[str]) -> str:
     try:
         import subprocess
         r = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True,
-                           text=True, timeout=10)
+                           text=True, errors="replace", timeout=10)
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:  # noqa: BLE001  只读查询失败不致命
         return ""
