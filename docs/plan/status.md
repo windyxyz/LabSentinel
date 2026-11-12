@@ -293,12 +293,16 @@ tag `v0.2.0` → GitHub Actions `release.yml`（windows-latest 双变体矩阵�
 | 14 | 双变体 setup.exe 同名（merge-multiple 互相覆盖）+ publish `files:` 清单漏 setup 模式（资产缺安装包的真因） | setup 变体后缀命名（对齐 zip）+ SUMS zip/setup 双哈希 + publish 清单补 setup |
 | 15 | `.iss` 的 `OutputBaseFilename` 固定无后缀名——build_portable 只改期望路径，dml 下 ISCC 产物名对不上被误判编译失败 → SUMS 找不到 setup（run 43252794610 dml 实证） | 编译到固定名后 `replace()` 重命名（784007c，本地双变体 158.5MB + SUMS 过滤复测通过） |
 
-**实际最终状态**（2026-11-13 如实更正）：v0.2.0 已发布（非 draft），资产 =
-双变体便携 zip + `SHA256SUMS-{cpu,dml}.txt` + `RELEASE-MANIFEST.json`；
-**setup.exe 未进资产**——15 层修复链代码完成（442177f/784007c，cpu 变体 CI 全绿，
-dml 终轮因冒烟停止断言抖动未走完，见「停止链可靠性」节），用户指示**发布暂缓**；
-恢复方式 = 修复批合入后重打 tag v0.2.0。nightly-rust 连续多轮在 dtolnay/rust-toolchain
-下载处网络抖动（11 秒即败，非门塞 job）。
+**实际最终状态**（2026-11-13 二次更正——**发布已恢复并完整闭环**）：tag v0.2.0
+重打至 7a130ce（含 RA1.2/RA1.3 Rust 重构 + P1/P2/P3 修复 + 3 个 pytest 回归
+修复），run 43288498357：verify/test-linux×4/**build-win cpu+dml 双绿/
+publish 全绿**（nightly-rust 仍为 toolchain 下载网络抖动，非门塞）。
+**Release 资产 7 项全齐**：`LabSentinel-portable-20261112.zip`（198MB）+
+`-dml.zip`（231MB）+ **`LabSentinel-setup-0.2.0.exe`（131MB）+ `-dml.exe`
+（153MB）** + `SHA256SUMS-{cpu,dml}.txt`（zip+setup 双哈希，下载实测验证）+
+`RELEASE-MANIFEST.json`。首轮恢复尝试 pytest 暴露 3 个本轮改动回归
+（测试桩 stderr 防御/卸载兜底身份 mock/archive 路径），本地全量
+631 passed 修复后重打。发布暂缓解除。
 
 **流程教训（CI 排障）**：ISCC 报错在 stderr 且只回显尾部 300 字符——diag 提交改为
 stdout+stderr 一并打印后才看到真实 include 错误；本机与 CI 的代码页/预装组件差异
