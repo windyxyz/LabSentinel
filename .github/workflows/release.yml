@@ -32,6 +32,10 @@ jobs:
   build-win:
     needs: [verify, test-linux]
     runs-on: windows-latest
+    # 全 job 中文日志统一 UTF-8（fetch_assets/build_portable/smoke 等脚本 print
+    # 中文在 GBK 控制台 charmap 炸，2026-11-13 fetch base model 步骤实测）
+    env:
+      PYTHONIOENCODING: "utf-8"
     # R2-303: cpu (default) + optional DirectML variant, same recipe.
     strategy:
       fail-fast: false

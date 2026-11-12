@@ -18,6 +18,12 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# CI 控制台（GitHub runner PowerShell）默认 GBK，中文日志打印即 charmap 炸
+# （2026-11-13 release.yml fetch base model 步骤实测）——stdout/stderr 重配 UTF-8
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "scripts" / "assets.lock.json"
 
