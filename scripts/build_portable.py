@@ -337,7 +337,8 @@ def make_installer() -> Path | None:
         capture_output=True, text=True, encoding=PROC_ENCODING, errors="replace")
     if r.returncode != 0 or not out.is_file():
         deploy.log(f"[警告] ISCC 编译失败（exit {r.returncode}）："
-                   f"{(r.stdout or '').strip()[-300:]}")
+                   f"stdout={(r.stdout or '').strip()[-400:]} "
+                   f"stderr={(r.stderr or '').strip()[-400:]}")
         return None
     deploy.log(f"[安装器] 完成 {out.stat().st_size / 1e6:.1f}MB")
     return out
