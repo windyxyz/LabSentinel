@@ -3,16 +3,21 @@
 import importlib.util
 import os
 import sys
-from pathlib import Path
-
 import pytest
+
+import platform
+
+# install_portable/portable_launcher 是 Windows 安装器/启动器（reg/taskkill/
+# powershell/creationflags），Linux CI 上这些依赖不存在——整文件跳过。
+pytestmark = pytest.mark.skipif(platform.system() != "Windows",
+                                reason="Windows 安装器/启动器功能")
+from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location(
     "install_portable", os.path.join(os.path.dirname(__file__), "..", "..", "scripts",
                                      "install_portable.py"))
 ip = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ip)
-
 
 def make_pkg(tmp_path: Path) -> Path:
     src = tmp_path / "pkg"
@@ -25,7 +30,6 @@ def make_pkg(tmp_path: Path) -> Path:
     (src / "app" / "VERSION").write_text("2099.01", encoding="ascii")
     (src / "启动.bat").write_text("@echo off\r\n", encoding="ascii")
     return src
-
 
 @pytest.fixture()
 def isolated(tmp_path, monkeypatch):
@@ -42,7 +46,6 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(ip, "remove_uninstall_registry", lambda: None)
     yield tmp_path
 
-
 def run(argv):
     old = sys.argv
     sys.argv = ["install_portable.py", *argv]
@@ -50,7 +53,6 @@ def run(argv):
         return ip.main()
     finally:
         sys.argv = old
-
 
 def test_dry_run_touches_nothing(isolated, capsys):
     src = make_pkg(isolated)
@@ -60,7 +62,6 @@ def test_dry_run_touches_nothing(isolated, capsys):
     assert not target.exists()  # 不写任何文件
     out = capsys.readouterr().out
     assert "dry-run" in out and str(target) in out and "开机自启：不开" in out
-
 
 def test_install_custom_dir_no_shortcuts(isolated, monkeypatch, capsys):
     src = make_pkg(isolated)
@@ -80,7 +81,6 @@ def test_install_custom_dir_no_shortcuts(isolated, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "2099.01" in out and "数据目录" in out  # 完成摘要（含版本/数据目录/卸载方式）
 
-
 def test_upgrade_preserves_data(isolated):
     src = make_pkg(isolated)
     target = isolated / "prog" / "LabSentinel"
@@ -92,7 +92,6 @@ def test_upgrade_preserves_data(isolated):
     assert run(["install", "--source", str(src), "--install-dir", str(target),
                 "--no-shortcuts", "--no-autostart"]) == 0  # 覆盖升级
     assert marker.read_text(encoding="utf-8") == "用户数据"  # 数据目录不动
-
 
 def test_dangerous_and_foreign_dirs_rejected(isolated):
     src = make_pkg(isolated)
@@ -106,7 +105,6 @@ def test_dangerous_and_foreign_dirs_rejected(isolated):
     assert run(["install", "--source", str(src), "--install-dir", str(foreign), "--force",
                 "--no-shortcuts", "--no-autostart"]) == 0  # --force 放行
     assert (foreign / "runtime" / "python.exe").exists()
-
 
 def test_shortcut_dirs_overridden(isolated, monkeypatch):
     src = make_pkg(isolated)
@@ -128,7 +126,6 @@ def test_shortcut_dirs_overridden(isolated, monkeypatch):
     assert rc == 0
     assert (desk / "LabSentinel.lnk").exists()
     assert (smenu / "LabSentinel.lnk").exists()
-
 
 def test_mutual_exclusive_autostart(isolated, capsys):
     src = make_pkg(isolated)

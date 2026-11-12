@@ -7,8 +7,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"
 
 import pytest  # noqa: E402
 
-import install_portable as ip  # noqa: E402
+import platform
 
+# install_portable/portable_launcher 是 Windows 安装器/启动器（reg/taskkill/
+# powershell/creationflags），Linux CI 上这些依赖不存在——整文件跳过。
+pytestmark = pytest.mark.skipif(platform.system() != "Windows",
+                                reason="Windows 安装器/启动器功能")
+
+import install_portable as ip  # noqa: E402
 
 def _fake_package(root: Path, version: str) -> Path:
     """最小便携包：runtime/python.exe + app/VERSION + scripts/portable_launcher.py。"""
@@ -19,7 +25,6 @@ def _fake_package(root: Path, version: str) -> Path:
     (root / "scripts").mkdir()
     (root / "scripts" / "portable_launcher.py").write_text("# launcher", encoding="utf-8")
     return root
-
 
 @pytest.mark.skipif(ip is None, reason="install_portable 不可导入")
 def test_install_archive_and_rollback(tmp_path, monkeypatch):
@@ -45,7 +50,6 @@ def test_install_archive_and_rollback(tmp_path, monkeypatch):
     assert ip.rollback(install) == 0
     assert (install / "app" / "VERSION").read_text("ascii").strip() == "0.1.0"
     assert (install / ip.CURRENT_MARK).read_text("ascii").strip() == "0.1.0"
-
 
 def test_upgrade_health_fail_auto_rollback_and_success(tmp_path, monkeypatch):
     """T-404 VM 演练等价：v1 安装 → 写数据 → v2 健康检查故意失败 → 自动回到 v1
@@ -84,7 +88,6 @@ def test_upgrade_health_fail_auto_rollback_and_success(tmp_path, monkeypatch):
     assert ip.do_uninstall(install, purge=False) == 0
     assert (install / "user.txt").exists()
 
-
 def test_upgrade_from_zip_with_path_traversal_guard(tmp_path, monkeypatch):
     """T-404：upgrade --from <zip> 解包（含一层包根），穿越条目被跳过。"""
     import zipfile as _zip
@@ -108,7 +111,6 @@ def test_upgrade_from_zip_with_path_traversal_guard(tmp_path, monkeypatch):
     assert not (tmp_path / "evil.txt").exists()
     assert not (install.parent / "escape.txt").exists()
 
-
 def test_uninstall_refuses_foreign_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LA"))
     (tmp_path / "LA").mkdir()
@@ -117,7 +119,6 @@ def test_uninstall_refuses_foreign_dir(tmp_path, monkeypatch):
     (foreign / "keep.txt").write_text("user data", encoding="utf-8")
     assert ip.do_uninstall(foreign, purge=False) == 2
     assert (foreign / "keep.txt").exists()  # 未删任何文件
-
 
 def test_uninstall_accepts_marked_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LA"))
