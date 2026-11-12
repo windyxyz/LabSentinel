@@ -58,7 +58,7 @@
 - 摄像头管理、实时画面查看、安全区绘制、规则管理、事件检索、报表（进出/违规统计）、人员库（人脸开启时）、系统状态（GPU/CPU/路数/帧率）。
 
 ### FR8 客户端多端（原则：原生/高性能渲染，拒绝 WebView 套壳）
-- **原则（用户拍板）**：跨端方案必须原生渲染——Electron / Tauri / uni-app 经典版这类 WebView 套壳一律不用（"直接用网页不好吗"）。见 [adr/0003](./adr/0003-native-client-flutter.md)。
+- **原则（用户拍板）**：跨端方案必须原生渲染——Electron / Tauri / uni-app 经典版这类 WebView 套壳一律不用（"直接用网页不好吗"）。见 [adr/0003](../adr/0003-native-client-flutter.md)。
 - **M1：Web**（响应式，手机/桌面浏览器）。
 - **M2：Android** —— Flutter（备选 Compose Multiplatform / Kotlin 原生，M2 启动时定）。
 - **M4：桌面客户端（Windows/macOS/Linux）+ iOS** —— Flutter 同一代码库；鸿蒙走 Flutter OHOS 社区移植（届时评估成熟度，不达标则放弃该端）；微信小程序与 Flutter 无法共享代码，若确有需要再做独立实现（uni-app 仅用于小程序端，不是主客户端）。
@@ -67,7 +67,7 @@
 - **一体机模式（默认）**：服务端部署目标 **Windows / macOS / Linux**（Docker 优先 + 原生降级路径，M0 先验 Windows）。
 - **Android 小模型部署**：作为**实验性部署目标**（旧手机/盒子跑 nano 级模型，NCNN/TFLite 路线），M4+ 评估，不进核心架构承诺。
 - 客户端-服务端模式：同一套服务，多端远程访问。
-- **所有 AI 分析都在服务端**（已确认）：摄像头→服务端→事件/告警；客户端零 AI 依赖。"端侧模型/云端 API"为后期实验特性。见 [adr/0002](./adr/0002-server-side-analysis.md)。
+- **所有 AI 分析都在服务端**（已确认）：摄像头→服务端→事件/告警；客户端零 AI 依赖。"端侧模型/云端 API"为后期实验特性。见 [adr/0002](../adr/0002-server-side-analysis.md)。
 
 ## 非功能需求
 
@@ -84,7 +84,7 @@
 
 | 阶段 | 内容 | 出口标准 |
 |---|---|---|
-| **M0 技术验证** | 1 路 RTSP 全链路 spike（详见 [40-roadmap.md](./40-roadmap.md)） | 实测帧率/延迟达标，硬件需求表成文 |
+| **M0 技术验证** | 1 路 RTSP 全链路 spike（详见 [40-roadmap.md](../archive/40-roadmap.md)） | 实测帧率/延迟达标，硬件需求表成文 |
 | **M1 服务端+Web** | FR1–FR4、FR6（应用内+企微+邮件）、FR7 核心、FR9 | Docker 一键起，Web 配置安全区，白大褂事件实时告警 |
 | **M2 Android + 人脸** | 安卓客户端、FR5 人脸比对（默认关） | 手机收告警；注册/陌生人流程走通 |
 | **M3 多路+通知+报表** | 多路扩容、钉钉/微信触达、统计报表 | ≥4 路稳定运行 |

@@ -44,4 +44,4 @@ amd-quark           MIT             NPU XINT8 量化
 
 ----------------------------------------------------------------------
 模型与数据集不随本仓库分发；人脸比对模块默认关闭，开启前阅读
-docs/部署指南.md 合规章节与 docs/80-risk-register.md。
+docs/guide/部署指南.md 合规章节与 docs/releases/risk-register.md。

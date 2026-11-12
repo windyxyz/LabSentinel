@@ -55,7 +55,7 @@ ffmpeg -rtsp_transport tcp -i <src> [-vf fps=<n>,scale=1280:720] -pix_fmt bgr24 
 
 ## 验证记录
 
-- 黄金语料：`docs/验证记录-S7-L1黄金语料对齐.md`（检测逐位一致 + 轨迹 322/322）。
+- 黄金语料：`docs/archive/验证记录-S7-L1黄金语料对齐.md`（检测逐位一致 + 轨迹 322/322）。
 - 断流重连/文件播完：`ls-ingest` 单测 + sidecar e2e
   （`scripts/verify_sidecar_evidence.py`）。
 - USB 拔插与 4 路 1080p 30 分钟 PoC 数据：**未测**（列入真机 24h 验收清单，

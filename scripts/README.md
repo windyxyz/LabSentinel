@@ -26,6 +26,16 @@
 | `release_check.py` | 发布终检（链接/密钥/TODO/必需文件/manifest） |
 | `rc_regression.py` | RC 快速回归编排（pytest/build/release_check/doctor） |
 | `export_openapi.py` | 导出/校验 `docs/openapi.json` 快照 |
+| `bump_version.py` | 版本号单源同步（VERSION/web/CHANGELOG 口径） |
+| `fetch_assets.py` | 按 `assets.lock.json` 下载模型/OpenH264 等外部资产（哈希校验） |
+| `make_sbom.py` | 生成 SBOM（T-407 供应链物料清单） |
+| `make_update_manifest.py` | 生成应用内更新检查 manifest（T-407） |
+| `rust_route_coverage.py` | Rust ls-server 路由覆盖率统计/门禁（`--fail-under`） |
+| `verify_sidecar_evidence.py` | Rust sidecar 存证链端到端演练（真 sidecar+真模型） |
+| `probe_runtime.py` | runtime 探针（`--serve` 启动异常落盘排障；替代 `python -c` 动态串） |
+| `health_check.py` | 升级/安装后真实健康检查（临时回环端口真启动轮询 ready） |
+| `secrets_rekey.py` | Fernet 密钥轮换（secretstore 再加密） |
+| `opentip_hashes.py` | opentip 申诉材料哈希清单 |
 
 ## 数据/运维
 
@@ -36,7 +46,11 @@
 | `seed_demo.py` | 首次启动播种演示摄像头（安装/便携共用） |
 | `deploy.py` | 源码模式环境体检/安装/重部署/卸载 |
 | `start-all.bat` / `stop-all.bat` | 源码开发三组件启停（go2rtc 1984 / API 8000 / Vite 5173） |
+| `install_portable.py` | HKCU 无管理员安装器（安装/覆盖升级/卸载/健康检查） |
+| `portable_launcher.py` | 双击启动器（数据外置/单实例锁/拉起 uvicorn/--stop） |
+| `soak_mixed_gray.py` | Python/Rust sidecar 混合灰度浸泡测试 |
 | `dispatch_tick.py` | 主线/子代理看板派发 tick（内部协作用，不随产品分发） |
+| `golden_diff.py` 等 tools/ 黄金语料工具 | 见 `tools/README.md` |
 
 ## 说明
 

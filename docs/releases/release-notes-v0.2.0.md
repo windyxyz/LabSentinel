@@ -1,7 +1,8 @@
 # Release Notes · LabSentinel v0.2.0
 
-> Draft for GitHub Release（78 号审阅 §15 发布检查清单产物）。**未发布**——签名证书
-> 未到位，按 §15 口径保持 draft 并标注「未签名预览版」。
+> GitHub Release v0.2.0（2026-11-12 发布，CI release workflow 全链实证）。
+> **未签名预览版**——签名证书未到位（T-403），安装时 SmartScreen 可能提示，
+> 请核对 `SHA256SUMS-*.txt` 校验和。
 > 数字纪律：所有数字来自仓库文档/实测命令（出处随行标注）；未经实测的能力如实标
 > 「待验证/预览」。
 
@@ -37,10 +38,12 @@
   锁、PID 防护拒停探针启动的服务、5 处 `python -c` 动态代码串文件化），
   并对齐 2 处冒烟断言（T-406 无演示素材播种口径 / 回环不走系统代理）。
 - **安装包形态（ADR-0010）**：同一 staging 产物同时出便携 zip 与
-  `LabSentinel-setup-<ver>.exe`（Inno Setup 6，mpv.net/Tautulli 双形态先例）；
-  按用户安装、覆盖升级、开始菜单/控制面板卸载项、可选 Windows 服务勾选页，
-  装完自动真实健康检查；升级/回滚能力复用现有 Python 安装器。CI 由
-  `choco install innosetup` 编译（本地未装 ISCC 如实标注待 CI 验证）。
+  `LabSentinel-setup-<ver>[-dml].exe`（Inno Setup 6，mpv.net/Tautulli 双形态
+  先例；cpu 无后缀 / dml 带 `-dml`，与 zip 命名一致）；按用户安装、覆盖升级、
+  开始菜单/控制面板卸载项、可选 Windows 服务勾选页，装完自动真实健康检查；
+  升级/回滚能力复用现有 Python 安装器。CI 由 `choco install innosetup` 编译
+  （已在 release workflow 实测编译通过并随 release 资产发布；中文语言文件随
+  仓库 `deploy/windows/languages/`）。
 - **Rust 控制面归档化管理**：ls-server 巨石 main.rs（5179 行）拆为共享层 +
   11 个功能域模块（1349 行主文件），便于按域归档与后续演进；门禁全绿。
 

@@ -65,10 +65,11 @@ def md_targets(root: Path):
     out = [root / "README.md"]
     docs = root / "docs"
     if docs.exists():
-        out += sorted(docs.glob("*.md"))
-        t = docs / "50-tasks"
-        if t.exists():
-            out += sorted(t.glob("*.md"))
+        # 2026-11-13 docs 重组后必须递归：guide/dev/releases/adr/plan 子目录
+        # 曾完全不在扫描范围，「断链 0 FAIL」对子目录失真（一致性审查 H2）。
+        # archive/ 是历史快照（旧链接按重组政策豁免），不参与扫描。
+        out += sorted(p for p in docs.rglob("*.md")
+                      if "archive" not in p.relative_to(docs).parts)
     return [p for p in out if p.exists()]
 
 
@@ -151,8 +152,8 @@ def check_versions(res) -> None:
     main_py = _extract(ROOT / "server" / "app" / "main.py", [re.compile(r'version="([^"]+)"')])
     api_py = _extract(ROOT / "server" / "app" / "api.py", [re.compile(r'"(\d+\.\d+\.\d+-[A-Za-z0-9]+)"')])
     ver_strings.update(main_py, api_py)
-    notes = ROOT / "docs" / "release-notes-v0.1.0-alpha.md"
-    ann = ROOT / "docs" / "发布公告.md"
+    notes = ROOT / "docs" / "archive" / "release-notes-v0.1.0-alpha.md"
+    ann = ROOT / "docs" / "archive" / "发布公告.md"
     note_vers = _extract(notes, [re.compile(r"v?\d+\.\d+\.\d+-[A-Za-z0-9]+")]) if notes.exists() else []
     ann_vers = _extract(ann, [re.compile(r"v?\d+\.\d+\.\d+-[A-Za-z0-9]+")]) if ann.exists() else []
     code_versions = {v for v in ver_strings if not v.startswith("v")}
@@ -243,8 +244,12 @@ def check_zip(res, zip_path: Path | None) -> None:
                 f"{zp.name} sha256={info['sha256'][:12]}… 缺必需={len(info['missing_required'])} "
                 f"缺可选={info['missing_optional']}",
                 "必需条目缺失按 58 报告处理" if rc != 0 else "")
-    # ADR-0010：setup.exe 双形态（可选产物——本机无 ISCC 时缺省，WARN 不阻断）
-    setup = zp.with_name(zp.name.replace("portable-", "setup-").replace(".zip", ".exe"))
+    # ADR-0010：setup.exe 双形态（可选产物——本机无 ISCC 时缺省，WARN 不阻断）。
+    # 实际命名是版本号（LabSentinel-setup-<ver>[-dml].exe，cpu 无后缀），不是 zip 的日期名。
+    dist = zp.parent
+    version = (ROOT / "VERSION").read_text("ascii").strip()
+    setups = sorted(dist.glob(f"LabSentinel-setup-{version}*.exe"))
+    setup = setups[0] if setups else dist / f"LabSentinel-setup-{version}.exe"
     if setup.is_file():
         sz = setup.stat().st_size / 1e6
         results_add(res, "安装包 setup.exe", "PASS", f"{setup.name} {sz:.1f}MB（ADR-0010 双形态）")

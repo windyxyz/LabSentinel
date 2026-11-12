@@ -126,7 +126,7 @@
 **如实保留的余量**（非本轮范围，均有真实依赖）：
 
 1. L3 末 2 条路由：`/api/export/monthly.pdf`（Rust 侧 PDF 生成）、`/api/folders/{cid}/scan`
-   （需推理管线接线）——当前 104/106 = 98.1%，已越过 ≥95% 门槛。
+   （需推理管线接线）——当前 104/106 = 98.1%，已越过 ≥95% 门槛（历史口径，现已 105/106=99.1%）。
 2. R2-303/R2-306：DML 前端探测提示、完整 1/4/8 路 × 30 分钟压测矩阵（需 GPU 硬件）。
 3. R2-502：WebrtcPlayer 子协议/断线重连信令全流程测试（需 stub RTCPeerConnection）。
 4. R2-308 黄金语料扩展（需 CC0 素材拍摄）；签名证书/minisign 密钥对/真实 RTSP 24h 等人工事项。
@@ -226,7 +226,7 @@
 > 二分定位「静态子集全部存活」结论仍然成立且如今有了正确解释：本就无查杀。
 > AV 治理批次交付的 exe 身份化/启动链审计/误报说明文档仍有效（预防性减面），
 > 但 opentip 材料/信任区建议**无需执行**；`docs/guide/杀毒软件误报说明.md` 与
-> `docs/opentip-申诉材料-0.2.0.md` 保留作未来发布参考（勿提交申诉）。
+> `docs/archive/opentip-申诉材料-0.2.0.md` 保留作未来发布参考（勿提交申诉）。
 > 卡巴斯基相关记忆条目已更正。
 
 用户决策：继续推进 Rust 重构（深度审阅 + 简化无用逻辑）；**不再推进 Docker 开发，
@@ -270,6 +270,85 @@
 确认）——本文「三向推进批」之前的「卡巴斯基删除/阻断」记录全部作废，真实原因见
 「便携包启动链排障」表；`docs/guide/杀毒软件误报说明.md` 与 opentip 材料保留作发布参考
 （**勿提交申诉**）。
+
+## v0.2.0 正式发布（2026-11-12，CI release workflow 全链实证）
+
+tag `v0.2.0` → GitHub Actions `release.yml`（windows-latest 双变体矩阵）。
+从首轮到全绿共 14 轮迭代，CI 环境暴露的本机不可复现缺陷全部落档：
+
+| # | CI 首爆点（本机测不出的原因） | 修复 |
+|---|---|---|
+| 1 | `LS_PPE_MODEL=""` 空串被 `Path('')` 视作 `.`，validate 拒绝目录 | 空路径视同未配置，走默认值 |
+| 2 | 写限流桶跨用例泄漏（CI 顺序与本地不同触发 429） | conftest fixture 清空桶 |
+| 3 | `CREATE_NO_WINDOW` creationflags 非 Windows 平台非法值 | 仅 win32 传 flags |
+| 4 | `mbcs` 编解码器仅 Windows 存在 | `PROC_ENCODING` 按平台取值 |
+| 5/6 | 安装器/启动器/keepawake 测试组与 pytest/pip-audit 在 Linux runner 全线不适配 | skipif 平台门 + pytest/pip-audit 限定 windows-latest |
+| 7 | `export_openapi` 子进程 GBK 输出中文 UnicodeEncodeError | 进程内 reconfigure（去子进程） |
+| 8 | pip-audit 首跑（--disable-pip 语义修正） | 全绿 |
+| 9 | upload/download-artifact v2 被官方强制下线 | v4.6（手写 SHA 错一次，API 实取修正） |
+| 10 | fetch_assets 中文日志 charmap 炸 | job 级 `PYTHONIOENCODING: utf-8` |
+| 11 | `.iss` 无 BOM：英文代码页（CP1252）的 ISCC 按 ANSI 读 UTF-8 脚本，3544 个中文注释字节全乱 → 解析 exit 2（本机中文代码页一直正常） | UTF-8 BOM |
+| 12 | choco 的 innosetup 不含 unofficial translations → `Couldn't open include file ChineseSimplified.isl`（本机 IS7 内置故测不出） | 中文 .isl 随仓库 `deploy/windows/languages/`，MessagesFile 相对路径 + Default 合并 |
+| 13 | T-410 install/uninstall 冒烟目录 `D:\a\_temp` 被卸载白名单拒绝 | 改 `%LOCALAPPDATA%\Programs\ls-install-smoke` |
+| 14 | 双变体 setup.exe 同名（merge-multiple 互相覆盖）+ publish `files:` 清单漏 setup 模式（资产缺安装包的真因） | setup 变体后缀命名（对齐 zip）+ SUMS zip/setup 双哈希 + publish 清单补 setup |
+| 15 | `.iss` 的 `OutputBaseFilename` 固定无后缀名——build_portable 只改期望路径，dml 下 ISCC 产物名对不上被误判编译失败 → SUMS 找不到 setup（run 43252794610 dml 实证） | 编译到固定名后 `replace()` 重命名（784007c，本地双变体 158.5MB + SUMS 过滤复测通过） |
+
+**实际最终状态**（2026-11-13 如实更正）：v0.2.0 已发布（非 draft），资产 =
+双变体便携 zip + `SHA256SUMS-{cpu,dml}.txt` + `RELEASE-MANIFEST.json`；
+**setup.exe 未进资产**——15 层修复链代码完成（442177f/784007c，cpu 变体 CI 全绿，
+dml 终轮因冒烟停止断言抖动未走完，见「停止链可靠性」节），用户指示**发布暂缓**；
+恢复方式 = 修复批合入后重打 tag v0.2.0。nightly-rust 连续多轮在 dtolnay/rust-toolchain
+下载处网络抖动（11 秒即败，非门塞 job）。
+
+**流程教训（CI 排障）**：ISCC 报错在 stderr 且只回显尾部 300 字符——diag 提交改为
+stdout+stderr 一并打印后才看到真实 include 错误；本机与 CI 的代码页/预装组件差异
+（BOM、语言文件）是安装器类问题的固定排查方向。
+
+## 全面审查轮（2026-11-13，三代理并行 + 手工修复）
+
+用户指令：修 bug + 全面审查 + 发布暂缓；随后追加**Rust-first 战略**（见下节）。
+
+**审查产出**（Rust/Python 边界 / 进程生命周期 bug 扫描 / 一致性扫描三路并行）：
+
+已修复（dd0d0b0 停止链 + 本轮两批）：
+- 停止链：`do_stop` 吞 taskkill 退出码（rc=0 但服务活着）→ 核实真死才删锁；
+  冒烟收尾误报垂死进程 → 消亡窗+重试；安装/卸载感知 `--stop` 结果；
+  legacy go2rtc 先删后读。
+- P1 三项：卸载兜底盲杀无身份核实（PID 复用可误杀）→ 与 do_stop 同防线；
+  `deploy.py kill_ports` 按端口盲杀常见开发端口 → 杀前核实命令行
+  （LabSentinel python 标记或本仓 tools/go2rtc）；`--purge-data` 锚点校验恒真
+  → 加「目录内真的像数据根」第二道门（config.env/labsentinel.db/logs）。
+- P2 六项：陈旧锁删除前先停旧实例（防双实例共写库）；go2rtc 三条失败路径
+  统一回收（`stop_go2rtc_if_any`）；health_check 探针超时孤儿 uvicorn →
+  子进程 PID 落盘+按 PID 兜底强杀；finalize 健康检查补 90s 超时；
+  升级前备份核 rc+zip 非空；冒烟步骤 4 捕 httpx 异常族。
+- P3 快赢：reg delete rc、portable_stop.bat 回退+rc 回传、rc_regression
+  去 shell=True、冒烟 --stop 超时捕获、ffprobe 输出校验。
+- 一致性：rust.yml 补 `workflow_call`（security-weekly 周审计此前从未真正跑过）；
+  release_check 断链扫描改递归全 docs（archive 豁免，34 文件）+ 版本核对路径
+  archive 修正 + setup 期望名改版本号；**21 条断链全部修复（18 文件 37 处，
+  release_check 复跑 0 FAIL）**；`标注与模型迭代手册.md` 收录进 docs/README 索引；
+  scripts/README 补 12 脚本条目；release-notes 头部改实际发布口径；
+  nightly-rust 注释 17/97→105/106；删 rust.yml 无效 CARGO_FEATURE_ORT。
+- 测试：test_stop_pid_safety 15 例（新增幸存者保留锁用例）+ launcher_ready
+  10 例 + installer/versioned/health 17 例全绿。
+
+**台账遗留（P3 大项，待处理）**：
+1. 编码簇：10 处 `text=True` 无 encoding（deploy.py:726 netstat 在杀进程路径最要紧、
+   collect_diagnostics/release_manifest/make_update_manifest/verify_sidecar 等）——
+   统一 PROC_ENCODING 封装；
+2. `analyzer_sidecar.py` channel_ready 超时不回收 sidecar + `_port` 不复位；
+3. `_free_port` TOCTOU + plugins start() 双 start 竞态；
+4. `read_lock` 旧版 JSON 锁判 None → --stop 拒停；launcher.lock 写入非原子
+   （spawn→写锁窗口崩溃成孤儿）；
+5. `soak_mixed_gray.py` 按映像名杀全机 ls-analyzer 实例；
+6. install_portable 升级前 `--stop` 无 timeout。
+
+**Rust-first 战略（用户 2026-11-13 指令）**：推进全面 Rust 重构（确实无法重构
+的功能除外），新开发一律直接写 Rust 不再 Python-first。现有基线：数据面
+（ls-analyzer sidecar）已灰度、控制面 ls-server 105/106 对齐但独立模式缺分析
+worker。路线 = ADR-0011 落盘 + 分阶段计划（L3 补齐 → L4 单二进制 → 启动链
+评估豁免清单）。
 
 ## 本轮环境事件（2026-11-09）
 

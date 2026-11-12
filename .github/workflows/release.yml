@@ -136,10 +136,10 @@ jobs:
       # provenance 占位（T-407 后）：actions/attest-build-provenance
 
   nightly-rust:
-    # R2-004 / §9.3: L3 control plane is only 17/97 routes -- the Rust single
-    # binary is an EXPERIMENTAL nightly artifact and must not enter a formal
-    # Release. Kept as a separate job so a Rust build failure cannot block
-    # the Windows portable release.
+    # R2-004 / §9.3: L3 control plane routes aligned 105/106 (99.1%) but the
+    # Rust single binary is an EXPERIMENTAL nightly artifact and must not
+    # enter a formal Release. Kept as a separate job so a Rust build failure
+    # cannot block the Windows portable release.
     needs: [verify]
     runs-on: windows-latest
     steps:

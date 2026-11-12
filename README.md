@@ -36,7 +36,8 @@
 
 ### 方式 A：安装包（推荐，向导式）
 
-下载 **`LabSentinel-setup-<版本>.exe`** → 双击 → 选择语言（简体中文/English）→
+下载 **`LabSentinel-setup-0.2.0.exe`**（[Releases](https://github.com/windyxyz/LabSentinel/releases)；
+GPU 加速选 `-dml` 后缀变体）→ 双击 → 选择语言（简体中文/English）→
 选择安装模式（**仅为我** / **为所有用户**）与安装位置 → 完成页勾选开始菜单/桌面快捷方式（默认全勾）→
 安装完成自动健康校验并启动。
 
@@ -45,7 +46,7 @@
 
 ### 方式 B：便携包（免安装）
 
-下载 **`LabSentinel-portable-<版本>.zip`** 解压 → 双击 `安装.bat`（生成快捷方式）→
+下载 **`LabSentinel-portable-<日期>.zip`** 解压 → 双击 `安装.bat`（生成快捷方式）→
 双击桌面 **LabSentinel**。**不需要安装 Python/Node**（包内自带嵌入式运行时），运行无需联网。
 
 - 数据在 `%LOCALAPPDATA%\LabSentinel`；`LabSentinel.exe --stop` 停止服务

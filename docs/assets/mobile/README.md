@@ -47,7 +47,7 @@ with sync_playwright() as p:
 | `events-table_375.png` | 375px 事件页（真实事件数据） | 页面溢出 0px；表格 `min-width:760px`，**横向滚动只发生在 `.panel` 容器内**（scrollWidth 800 > clientWidth 341）；首列"时间" sticky 常驻；单元格不再一字一行 |
 | `events-table_1280.png` | 桌面 1280px 同页 | 9 列完整布局与修复前一致（桌面端不受影响） |
 
-自动化回归脚本：`tools/shot_events_375.py`（gpu-venv playwright；需服务端+前端已起，默认
+自动化回归脚本：`tools/shot_events_375.py`（**该脚本已移除**，以下为历史用法记录；gpu-venv playwright；需服务端+前端已起，默认
 `http://localhost:5174`——写一份临时 vite preview 配置（照 `web/vite.config.js` 的 proxy 样式，
 把 /api 指向 8001 测试 API）即可拿真实事件数据，临时配置用后即删）。输出：页面级溢出 px、
 表格容器滚动宽度、截图。

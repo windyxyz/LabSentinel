@@ -2,7 +2,7 @@
 
 > 日常运维（巡检/备份/升级/告警排障）请看 **[运维手册](运维手册.md)**；本文按主题收录踩坑问答。
 > 全部条目来自本项目开发过程中**实际遇到并解决过**的问题（2026-10-25/27）。
-> 格式：**现象 → 原因 → 解决**。查不到 here 的问题先看 [80-risk-register.md](risk-register.md)。
+> 格式：**现象 → 原因 → 解决**。查不到 here 的问题先看 [80-risk-register.md](../releases/risk-register.md)。
 
 ## 1. 安装与网络
 
@@ -248,7 +248,7 @@ D:/LabSentinel/m0-venv/Scripts/python.exe tools/train_ppe.py --data Resources/da
 >5 字段且偶数个 → 按 x/y 序列取外接矩形。`tools/eval_report.py` 的 `load_gt` 可参考。
 
 **Q：标注规范在哪**
-→ [90-data-flywheel.md](data-flywheel.md) 第二节（Lab Coat/No Lab Coat 语义、遮挡阈值、歧义帧处理）。
+→ [90-data-flywheel.md](../dev/data-flywheel.md) 第二节（Lab Coat/No Lab Coat 语义、遮挡阈值、歧义帧处理）。
 数据集许可 CC BY 4.0；对外发布前必须过 `tools/export_dataset.py` 生成的脱敏确认清单。
 
 ## 7. 告警与推送

@@ -8,6 +8,9 @@ on:
     paths: ["engine-rs/**", "proto/**", "testdata/**", ".github/workflows/rust.yml"]
   pull_request:
     paths: ["engine-rs/**", "proto/**", "testdata/**", ".github/workflows/rust.yml"]
+  # security-weekly.yml 每周审计经此处复用——缺 workflow_call 时定时触发
+  # 在解析期直接报错（审计从未真正跑过，2026-11-13 一致性审查发现）
+  workflow_call: {}
 
 permissions:
   contents: read
@@ -129,7 +132,6 @@ jobs:
       - name: cargo check --target ${{ matrix.target }}
         working-directory: engine-rs
         # 交叉目标缺系统链接器/openssl，只做前端检查；ls-proto 生成代码在 host 构建
+        # （ort 是 load-dynamic 非链接依赖，check 无需 libclang；CARGO_FEATURE_* 是
+        # cargo 输出给 build script 的变量，外部设置并不能关闭 feature——原写法无效已删）
         run: cargo check --workspace --target ${{ matrix.target }}
-        env:
-          # 关闭需要原生构建脚本链接的 ort 动态加载路径（纯 Rust 绑定无需 libclang）
-          CARGO_FEATURE_ORT: ""

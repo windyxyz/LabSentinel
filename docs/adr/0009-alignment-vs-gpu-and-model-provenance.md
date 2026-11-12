@@ -21,7 +21,7 @@ Ultralytics 官方 release 的 `yolo11n.onnx`（sha256 `634279b4…`）——它
 ### 1. 验收标准从「逐位一致」改为分层容差
 
 - 同后端（Python-ORT CPU ↔ Rust-ort 同版本）：保留逐位一致作为**附加回归门禁**
-  （`docs/验证记录-S7-L1黄金语料对齐.md` 的 322/322 用例继续跑）。
+  （`docs/archive/验证记录-S7-L1黄金语料对齐.md` 的 322/322 用例继续跑）。
 - 跨后端 / 跨模型：检测框 IoU ≥ 0.99 且 |Δconf| ≤ 0.02（同后端）/ ≤ 0.05
   （跨后端）；事件一致率 ≥ 95%（track-agnostic）。
 - 这样 DML、CUDA、CoreML、OpenVINO 都可以纳入对齐验收，不必为了位级一致
@@ -52,7 +52,7 @@ Ultralytics 官方 release 的 `yolo11n.onnx`（sha256 `634279b4…`）——它
 - **恢复计划（需维护者操作）**：把本地导出的模型上传到项目自建 assets release
   （当前 `Windy-LabSentinel/assets` 的 `ppe-v1` 等相关 URL 实测 404，Q-08 按需下载
   同样受影响），把 `assets.lock.json` 的 `yolo11n.onnx` URL 与 sha256 改为该资产，
-  并在 `docs/验证记录-S7-L1黄金语料对齐.md` 追加一次两种模型的分层容差验收记录。
+  并在 `docs/archive/验证记录-S7-L1黄金语料对齐.md` 追加一次两种模型的分层容差验收记录。
   完成前，正式 Release 的发布说明必须写明「CPU 变体使用官方 ONNX，与开发期
   黄金语料模型不同，按分层容差验收」。
 

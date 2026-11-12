@@ -52,7 +52,7 @@ python tools\camera_soak.py --preflight --base-url http://127.0.0.1:8000 --camer
 4. 预期结果：列表出现新行；点「启动」后状态 `running`、fps 与子码流标称一致、
    「实时画面」出图；
 - 失败先查：状态列红字 `last_error`（401=账号、404/超时=路径、`cannot open`=编码不支持）
-  → 完整字段看 `GET /api/cameras/{id}/status`（[口径](api-reference.md) §8.3）。
+  → 完整字段看 `GET /api/cameras/{id}/status`（[口径](../dev/api-reference.md) §8.3）。
 
 ## 3. 画安全区与规则
 
@@ -65,7 +65,7 @@ python tools\camera_soak.py --preflight --base-url http://127.0.0.1:8000 --camer
 3. 每条规则配：`level`（1 提示/2 警告/3 严重）、`cooldown`（同区同 track 冷却秒数，建议 ≥30）、
    `time_start/time_end`（只在实验室使用时段启用，夜间红外会放大误报）；
 4. 多路同布局：用摄像头复制接口一键带过区域+规则（`POST /api/cameras/{id}/copy`，
-   见 [35-api-reference](api-reference.md)）；
+   见 [35-api-reference](../dev/api-reference.md)）；
 5. 预期：启动后走一圈，Events 页出现 enter/enter_no_ppe 事件、截图与时间正确。
 
 ## 4. 告警验证（先自测后真实）
@@ -101,9 +101,9 @@ python tools\camera_soak.py --all --duration 24h --interval 30
 | 连不上（超时） | 网段不通/防火墙拦 554 → 先 ping，再 ffprobe（§1a） |
 | 连不上（401） | 账号错/密码带特殊字符未转义 → URL-encode `@:#?=` 等字符 |
 | 连上但无画面 | H.265 子码流 → 摄像头后台改 H.264；或分辨率过高 → 换子码流 |
-| 能连但不出事件 | 区域没画/画错位置 → 实时画面叠加确认；规则时间窗没覆盖当前时段；模型类别不匹配（`LS_PPE_VIOLATION_CLASS`，见 [.env.example](../server/.env.example)） |
+| 能连但不出事件 | 区域没画/画错位置 → 实时画面叠加确认；规则时间窗没覆盖当前时段；模型类别不匹配（`LS_PPE_VIOLATION_CLASS`，见 [.env.example](../../server/.env.example)） |
 | 画面卡顿/帧龄涨 | 码率太高 → 摄像头端降子码流码率；多路 DML 负载 → 降低 analysis_fps（`LS_ANALYSIS_FPS`） |
-| 误报多 | 阈值/区域/夜红外 → 收紧区域、加 cooldown、夜间缩小规则生效窗、`LS_PPE_CONF` 上调；长期治理走误报池标注（[标注与模型迭代手册](标注与模型迭代手册.md)） |
+| 误报多 | 阈值/区域/夜红外 → 收紧区域、加 cooldown、夜间缩小规则生效窗、`LS_PPE_CONF` 上调；长期治理走误报池标注（[标注与模型迭代手册](../标注与模型迭代手册.md)） |
 | 告警不发 | 渠道未配/静默生效/过滤规则（`LS_ALERT_FILTERS`）→ 告警面板自测 + `GET /api/alerts/status` 失败列表 |
 | `重试中（第 N 次）` 不消失 | 源一直起不来 → 看状态列红字；达上限转 `自动重启失败，请检查`（[运维手册](运维手册.md) §4.1） |
 
@@ -123,7 +123,7 @@ python tools\camera_soak.py --all --duration 24h --interval 30
 
 - 停单路：「摄像头」页点「停止」（守护不拉已手动停止的摄像头）；
 - 恢复旧配置：配置导出/导入（`POST /api/config/import`，merge/replace 双模式，
-  [35-api-reference](api-reference.md) §10）；导入前先 `GET /api/config/export` 留底；
+  [35-api-reference](../dev/api-reference.md) §10）；导入前先 `GET /api/config/export` 留底；
 - 数据备份：`python scripts\backup_data.py`（备份 API 保证 WAL 一致，别直接拷 .db）；
 - 卸载服务：便携版「卸载.bat」/ 控制面板卸载（数据目录自动改名备份，不直接删）；
   全流程见 [59-portable-install](安装与卸载.md)。

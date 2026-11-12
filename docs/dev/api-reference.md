@@ -1,6 +1,6 @@
 # 35 · API 契约（服务端 ⇄ 客户端）
 
-> **机器可读契约**：[docs/openapi.json](openapi.json)——由 `python scripts/export_openapi.py` 生成（勿手改；CI/RC 用 `--check` 校验漂移）。
+> **机器可读契约**：[docs/openapi.json](../openapi.json)——由 `python scripts/export_openapi.py` 生成（勿手改；CI/RC 用 `--check` 校验漂移）。
 
 > v0.1（2026-10-26）· 依据**当前真实实现**（server/app/api.py）整理。前后端/子代理开发以本文为准；改 API 必须同步更新本文。
 > Base URL：`http://127.0.0.1:8000`（Vite 开发代理 `/api`、`/ws`）。无鉴权（局域网内网部署，M3 加管理密码）。

@@ -2,7 +2,7 @@
 
 LAB PPE 模型的完整复现流水线：**下载数据集 → 微调训练 → 导出 ONNX → NPU 量化**。
 任务规格见历史任务包（已清理），
-M0 实测背景见 [../docs/40-roadmap.md](../docs/40-roadmap.md) 的「实测环境与注意事项」。
+M0 实测背景见 [../docs/archive/40-roadmap.md](../docs/archive/40-roadmap.md) 的「实测环境与注意事项」。
 
 ## 一、两个 Python 环境（勿重建、勿改包版本）
 
@@ -20,7 +20,7 @@ M0 实测背景见 [../docs/40-roadmap.md](../docs/40-roadmap.md) 的「实测�
 | `list_cameras.py` | 枚举 DirectShow 摄像头索引/分辨率/fps；`--snapshot-dir` 保存首帧确认画面 |
 | `virtual_cam_feed.py` | 用 pyvirtualcam 把演示视频喂给 OBS Virtual Camera（`pip install pyvirtualcam`），供 `type=usb` 联调 |
 
-用法与注意事项见 [../docs/guide/部署指南.md](../docs/guide/部署指南.md) §3.1 与 [../docs/64-usb-virtual-camera-report.md](../docs/64-usb-virtual-camera-report.md)。
+用法与注意事项见 [../docs/guide/部署指南.md](../docs/guide/部署指南.md) §3.1（历史 USB 虚拟摄像头联调报告 64-usb-virtual-camera-report.md 已清理）。
 
 ## 二、流水线四步
 
@@ -193,7 +193,7 @@ D:/LabSentinel/gpu-venv/Scripts/python.exe tools/train_ppe.py \
 
 ## 九、黄金语料归档工具（S7 验收留档，非日常流水线）
 
-以下 4 个脚本服务于 2026-11-06 的 `docs/验证记录-S7-L1黄金语料对齐.md`
+以下 4 个脚本服务于 2026-11-06 的 `docs/archive/验证记录-S7-L1黄金语料对齐.md`
 （Python ↔ Rust 检测/跟踪逐帧对齐验证），**不参与生产运行、不在 CI 中调用**，
 仅保留用于复现历史验收结论。日常训练/推理/评估请用上文一至八节的工具。
 
