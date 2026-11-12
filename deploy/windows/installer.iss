@@ -1,14 +1,24 @@
-; LabSentinel Windows 安装器（ADR-0010 / 批次 B，2026-11-12；多语言版 2026-11-13）
+; LabSentinel Windows 安装器（ADR-0010 / 批次 B，2026-11-12；多语言+双模式版 2026-11-13）
 ; 同一 staging（Resources/dist/portable/LabSentinel/）出 setup.exe + 便携 zip 双形态。
 ; 由 scripts/build_portable.py --installer 调用 ISCC.exe 编译；版本由 /DLsAppVersion= 传入。
 ; 参考样板：mpv.net（Inno + 同源 zip）、Tautulli（Python 服务 NSIS）、Jellyfin（可选服务）。
 ;
-; 多语言/交互（2026-11-13）：
+; 多语言/双模式/交互（2026-11-13）：
 ; - 首页语言选择：简体中文 / English（IS7 自带 Languages\ChineseSimplified.isl）
-; - 安装位置可选（DisableDirPage=no；按用户安装，可 /ALLUSERS 提权）
-; - 完成页双复选框：开始菜单 + 桌面快捷方式（默认全勾，由 [Code] 挂 Finished 页 Surface）
-; - 快捷方式生成在 ssInstall→文件复制 之后（CreateShellLink，[Icons] 不再静态判定）
-; - 「立即启动」沿用内建 RunList（[Run] postinstall）
+; - 双安装模式（PrivilegesRequiredOverridesAllowed=dialog commandline）：
+;   · 仅为我安装（默认，lowest，无需管理员）——目录 {localappdata}\Programs\LabSentinel，
+;     开始菜单 {userprograms}，桌面 {userdesktop}，卸载项 HKCU
+;   · 为所有用户安装（向导可选/命令行 /ALLUSERS，提权）——目录 {autopf}\LabSentinel，
+;     开始菜单 {commonprograms}（所有用户可见），桌面 {commondesktop}，卸载项 HKLM
+;   Inno 的 {userprograms}/{commonprograms} 等常量随 IsAdminInstallMode 自动切换，
+;   [Registry] 用 HKLM/HKCU 分支 + [Code] AdminInstallMode 判定；数据目录两种模式
+;   都落在各用户 %LOCALAPPDATA%\LabSentinel（服务模式例外，见 XML）。
+; - 完成页双复选框：开始菜单 + 桌面快捷方式（默认全勾）；「立即启动」沿用内建 RunList
+; - 快捷方式生成在 ssPostInstall（CreateShellLink），卸载项始终生成
+;
+; 注意：为所有用户安装时数据目录仍是安装用户的 LOCALAPPDATA——多用户各自跑
+; `runtime\python.exe scripts\install_portable.py finalize` 会生成各自数据；
+; 服务模式（WinSW）才是共享数据形态（见 deploy/windows/labsentinel-service.xml）。
 
 #ifndef LsAppVersion
   #define LsAppVersion "0.2.0"
@@ -27,9 +37,10 @@ AppVersion={#LsAppVersion}
 AppVerName=LabSentinel {#LsAppVersion}
 AppPublisher=LabSentinel Project
 AppPublisherURL=https://github.com/windyxyz/LabSentinel
-DefaultDirName={localappdata}\Programs\LabSentinel
+; 双模式默认目录：IsAdminInstallMode 为假 → {localappdata}\Programs，真 → {autopf}
+DefaultDirName={code:GetDefaultDirName}
 DefaultGroupName=LabSentinel
-; 按用户安装（与 install_portable.py 的 HKCU 设计一致），允许命令行 /ALLUSERS 提权
+; 向导「安装类型」页提供 仅为我 / 为所有用户 选择；命令行 /ALLUSERS /CURRENTUSER 亦可
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog commandline
 ; 同 AppId 覆盖升级：自动装回原目录并原地覆盖文件
@@ -85,23 +96,17 @@ Name: "installservice"; Description: "{cm:ServiceTask}"; \
 Source: "{#LsSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
-; 控制面板「卸载程序」条目（HKCU，无需管理员）；Inno 自带卸载注册表键，此处只补显示信息
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"; \
-  ValueType: string; ValueName: "DisplayName"; ValueData: "LabSentinel {#LsAppVersion}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"; \
-  ValueType: string; ValueName: "DisplayVersion"; ValueData: "{#LsAppVersion}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"; \
-  ValueType: string; ValueName: "Publisher"; ValueData: "LabSentinel Project"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"; \
-  ValueType: string; ValueName: "InstallLocation"; ValueData: "{app}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSentinel"; \
-  ValueType: string; ValueName: "HelpLink"; ValueData: "docs\部署FAQ.md"; Flags: uninsdeletekey
+; 控制面板「卸载程序」条目由 Inno 原生维护（{AppId}_is1 键，随安装模式自动落
+; HKCU / HKLM(32 位视图)，DisplayVersion/Publisher/InstallLocation 齐全）——
+; 2026-11-13 ALLUSERS 实测确认后移除旧的手写补充键（曾造成控制面板双条目）。
+; 数据目录说明见 [UninstallDelete]。
 
 [UninstallDelete]
 ; 用户数据（%LOCALAPPDATA%\LabSentinel）与 versions/ 归档**不随卸载删除**——
 ; {app} 之外的目录本就不在卸载范围，此处仅作说明；需清理时手工删除：
 ;   数据：%LOCALAPPDATA%\LabSentinel\（DB/截图/视频/标注池/日志/FIRST_RUN_TOKEN）
 ;   版本归档：{app}\versions\（回滚点，卸载时保留便于排查后重装）
+;   服务模式共享数据：C:\ProgramData\LabSentinel\（WinSW XML 的 LS_DATA_DIR）
 ; Type: files; Name: "{app}\versions\*"  ← 刻意不写：保留回滚点
 
 [Run]
@@ -110,6 +115,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\LabSent
 ;   2) 文件复制（[Files]）
 ;   3) 此处 finalize --verify：真实启动新版本 uvicorn → /api/health/ready → 停止；
 ;      失败自动 rollback() 到 versions/ 归档并以非 0 退出码让 Inno 中止安装。
+;   服务模式（ALLUSERS）下健康检查以当前管理员用户身份跑（数据目录为其 LOCALAPPDATA），
+;   与服务实际运行账户（LocalService）不同——仅验证程序本身可启动。
 Filename: "{app}\runtime\python.exe"; \
   Parameters: "scripts\install_portable.py finalize --verify --install-dir ""{app}"" --silent"; \
   WorkingDir: "{app}"; Flags: runhidden; StatusMsg: "{cm:Verify}"
@@ -125,6 +132,15 @@ Filename: "{app}\LabSentinel.exe"; Parameters: "--stop"; WorkingDir: "{app}"; \
 var
   StartMenuCb: TNewCheckBox;
   DesktopCb: TNewCheckBox;
+
+// 双模式默认目录：管理员（为所有用户）→ {autopf}\LabSentinel；仅为我 → {localappdata}\Programs
+function GetDefaultDirName(Param: String): String;
+begin
+  if IsAdminInstallMode then
+    Result := ExpandConstant('{autopf}\LabSentinel')
+  else
+    Result := ExpandConstant('{localappdata}\Programs\LabSentinel');
+end;
 
 // ---- 完成页注入双复选框（默认全勾）：开始菜单 + 桌面快捷方式 ----
 procedure CurPageChanged(CurPageID: Integer);
@@ -156,21 +172,36 @@ begin
 end;
 
 // ---- 快捷方式生成（文件复制后）：按完成页勾选；卸载项始终生成 ----
+// 开始菜单位置随模式：管理员 → {commonprograms}（所有用户开始菜单）；
+// 仅为我 → {userprograms}。桌面同理 {commondesktop}/{userdesktop}。
 procedure CreateShortcuts;
 var
   GroupDir, DesktopDir: String;
+  WantMenu, WantDesktop: Boolean;
 begin
-  GroupDir := ExpandConstant('{group}');
-  DesktopDir := ExpandConstant('{userdesktop}');
+  if IsAdminInstallMode then
+  begin
+    GroupDir := ExpandConstant('{commonprograms}\LabSentinel');
+    DesktopDir := ExpandConstant('{commondesktop}');
+  end
+  else
+  begin
+    GroupDir := ExpandConstant('{userprograms}\LabSentinel');
+    DesktopDir := ExpandConstant('{userdesktop}');
+  end;
+  // 静默安装（/VERYSILENT）不触发 wpFinished → 复选框为 nil → 默认全生成
+  // （交互安装下复选框默认也是全勾，语义一致）
+  WantMenu := (StartMenuCb = nil) or StartMenuCb.Checked;
+  WantDesktop := (DesktopCb = nil) or DesktopCb.Checked;
   // 卸载快捷方式始终生成（保证可从开始菜单卸载）
   ForceDirectories(GroupDir);
   CreateShellLink(GroupDir + '\Uninstall LabSentinel.lnk',
     'Uninstall LabSentinel', ExpandConstant('{uninstallexe}'), '', '', '', 0, SW_SHOWNORMAL);
-  if (StartMenuCb <> nil) and StartMenuCb.Checked then
+  if WantMenu then
     CreateShellLink(GroupDir + '\LabSentinel.lnk',
       CustomMessage('Launch'), ExpandConstant('{app}\LabSentinel.exe'),
       '', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
-  if (DesktopCb <> nil) and DesktopCb.Checked then
+  if WantDesktop then
     CreateShellLink(DesktopDir + '\LabSentinel.lnk',
       CustomMessage('Launch'), ExpandConstant('{app}\LabSentinel.exe'),
       '', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
@@ -195,18 +226,23 @@ begin
   begin
     CreateShortcuts;
 
-    // 可选服务（Tasks 勾选后）
+    // 可选服务（Tasks 勾选后；仅 ALLUSERS 模式有意义——LocalService + ProgramData）
     if WizardIsTaskSelected('installservice') then
     begin
-      WinSW := ExpandConstant('{app}\tools\winsw.exe');
-      if FileExists(WinSW) then
-      begin
-        if not Exec(WinSW, 'install labsentinel-service.xml',
-                    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-          MsgBox(CustomMessage('ServiceFailed'), mbError, MB_OK);
-      end
+      if not IsAdminInstallMode then
+        MsgBox(CustomMessage('ServiceMissing'), mbInformation, MB_OK)
       else
-        MsgBox(CustomMessage('ServiceMissing'), mbInformation, MB_OK);
+      begin
+        WinSW := ExpandConstant('{app}\tools\winsw.exe');
+        if FileExists(WinSW) then
+        begin
+          if not Exec(WinSW, 'install labsentinel-service.xml',
+                      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+            MsgBox(CustomMessage('ServiceFailed'), mbError, MB_OK);
+        end
+        else
+          MsgBox(CustomMessage('ServiceMissing'), mbInformation, MB_OK);
+      end;
     end;
   end;
 end;
