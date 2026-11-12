@@ -13,6 +13,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+# CI 的 python -I --check 子进程在 GBK 控制台打印中文报错会 charmap 炸
+# （UnicodeEncodeError，2026-11-13 CI windows 实测）——stdout/stderr 重配为
+# UTF-8 + replace；-I 忽略 PYTHONIOENCODING，只能在进程内解决。
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "docs" / "openapi.json"
 
