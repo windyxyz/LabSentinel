@@ -6,6 +6,35 @@
 
 ## [Unreleased]
 
+### 全面安全/性能审计修复（2026-11-14，反思自查 + 双专项）
+- **P0-1 WebSocket 握手零鉴权（CSWSH）**：`/ws/events` 此前无 Origin 校验、
+  无令牌校验——恶意网页 drive-by 可实时读取事件流并绕过读保护。修复：Origin
+  同源/白名单校验 + read_protected 时子协议 `bearer.<token>`/Bearer 令牌校验
+  （语义对齐 Python `_ws_auth_check`），并 echo `labsentinel` 子协议。
+- **P0-2 首发派发阻塞帧循环**：dispatch_event 是同步 ureq（单渠道最坏 ~40s
+  ×8 渠道），跑在相机帧循环线程上会让该路停摆数分钟——改投后台线程
+  （对齐 Python ThreadPoolExecutor 异步语义）。
+- **P1 批**：设备令牌降级 triage-only（此前可 shutdown/config import/plugins
+  start——权限放大）；插件子进程环境白名单重建（不再继承 LS_ADMIN_TOKEN）+
+  start 重入拒绝（防进程增殖/句柄孤儿）；folder 原图端点 containment 校验
+  （DB path 被污染时防任意文件读取）。
+- **P2 批**：常数时间令牌比较（ct_eq）；`/api/logs` 脱敏 + 2MB 尾部读取 +
+  不回显绝对路径；GET 管理分级（audit/devices/config/plugins/face-persons）；
+  写限流 120/min + pairing/claim 10/min/IP（testing 豁免）；request-id 随机化
+  （原为可预测纳秒时间戳）；ppe_download 流式下载按期望大小截断；diagnostics/
+  ppe 状态不再回显内部绝对路径。
+- **反思自查批**：folder worker 每 tick（3s）重复加载 YOLO 模型 → 提到循环外；
+  genai reviewed/failed/queue_depth 计数恒 0（stats 未共享给消费线程）→ Arc
+  共享修复；face 客户端显式校验 HTTP 状态码（ureq 2.x 非 2xx 返回 Ok）；face
+  注册流式读取（10MB 上限在读取中断，不再全量进内存）；插件 state.json 原子写；
+  `{python}` 占位不再替换成本服务自身 exe；launch 模式 bind 失败优雅退出。
+- **Python 侧回归修复**（性能审计发现）：`pipeline.py:257` T-308 把录像 done
+  检查留在 `for rec` 循环外（引用最后一个 rec）——多录像时除最后一个外永不
+  置 done，**视频永不回填**；移回循环体内（2026-11-06 回归）。
+- 门禁：workspace 115 passed + clippy `-D warnings` + fmt 全绿；Python 存证
+  12 例 + 全量回归跑测；安全专项 + 性能专项两轮独立审计覆盖认证覆盖/注入面/
+  路径穿越/SSRF/信息泄露/DoS/热路径/锁并发/死代码/双实现漂移十个维度。
+
 ### Rust 重构 RA4：部署/启动链替换评估 + 核心消解件（ADR-0011，2026-11-13）
 - **逐项判定落地**（见 roadmap RA4 能力矩阵）：Inno 消解 5 项（文件/快捷方式/
   卸载键/自启/覆盖升级）；Rust 重写 2 项 ✅；豁免 2 项（deploy.py/tools/）；

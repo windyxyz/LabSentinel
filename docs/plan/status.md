@@ -308,6 +308,52 @@ publish 全绿**（nightly-rust 仍为 toolchain 下载网络抖动，非门塞�
 stdout+stderr 一并打印后才看到真实 include 错误；本机与 CI 的代码页/预装组件差异
 （BOM、语言文件）是安装器类问题的固定排查方向。
 
+## 全面审计修复轮（2026-11-14，反思自查 + 安全/性能双专项）
+
+用户指令：反问式自查覆盖全项目 + 安全修复 + 性能优化 + 代码精简。
+
+**方法**：① 手工对 RA2~RA4 新写代码逐模块反问（7 项实锤）；② 安全专项代理
+（认证覆盖/注入面/路径穿越/SSRF/信息泄露/DoS 六维度）；③ 性能+死代码专项代理
+（热路径/锁并发/跨 crate 死代码/双实现漂移十维度）。
+
+**P0 修复（2 项，均为可利用/高影响）**：
+- **WS 握手零鉴权（CSWSH）**：`/ws/events` 无 Origin 校验无令牌——恶意网页
+  drive-by 实时读事件流+绕过读保护 → Origin 同源/白名单 + `bearer.<token>`
+  子协议校验（对齐 Python `_ws_auth_check`）。
+- **首发派发阻塞帧循环**：dispatch_event 同步 ureq（单渠道最坏 40s×8 渠道）
+  跑在相机帧循环线程 → 后台线程（对齐 Python ThreadPoolExecutor）。
+
+**P1 修复（5 项）**：设备令牌降级 triage-only（此前可 shutdown/config import/
+plugins start——配对设备泄露即全权接管）；插件子进程环境白名单重建（不再继承
+LS_ADMIN_TOKEN）；插件 start 重入拒绝（防进程增殖/句柄孤儿）；folder 原图端点
+containment（DB path 污染防任意文件读取）。
+
+**P2 修复（8 项）**：ct_eq 常数时间令牌比较；/api/logs 脱敏+2MB 尾读+不回显
+绝对路径；GET 管理分级（audit/devices/config/plugins/face-persons = admin）；
+写限流 120/min + claim 10/min/IP（testing 豁免）；request-id 随机化（原为可
+预测纳秒）；ppe_download 流式+按期望大小截断；diagnostics/ppe 路径回显收敛；
+selftest 噪音消除。
+
+**反思自查批（7 项）**：folder worker 每 tick（3s）重复加载 YOLO 模型（提循环
+外）；genai reviewed/failed/queue_depth 计数恒 0（stats 未共享消费线程 → Arc
+修复）；face 客户端不校验 HTTP 状态码（ureq 2.x 非 2xx 返回 Ok → 假成功）；
+face 注册流式读取（10MB 上限在读取中断）；插件 state.json 原子写；`{python}`
+占位误替换为本服务自身 exe；--launch bind 失败 unwrap panic → 优雅退出。
+
+**Python 回归修复（性能审计发现）**：`pipeline.py:257` T-308（2026-11-06）
+把录像 done 检查留在 `for rec` 循环外——多录像时除最后一个外永不置 done，
+**视频永不回填**；移回循环体内。这正是「双实现漂移风险」审法的直接产出
+（Rust 侧 done 判定正确，对照出 Python 回归）。
+
+**死代码/精简清单**（审计产出，后续批次消化）：Rust 侧 Ingest::alive/
+Workers::ids/ensure_tools_on_path/ZoneState::size 等未用符号与过时 allow 标注；
+Python 侧 can_triage/wait_ready/add_audit 等 14 处零调用；漂移风险表
+（folder 目录增量扫描、holiday_only 未读、SQLite synchronous=NORMAL 差异）已
+入账待排期。
+
+门禁：workspace 115 passed + clippy/fmt 绿；Python 全量 **631 passed / 7
+skipped / 0 failed**（含回归修复验证）。
+
 ## 全面审查轮（2026-11-13，三代理并行 + 手工修复）
 
 用户指令：修 bug + 全面审查 + 发布暂缓；随后追加**Rust-first 战略**（见下节）。
