@@ -1285,17 +1285,20 @@ mod tests {
 
     // ---- RA1.3：folder worker + 首发派发 ----
 
-    /// folder_images 表建表（seed_schema 未含；列与 Python store.MIGRATIONS 一致）。
+    /// folder_images 表建表（seed_schema 未含；列与唯一索引对齐 Python
+    /// store.MIGRATIONS——四元组 (camera_id,path,mtime_ns,size)，文件覆盖即新图）。
     fn seed_folder_images(db: &std::path::Path) {
         let c = rusqlite::Connection::open(db).unwrap();
         c.execute_batch(
             "CREATE TABLE IF NOT EXISTS folder_images(\
-             id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, path TEXT UNIQUE, \
+             id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, path TEXT, \
              name TEXT, mtime_ns INTEGER, size INTEGER, ts TEXT, processed_ts TEXT, \
              width INTEGER, height INTEGER, persons INTEGER DEFAULT 0, in_zone INTEGER DEFAULT 0, \
              ppe_no INTEGER DEFAULT 0, ppe_wearing INTEGER DEFAULT 0, zones TEXT, \
              violations TEXT, key INTEGER DEFAULT 0, violation INTEGER DEFAULT 0, \
-             event_id INTEGER, snapshot TEXT, error TEXT);",
+             event_id INTEGER, snapshot TEXT, error TEXT);\
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_images_uniq \
+             ON folder_images(camera_id, path, mtime_ns, size);",
         )
         .unwrap();
     }

@@ -1413,9 +1413,11 @@ impl Store {
         if self.conn.changes() > 0 {
             Ok(self.conn.last_insert_rowid())
         } else {
+            // 唯一键 = (camera_id, path, mtime_ns, size)——对齐 Python schema 的
+            // idx_folder_images_uniq 四元组：文件被覆盖（mtime/size 变）即视为新图
             self.conn.query_row(
-                "SELECT id FROM folder_images WHERE camera_id=? AND path=?",
-                params![camera_id, path],
+                "SELECT id FROM folder_images WHERE camera_id=? AND path=? AND mtime_ns=? AND size=?",
+                params![camera_id, path, mtime_ns, size],
                 |r| r.get(0),
             )
         }
