@@ -220,6 +220,56 @@ impl Store {
         Ok(cams.into_iter().find(|c| c.id == id))
     }
 
+    /// RA2-S6：人脸同意记录（合规留痕，只存 subject/ts，不落人脸图片）。
+    pub fn add_face_consent(&self, subject: &str, ts: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO face_consents(subject,ts) VALUES(?,?)",
+            params![subject, ts],
+        )?;
+        Ok(())
+    }
+
+    pub fn face_consents(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT subject,ts FROM face_consents ORDER BY ts")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    pub fn face_consent_ts(&self, subject: &str) -> rusqlite::Result<Option<String>> {
+        match self.conn.query_row(
+            "SELECT ts FROM face_consents WHERE subject=?",
+            params![subject],
+            |r| r.get(0),
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn clear_face_consents(&self) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM face_consents", [])?;
+        Ok(())
+    }
+
+    /// RA2-S5：事件 AI 复核标记回写（对齐 Python store.set_ai_review：
+    /// 只写 ai_review/ai_review_ts/ai_review_model，绝不改 status）。
+    pub fn set_ai_review(
+        &self,
+        eid: i64,
+        review_json: &str,
+        ts: &str,
+        model: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE events SET ai_review=?, ai_review_ts=?, ai_review_model=? WHERE id=?",
+            params![review_json, ts, model, eid],
+        )?;
+        Ok(())
+    }
+
     pub fn set_camera_status(&self, id: i64, status: &str) -> rusqlite::Result<usize> {
         self.conn.execute(
             "UPDATE cameras SET status=? WHERE id=?",

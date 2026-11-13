@@ -132,6 +132,10 @@ impl EventSink {
             ts: &cand.ts_iso,
         };
         let eid = store.add_event(&ev).map_err(|e| e.to_string())?;
+        // RA2-S5：AI 复核入队（默认 provider=none 零开销；只写 ai_review 标记）
+        let _ = st
+            .genai
+            .maybe_enqueue(eid, snapshot.as_deref(), cand.level, &st.db_path);
         // WS 广播：行口径与 /api/events 完全一致（绝对路径不外泄——event_json
         // 只出 has_snapshot/has_video 布尔，与 Python 桥 pop(snapshot/video) 等价）
         if let Ok(Some(row)) = store.event_by_id(eid) {
@@ -1518,6 +1522,170 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM alert_deliveries", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 0, "无渠道不建投递行");
+    }
+
+    #[tokio::test]
+    async fn face_compliance_gates() {
+        use crate::tests::helpers::{body_json, req, test_state};
+        use crate::*;
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        seed_schema(&db);
+        let app = build_router(test_state(db.to_str().unwrap()));
+        // 默认关（LS_FACE_ENABLED 未设）→ 403 合规门（在任何 CompreFace 调用前）
+        let r = req(&app, "GET", "/api/face/persons", None).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let j = body_json(r).await;
+        assert!(j["detail"].as_str().unwrap().contains("未开启"), "合规文案");
+        // /face/status 只读不受门控：enabled=false
+        let j = body_json(req(&app, "GET", "/api/face/status", None).await).await;
+        assert_eq!(j["enabled"], false);
+        assert!(j.get("configured").is_some() && j.get("threshold").is_some());
+    }
+
+    #[test]
+    fn genai_parse_review_strict_and_status_default() {
+        // 严格 JSON：verdict 白名单 / reason 截断 / confidence 夹取 / 围栏剥离
+        let ok = crate::genai::parse_review(
+            "```json\n{\"verdict\":\"likely_false\",\"reason\":\"无人\",\"confidence\":0.8}\n```",
+        )
+        .unwrap();
+        assert_eq!(ok["verdict"], "likely_false");
+        assert_eq!(ok["reason"], "无人");
+        assert_eq!(ok["confidence"], 0.8);
+        assert!(crate::genai::parse_review("not json").is_err());
+        assert!(crate::genai::parse_review("{\"verdict\":\"bogus\"}").is_err());
+        let clamped =
+            crate::genai::parse_review("{\"verdict\":\"uncertain\",\"confidence\":9.9}").unwrap();
+        assert_eq!(clamped["confidence"], 1.0);
+        // 默认 provider=none：status 九字段 + 零开销（不入队、不建线程）
+        let g = crate::genai::GenAI::from_env();
+        let s = g.status();
+        assert_eq!(s["provider"], "none");
+        assert!(s.get("queue_depth").is_some() && s.get("max_inflight").is_some());
+        assert!(!g.maybe_enqueue(1, Some("/x.jpg"), 3, ":memory:"));
+    }
+
+    #[test]
+    fn set_ai_review_writes_marker_without_status_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("t.db");
+        seed_schema(&db);
+        let s = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+        let eid = s
+            .add_event(&ls_store::NewEvent {
+                camera_id: 1,
+                type_: "person_enter",
+                level: 2,
+                track_id: 1,
+                detail: "x",
+                snapshot: None,
+                ts: "2026-11-13T00:00:00",
+            })
+            .unwrap();
+        s.set_ai_review(
+            eid,
+            "{\"verdict\":\"likely_true\"}",
+            "2026-11-13T00:00:01",
+            "llava",
+        )
+        .unwrap();
+        let (review, status): (Option<String>, String) = s
+            .conn()
+            .query_row(
+                "SELECT ai_review, status FROM events WHERE id=?",
+                [eid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(review.unwrap().contains("likely_true"));
+        assert_eq!(status, "new", "AI 复核绝不改 status");
+    }
+
+    #[tokio::test]
+    async fn plugins_s7_contract() {
+        use crate::tests::helpers::{body_json, req, test_state_custom};
+        use crate::*;
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        let data = dir.path().join("data");
+        let plug = data.join("plugins");
+        let good = plug.join("demo-plug");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(
+            good.join("plugin.json"),
+            r#"{"id":"demo-plug","name":"Demo","version":"1.0","description":"x",
+                "command":["{python}","--version"],"permissions":["read"],"env":{"FOO":"bar"}}"#,
+        )
+        .unwrap();
+        let bad = plug.join("bad-plug");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(
+            bad.join("plugin.json"),
+            r#"{"id":"../escape","command":[]}"#,
+        )
+        .unwrap();
+        seed_schema(&db);
+        let app = build_router(test_state_custom(
+            db.to_str().unwrap(),
+            "",
+            false,
+            data.to_str().unwrap(),
+            true,
+            "",
+        ));
+        // scan：好插件 + 坏清单 error 项
+        let j = body_json(req(&app, "GET", "/api/plugins", None).await).await;
+        let arr = j["plugins"].as_array().unwrap();
+        assert!(arr
+            .iter()
+            .any(|p| p["id"] == "demo-plug" && p["name"] == "Demo"));
+        assert!(
+            arr.iter()
+                .any(|p| p["id"] == "bad-plug" && p["error"].is_string()),
+            "坏清单生成 error 项"
+        );
+        // enable → {id,enabled:true}
+        let j = body_json(req(&app, "POST", "/api/plugins/demo-plug/enable", None).await).await;
+        assert_eq!(j["enabled"], true);
+        // 不存在的插件 → 404
+        let r = req(&app, "POST", "/api/plugins/nope/enable", None).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        // logs（无日志文件 → 空串，不崩）
+        let j = body_json(req(&app, "GET", "/api/plugins/demo-plug/logs", None).await).await;
+        assert_eq!(j["id"], "demo-plug");
+    }
+
+    #[tokio::test]
+    async fn status_endpoints_ra2_shape() {
+        use crate::tests::helpers::{body_json, req, test_state};
+        use crate::*;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        seed_schema(&db);
+        let app = build_router(test_state(db.to_str().unwrap()));
+        // S9：model/status 形状对齐 Python（classes/ppe/backend/imgsz/conf/analysis_fps）
+        let j = body_json(req(&app, "GET", "/api/model/status", None).await).await;
+        assert!(j.get("backend").is_some() && j.get("imgsz").is_some());
+        assert!(j.get("classes").is_some() && j["classes"].get("names").is_some());
+        assert!(j.get("ppe").is_some() && j["ppe"].get("conf").is_some());
+        assert!(j.get("face_enabled").is_some());
+        // S2：mqtt/status 九字段（默认关）
+        let j = body_json(req(&app, "GET", "/api/mqtt/status", None).await).await;
+        assert_eq!(j["enabled"], false);
+        assert!(
+            j.get("published").is_some()
+                && j.get("queue_depth").is_some()
+                && j.get("host").is_some()
+                && j.get("topic_prefix").is_some()
+        );
+        // genai/plugins 现状如实占位（S5/S7 待接）
+        let j = body_json(req(&app, "GET", "/api/genai/status", None).await).await;
+        assert_eq!(j["provider"], "none");
+        let j = body_json(req(&app, "GET", "/api/plugins", None).await).await;
+        assert!(j["plugins"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

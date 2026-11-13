@@ -169,17 +169,80 @@ pub(crate) async fn sign_media(
     Json(json!({"exp": exp.to_string(), "sig": format!("sha256={sig}")})).into_response()
 }
 
+fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
 pub(crate) async fn model_status() -> Response {
-    // rust 控制面无 Python 引擎；文件状态与配置如实上报，引擎字段如实标注。
+    // RA2-S9：形状对齐 Python api.model_status（只读上报，不加载 ONNX）。
     let fp32 = std::env::var("LS_MODEL_FP32").unwrap_or_default();
     let ppe = std::env::var("LS_PPE_MODEL").unwrap_or_default();
     let active = if ppe.is_empty() { &fp32 } else { &ppe };
+    let backend_order = std::env::var("LS_BACKEND_ORDER").unwrap_or_default();
+    let backend = backend_order
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // classes 文件：模型同目录 <stem>.classes.txt，回退 yolo11n_ppe.classes.txt
+    let classes_file: Option<String> = if active.is_empty() {
+        None
+    } else {
+        let p = std::path::Path::new(active);
+        let cand1 = p.with_extension("classes.txt");
+        let cand2 = p
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("yolo11n_ppe.classes.txt");
+        if cand1.is_file() {
+            Some(cand1.to_string_lossy().into_owned())
+        } else if cand2.is_file() {
+            Some(cand2.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    };
+    let (class_names, class_count) = match &classes_file {
+        Some(f) => {
+            let raw = std::fs::read_to_string(f).unwrap_or_default();
+            let all: Vec<String> = raw
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            (all.iter().take(50).cloned().collect::<Vec<_>>(), all.len())
+        }
+        None => (Vec::new(), 0),
+    };
+    let ppe_class_names: Vec<String> = std::env::var("LS_PPE_CLASS_NAMES")
+        .unwrap_or_else(|_| "lab coat".into())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     Json(json!({
-        "engine": {"loaded": false, "backend": null,
-                   "note": "rust 控制面独立模式不加载 ONNX（数据面在 Python 服务/sidecar）"},
+        "backend": backend,
+        "imgsz": env_num("LS_IMGSZ", 640u32),
+        "conf": env_num("LS_CONF_THRES", 0.40f64),
+        "analysis_fps": env_num("LS_ANALYSIS_FPS", 5.0f64),
         "models": {"ppe": file_info(std::path::Path::new(active)),
                    "fp32": file_info(std::path::Path::new(&fp32))},
-        "backend_order": std::env::var("LS_BACKEND_ORDER").unwrap_or_default(),
+        "classes": {"file": classes_file, "exists": classes_file.is_some(),
+                    "count": class_count, "names": class_names},
+        "ppe": {"class_names": ppe_class_names,
+                "violation_class": std::env::var("LS_PPE_VIOLATION_CLASS")
+                    .unwrap_or_else(|_| "no lab coat".into()),
+                "conf": env_num("LS_PPE_CONF", 0.30f64),
+                "wearing_conf": env_num("LS_PPE_WEARING_CONF", 0.20f64)},
+        "face_enabled": std::env::var("LS_FACE_ENABLED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false),
+        "backend_order": backend_order,
+        "engine": {"loaded": false, "backend": null,
+                   "note": "rust 控制面独立模式不加载 ONNX（worker 运行时按 LS_MODEL_PATH 加载）"},
     }))
     .into_response()
 }
@@ -212,32 +275,125 @@ pub(crate) async fn mqtt_status(State(st): State<Shared>) -> Response {
     .into_response()
 }
 
-pub(crate) async fn genai_status() -> Response {
-    Json(json!({"provider": "none", "configured": false,
-                "note": "VLM 复核在 Python 服务实现；rust 控制面独立模式不启用"}))
-    .into_response()
+pub(crate) async fn genai_status(State(st): State<Shared>) -> Response {
+    // RA2-S5：真实九字段（默认 provider=none 时其余计数 0）
+    Json(st.genai.status()).into_response()
 }
 
-pub(crate) async fn plugins_list() -> Response {
-    Json(json!({"plugins": [],
-                "note": "插件管理器在 Python 服务实现；rust 控制面独立模式无插件"}))
-    .into_response()
+pub(crate) async fn plugins_list(State(st): State<Shared>) -> Response {
+    // RA2-S7：真实扫描 data/plugins（坏清单生成 error 项不崩）
+    Json(json!({"plugins": st.plugins.scan(&st)})).into_response()
 }
 
-pub(crate) async fn update_check_status() -> Response {
-    // LS_UPDATE_MANIFEST_URL 未配置时 Python 返回 enabled=false（只查静态清单）
+/// 版本比较（只升不降，T-110）：点分段数字逐段比较，短段补 0。
+fn version_gt(a: &str, b: &str) -> bool {
+    let pa: Vec<u64> = a
+        .split('.')
+        .map(|s| s.trim().parse().unwrap_or(0))
+        .collect();
+    let pb: Vec<u64> = b
+        .split('.')
+        .map(|s| s.trim().parse().unwrap_or(0))
+        .collect();
+    let n = pa.len().max(pb.len());
+    (0..n).any(|i| pa.get(i).copied().unwrap_or(0) > pb.get(i).copied().unwrap_or(0))
+}
+
+fn url_allowed(url: &str, hosts_csv: &str) -> bool {
+    // T-110：https 前置 + 主机在白名单（逗号分隔，空=拒绝全部）
+    if !url.starts_with("https://") {
+        return false;
+    }
+    let host = url
+        .strip_prefix("https://")
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    hosts_csv
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .any(|h| !h.is_empty() && h == host)
+}
+
+static UPDATE_CACHE: std::sync::Mutex<Option<(std::time::Instant, Value)>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) async fn update_check_status(
+    State(_st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    // RA2-S8：清单拉取真实现（1h 缓存 + https 强制 + url 白名单）。
+    // minisign 签名验证未实现（分水岭决策：不引新 crate）——error 字段如实标注。
     let manifest = std::env::var("LS_UPDATE_MANIFEST_URL").unwrap_or_default();
-    Json(
-        json!({"enabled": !manifest.is_empty(), "current": st_version(),
-        "latest": null, "update_available": false,
-        "error": null,
-        "note": if manifest.is_empty() {
-            "未配置 LS_UPDATE_MANIFEST_URL，更新检查关闭"
-        } else {
-            "rust 控制面仅上报配置状态；清单拉取在 Python 服务"
-        }}),
-    )
-    .into_response()
+    let current = st_version();
+    let mut result = json!({
+        "enabled": !manifest.is_empty(), "current": current,
+        "update_available": false, "latest": null, "url": null,
+        "sha256": null, "notes": null, "published_at": null,
+        "channel": null, "error": "",
+    });
+    if manifest.is_empty() {
+        return Json(result).into_response();
+    }
+    let refresh = q.get("refresh").map(|v| v == "1").unwrap_or(false);
+    if !refresh {
+        if let Ok(g) = UPDATE_CACHE.lock() {
+            if let Some((ts, cached)) = g.as_ref() {
+                if ts.elapsed() < std::time::Duration::from_secs(3600) {
+                    return Json(cached.clone()).into_response();
+                }
+            }
+        }
+    }
+    let allow_http = std::env::var("LS_UPDATE_ALLOW_HTTP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if manifest.starts_with("http://") && !allow_http {
+        result["error"] = json!("清单 URL 必须 https（LS_UPDATE_ALLOW_HTTP=1 可豁免内网测试）");
+        return Json(result).into_response();
+    }
+    let fetched: Result<Value, String> = (|| {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+        let text = agent
+            .get(&manifest)
+            .call()
+            .map_err(|e| format!("清单拉取失败: {e}"))?
+            .into_string()
+            .map_err(|e| format!("清单读取失败: {e}"))?;
+        serde_json::from_str(&text).map_err(|_| "清单非 JSON".to_string())
+    })();
+    match fetched {
+        Err(e) => {
+            // 错误不缓存：下次调用可重试（网络瞬时失败不粘住 1h）
+            result["error"] = json!(e);
+        }
+        Ok(data) => {
+            result["latest"] = data.get("version").cloned().unwrap_or(Value::Null);
+            if let Some(l) = data.get("version").and_then(|v| v.as_str()) {
+                result["update_available"] = json!(version_gt(l, &current));
+            }
+            for k in ["url", "sha256", "notes", "published_at", "channel"] {
+                result[k] = match data.get(k) {
+                    Some(Value::String(s)) => json!(s.clone()),
+                    _ => Value::Null,
+                };
+            }
+            let hosts = std::env::var("LS_UPDATE_URL_HOSTS").unwrap_or_default();
+            if let Some(u) = result["url"].as_str().map(|s| s.to_string()) {
+                if !url_allowed(&u, &hosts) {
+                    result["url"] = Value::Null; // 前端只渲染白名单内 https 链接
+                }
+            }
+            if let Ok(mut g) = UPDATE_CACHE.lock() {
+                *g = Some((std::time::Instant::now(), result.clone()));
+            }
+        }
+    }
+    Json(result).into_response()
 }
 
 pub(crate) fn st_version() -> String {
@@ -360,19 +516,60 @@ pub(crate) async fn shutdown_server() -> Response {
 }
 
 pub(crate) fn plugin_not_found() -> Response {
-    detail_err(
-        StatusCode::NOT_FOUND,
-        "plugin not found（rust 控制面无插件管理器，列表见 GET /api/plugins）",
-    )
-    .into_response()
+    detail_err(StatusCode::NOT_FOUND, "plugin not found").into_response()
 }
 
-pub(crate) async fn plugin_logs(AxPath(_pid): AxPath<String>) -> Response {
-    plugin_not_found()
+pub(crate) async fn plugin_logs(
+    State(st): State<Shared>,
+    AxPath(pid): AxPath<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    // RA2-S7：日志 tail（默认 200 行，与 Python plugins.logs 同口径）
+    if st.plugins.scan(&st).iter().all(|p| p["id"] != pid) {
+        return plugin_not_found();
+    }
+    let tail = q
+        .get("tail")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(200)
+        .clamp(1, 1000);
+    Json(json!({"id": pid, "logs": st.plugins.logs(&st, &pid, tail)})).into_response()
 }
 
-pub(crate) async fn plugin_action(AxPath(_pid): AxPath<String>) -> Response {
-    plugin_not_found()
+pub(crate) async fn plugin_action(
+    State(st): State<Shared>,
+    AxPath(pid): AxPath<String>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Response {
+    // RA2-S7：enable/disable/start/stop 按 URI 尾段分发（与 Python 同契约：
+    // enable/disable → {id,enabled}；start/stop → {id,status,detail}）
+    let action = req
+        .uri()
+        .path()
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    match action.as_str() {
+        "enable" | "disable" => {
+            let on = action == "enable";
+            if st.plugins.set_enabled(&st, &pid, on) {
+                Json(json!({"id": pid, "enabled": on})).into_response()
+            } else {
+                plugin_not_found()
+            }
+        }
+        "start" | "stop" => {
+            let (ok, detail) = if action == "start" {
+                st.plugins.start(&st, &pid)
+            } else {
+                st.plugins.stop(&pid)
+            };
+            let status = if ok { "ok" } else { "error" };
+            Json(json!({"id": pid, "status": status, "detail": detail})).into_response()
+        }
+        _ => detail_err(StatusCode::BAD_REQUEST, "未知插件动作").into_response(),
+    }
 }
 
 // ---- face（合规敏感：默认关闭。分支与 Python _face_guard 同语义） ----
@@ -384,6 +581,7 @@ pub(crate) fn face_enabled() -> bool {
 }
 
 pub(crate) fn face_guard() -> Result<(), Box<Response>> {
+    // RA2-S6：两道合规门（403 未开启 / 503 未配 key），之后放行真实现
     if !face_enabled() {
         return Err(Box::new(
             detail_err(
@@ -393,8 +591,7 @@ pub(crate) fn face_guard() -> Result<(), Box<Response>> {
             .into_response(),
         ));
     }
-    let key = std::env::var("LS_COMPREFACE_API_KEY").unwrap_or_default();
-    if key.is_empty() {
+    if !crate::face::FaceClient::from_env().configured() {
         return Err(Box::new(
             detail_err(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -403,51 +600,131 @@ pub(crate) fn face_guard() -> Result<(), Box<Response>> {
             .into_response(),
         ));
     }
-    // CompreFace HTTP 客户端在 Python 服务实现（注册/识别/1:N 全链）；rust 独立
-    // 模式开启开关后如实返回 503 而不是假装可用（§11.3 证据约束）。
-    Err(Box::new((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"detail": "CompreFace 客户端在 Python 服务实现；rust 控制面独立模式不支持人脸注册/识别",
-                    "code": "not_available_standalone"})),
-    )
-        .into_response()))
+    Ok(())
 }
 
 pub(crate) async fn face_status() -> Json<Value> {
-    let key = std::env::var("LS_COMPREFACE_API_KEY").unwrap_or_default();
+    let c = crate::face::FaceClient::from_env();
     Json(
-        json!({"enabled": face_enabled(), "configured": !key.is_empty(),
-                "threshold": 0.75,
-                "note": "CompreFace 客户端在 Python 服务实现"}),
+        json!({"enabled": face_enabled(), "configured": c.configured(),
+                "threshold": c.threshold}),
     )
 }
 
-pub(crate) async fn face_register(State(_st): State<Shared>, _body: axum::body::Bytes) -> Response {
+pub(crate) async fn face_register(
+    State(st): State<Shared>,
+    mut mp: axum::extract::Multipart,
+) -> Response {
     if let Err(resp) = face_guard() {
         return *resp;
     }
-    unreachable!("face_guard 在独立模式下恒 Err（见上）")
+    let mut subject = String::new();
+    let mut consent = false;
+    let mut photo: Option<Vec<u8>> = None;
+    const MAX: usize = 10 * 1024 * 1024;
+    while let Ok(Some(field)) = mp.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "subject" => subject = field.text().await.unwrap_or_default(),
+            "consent" => {
+                consent = matches!(
+                    field
+                        .text()
+                        .await
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "true" | "1" | "on"
+                )
+            }
+            "photo" => {
+                let data = field.bytes().await.unwrap_or_default();
+                if data.len() > MAX {
+                    return detail_err(StatusCode::PAYLOAD_TOO_LARGE, "照片超过 10MB 上限")
+                        .into_response();
+                }
+                photo = Some(data.to_vec());
+            }
+            _ => {}
+        }
+    }
+    if !consent {
+        return detail_err(
+            StatusCode::BAD_REQUEST,
+            "注册人员必须 consent=true（合规留痕）",
+        )
+        .into_response();
+    }
+    let Some(data) = photo else {
+        return detail_err(StatusCode::BAD_REQUEST, "照片为空").into_response();
+    };
+    if data.is_empty() || subject.trim().is_empty() {
+        return detail_err(StatusCode::BAD_REQUEST, "照片为空或 subject 必填").into_response();
+    }
+    let client = crate::face::FaceClient::from_env();
+    if let Err(e) = client.add_person(subject.trim(), &data) {
+        return detail_err(StatusCode::BAD_GATEWAY, &e).into_response();
+    }
+    // 同意记录落本地库（只存 subject/ts，不落人脸图片）
+    let ts = crate::genai::chrono_now();
+    if let Ok(s) = ls_store::Store::open(&st.db_path) {
+        let _ = s.add_face_consent(subject.trim(), &ts);
+    }
+    Json(json!({"ok": true, "subject": subject.trim(), "consent_ts": ts})).into_response()
 }
 
-pub(crate) async fn face_persons_list() -> Response {
+pub(crate) async fn face_persons_list(State(st): State<Shared>) -> Response {
     if let Err(resp) = face_guard() {
         return *resp;
     }
-    unreachable!("face_guard 在独立模式下恒 Err")
+    let client = crate::face::FaceClient::from_env();
+    let persons = match client.list_persons() {
+        Ok(p) => p,
+        Err(e) => return detail_err(StatusCode::BAD_GATEWAY, &e).into_response(),
+    };
+    // Python：CompreFace subjects ∩ 本地 face_consents（带同意时间戳）
+    with_store(&st, |s| {
+        let consents: std::collections::HashMap<String, String> =
+            s.face_consents().unwrap_or_default().into_iter().collect();
+        let rows: Vec<Value> = persons
+            .iter()
+            .map(|p| json!({"subject": p, "consent_ts": consents.get(p)}))
+            .collect();
+        Ok(Json(rows).into_response())
+    })
 }
 
-pub(crate) async fn face_clear_all() -> Response {
+pub(crate) async fn face_clear_all(State(st): State<Shared>) -> Response {
     if let Err(resp) = face_guard() {
         return *resp;
     }
-    unreachable!("face_guard 在独立模式下恒 Err")
+    let client = crate::face::FaceClient::from_env();
+    let mut errors = Vec::new();
+    match client.list_persons() {
+        Ok(persons) => {
+            for p in persons {
+                if let Err(e) = client.delete_person(&p) {
+                    errors.push(format!("{p}: {e}"));
+                }
+            }
+        }
+        Err(e) => errors.push(e),
+    }
+    if let Ok(s) = ls_store::Store::open(&st.db_path) {
+        let _ = s.clear_face_consents();
+    }
+    Json(json!({"ok": errors.is_empty(), "errors": errors})).into_response()
 }
 
-pub(crate) async fn face_delete(AxPath(_subject): AxPath<String>) -> Response {
+pub(crate) async fn face_delete(AxPath(subject): AxPath<String>) -> Response {
     if let Err(resp) = face_guard() {
         return *resp;
     }
-    unreachable!("face_guard 在独立模式下恒 Err")
+    match crate::face::FaceClient::from_env().delete_person(&subject) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => detail_err(StatusCode::BAD_GATEWAY, &e).into_response(),
+    }
 }
 
 // ---- 告警自检（真实发送：复用 ls-dispatch，渠道 URL 读 env） ----

@@ -51,6 +51,8 @@ pub(crate) fn test_state_custom(
         testing,
         workers: crate::worker::Workers::default(),
         mqtt: None,
+        plugins: crate::plugins::PluginManager::default(),
+        genai: crate::genai::GenAI::from_env(),
     })
 }
 
@@ -82,6 +84,7 @@ pub(crate) fn seed_schema(path: &std::path::Path) {
          threshold INTEGER, enabled INTEGER, days_of_week TEXT, holiday_only INTEGER);
          CREATE TABLE alert_deliveries(id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER, channel TEXT, \
          status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0, last_error TEXT, updated_ts TEXT);
+         CREATE TABLE face_consents(subject TEXT PRIMARY KEY, ts TEXT);
          CREATE TABLE alert_silences(id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, target TEXT, \
          reason TEXT, created_ts TEXT NOT NULL, until_ts TEXT NOT NULL, created_by TEXT);
          CREATE TABLE audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, request_id TEXT, \

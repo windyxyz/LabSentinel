@@ -25,8 +25,11 @@ use tower_http::services::{ServeDir, ServeFile};
 
 // ---- 2026-11-12 批次 A：按功能域拆分（结构化重构，机械搬移零逻辑改动）----
 // 原 middleware::{self,..} 导入已改 `middleware::Next`（根 `mod middleware` 让名）。
+mod face;
+mod genai;
 mod handlers;
 mod middleware;
+mod plugins;
 mod router;
 mod state;
 mod util;
@@ -124,6 +127,8 @@ async fn main() {
         workers: worker::Workers::default(),
         // RA2-S2：MQTT 事件桥（默认关零行为变化；连接失败不阻塞事件链——库保证）
         mqtt: ls_jobs::mqtt_from_env().map(Arc::new),
+        plugins: plugins::PluginManager::default(),
+        genai: genai::GenAI::from_env(),
     });
     // R2-305：网页端配置的渠道（app_settings alert.*，Fernet 解密）注入 ls-jobs
     // escalation 发送——"网页端保存企微 webhook → rust 路径生效"的真实验收点。

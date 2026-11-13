@@ -26,6 +26,10 @@ pub struct AppState {
     pub workers: crate::worker::Workers,
     /// RA2-S2：MQTT 事件桥（默认关——LS_MQTT_ENABLED=1 才构造；None=未启用）
     pub mqtt: Option<Arc<ls_dispatch::mqtt::MqttBus>>,
+    /// RA2-S7：插件管理器（manifest 校验/启停/日志）
+    pub plugins: crate::plugins::PluginManager,
+    /// RA2-S5：事件 AI 复核（默认 provider=none 零开销）
+    pub genai: crate::genai::GenAI,
 }
 
 #[derive(Default)]

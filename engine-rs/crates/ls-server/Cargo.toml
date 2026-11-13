@@ -19,7 +19,7 @@ ls-jobs = { path = "../ls-jobs" }
 # ls-ingest 供 worker 生命周期（Ingest/ChildSlot ffmpeg 托管）
 ls-analyzer = { path = "../ls-analyzer" }
 ls-ingest = { path = "../ls-ingest" }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.7", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 serde = { workspace = true }

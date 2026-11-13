@@ -6,6 +6,29 @@
 
 ## [Unreleased]
 
+### Rust 重构 RA2：S5~S9 批次——503 占位清零（ADR-0011，2026-11-13）
+- **S5 GenAI 事件复核**：`genai.rs`——默认 provider=none 零开销；单线程有界
+  队列（max=100 满丢计数）；ollama/openai_compat 双 provider（ureq）；严格
+  JSON 解析（verdict 白名单/reason≤200/confidence 夹取/围栏剥离）；回写
+  `events.ai_review*` 绝不改 status；回环红线（非回环需
+  LS_GENAI_ALLOW_REMOTE）；`/genai/status` 九字段真实。
+- **S6 face 控制面**：`face.rs` CompreFace REST 客户端（ureq 手工 multipart，
+  中文 subject URL 编码）；5 端点摘 `not_available_standalone`——注册
+  （consent=true 强制/10MB 上限/同意落 face_consents 表）、列表（subjects ∩
+  同意记录）、删除/一键清除（errors 数组）；合规门 403/503 分支保持。
+- **S7 plugins 管理器**：`plugins.rs`——manifest 严格校验（deny_unknown_fields/
+  id 正则+目录名一致/permissions 白名单/env 禁 LS_*）、state.json 持久化、
+  start（{python} 占位/PATH/目录锚定 + CREATE_NO_WINDOW + 日志追加）/
+  stop（强杀）/logs tail；6 端点摘 404 占位；坏清单 error 项不崩。
+- **S8 update/check**：清单拉取真实现（1h 缓存、错误不缓存可重试、https
+  强制 + LS_UPDATE_URL_HOSTS 白名单、只升不降版本比较）；**minisign 签名
+  验证未实现如实标注**（不引新 crate 的分水岭决策，T-403 证书到位时一并接）。
+- **S9 model/status 形状对齐**：补 backend/imgsz/conf/analysis_fps/classes
+  （file/exists/count/names，回退 yolo11n_ppe.classes.txt）/ppe 参数组/
+  face_enabled。
+- 门禁：workspace **115 passed / 0 failed**（+5 RA2 契约测试）+ clippy
+  `-D warnings` + fmt 全绿。RA2 除豁免项外 503 占位清零。
+
 ### Rust 重构 RA2：S1/S2/S3 批次（ADR-0011，2026-11-13）
 - **S1 PPE 参数化进 lib**：`YoloPpeRunner`/`PpeConfig`/`anchored_child`/
   `load_class_names` 从 bin 迁入 `ls-analyzer/src/ppe.rs`（sidecar 走 env 包装，
