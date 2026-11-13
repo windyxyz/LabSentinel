@@ -137,15 +137,39 @@ impl EventSink {
         if let Ok(Some(row)) = store.event_by_id(eid) {
             let _ = st.events_tx.send(event_json(&row).to_string());
         }
-        // RA1.3：告警首发派发（外部 8 渠道；静默/过滤/限流复用 ls-jobs 链路，
-        // 与 escalation 共享渠道快照和限流器）。投递失败只影响外部通知，
-        // 不影响事件已入库/已广播的事实。
         let cam_name = store
             .camera(cand.camera_id)
             .ok()
             .flatten()
             .map(|c| c.name)
             .unwrap_or_default();
+        // RA2-S2：MQTT 总线发布（独立于静默/渠道过滤——Python alerts.dispatch
+        // 入口同位；连接失败不阻塞事件链）。zones 契约数组：候选不带区域名，空数组。
+        if let Some(bus) = &st.mqtt {
+            let api_base = std::env::var("LS_MQTT_API_BASE").unwrap_or_else(|_| {
+                format!(
+                    "http://127.0.0.1:{}",
+                    std::env::var("LS_PORT").unwrap_or_else(|_| "8000".into())
+                )
+            });
+            let fields = ls_dispatch::mqtt::EventFields {
+                id: eid,
+                ts: &cand.ts_iso,
+                camera_id: cand.camera_id,
+                camera_name: Some(&cam_name),
+                type_: &cand.behavior,
+                level: cand.level,
+                track_id: cand.track_id,
+                detail: &cand.detail,
+                zones: &[],
+                has_snapshot: snapshot.is_some(),
+                api_base: &api_base,
+            };
+            let _ = bus.publish_event(&fields);
+        }
+        // RA1.3：告警首发派发（外部 8 渠道；静默/过滤/限流复用 ls-jobs 链路，
+        // 与 escalation 共享渠道快照和限流器）。投递失败只影响外部通知，
+        // 不影响事件已入库/已广播的事实。
         let dev = ls_dispatch::DispatchEvent {
             id: eid,
             camera_id: cand.camera_id,
@@ -255,6 +279,8 @@ pub struct WorkerConfig {
     pub rules: Vec<ls_analyzer::pipeline::RuleSpec>,
     pub calendar: HashMap<String, String>,
     pub detector: ls_analyzer::detector::DetectorConfig,
+    /// RA2-S1：PPE 级联配置（None = 未配置模型/下载未完成 → 仅人员检测）
+    pub ppe: Option<ls_analyzer::ppe::PpeConfig>,
     pub evidence_fps: f64,
     pub max_restarts: u32,
 }
@@ -341,6 +367,17 @@ impl WorkerConfig {
                 detector.model_path = Some(PathBuf::from(p.trim()));
             }
         }
+        // RA2-S1：PPE 级联（env LS_PPE_MODEL 若配，过锚点校验；类名/阈值走
+        // PpeConfig 默认——与 sidecar 默认口径一致）
+        let ppe = std::env::var("LS_PPE_MODEL").ok().and_then(|raw| {
+            let p = PathBuf::from(raw.trim());
+            ls_analyzer::detector::anchor_model_file(&p).map(|model_path| {
+                ls_analyzer::ppe::PpeConfig {
+                    model_path,
+                    ..Default::default()
+                }
+            })
+        });
         Ok(Some(WorkerConfig {
             camera_id: cid,
             spec: ls_analyzer::pipeline::CameraSpec {
@@ -355,6 +392,7 @@ impl WorkerConfig {
             rules,
             calendar,
             detector,
+            ppe,
             evidence_fps: efps,
             max_restarts: DEFAULT_MAX_RESTARTS,
         }))
@@ -472,6 +510,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         exit,
     );
     let mut detector = ls_analyzer::detector::make_detector(&cfg.detector);
+    // RA2-S1：PPE 级联注入管线（未配置模型 → None → 仅人员检测，ppe 恒 Unknown）
+    let ppe_runner = cfg.ppe.as_ref().and_then(ls_analyzer::ppe::make_ppe_runner);
+    pipe.set_ppe(ppe_runner);
     let evidence = Arc::new(ls_analyzer::evidence::Evidence::default());
     evidence.new_ring(cfg.spec.analysis_fps as f64, cfg.evidence_fps);
     let mut ing = ls_ingest::Ingest::new(ls_ingest::IngestConfig {
@@ -737,22 +778,30 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let cands = ls_ingest::folder::scan_candidates(&root, &scan_cfg, now, internal.as_deref());
+        // RA2-S3：识别器每轮构造一次（模型加载开销摊到整批图片）
+        let mut detector = ls_analyzer::detector::make_detector(&cfg.detector);
+        let mut ppe_runner = cfg.ppe.as_ref().and_then(ls_analyzer::ppe::make_ppe_runner);
+        let sink = EventSink::new(Arc::clone(&st));
+        let max_per_tick = env_f64("LS_FOLDER_MAX_PER_TICK", 20.0).max(1.0) as usize;
         let mut scanned = 0usize;
-        for c in &cands {
+        for c in cands.iter().take(max_per_tick) {
             if handle.stop.load(Ordering::SeqCst) {
                 break;
             }
-            let ts = iso_secs(now as u64);
+            let ts = iso_secs(c.mtime_s as u64); // Python：ts=文件 mtime
+            let processed_ts = iso_secs(now as u64);
             let name = c.path.file_name().map(|n| n.to_string_lossy().into_owned());
             let mtime_ns = (c.mtime_s * 1e9) as i64;
-            match store.add_folder_image(
+            let path_s = c.path.to_string_lossy().into_owned();
+            // 先幂等登记（唯一键 camera_id,path）——失败不阻断本轮其它图片
+            let iid = match store.add_folder_image(
                 cfg.camera_id,
-                &c.path.to_string_lossy(),
+                &path_s,
                 name.as_deref(),
                 mtime_ns,
                 c.size as i64,
                 &ts,
-                &ts,
+                &processed_ts,
                 None,
                 None,
                 0,
@@ -766,19 +815,178 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 None,
                 None,
             ) {
-                Ok(_) => scanned += 1,
-                Err(e) => eprintln!(
-                    "[ls-folder] cam-{} 登记失败 {}: {e}",
-                    cfg.camera_id,
-                    c.path.display()
-                ),
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!(
+                        "[ls-folder] cam-{} 登记失败 {}: {e}",
+                        cfg.camera_id,
+                        c.path.display()
+                    );
+                    continue;
+                }
+            };
+            // 已识别过的行跳过（width 非空 = 跑过识别；RA1.3 占位行 width=NULL
+            // 会被真值回填）——唯一键幂等 + 此判据防重复解码/重复建事件
+            if let Ok(Some(row)) = store.folder_image(iid) {
+                if row.width.is_some() {
+                    continue;
+                }
             }
+            // 单图解码 → BGR 1280x720（ffmpeg；中文路径安全）
+            let (bgr, w, h) = match ls_ingest::decode_image(&c.path, 1280, 720) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = store.update_folder_image_analysis(
+                        iid,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "[]",
+                        "[]",
+                        false,
+                        false,
+                        None,
+                        Some(&format!("无法解码（损坏或非图片文件）: {e}")),
+                        &processed_ts,
+                    );
+                    continue;
+                }
+            };
+            let frame = ls_ingest::Frame {
+                width: w,
+                height: h,
+                data: bgr.clone(),
+                index: 0,
+            };
+            let mut dets = detector.detect(&frame);
+            // PPE 级联：逐人框判定（未配 PPE 模型 → ppe 恒 Unknown）
+            if let Some(runner) = ppe_runner.as_mut() {
+                let boxes: Vec<[f32; 4]> = dets.iter().map(|d| d.box_).collect();
+                let statuses = runner.statuses(&bgr, w, h, &boxes);
+                for (d, st) in dets.iter_mut().zip(statuses) {
+                    d.ppe = st;
+                }
+            }
+            // 区域锚点 = 人框底边中点（与 pipeline.rs 同口径）；逐区统计
+            let mut zone_hits: Vec<serde_json::Value> = Vec::new();
+            let mut in_zone_ids: std::collections::HashSet<usize> = Default::default();
+            let mut ppe_no = 0i64;
+            let mut ppe_wearing = 0i64;
+            let mut violations: Vec<String> = Vec::new();
+            for z in &cfg.zones {
+                let poly: Vec<ls_core::Point> = z.points.clone();
+                let mut zone_person = 0i64;
+                let mut zone_no = 0i64;
+                let mut zone_wear = 0i64;
+                for (di, d) in dets.iter().enumerate() {
+                    let anchor = (((d.box_[0] + d.box_[2]) / 2.0) as i64, d.box_[3] as i64);
+                    if ls_core::point_in_polygon(&poly, anchor) {
+                        zone_person += 1;
+                        in_zone_ids.insert(di);
+                        match d.ppe {
+                            ls_analyzer::pipeline::PpeStatus::NoPpe => {
+                                zone_no += 1;
+                                ppe_no += 1; // 跨区去重按人算，此处按统计近似（同图同人通常只在一个区）
+                            }
+                            ls_analyzer::pipeline::PpeStatus::Wearing => {
+                                zone_wear += 1;
+                                ppe_wearing += 1;
+                            }
+                            ls_analyzer::pipeline::PpeStatus::Unknown => {}
+                        }
+                    }
+                }
+                if zone_person > 0 {
+                    zone_hits.push(serde_json::json!({
+                        "zone_id": z.id, "name": z.name,
+                        "persons": zone_person, "no": zone_no, "wearing": zone_wear,
+                    }));
+                    if zone_no > 0 {
+                        violations.push("enter_no_ppe".into());
+                    }
+                }
+            }
+            let persons = dets.len() as i64;
+            let in_zone = in_zone_ids.len() as i64;
+            // occupancy 规则（threshold < 人数 且 zone_id=0 整画面口径）
+            for r in &cfg.rules {
+                if r.behavior == "occupancy_over" && r.enabled && persons > r.threshold {
+                    violations.push("occupancy_over".into());
+                }
+            }
+            violations.sort();
+            violations.dedup();
+            let key = persons > 0;
+            let violation = !violations.is_empty();
+            // 违规快照：从解码帧现编 JPEG（q80，与事件截图同口径），落盘
+            // data/snapshots 且保留字节供 EventSink 入库（绝对路径入 DB 与 Python 同口径）
+            let (snapshot_path, snapshot_jpeg) = if violation {
+                let snap_dir = PathBuf::from(&st.data_dir).join("snapshots");
+                let _ = std::fs::create_dir_all(&snap_dir);
+                let snap_path = snap_dir.join(format!("folder_{iid}.jpg"));
+                let jpeg = ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h).unwrap_or_default();
+                if !jpeg.is_empty() && std::fs::write(&snap_path, &jpeg).is_ok() {
+                    (Some(snap_path.to_string_lossy().into_owned()), Some(jpeg))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+            let zones_json = serde_json::to_string(&zone_hits).unwrap_or_else(|_| "[]".into());
+            let violations_json =
+                serde_json::to_string(&violations).unwrap_or_else(|_| "[]".into());
+            let _ = store.update_folder_image_analysis(
+                iid,
+                w as i64,
+                h as i64,
+                persons,
+                in_zone,
+                ppe_no,
+                ppe_wearing,
+                &zones_json,
+                &violations_json,
+                key,
+                violation,
+                snapshot_path.as_deref(),
+                None,
+                &processed_ts,
+            );
+            // 违规 → 事件（走 EventSink：入库 + WS 广播 + MQTT + 首发派发）
+            if violation {
+                for behavior in &violations {
+                    let cand = ls_analyzer::pipeline::Candidate {
+                        camera_id: cfg.camera_id,
+                        zone_id: None,
+                        behavior: behavior.clone(),
+                        level: 2,
+                        track_id: 0,
+                        detail: format!(
+                            "文件夹图片 {} 命中 {}（{}人/{}区内）",
+                            name.as_deref().unwrap_or(""),
+                            behavior,
+                            persons,
+                            in_zone
+                        ),
+                        ts_iso: processed_ts.clone(),
+                        evidence_key: format!("folder:{iid}:{behavior}"),
+                    };
+                    if let Ok(Some(eid)) = sink.record(&cand, snapshot_jpeg.as_deref()) {
+                        let _ = store.set_folder_image_event(iid, eid);
+                    }
+                }
+            }
+            scanned += 1;
         }
         if !cands.is_empty() {
             println!(
-                "[ls-folder] cam-{} 本轮扫描 {} 候选（已登记的由唯一键幂等跳过）",
+                "[ls-folder] cam-{} 本轮 {} 候选，识别 {} 张（上限 {max_per_tick}）",
                 cfg.camera_id,
-                cands.len()
+                cands.len(),
+                scanned
             );
         }
         let _ = scanned;
@@ -1210,14 +1418,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bad, 0, "非图片扩展名不入册");
-        // 识别字段如实 0（RA1.3 无推理；RA2 回填）
-        let persons: i64 = s
+        // RA2-S3：假 jpg 无法解码 → error 字段如实（persons=0 且 width=0），
+        // 不再是无条件 0 占位
+        let (persons, err): (i64, Option<String>) = s
             .conn()
-            .query_row("SELECT persons FROM folder_images LIMIT 1", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT persons, error FROM folder_images LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(persons, 0);
+        assert!(err.is_some(), "解码失败应落 error 字段");
         assert!(stop_worker(&st, 1));
     }
 

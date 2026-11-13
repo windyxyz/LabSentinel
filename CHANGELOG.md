@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Rust 重构 RA2：S1/S2/S3 批次（ADR-0011，2026-11-13）
+- **S1 PPE 参数化进 lib**：`YoloPpeRunner`/`PpeConfig`/`anchored_child`/
+  `load_class_names` 从 bin 迁入 `ls-analyzer/src/ppe.rs`（sidecar 走 env 包装，
+  协议不变）；ls-server worker 与 folder worker 经 `cfg.ppe` 注入管线
+  （未配模型 → 仅人员检测，ppe 恒 Unknown）。
+- **S2 MQTT 事件桥接线**：`AppState.mqtt = ls_jobs::mqtt_from_env()`（默认关零
+  行为变化）；`EventSink::record` 落库后发布 payload v1（独立于静默/渠道过滤，
+  与 Python alerts.dispatch 同位）；`/mqtt/status` 从 `MqttStats.snapshot()`
+  出真实 published/dropped/failed/connected 等九字段。
+- **S3 folder 识别管线**：`ls-ingest::decode_image`（ffmpeg 单图解码 BGR
+  1280×720，零新依赖/中文路径安全）；folder worker 从「仅扫描登记」升级为
+  解码 → YOLO 检测 → 区域锚点判定 → PPE 分级 → zones/violations/key →
+  违规 JPEG 快照 → 全字段回填 → 违规事件经 EventSink（入库+WS+MQTT+首发派发）
+  → `set_folder_image_event` 关联；每 tick 限额 `LS_FOLDER_MAX_PER_TICK`。
+  ls-store 增 `update_folder_image_analysis`/`set_folder_image_event`。
+  解码失败行如实落 `error` 字段；已识别行按 width 跳过防重复建事件。
+- 门禁：workspace **110 passed / 0 failed** + clippy `-D warnings` + fmt 全绿。
+
 ### Rust 重构 RA2 开工：/api/system 契约补齐（ADR-0011，2026-11-13）
 - `today_counts`/`unhandled_today`/`alerts` 从空占位变真值：ls-store 新增
   `today_event_counts`/`count_events_today_handled`/`delivery_counts`

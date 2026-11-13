@@ -117,9 +117,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare("SELECT status, COUNT(*) FROM alert_deliveries GROUP BY status")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         let mut d = std::collections::BTreeMap::new();
         for r in rows {
             let (k, v) = r?;
@@ -1252,6 +1250,60 @@ impl Store {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
         }
+    }
+
+    /// RA2-S3：folder 识别结果回填（扫描登记行 → 真值）。唯一键（camera_id,path）
+    /// 幂等登记的行会被 UPDATE 覆盖成实测值——重复扫描同一文件不重复建事件
+    /// （调用方按 `processed_ts`/event_id 判重）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_folder_image_analysis(
+        &self,
+        iid: i64,
+        width: i64,
+        height: i64,
+        persons: i64,
+        in_zone: i64,
+        ppe_no: i64,
+        ppe_wearing: i64,
+        zones: &str,
+        violations: &str,
+        key: bool,
+        violation: bool,
+        snapshot: Option<&str>,
+        error: Option<&str>,
+        processed_ts: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE folder_images SET width=?,height=?,persons=?,in_zone=?,ppe_no=?, \
+             ppe_wearing=?,zones=?,violations=?,key=?,violation=?,snapshot=?,error=?, \
+             processed_ts=? WHERE id=?",
+            params![
+                width,
+                height,
+                persons,
+                in_zone,
+                ppe_no,
+                ppe_wearing,
+                zones,
+                violations,
+                key as i64,
+                violation as i64,
+                snapshot,
+                error,
+                processed_ts,
+                iid
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// RA2-S3：folder 图片关联首个事件（Python set_folder_image_event 同口径）。
+    pub fn set_folder_image_event(&self, iid: i64, eid: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE folder_images SET event_id=? WHERE id=? AND event_id IS NULL",
+            params![eid, iid],
+        )?;
+        Ok(())
     }
 
     /// RA1.3：folder worker 扫描登记（对齐 Python store.add_folder_image：

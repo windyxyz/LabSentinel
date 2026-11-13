@@ -193,6 +193,50 @@ impl Drop for Ingest {
     }
 }
 
+/// RA2-S3：单图解码为 BGR 画布（folder worker 识别管线）。
+/// `ffmpeg -i <img> -frames:v 1 -vf scale=WxH -pix_fmt bgr24 -f rawvideo pipe:1`
+/// ——零新依赖、解码器与视频路完全一致、天然支持扫描器全部白名单扩展名；
+/// 中文路径安全（Command 参数不经过 shell）。返回 `(bgr, width, height)`；
+/// 解码失败/缺 ffmpeg/字节数不符 → Err（调用方落库 error 字段如实）。
+pub fn decode_image(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut c = Command::new(ls_core::bin::find("ffmpeg"));
+    c.args(["-loglevel", "error", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            &format!("scale={width}:{height}"),
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = c.spawn().map_err(|e| format!("ffmpeg 启动失败: {e}"))?;
+    let mut out = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout
+            .read_to_end(&mut out)
+            .map_err(|e| format!("读帧失败: {e}"))?;
+    }
+    let status = child.wait().map_err(|e| format!("ffmpeg 等待失败: {e}"))?;
+    if !status.success() {
+        return Err(format!("ffmpeg 退出码 {}", status));
+    }
+    let expect = (width as usize) * (height as usize) * 3;
+    if out.len() != expect {
+        return Err(format!("帧字节数 {} != 期望 {expect}", out.len()));
+    }
+    Ok((out, width, height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

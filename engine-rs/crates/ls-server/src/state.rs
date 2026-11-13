@@ -24,6 +24,8 @@ pub struct AppState {
     pub testing: bool,
     /// RA1.2（ADR-0011）：进程内分析 worker 注册表（start/stop_camera 真实现）
     pub workers: crate::worker::Workers,
+    /// RA2-S2：MQTT 事件桥（默认关——LS_MQTT_ENABLED=1 才构造；None=未启用）
+    pub mqtt: Option<Arc<ls_dispatch::mqtt::MqttBus>>,
 }
 
 #[derive(Default)]

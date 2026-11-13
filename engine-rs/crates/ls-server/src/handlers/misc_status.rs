@@ -184,10 +184,31 @@ pub(crate) async fn model_status() -> Response {
     .into_response()
 }
 
-pub(crate) async fn mqtt_status() -> Response {
-    // rust 侧未接 MQTT 桥（任务125 在 Python 侧）；未启用形状与 Python 一致
-    Json(json!({"enabled": false, "connected": false,
-                "note": "MQTT 事件桥在 Python 服务实现；rust 控制面独立模式不启用"}))
+pub(crate) async fn mqtt_status(State(st): State<Shared>) -> Response {
+    // RA2-S2：MQTT 事件桥接线（默认关零行为变化）。字段对齐 Python
+    // mqtt_bridge.status()：queue_depth/error 为 Rust stats 未覆盖项，如实 0/null。
+    let enabled = std::env::var("LS_MQTT_ENABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let host = std::env::var("LS_MQTT_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let topic_prefix =
+        std::env::var("LS_MQTT_TOPIC_PREFIX").unwrap_or_else(|_| "labsentinel".into());
+    let (published, dropped, failed, connected) = match &st.mqtt {
+        Some(bus) => {
+            let (p, d, f, c) = bus.stats.snapshot();
+            (p as i64, d as i64, f as i64, c)
+        }
+        None => (0, 0, 0, false),
+    };
+    Json(json!({
+        "enabled": enabled,
+        "available": st.mqtt.is_some(),
+        "connected": connected,
+        "published": published, "dropped": dropped, "failed": failed,
+        "queue_depth": 0,
+        "host": host, "topic_prefix": topic_prefix,
+        "error": null,
+    }))
     .into_response()
 }
 
