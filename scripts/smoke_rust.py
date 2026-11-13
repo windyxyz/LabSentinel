@@ -13,7 +13,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

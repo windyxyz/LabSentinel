@@ -12,7 +12,6 @@ import hashlib
 import secrets
 import threading
 import time
-from datetime import datetime
 
 _PAIR_TTL_S = 300
 _TOUCH_INTERVAL_S = 60  # R2-103: do not write SQLite on every read request
@@ -111,11 +110,6 @@ def verify(store, token: str) -> dict | None:
     except Exception:  # noqa: BLE001
         pass
     return row
-
-
-def can_triage(token: str, store) -> bool:
-    """设备令牌允许事件处置（acked/false_positive），不允许改配置。"""
-    return verify(store, token) is not None
 
 
 def revoke(store, device_id: int) -> bool:

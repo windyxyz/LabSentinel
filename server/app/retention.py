@@ -400,13 +400,3 @@ def stop_scheduler():
     t = _thread
     if t and t.is_alive():
         t.join(timeout=2.0)
-
-
-def wait_ready(timeout: float = 5.0):
-    """测试辅助：等首轮清理跑完。"""
-    t0 = time.monotonic()
-    while time.monotonic() - t0 < timeout:
-        if last_result():
-            return True
-        time.sleep(0.05)
-    return False

@@ -26,11 +26,6 @@ class Detection:
         self.cls = cls
 
     @property
-    def bottom_center(self):
-        x1, _, x2, y2 = self.xyxy
-        return (int((x1 + x2) / 2), int(y2))
-
-    @property
     def area(self):
         x1, y1, x2, y2 = self.xyxy
         return max(0, x2 - x1) * max(0, y2 - y1)

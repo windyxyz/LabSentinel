@@ -31,10 +31,3 @@ def log_dir() -> Path:
     if env:
         return Path(env)
     return data_dir().parent / "logs"
-
-
-def config_path() -> Path:
-    env = os.environ.get("LS_CONFIG_FILE", "").strip()
-    if env:
-        return Path(env)
-    return data_dir().parent / "config.env"

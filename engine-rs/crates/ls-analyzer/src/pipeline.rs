@@ -20,7 +20,6 @@ use ls_core::{point_in_polygon, ZoneChange};
 use ls_track::{ByteTrack, ByteTrackConfig, Detection as TrackDetection};
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // name 用于诊断/后续快照展示；数据面无读取
 pub struct CameraSpec {
     pub id: i64,
     pub name: String,
@@ -58,7 +57,6 @@ pub struct RuleSpec {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Wearing/NoPpe 由 T-325 检层构造；管线分支已就绪
 pub enum PpeStatus {
     Unknown,
     Wearing,

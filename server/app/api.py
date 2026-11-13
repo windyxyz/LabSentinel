@@ -1,32 +1,24 @@
 """REST API 路由。"""
-import csv
-import io
 import json
-import mimetypes
 import os
-import re
 import secrets
-import shutil
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Form,
     HTTPException,
     Request,
-    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from . import (
-    alert_config,
+    alert_config,  # noqa: F401  _context.alert_config 经 api 属性访问（ruff 不可追踪）
     discovery,
     genai,
     go2rtc,
@@ -35,23 +27,18 @@ from . import (
     update_check,
 )
 from . import plugins as plugins_mod
-from .alerts import dispatcher, render_alert
+from .alerts import dispatcher
+from .alerts import render_alert  # noqa: F401  _context.render_alert 同上
 from .config import settings
 from .constants import TYPE_TEXT
 
 # B-28：api 层不再导入 get_engine——/api/system 只读 engine._engine/PRELOAD，模型缺失不炸
 from .face import FaceClient
-from .folders import image_exts, thumbnail_bytes
-from .models import (CameraCreate, ClaimPairingBody, DiscoveryProbeBody, RuleCreate,
-                     SilenceCreate, TemplatePreviewBody, ZoneCreate)
+from .folders import image_exts
+from .models import (ClaimPairingBody, DiscoveryProbeBody, SilenceCreate, TemplatePreviewBody)
 from .pipeline import CameraManager
-from .stats import daily as stats_daily_query
-from .stats import hourly as stats_hourly_query
-from .stats import quality as stats_quality_query
-from .stats import summary as stats_summary_query
 from .stats import timeline as stats_timeline_query
-from .stats import weekly as stats_weekly_query
-from .store import EVENT_STATUSES, Store, ro_uri
+from .store import Store, ro_uri
 
 router = APIRouter()  # T-621：前缀由 main 挂载（/api 别名 + /api/v1 正式）
 

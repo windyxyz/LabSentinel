@@ -8,9 +8,8 @@
 //! - finalize：帧序列 → `videos/ev_{eid}.mp4`（复用 evidence::encode_mp4）→
 //!   `set_event_video` 回填。
 //!
-//! 告警首发派发（Python dispatcher.dispatch → 8 渠道）在 RA1.3 随 worker
+//! 告警首发派发（Python dispatcher.dispatch → 8 渠道）已在 RA1.3 随 worker
 //! 生命周期接入（复用 ls_dispatch::deliver + escalation 既有链路）。
-#![allow(dead_code)] // RA1.2 骨架先行——RA1.3 worker 生命周期接线后摘除
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -277,13 +276,6 @@ impl Workers {
         h.stop.store(true, Ordering::SeqCst);
         ls_ingest::Ingest::kill_slot(&h.ffmpeg);
         Some(h)
-    }
-
-    pub fn ids(&self) -> Vec<i64> {
-        self.map
-            .lock()
-            .map(|m| m.keys().copied().collect())
-            .unwrap_or_default()
     }
 }
 

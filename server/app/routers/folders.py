@@ -6,15 +6,13 @@
 import csv
 import io
 import mimetypes
-import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, Response
 
 from . import _context as ctx
-from ..config import settings
-from ..folders import image_exts, thumbnail_bytes
+from ..folders import thumbnail_bytes
 
 router = APIRouter()
 

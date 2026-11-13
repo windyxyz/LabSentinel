@@ -5,7 +5,6 @@ is_our_process：Windows 用 PowerShell/CIM 校验命令行；POSIX 读 /proc �
 """
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 from . import is_windows
@@ -74,28 +73,3 @@ def kill_tree(pid: int) -> None:
         pass
 
 
-def pids_matching(marker: str) -> list[int]:
-    """按命令行标记找进程（测试/诊断用）。"""
-    out: list[int] = []
-    if is_windows():
-        ps = run_text(
-            ["powershell", "-NoProfile", "-Command",
-             f"Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{marker}*' }} | "
-             "Select-Object -ExpandProperty ProcessId"],
-            capture_output=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW)  # type: ignore[attr-defined]
-        for line in (ps.stdout or "").splitlines():
-            line = line.strip()
-            if line.isdigit():
-                out.append(int(line))
-        return out
-    for p in Path("/proc").iterdir() if Path("/proc").exists() else []:
-        if not p.name.isdigit():
-            continue
-        try:
-            cmd = (p / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
-        except OSError:
-            continue
-        if marker in cmd:
-            out.append(int(p.name))
-    return out

@@ -69,15 +69,3 @@ def ppe_status_from_boxes(no_boxes, wear_boxes, person_box) -> str:
             return "wearing"
     return "unknown"
 
-
-def ppe_status(ppe, frame: np.ndarray, person_box) -> str:
-    """实验服证据分级：'no'（显式违规证据） | 'wearing'（穿戴证据） | 'unknown'。
-
-    违规告警只认 No Lab Coat 类的显式检测（AP 0.81）；穿戴证据用低阈值；
-    两者皆无时返回 unknown，绝不把"证据不足"当"未穿"——防对合规人员误告警。
-    """
-    if ppe is None:
-        return "unknown"
-    no_boxes, wear_boxes = ppe_boxes(ppe, frame)
-    return ppe_status_from_boxes(no_boxes, wear_boxes, person_box)
-

@@ -164,15 +164,6 @@ impl Ingest {
         }))
     }
 
-    /// 进程是否仍在运行
-    pub fn alive(&mut self) -> bool {
-        self.child.as_ref().is_some_and(|slot| {
-            slot.lock()
-                .map(|mut g| g.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))))
-                .unwrap_or(false)
-        })
-    }
-
     pub fn stop(&mut self) {
         self.stdout = None;
         if let Some(slot) = self.child.take() {

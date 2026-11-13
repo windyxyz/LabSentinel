@@ -67,16 +67,8 @@ def manager():
     return _api().manager
 
 
-def system_version():
-    return _api()._system_version()
-
-
 def unlink_data_file(path):
     return _api()._unlink_data_file(path)
-
-
-def folder_media_path(row):
-    return _api()._folder_media_path(row)
 
 
 def folder_readable_path(row):
@@ -97,10 +89,6 @@ def check_ai_verdict(v):
 
 def event_row(row):
     return _api()._event_row(row)
-
-
-def event_statuses():
-    return _api().EVENT_STATUSES
 
 
 def normalize_ts_range(start_ts, end_ts):

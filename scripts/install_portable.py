@@ -435,15 +435,6 @@ def _read_install_mark(install: Path) -> dict | None:
         return None
 
 
-def _try_link(src, dst):
-    """copy_function：优先硬链接（同盘零拷贝归档），跨盘/权限失败回退复制。"""
-    try:
-        os.link(src, dst)
-        return dst
-    except OSError:
-        return shutil.copy2(src, dst)
-
-
 def _archive_current(install: Path, version: str) -> Path | None:
     """T-404：把当前安装树归入 versions/<ver>/。
 

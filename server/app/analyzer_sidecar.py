@@ -167,10 +167,6 @@ class SidecarAnalyzer(AnalyzerBackend):
         except (ValueError, OSError):
             pass  # 进程退出/管道关闭
 
-    def out_log(self) -> list[str]:
-        """最近 sidecar 输出（诊断用）。"""
-        return list(getattr(self, "_out_log", ()))
-
     def stop(self, keep_snapshot: bool = False) -> None:
         """停止进程；keep_snapshot=True 保留配置快照供 ensure_running 恢复重放。"""
         self._started = False

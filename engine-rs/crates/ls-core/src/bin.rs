@@ -11,7 +11,7 @@
 //! 4. PATH（`which` 语义，用 `std::process::Command` 探测版本即可判定可用）。
 
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn exe_name(name: &str) -> String {
     if cfg!(windows) {
@@ -72,29 +72,6 @@ pub fn find(name: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// 便携包布局下把 `tools/` 目录加入进程 PATH（子进程继承），
-/// 这样即使调用方仍用裸 `Command::new("ffmpeg")` 也能找到随包二进制。
-pub fn ensure_tools_on_path() {
-    if let Ok(current) = env::current_exe() {
-        if let Some(base) = current.parent() {
-            let candidates = [base.join("tools").join("ffmpeg"), base.join("tools")];
-            let mut add: Vec<PathBuf> = candidates.iter().filter(|p| p.is_dir()).cloned().collect();
-            if !add.is_empty() {
-                let mut paths: Vec<PathBuf> =
-                    env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect();
-                for p in add.drain(..) {
-                    if !paths.contains(&p) {
-                        paths.insert(0, p);
-                    }
-                }
-                if let Ok(joined) = env::join_paths(paths) {
-                    env::set_var("PATH", joined);
-                }
-            }
-        }
-    }
-}
-
 /// 显式检查某个二进制是否可用（用于测试 skip 判定）。
 pub fn available(name: &str) -> bool {
     std::process::Command::new(find(name))
@@ -102,14 +79,6 @@ pub fn available(name: &str) -> bool {
         .output()
         .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
         .unwrap_or(false)
-}
-
-/// 与 Python `platform.binaries.find_binary` 等价的目录前缀（供诊断输出）。
-pub fn tools_dir() -> Option<PathBuf> {
-    let current = env::current_exe().ok()?;
-    let base = current.parent()?;
-    let d: &Path = base;
-    Some(d.join("tools"))
 }
 
 #[cfg(test)]

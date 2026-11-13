@@ -1,6 +1,6 @@
 """API 数据模型（与前端契约一致，见 web/）。"""
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 

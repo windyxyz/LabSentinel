@@ -781,12 +781,6 @@ class Store:
             r = c.execute("SELECT * FROM zones WHERE id=?", (zid,)).fetchone()
             return dict(r) if r else None
 
-    def delivery_by_id(self, did: int) -> dict | None:
-        """按 id 单查投递记录（同上，替代全表拉取）。"""
-        with self._conn() as c:
-            r = c.execute("SELECT * FROM alert_deliveries WHERE id=?", (did,)).fetchone()
-            return dict(r) if r else None
-
     # ---- 告警静默（任务81）----
     def add_silence(self, scope: str, target: str | None, reason: str | None,
                     created_by: str | None = None, duration_s: int = 3600) -> dict:
@@ -820,14 +814,6 @@ class Store:
         return n > 0
 
     # ---- 操作审计（任务87）----
-    def add_audit(self, ts: str, request_id: str | None, actor: str, action: str,
-                  target: str | None, status_code: int) -> None:
-        """写审计行（失败由调用方兜底 WARNING，不影响业务响应）。"""
-        with self._lock, self._conn() as c:
-            c.execute("INSERT INTO audit_log(ts,request_id,actor,action,target,status_code) "
-                      "VALUES(?,?,?,?,?,?)",
-                      (ts, request_id, actor, action, target, status_code))
-
     def audit(self, limit=50, offset=0, action: str | None = None,
               actor: str | None = None, start_ts: str | None = None,
               end_ts: str | None = None) -> tuple[list[dict], int]:

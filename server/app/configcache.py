@@ -50,10 +50,3 @@ def camera_name(store, cid: int) -> str | None:
     names = _snapshot(store, "cameras", store.config_version(),
                       lambda: {c["id"]: c["name"] for c in store.cameras()})
     return names.get(cid)
-
-
-def invalidate(store) -> None:
-    """版本号回绕/Store 重建时手动失效（测试与迁移路径用）。"""
-    c = _cache(store)
-    with _lock:
-        c.clear()

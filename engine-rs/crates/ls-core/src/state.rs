@@ -83,11 +83,6 @@ impl ZoneState {
             .collect()
     }
 
-    /// 状态表大小（与 Python `size` 对齐）。
-    pub fn size(&self) -> usize {
-        self.state.len()
-    }
-
     /// 内存回收：删除"非活跃且已判离场"的轨迹；超 cap 按插入序淘汰非活跃项。
     /// 语义与 Python `retain` 一致（在场项即使消失也保留，等待离场去抖完成）。
     pub fn retain(&mut self, active: &[i64], max_size: Option<usize>) -> usize {
@@ -176,6 +171,5 @@ mod tests {
         // 全部在场 → 第一轮 stale 回收 0；cap=10 按插入序淘汰非 active 90 个
         let removed = st.retain(&[0, 1, 2], Some(10));
         assert_eq!(removed, 90);
-        assert_eq!(st.size(), 10); // active 3 + cap 补足
     }
 }
