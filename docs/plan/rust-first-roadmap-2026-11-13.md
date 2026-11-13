@@ -30,13 +30,20 @@
   扫描→登记）；**端到端真机验收（真实 RTSP/视频挂机）留 RA1 验收项**，
   与 24h 挂机人工事项合并执行。
 
-## RA2：控制面补全（待 RA1）
+## RA2：控制面补全（2026-11-13 完成，S1~S9 全部落地）
 
-- [ ] face/ppe 管线真实现（模型管理走 ls-store + assets.lock 哈希）
-- [ ] genai 占位实现（对齐 Python genai 提供者语义）
-- [ ] plugins 机制对齐（manifest 加载/启用禁用）
-- [ ] MQTT bridge（rumqttc 在 ls-dispatch 已有基础，T-329）
-- [ ] 验收：ls-server 503 占位清零（OpenVINO 等豁免项除外，如实标注）。
+- [x] face/ppe 管线：PPE runner 参数化进 lib（`ppe.rs`）+ worker/folder 注入；
+      face CompreFace 控制面（合规门/consent 强制/同意表；1:N 识别数据面豁免在
+      Python/sidecar）；模型管理走 env（LS_MODEL_PATH/LS_PPE_MODEL），assets.lock
+      哈希校验在 ppe/download 已有
+- [x] genai 真实现（双 provider/严格 JSON/回写不改 status/回环红线/status 九字段）
+- [x] plugins 机制对齐（manifest 严格校验/state.json/启停/日志 tail/坏清单 error 项）
+- [x] MQTT bridge 接线（默认关零行为变化；payload v1 只加不减）
+- [x] folder 识别管线（ffmpeg 单图解码→YOLO→区域/PPE→违规快照/事件/event_id 回填）
+- [x] /api/system 契约补齐（today_counts/unhandled_today/alerts）+ model_status
+      形状对齐 + update/check 拉清单真实现（minisign 如实豁免）
+- [x] 验收：ls-server **503 占位清零**（豁免项：update 签名验证、face 1:N 识别
+      数据面、OpenVINO——均如实标注）；workspace 115 passed + clippy/fmt 绿
 
 ## RA3：L4 单二进制（待 RA2）
 
