@@ -1309,6 +1309,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn system_contract_today_and_alerts() {
+        use crate::tests::helpers::{body_json, req, test_state};
+        use crate::*;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        seed_schema(&db);
+        {
+            let s = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+            s.add_camera_full("cam-1", "rtsp://x", "rtsp", "").unwrap();
+            // 两条今日事件（一条 new 一条已处置）+ 一条投递行——ts 用 SQL localtime
+            // 生成，与 today_event_counts 的匹配口径同源
+            for status in ["new", "acked"] {
+                s.conn()
+                    .execute(
+                        "INSERT INTO events(ts,camera_id,type,level,track_id,detail,status) \
+                         VALUES(date('now','localtime')||'T08:00:00',1,'person_enter',2,1,'x',?)",
+                        [status],
+                    )
+                    .unwrap();
+            }
+            s.add_delivery(1, "webhook").unwrap();
+        }
+        let app = build_router(test_state(db.to_str().unwrap()));
+        let r = req(&app, "GET", "/api/system", None).await;
+        let j = body_json(r).await;
+        assert_eq!(j["today_counts"]["2"], 2, "今日按级别计数");
+        assert_eq!(j["unhandled_today"], 1, "今日未处置（new）");
+        assert_eq!(j["alerts"]["pending"], 1, "投递行计数");
+        assert_eq!(j["backend"], "rust");
+    }
+
+    #[tokio::test]
     async fn snapshot_503_when_worker_absent_and_404_when_missing() {
         use crate::tests::helpers::{body_json, req, seed_schema as _seed, test_state};
         use crate::*;

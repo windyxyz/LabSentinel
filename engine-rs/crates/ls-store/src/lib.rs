@@ -91,6 +91,47 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 今日事件按级别计数（RA2 对齐 Python today_event_counts：本地日 ts 前缀
+    /// 匹配——SQLite `localtime` 取 OS 时区，与 Python datetime.now() 同口径）。
+    pub fn today_event_counts(&self) -> rusqlite::Result<Vec<(i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT level, COUNT(*) n FROM events \
+             WHERE ts LIKE date('now','localtime') || '%' GROUP BY level",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// 今日已处置数（status != 'new'；Python count_events_today_handled 同口径）。
+    pub fn count_events_today_handled(&self) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM events \
+             WHERE ts LIKE date('now','localtime') || '%' AND status != 'new'",
+            [],
+            |r| r.get(0),
+        )
+    }
+
+    /// 投递行计数（RA2 对齐 Python delivery_counts）：(pending, failed, ok)。
+    pub fn delivery_counts(&self) -> rusqlite::Result<(i64, i64, i64)> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT status, COUNT(*) FROM alert_deliveries GROUP BY status")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut d = std::collections::BTreeMap::new();
+        for r in rows {
+            let (k, v) = r?;
+            d.insert(k, v);
+        }
+        Ok((
+            d.get("pending").copied().unwrap_or(0),
+            d.get("failed").copied().unwrap_or(0),
+            d.get("ok").copied().unwrap_or(0),
+        ))
+    }
+
     /// 事件视频回填（RA1.1，对齐 Python store.set_event_video：存 data_dir
     /// 相对路径，serve_event_media 用 data_dir.join 解析）。
     pub fn set_event_video(&self, eid: i64, path: &str) -> rusqlite::Result<()> {

@@ -41,14 +41,26 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
     };
     let cams = s.cameras().unwrap_or_default();
     let _total = s.count_events().unwrap_or(0);
+    // RA2：system 契约补齐（today_counts/unhandled_today/alerts，SQL 口径对齐
+    // Python store.today_event_counts/count_events_today_handled/delivery_counts）
+    let today = s.today_event_counts().unwrap_or_default();
+    let handled = s.count_events_today_handled().unwrap_or(0);
+    let total_today: i64 = today.iter().map(|(_, n)| *n).sum();
+    let unhandled = (total_today - handled).max(0);
+    let (pending, failed, ok) = s.delivery_counts().unwrap_or((0, 0, 0));
+    let mut today_counts = std::collections::BTreeMap::new();
+    for (lv, n) in &today {
+        today_counts.insert(lv.to_string(), n);
+    }
     Json(json!({
         "version": st.version,
         "schema_version": s.schema_version().unwrap_or(0),
         "backend": "rust",
         "cameras": cams.iter().map(|c| json!({"id": c.id, "name": c.name,
             "status": c.status, "type": c.type_})).collect::<Vec<_>>(),
-        "today_counts": {},
-        "unhandled_today": 0,
+        "today_counts": today_counts,
+        "unhandled_today": unhandled,
+        "alerts": {"pending": pending, "failed": failed, "ok": ok},
         "components": {"engine": {"state": "idle"}, "go2rtc": {"ok": false}},
         "config_issues": {"fail": 0, "warn": 0, "source_issues": []},
     }))

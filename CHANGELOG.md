@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Rust 重构 RA2 开工：/api/system 契约补齐（ADR-0011，2026-11-13）
+- `today_counts`/`unhandled_today`/`alerts` 从空占位变真值：ls-store 新增
+  `today_event_counts`/`count_events_today_handled`/`delivery_counts`
+  （SQL 口径对齐 Python 同名方法，today 用 SQLite `localtime` 取 OS 时区）。
+- 已知差异如实记录：folder worker 写 UTC ts（std 无本地时区），UTC 16:00 后
+  落「昨天」的口径偏移待 RA2 统一（同一路相机同一时刻只由一个实现写入）。
+
 ### Rust 重构 RA1.3：告警首发派发 + folders/scan（ADR-0011，2026-11-13）
 - **告警首发派发**：`ls-jobs::Jobs::dispatch_event`——worker 候选事件落地后经
   与 escalation 同一链路组件（注入渠道快照/env 回退 → 静默匹配 → 渠道过滤 →
