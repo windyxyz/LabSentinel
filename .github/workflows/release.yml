@@ -136,23 +136,40 @@ jobs:
       # provenance 占位（T-407 后）：actions/attest-build-provenance
 
   nightly-rust:
-    # R2-004 / §9.3: L3 control plane routes aligned 105/106 (99.1%) but the
-    # Rust single binary is an EXPERIMENTAL nightly artifact and must not
-    # enter a formal Release. Kept as a separate job so a Rust build failure
-    # cannot block the Windows portable release.
+    # RA3（ADR-0011）：Rust 单二进制形态转正式产物——构建 + 冒烟 + 上传
+    # release 资产。保持独立 job：Rust 构建失败不阻塞 Windows 便携主链。
     needs: [verify]
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
-      - name: build_rust.py --zip (experimental)
+      - name: web build
+        run: |
+          cd web; npm ci; npm run build
+      - name: build_rust.py --zip
         run: python scripts/build_rust.py --zip
+      - name: RA3 冒烟（隔离启动/健康/前端/停止）
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          python scripts/smoke_rust.py --zip $zip.FullName --timeout 90
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: labsentinel-rust-nightly
+          name: labsentinel-rust
           path: Resources/dist/labsentinel-rust-*.zip
-          if-no-files-found: warn
-          retention-days: 7
+          if-no-files-found: error
+          retention-days: 14
+      - name: 上传 release 资产（rust zip）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          gh release upload $env:GITHUB_REF_NAME $zip.FullName --repo $env:GITHUB_REPOSITORY --clobber
 
   publish:
     needs: [build-win]

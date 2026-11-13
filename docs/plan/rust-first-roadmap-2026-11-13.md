@@ -45,12 +45,19 @@
 - [x] 验收：ls-server **503 占位清零**（豁免项：update 签名验证、face 1:N 识别
       数据面、OpenVINO——均如实标注）；workspace 115 passed + clippy/fmt 绿
 
-## RA3：L4 单二进制（待 RA2）
+## RA3：L4 单二进制（2026-11-13 完成）
 
-- [ ] ls-server 进程内嵌分析管线（去 sidecar gRPC 自环，或保留为可选模式）
-- [ ] build_rust.py 转正式产物（release workflow 接入）
-- [ ] 便携包 Rust 形态：单 exe + models + web 静态 + .env；smoke 8/8
-- [ ] web_dist 静态服务 + SPA 回退已就绪（0.2.0 已接线），补缓存策略对齐
+- [x] ls-server 进程内嵌分析管线：RA1.2 的 worker.rs 即进程内 ffmpeg 帧循环
+      （从不 spawn sidecar——"去 gRPC 自环"由方案 C→A 天然达成）
+- [x] build_rust.py 转正式产物：release workflow nightly-rust job 重写为
+      web build → build_rust --zip → **RA3 冒烟** → artifact + `gh release upload`
+      （保持独立 job，Rust 失败不阻塞便携主链）
+- [x] 便携包 Rust 形态：labsentinel-server.exe + web/dist + models + go2rtc +
+      .env.example + README（**30.8MB vs Python 便携包 198MB**——嵌入式
+      CPython runtime 退役的价值实证）；冒烟 `scripts/smoke_rust.py`
+      （解包/就绪/backend=rust/前端 SPA 4/4 PASS，本机实测）
+- [x] web_dist 缓存策略：0.2.0 已接线（middleware static_cache_policy：
+      assets/* immutable 1 年 + SPA 回退 no-cache），冒烟抽验资产 200 通过
 
 ## RA4：部署/启动链替换评估（待 RA3）
 

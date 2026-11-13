@@ -88,10 +88,21 @@ def assemble() -> None:
         "Rust crates: 见 engine-rs/Cargo.lock（cargo-deny 生成完整清单）\n"
         "go2rtc: MIT · onnxruntime: MIT · OpenCV(ffmpeg): 见 NOTICE\n", encoding="utf-8")
     (DIST / "README.txt").write_text(
-        f"LabSentinel {VERSION} — Rust 单二进制分发（实验产物，非 L3 正式 Release）\n"
-        "启动: labsentinel-server.exe（LS_DB_PATH / LS_PORT / LS_ADMIN_TOKEN）\n"
-        "模型目录 models/，前端 web/，实时画面 go2rtc 见 tools/\n"
-        "训练/量化/标注工具链仍在仓库 tools/（Python，AI 生态依赖）\n", encoding="utf-8")
+        f"LabSentinel {VERSION} — Rust 单二进制分发（ADR-0011 RA3 正式形态）\n"
+        "启动: labsentinel-server.exe（LS_DB_PATH / LS_DATA_DIR / LS_PORT / LS_ADMIN_TOKEN；\n"
+        "      进程内分析 worker：LS_MODEL_PATH=models/yolo11n.onnx 即启用检测）\n"
+        "模型目录 models/，前端 web/（SPA 回退+immutable 缓存），实时画面 go2rtc 见 tools/\n"
+        "安装/升级/卸载链仍走 Python 便携包（RA4 评估替换）；训练工具链 tools/（Python）\n", encoding="utf-8")
+    (DIST / ".env.example").write_text(
+        "# LabSentinel Rust 形态最小配置（重命名 .env 生效；全部可省略）\n"
+        "LS_DB_PATH=data/labsentinel.db\n"
+        "LS_DATA_DIR=data\n"
+        "LS_PORT=8000\n"
+        "# 局域网暴露必须配令牌（否则拒绝启动，与 Python 同语义）\n"
+        "# LS_HOST=0.0.0.0\n# LS_ADMIN_TOKEN=<随机>\n"
+        "# 进程内分析 worker\n"
+        "LS_MODEL_PATH=models/yolo11n.onnx\n"
+        "# LS_PPE_MODEL=models/yolo11n_ppe.onnx\n", encoding="utf-8")
 
 
 def zip_it() -> Path:

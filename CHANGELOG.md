@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### Rust 重构 RA3：L4 单二进制形态（ADR-0011，2026-11-13）
+- **Rust 形态便携包转正式产物**：release workflow nightly-rust job 重写为
+  web build → `build_rust.py --zip` → **冒烟** → artifact + `gh release upload`
+  （独立 job，Rust 失败不阻塞 Windows 便携主链）。
+- **冒烟**：`scripts/smoke_rust.py`——隔离解包 → 启动 → 就绪轮询
+  `/api/health/ready` → `/api/system` 断言 `backend=rust` → 前端 SPA
+  （根标记 + immutable 资产抽验）→ 停止清理；本机实测 4/4 PASS。
+- **体积实证**：Rust 形态 **30.8MB** vs Python 便携包 198MB——嵌入式
+  CPython runtime 退役（RA4 的部署链替换以此为基线）。
+- build_rust.py README/.env.example 更新（RA3 正式口径 + worker 环境变量说明）。
+
 ### Rust 重构 RA2：S5~S9 批次——503 占位清零（ADR-0011，2026-11-13）
 - **S5 GenAI 事件复核**：`genai.rs`——默认 provider=none 零开销；单线程有界
   队列（max=100 满丢计数）；ollama/openai_compat 双 provider（ureq）；严格
