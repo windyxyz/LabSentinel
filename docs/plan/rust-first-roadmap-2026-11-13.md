@@ -59,13 +59,33 @@
 - [x] web_dist 缓存策略：0.2.0 已接线（middleware static_cache_policy：
       assets/* immutable 1 年 + SPA 回退 no-cache），冒烟抽验资产 200 通过
 
-## RA4：部署/启动链替换评估（待 RA3）
+## RA4：部署/启动链替换评估（2026-11-13 评估完成 + 核心消解件落地）
 
-- [ ] install_portable 各能力逐项判定：Rust 重写 / 单二进制消解 / 豁免保留
-- [ ] portable_launcher：单二进制下大概率消解为 exe 直启 + 托盘（待评估）
-- [ ] health_check/升级归档/回滚语义在 Rust 安装器（或 Inno [Code]）中的等价物
-- [ ] Python 退役清单 + 分发物零嵌入式 Python 验证
-- [ ] 过渡期 Python 缺陷修复承诺：P1/P2 必修，P3 仅台账（不再大重构 Python）
+逐项判定（install_portable / portable_launcher 能力矩阵）：
+
+| 能力 | 判定 | 依据 |
+|---|---|---|
+| 复制 staging→安装目录 | **Inno 消解** | [Files] 原生 |
+| 桌面/开始菜单快捷方式 | **Inno 消解** | [Icons] 原生 |
+| HKCU 卸载注册表 | **Inno 消解** | AppId 键原生 |
+| 开机自启 | **Inno 消解** | [Icons] {userstartup} |
+| 覆盖升级 | **Inno 消解** | UsePreviousAppDir |
+| 单实例锁/端口试探/开浏览器 | **Rust 重写 ✅ 已落地** | `--launch`（端口试探防双实例 + launcher.lock "pid port" 契约对齐 + 就绪开浏览器） |
+| finalize 健康检查（health_check.py） | **Rust 重写 ✅ 已落地** | `--selftest-http`（临时端口真启动轮询 ready ≤60s，本机实测 exit=0） |
+| 升级版本归档/回滚（versions/） | **RA4.2 保留 Python** | install_portable 归档/回滚带硬链接优化与 DB 备份联动；Python 安装器按 ADR-0010 保留一个过渡周期 |
+| deploy.py（源码模式） | **豁免** | 开发工具，长期 Python |
+| tools/ 训练工具链 | **豁免** | ADR-0011 豁免清单 |
+
+- [x] portable_launcher 消解件：`labsentinel-server.exe --launch`（端口试探 +
+      单实例锁 + 开浏览器；托盘留 RA4.2 可选）
+- [x] health_check 消解件：`labsentinel-server.exe --selftest-http`（本机实测
+      ready=true exit=0；Inno finalize 后续改调此子命令——Python 安装器保留期
+      内两条路径并存）
+- [x] 分发物零嵌入式 Python 验证：Rust 形态 zip 30.8MB 本就不含 runtime
+      （RA3 冒烟覆盖）；Python 便携包/installer 按 ADR-0010/RA4.2 保留
+- [ ] RA4.2（过渡期末）：升级归档/回滚 Rust 化 + Inno finalize 切 `--selftest-http`
+      + Python 分发物退役清单执行
+- [x] 过渡期 Python 纪律：P1/P2 必修（已全部闭环），P3 仅台账，不再大重构
 
 ## 过渡期纪律
 

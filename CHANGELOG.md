@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### Rust 重构 RA4：部署/启动链替换评估 + 核心消解件（ADR-0011，2026-11-13）
+- **逐项判定落地**（见 roadmap RA4 能力矩阵）：Inno 消解 5 项（文件/快捷方式/
+  卸载键/自启/覆盖升级）；Rust 重写 2 项 ✅；豁免 2 项（deploy.py/tools/）；
+  升级归档/回滚保留 Python 至 RA4.2（ADR-0010 过渡周期）。
+- **`--launch` 消解件**：端口试探防双实例（已被监听 → 开页面即退）+
+  launcher.lock "pid port" 契约对齐（位置 data 上一级 logs/）+ 就绪开浏览器。
+- **`--selftest-http` 消解件**：health_check.py 的 Rust 等价——真起服务于
+  127.0.0.1:0（隔离临时数据目录），轮询 ready ≤60s；本机实测 ready=true
+  exit=0；Inno finalize 后续切此子命令（Python 安装器保留期内并存）。
+- 门禁：workspace 115 passed + clippy `-D warnings` + fmt 全绿。
+
 ### Rust 重构 RA3：L4 单二进制形态（ADR-0011，2026-11-13）
 - **Rust 形态便携包转正式产物**：release workflow nightly-rust job 重写为
   web build → `build_rust.py --zip` → **冒烟** → artifact + `gh release upload`

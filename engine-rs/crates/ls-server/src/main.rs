@@ -62,6 +62,23 @@ pub(crate) use state::{AppState, PairState, Shared};
 async fn main() {
     // 健康自检（原为容器 HEALTHCHECK 设计，Docker 路线已终止——保留作通用探活）：
     // `labsentinel-server --healthcheck <db>` 只读探活即退出
+    let launch_mode = std::env::args().any(|x| x == "--launch");
+    if launch_mode {
+        // RA4（ADR-0011）：portable_launcher 消解件——端口试探防双实例：
+        // 目标端口已被监听 = 已有实例在跑 → 开浏览器即退（锁文件照写对齐 Python 语义）
+        let port: u16 = std::env::var("LS_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8000);
+        if tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .is_err()
+        {
+            println!("[launch] 端口 {port} 已被监听——已有 LabSentinel 实例，直接打开页面");
+            open_browser(port);
+            std::process::exit(0);
+        }
+    }
     let mut args = std::env::args().skip(1);
     if let Some(a) = args.next() {
         if a == "--healthcheck" {
@@ -88,6 +105,12 @@ async fn main() {
                 serde_json::to_string_pretty(&dump_routes()).expect("json")
             );
             std::process::exit(0);
+        }
+        // RA4（ADR-0011）：health_check.py 消解件——真起服务于 127.0.0.1:0，
+        // 轮询 /api/health/ready ≤60s（Inno finalize/升级后自检调用；exit 0=通过）。
+        if a == "--selftest-http" {
+            let ok = selftest_http().await;
+            std::process::exit(if ok { 0 } else { 1 });
         }
     }
     let db_path =
@@ -285,7 +308,93 @@ async fn main() {
         .await
         .unwrap();
     println!("labsentinel-server READY port={port}");
+    // RA4：--launch 模式（portable_launcher 消解件）——单实例锁（对齐 Python
+    // "pid port" 契约，位置 data 上一级 logs/）+ 就绪后开浏览器
+    if launch_mode {
+        let logs = std::path::Path::new(&st.data_dir)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("logs");
+        let _ = std::fs::create_dir_all(&logs);
+        let _ = std::fs::write(
+            logs.join("launcher.lock"),
+            format!("{} {port}", std::process::id()),
+        );
+        open_browser(port);
+    }
     axum::serve(listener, app).await.unwrap();
+}
+
+/// RA4：默认浏览器打开服务页（Windows `cmd /C start`；其他平台 xdg-open/open）。
+fn open_browser(port: u16) {
+    let url = format!("http://127.0.0.1:{port}/");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .creation_flags(0x0800_0000)
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+}
+
+/// RA4：health_check.py 消解件——真起服务于 127.0.0.1:0（隔离临时数据目录），
+/// 轮询 /api/health/ready ≤60s。退出码由调用方转进程码（0=通过）。
+async fn selftest_http() -> bool {
+    let dir = std::env::temp_dir().join(format!("ls-selftest-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let db = dir.join("selftest.db");
+    let st = Arc::new(AppState {
+        db_path: db.to_string_lossy().into_owned(),
+        admin_token: String::new(),
+        read_token: String::new(),
+        read_protected: false,
+        trusted_hosts: vec!["127.0.0.1".into(), "localhost".into()],
+        allowed_origins: vec![],
+        web_dist: String::new(), // 不挂载静态（自检只验 API/DB 链路）
+        data_dir: dir.join("data").to_string_lossy().into_owned(),
+        version: std::env::var("LS_VERSION").unwrap_or_else(|_| "0.0.0".into()),
+        events_tx: broadcast::channel(16).0,
+        jobs: Arc::new(ls_jobs::Jobs::new(
+            db.clone(),
+            ls_jobs::JobsConfig::default_for_db(&db),
+        )),
+        pair_state: std::sync::Mutex::new(PairState::default()),
+        testing: false,
+        workers: worker::Workers::default(),
+        mqtt: None,
+        plugins: plugins::PluginManager::default(),
+        genai: genai::GenAI::from_env(),
+    });
+    st.jobs.start();
+    let app = build_router(st.clone());
+    let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await else {
+        return false;
+    };
+    let addr = match listener.local_addr() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = format!("http://{addr}");
+    let mut ok = false;
+    for _ in 0..60 {
+        let url = format!("{base}/api/health/ready");
+        let req = ureq::get(&url).timeout(std::time::Duration::from_secs(2));
+        if let Ok(r) = req.call() {
+            if r.status() == 200 {
+                ok = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+    println!("[selftest-http] ready={ok}");
+    ok
 }
 
 #[cfg(test)]
