@@ -174,6 +174,9 @@ impl EventSink {
         // RA1.3：告警首发派发（外部 8 渠道；静默/过滤/限流复用 ls-jobs 链路，
         // 与 escalation 共享渠道快照和限流器）。投递失败只影响外部通知，
         // 不影响事件已入库/已广播的事实。
+        // 性能 P0-2（审计）：dispatch_event 是同步 ureq——单渠道最坏 ~40s
+        // （4 次尝试+退避），×8 渠道会把帧循环停摆数分钟（ffmpeg 管道积压）。
+        // 改投后台线程（对齐 Python ThreadPoolExecutor 异步语义）。
         let dev = ls_dispatch::DispatchEvent {
             id: eid,
             camera_id: cand.camera_id,
@@ -183,10 +186,19 @@ impl EventSink {
             ts: cand.ts_iso.clone(),
             camera_name: cam_name,
         };
-        let submitted = st.jobs.dispatch_event(&store, &dev);
-        if submitted > 0 {
-            println!("[ls-worker] event#{eid} 首发派发 {submitted} 渠道");
-        }
+        let jobs = Arc::clone(&st.jobs);
+        let db_path = st.db_path.clone();
+        let eid_log = eid;
+        let _ = std::thread::Builder::new()
+            .name(format!("ls-dispatch-{eid}"))
+            .spawn(move || {
+                if let Ok(s) = ls_store::Store::open(&db_path) {
+                    let submitted = jobs.dispatch_event(&s, &dev);
+                    if submitted > 0 {
+                        println!("[ls-dispatch] event#{eid_log} 首发派发 {submitted} 渠道");
+                    }
+                }
+            });
         Ok(Some(eid))
     }
 
@@ -760,6 +772,11 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             marked = Some(v.into());
         }
     };
+    // RA2 反思修正：识别器/管件在循环外构造一次——此前在 loop 体内，
+    // 每 tick（3s）都重新加载 YOLO 模型（数百 ms 级开销 × 每 3s）
+    let mut detector = ls_analyzer::detector::make_detector(&cfg.detector);
+    let mut ppe_runner = cfg.ppe.as_ref().and_then(ls_analyzer::ppe::make_ppe_runner);
+    let sink = EventSink::new(Arc::clone(&st));
     loop {
         if handle.stop.load(Ordering::SeqCst) {
             break;
@@ -782,10 +799,6 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let cands = ls_ingest::folder::scan_candidates(&root, &scan_cfg, now, internal.as_deref());
-        // RA2-S3：识别器每轮构造一次（模型加载开销摊到整批图片）
-        let mut detector = ls_analyzer::detector::make_detector(&cfg.detector);
-        let mut ppe_runner = cfg.ppe.as_ref().and_then(ls_analyzer::ppe::make_ppe_runner);
-        let sink = EventSink::new(Arc::clone(&st));
         let max_per_tick = env_f64("LS_FOLDER_MAX_PER_TICK", 20.0).max(1.0) as usize;
         let mut scanned = 0usize;
         for c in cands.iter().take(max_per_tick) {

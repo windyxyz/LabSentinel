@@ -168,33 +168,62 @@ pub(crate) async fn folder_image_detail(
 }
 
 /// 与 Python folder_readable_path 同口径：记录的 path 是真实文件路径
+/// P1-3（安全审计）：containment 校验——path 必须 resolve 后位于该相机的
+/// source 目录内（或 data_dir 内的 snapshot 回退），否则 403（DB path 被污染
+/// 时防任意文件读取；对齐 Python commonpath 语义）。
 pub(crate) async fn folder_image_file(
     State(st): State<Shared>,
     AxPath(iid): AxPath<i64>,
 ) -> Response {
     with_store(&st, |s| match s.folder_image(iid)? {
-        Some(r) => match std::fs::read(&r.path) {
-            Ok(data) => {
-                let mt = if r.path.to_ascii_lowercase().ends_with(".png") {
-                    "image/png"
-                } else {
-                    "image/jpeg"
-                };
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, mt),
-                        (header::CACHE_CONTROL, "private, max-age=3600"),
-                    ],
-                    data,
+        Some(r) => {
+            // containment：记录路径与相机 source 目录（或 data_dir）前缀比对
+            let allowed = match s.camera(r.camera_id).ok().flatten() {
+                Some(cam) => vec![cam.source.clone(), st.data_dir.clone()],
+                None => vec![st.data_dir.clone()],
+            };
+            let norm = |p: &str| {
+                std::path::Path::new(p)
+                    .canonicalize()
+                    .map(|c| c.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default()
+            };
+            let rp = norm(&r.path);
+            let contained = !rp.is_empty()
+                && allowed.iter().any(|base| {
+                    let b = norm(base);
+                    !b.is_empty() && rp.starts_with(&b)
+                });
+            if !contained {
+                return Ok(detail_err(
+                    StatusCode::FORBIDDEN,
+                    "记录路径不在该摄像头源目录内（已拒绝）",
                 )
-                    .into_response())
+                .into_response());
             }
-            Err(_) => Ok(detail_err(
-                StatusCode::NOT_FOUND,
-                "原图片文件不存在（可能已被系统清理）",
-            )
-            .into_response()),
-        },
+            match std::fs::read(&r.path) {
+                Ok(data) => {
+                    let mt = if r.path.to_ascii_lowercase().ends_with(".png") {
+                        "image/png"
+                    } else {
+                        "image/jpeg"
+                    };
+                    Ok((
+                        [
+                            (header::CONTENT_TYPE, mt),
+                            (header::CACHE_CONTROL, "private, max-age=3600"),
+                        ],
+                        data,
+                    )
+                        .into_response())
+                }
+                Err(_) => Ok(detail_err(
+                    StatusCode::NOT_FOUND,
+                    "原图片文件不存在（可能已被系统清理）",
+                )
+                .into_response()),
+            }
+        }
         None => Ok(detail_err(StatusCode::NOT_FOUND, "image record not found").into_response()),
     })
 }

@@ -254,9 +254,12 @@ class CameraWorker(threading.Thread):
                         continue
                     rec.frames.append(buf)
                     rec.frames_are_jpeg = True
-            if time.monotonic() - rec.t0 >= VIDEO_PRE_S + VIDEO_POST_S:
-                rec.done.set()
-                self._rec_q.put(rec)
+                    # 2026-11-14 修复回归（性能审计发现）：T-308 把 done 检查
+                    # 留在了 for rec 循环外（引用最后一个 rec）——多录像时除
+                    # 最后一个外永不置 done，视频永不回填。移回循环体内。
+                    if time.monotonic() - rec.t0 >= VIDEO_PRE_S + VIDEO_POST_S:
+                        rec.done.set()
+                        self._rec_q.put(rec)
         self._recs = [r for r in self._recs if not r.done.is_set()]
 
     def _open_writer(self, path: str, fps: float):

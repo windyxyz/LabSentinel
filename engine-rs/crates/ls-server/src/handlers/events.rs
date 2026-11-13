@@ -160,8 +160,63 @@ pub(crate) async fn event_video(State(st): State<Shared>, AxPath(eid): AxPath<i6
     serve_event_media(&st, eid, |e| &e.video, "video/mp4")
 }
 
-pub(crate) async fn ws_events(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, st.events_tx.subscribe()))
+/// P0-1 修复（安全审计）：WS 握手校验——此前零鉴权（CSWSH：恶意网页可
+/// drive-by 读取事件流并绕过读保护）。语义对齐 Python `_ws_origin_ok` +
+/// `_ws_auth_check`：
+/// - 存在 Origin 时必须与 Host 同源或在 allowed_origins 白名单（无 Origin =
+///   非浏览器客户端，放行）；
+/// - read_protected 时校验令牌（子协议 bearer.<token> 优先 → Authorization
+///   Bearer），admin/read/设备令牌均可（与 HTTP 读口径一致）。
+fn ws_origin_ok(origin: Option<&str>, host: &str, allowed: &[String]) -> bool {
+    let Some(origin) = origin else {
+        return true; // 非浏览器客户端（curl/插件/移动端）
+    };
+    if origin.split("://").last().unwrap_or("") == host {
+        return true;
+    }
+    allowed.iter().any(|o| o == origin)
+}
+
+fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    // 令牌来源优先级：子协议 bearer.<token> → Authorization: Bearer
+    let protos = headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    for p in protos.split(',').map(|s| s.trim()) {
+        if let Some(t) = p.strip_prefix("bearer.") {
+            return Some(t.to_string());
+        }
+    }
+    let auth = headers.get("authorization").and_then(|v| v.to_str().ok())?;
+    auth.strip_prefix("Bearer ").map(|s| s.to_string())
+}
+
+pub(crate) async fn ws_events(
+    State(st): State<Shared>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
+    if !ws_origin_ok(origin, &headers_host(&headers), &st.allowed_origins) {
+        return (StatusCode::FORBIDDEN, "WS Origin 校验失败").into_response();
+    }
+    if st.read_protected {
+        let ok = crate::middleware::check_read_token(&st, ws_token(&headers).as_deref());
+        if !ok {
+            return (StatusCode::UNAUTHORIZED, "WS 读令牌校验失败").into_response();
+        }
+    }
+    ws.protocols(["labsentinel"])
+        .on_upgrade(move |socket| handle_ws(socket, st.events_tx.subscribe()))
+}
+
+fn headers_host(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
 }
 
 // ==== R2-309 批次 4：网页端告警渠道配置（任务140 复刻 + Fernet 互操作）+ 局域网发现 ====

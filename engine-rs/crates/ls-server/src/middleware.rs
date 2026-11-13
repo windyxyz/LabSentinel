@@ -80,6 +80,44 @@ pub(crate) async fn guard_middleware(
             )
                 .into_response();
         }
+        // P2-1（安全审计）：写限流（对齐 Python main.py 写 120/min 滑动窗口）
+        // + pairing/claim 每 IP 10/min（防反复作废待配对码/爆破配对码）。
+        // testing 态豁免（集成测试的写请求会撞全局窗口；对齐 testserver 模式）
+        static RATE: std::sync::Mutex<
+            Option<std::collections::HashMap<String, Vec<std::time::Instant>>>,
+        > = std::sync::Mutex::new(None);
+        let ip = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| host.clone());
+        let (limit, window) = if path == "/api/pairing/claim" {
+            (10usize, 60u64)
+        } else {
+            (120, 60)
+        };
+        let now = std::time::Instant::now();
+        let mut allowed = true;
+        if !st.testing {
+            if let Ok(mut m) = RATE.lock() {
+                let m = m.get_or_insert_with(std::collections::HashMap::new);
+                let e = m.entry(ip).or_default();
+                e.retain(|t| now.duration_since(*t).as_secs() < window);
+                if e.len() >= limit {
+                    allowed = false;
+                } else {
+                    e.push(now);
+                }
+            }
+        }
+        if !allowed {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"detail": "请求过于频繁，稍后再试", "code": "rate_limited"})),
+            )
+                .into_response();
+        }
         // 管理令牌（写操作；设备令牌可处置事件但不可改配置——T-620）。
         // 豁免：/api/pairing/claim 在 Python 侧无鉴权守卫（公开配对入口，
         // 由配对码本身与限流保护）——契约 1:1 对齐。
@@ -87,7 +125,7 @@ pub(crate) async fn guard_middleware(
         if path == "/api/pairing/claim" {
             actor = "anonymous".into();
         } else {
-            match check_write_token(&st, provided.as_deref()) {
+            match check_write_token(&st, provided.as_deref(), &path) {
                 Ok(a) => actor = a,
                 Err(resp) => return *resp,
             }
@@ -106,6 +144,23 @@ pub(crate) async fn guard_middleware(
                 "需要管理令牌（X-Admin-Token 或 Authorization: Bearer）",
             )
             .into_response();
+        }
+        // P2-4（安全审计）：管理级 GET 端点（Python require_admin）——read 令牌不够
+        const ADMIN_GETS: &[&str] = &[
+            "/api/audit",
+            "/api/devices",
+            "/api/config/summary",
+            "/api/plugins",
+            "/api/face/persons",
+        ];
+        let admin_get = ADMIN_GETS
+            .iter()
+            .any(|p| path == *p || path.starts_with(&format!("{p}/")));
+        if admin_get && !st.admin_token.is_empty() {
+            let provided = provided.as_deref().unwrap_or("");
+            if !ct_eq(provided, &st.admin_token) {
+                return detail_err(StatusCode::UNAUTHORIZED, "该端点需要管理令牌").into_response();
+            }
         }
         actor = "read".into();
     }
@@ -187,20 +242,41 @@ pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
     Some(dev.name)
 }
 
+/// P2-2（安全审计）：常数时间令牌比较（双 SHA256 后定长比较——长度恒 32，
+/// 无早退分支；对齐 Python hmac.compare_digest）。
+fn ct_eq(a: &str, b: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(a.as_bytes()).as_slice() == Sha256::digest(b.as_bytes()).as_slice()
+}
+
+/// P1-1（安全审计）：triage 端点白名单——设备令牌仅允许处置单事件
+/// （POST /api/events/{id}/status）；bulk-status/config/plugins/shutdown 等
+/// 写操作一律要求管理令牌（对齐 Python require_triage 的端点声明）。
+fn is_triage_path(path: &str) -> bool {
+    match path.strip_prefix("/api/events/") {
+        Some(tail) => match tail.strip_suffix("/status") {
+            Some(id) => id.parse::<i64>().is_ok(),
+            None => false,
+        },
+        None => false,
+    }
+}
+
 /// 写守卫：返回 (actor) 或 401/403 响应（与 require_admin/require_triage 同语义）。
 /// Err 用 Box 装箱（result_large_err：axum Response 体较大）。
 pub(crate) fn check_write_token(
     st: &Shared,
     provided: Option<&str>,
+    path: &str,
 ) -> Result<String, Box<Response>> {
     if st.admin_token.is_empty() {
         return Ok("anonymous(auth-off)".into());
     }
     let provided = provided.unwrap_or("");
-    if provided == st.admin_token {
+    if ct_eq(provided, &st.admin_token) {
         return Ok("admin".into());
     }
-    if !st.read_token.is_empty() && provided == st.read_token {
+    if !st.read_token.is_empty() && ct_eq(provided, &st.read_token) {
         return Err(Box::new(
             detail_err(
                 StatusCode::UNAUTHORIZED,
@@ -210,7 +286,18 @@ pub(crate) fn check_write_token(
         ));
     }
     if let Some(name) = check_device_token(st, provided) {
-        return Ok(format!("device:{name}"));
+        // P1-1：设备令牌仅限 triage（处置单事件）——否则权限放大
+        // （shutdown/config import/plugins start 均可被配对设备触发）
+        if is_triage_path(path) {
+            return Ok(format!("device:{name}"));
+        }
+        return Err(Box::new(
+            detail_err(
+                StatusCode::FORBIDDEN,
+                "设备令牌仅可处置事件（triage）——管理操作请使用管理令牌",
+            )
+            .into_response(),
+        ));
     }
     Err(Box::new(
         detail_err(
@@ -221,16 +308,16 @@ pub(crate) fn check_write_token(
     ))
 }
 
-/// 读守卫：admin/read/设备令牌均可（R2-103）
+/// 读守卫：admin/read/设备令牌均可（R2-103）；P2-2 常数时间比较
 pub(crate) fn check_read_token(st: &Shared, provided: Option<&str>) -> bool {
     if st.admin_token.is_empty() {
         return true;
     }
     let provided = provided.unwrap_or("");
-    if provided == st.admin_token {
+    if ct_eq(provided, &st.admin_token) {
         return true;
     }
-    if !st.read_token.is_empty() && provided == st.read_token {
+    if !st.read_token.is_empty() && ct_eq(provided, &st.read_token) {
         return true;
     }
     check_device_token(st, provided).is_some()

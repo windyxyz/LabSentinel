@@ -76,11 +76,19 @@ pub(crate) fn random_token() -> String {
 
 pub(crate) fn uuid_like() -> String {
     // 32 hex（与 Python uuid4().hex 同形，无需外部 crate）
+    // P2-9（安全审计）：原为纳秒时间戳——可预测且同纳秒碰撞，不满足审计
+    // 关联唯一性。改为 getrandom 熵（已在 deps）+ 时间混合。
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{:032x}", t)
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed) as u128;
+    let mut seed = (t ^ (seq << 64)).to_le_bytes();
+    // getrandom 随机熵填充（getrandom 0.2 API：getrandom(&mut buf)）
+    let _ = getrandom::getrandom(&mut seed);
+    format!("{:032x}", u128::from_le_bytes(seed))
 }
 
 // ---- handlers ----

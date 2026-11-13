@@ -1,4 +1,4 @@
-﻿//! RA2-S7（ADR-0011）：插件管理器——manifest 校验 / state.json 持久化 /
+//! RA2-S7（ADR-0011）：插件管理器——manifest 校验 / state.json 持久化 /
 //! 子进程启停 / 日志 tail。契约 1:1 对齐 Python `server/app/plugins.py`。
 //!
 //! 安全红线（与 Python 同）：
@@ -111,7 +111,13 @@ fn write_state(st: &Shared, set: &HashSet<String>) {
     let mut v: Vec<&String> = set.iter().collect();
     v.sort();
     if let Ok(t) = serde_json::to_string(&serde_json::json!({"enabled": v})) {
-        let _ = std::fs::write(state_path(st), t);
+        // RA2 反思修正：原子写（临时文件 + os.replace）——半写的 state.json
+        // 会让下次启动丢失全部启用状态（Python 侧同口径）
+        let target = state_path(st);
+        let tmp = target.with_extension("json.tmp");
+        if std::fs::write(&tmp, t).is_ok() {
+            let _ = std::fs::rename(&tmp, &target);
+        }
     }
 }
 
@@ -201,6 +207,8 @@ impl PluginManager {
     }
 
     /// 启动：先 enable 校验 → 入口解析 → 隐藏窗口 spawn（日志追加）。
+    /// P1-5（安全审计）：spawn 前（持锁）检查重入——旧进程存活则拒绝，
+    /// 防句柄覆盖成孤儿 + 进程增殖（P1-4 同批：环境白名单重建见下方 spawn）。
     pub fn start(&self, st: &Shared, pid: &str) -> (bool, String) {
         let Some(m) = (match manifest(st, pid) {
             Ok(v) => v,
@@ -211,17 +219,44 @@ impl PluginManager {
         if !read_state(st).contains(pid) {
             return (false, "插件未启用（先 enable）".into());
         }
-        // 入口解析：{python} 占位 → 当前解释器；PATH 命令；目录内锚定
+        if let Ok(procs) = self.procs.lock() {
+            if procs.contains_key(pid) {
+                return (false, "已在运行".into());
+            }
+        }
+        // 入口解析：{python} 占位 → Python 解释器（Rust 形态无嵌入式 runtime：
+        // 依次尝试安装目录 runtime\python.exe → PATH；current_exe 是本服务自身，
+        // 绝不能作为 {python} 替换目标——RA2 反思修正）；PATH 命令；目录内锚定
         let dir = plugin_dir(st).join(pid);
         let mut cmd = m.command.clone();
         let exe = if cmd[0].contains("{python}") {
-            cmd[0] = cmd[0].replace(
-                "{python}",
-                &std::env::current_exe()
-                    .unwrap_or_default()
-                    .to_string_lossy(),
-            );
-            PathBuf::from(&cmd[0])
+            let mut py: Option<PathBuf> = None;
+            for p in [
+                plugin_dir(st)
+                    .parent()
+                    .map(|d| d.join("runtime").join("python.exe")),
+                Some(PathBuf::from("python.exe")),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if p.is_file() {
+                    py = Some(p);
+                    break;
+                }
+                if p.parent().is_none() && which("python.exe").is_some() {
+                    py = Some(p);
+                    break;
+                }
+            }
+            let Some(py) = py else {
+                return (
+                    false,
+                    "{python} 占位不可用：未找到 Python 解释器（Rust 形态不自带）".into(),
+                );
+            };
+            cmd[0] = cmd[0].replace("{python}", &py.to_string_lossy());
+            py
         } else if let Some(p) = which(&cmd[0]) {
             cmd[0] = p.to_string_lossy().into_owned();
             p
@@ -248,8 +283,34 @@ impl PluginManager {
             c.stdout(Stdio::from(f.try_clone().unwrap()))
                 .stderr(Stdio::from(f.try_clone().unwrap()));
         }
-        for (k, v) in &m.env {
-            c.env(k, v);
+        // P1-4（安全审计）：环境白名单重建——绝不让子进程继承父环境
+        // （LS_ADMIN_TOKEN/LS_COMPREFACE_API_KEY 等会被插件直接读走）。
+        // 对齐 Python _ENV_PASS：保留系统必需项 + 清 LS_* + 按 manifest.env 注入。
+        {
+            use std::collections::HashMap as _Hm;
+            const PASS: &[&str] = &[
+                "SystemRoot",
+                "windir",
+                "TEMP",
+                "TMP",
+                "PATH",
+                "PATHEXT",
+                "COMSPEC",
+                "NUMBER_OF_PROCESSORS",
+                "PROCESSOR_ARCHITECTURE",
+                "OS",
+                "USERNAME",
+            ];
+            let pass: _Hm<String, String> = std::env::vars()
+                .filter(|(k, _)| PASS.iter().any(|p| p.eq_ignore_ascii_case(k)))
+                .collect();
+            c.env_clear();
+            for (k, v) in pass {
+                c.env(k, v);
+            }
+            for (k, v) in &m.env {
+                c.env(k, v);
+            }
         }
         #[cfg(windows)]
         {

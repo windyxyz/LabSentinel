@@ -304,9 +304,19 @@ async fn main() {
     }
     let app = build_router(st.clone());
     st.jobs.start();
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .unwrap();
+    // RA2 反思修正：launch 模式下端口试探与 bind 之间存在 TOCTOU 窗口——
+    // bind 失败不再 unwrap panic（会崩进程），优雅提示后退出
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[ls-server] 端口 {port} 绑定失败: {e}——可能已有实例在运行");
+            if launch_mode {
+                open_browser(port);
+                std::process::exit(0);
+            }
+            std::process::exit(1);
+        }
+    };
     println!("labsentinel-server READY port={port}");
     // RA4：--launch 模式（portable_launcher 消解件）——单实例锁（对齐 Python
     // "pid port" 契约，位置 data 上一级 logs/）+ 就绪后开浏览器
@@ -368,7 +378,7 @@ async fn selftest_http() -> bool {
         plugins: plugins::PluginManager::default(),
         genai: genai::GenAI::from_env(),
     });
-    st.jobs.start();
+    // 不 start() 后台作业：自检只验 API/DB 链路（顺带消除空 DB 的 backup 噪音）
     let app = build_router(st.clone());
     let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await else {
         return false;

@@ -56,7 +56,7 @@ pub struct GenAI {
     model: String,
     min_level: i64,
     tx: Option<SyncSender<GenAIJob>>,
-    stats: Stats,
+    stats: std::sync::Arc<Stats>,
 }
 
 #[derive(Default)]
@@ -118,7 +118,7 @@ impl GenAI {
                 model: String::new(),
                 min_level: 2,
                 tx: None,
-                stats: Stats::default(),
+                stats: std::sync::Arc::new(Stats::default()),
             };
         }
         let (tx, rx) = mpsc::sync_channel::<GenAIJob>(QUEUE_MAX);
@@ -132,11 +132,17 @@ impl GenAI {
             api_key: api_key.clone(),
             timeout_s,
         };
-        // 单线程消费者：纯复核 + ls-store 回写（ai_review 标记，绝不改 status）
+        let stats = std::sync::Arc::new(Stats::default());
+        let rx_stats = std::sync::Arc::clone(&stats);
+        // 单线程消费者：纯复核 + ls-store 回写（ai_review 标记，绝不改 status）。
+        // RA2 反思修正：reviewed/failed/queue_depth 由消费者维护——此前 stats
+        // 未共享给消费线程，status 端点的计数恒 0（queue_depth 只增不减）
         std::thread::Builder::new()
             .name("ls-genai".into())
             .spawn(move || {
                 for job in rx {
+                    rx_stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                    rx_stats.inflight.fetch_add(1, Ordering::Relaxed);
                     let result = snapshot_b64(&job.snapshot)
                         .and_then(|b64| {
                             call_provider(
@@ -150,13 +156,24 @@ impl GenAI {
                             .ok()
                         })
                         .and_then(|text| parse_review(&text).ok());
-                    if let Some(review) = result {
-                        if let Ok(store) = ls_store::Store::open(&job.db_path) {
-                            let now = chrono_now();
-                            let _ =
-                                store.set_ai_review(job.eid, &review.to_string(), &now, &cfg.model);
+                    match result {
+                        Some(review) => {
+                            rx_stats.reviewed.fetch_add(1, Ordering::Relaxed);
+                            if let Ok(store) = ls_store::Store::open(&job.db_path) {
+                                let now = chrono_now();
+                                let _ = store.set_ai_review(
+                                    job.eid,
+                                    &review.to_string(),
+                                    &now,
+                                    &cfg.model,
+                                );
+                            }
+                        }
+                        None => {
+                            rx_stats.failed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    rx_stats.inflight.fetch_sub(1, Ordering::Relaxed);
                 }
             })
             .ok();
@@ -165,7 +182,7 @@ impl GenAI {
             model,
             min_level: env_num("LS_GENAI_MIN_LEVEL", 2i64),
             tx: Some(tx),
-            stats: Stats::default(),
+            stats,
         }
     }
 

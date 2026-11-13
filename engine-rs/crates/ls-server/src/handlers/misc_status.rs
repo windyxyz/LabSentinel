@@ -102,7 +102,7 @@ pub(crate) async fn diagnostics_summary(State(st): State<Shared>) -> Response {
             "backend": "rust",
             "uptime_s": null,
             "counts": counts,
-            "disk": {"data_dir": st.data_dir, "free_bytes": null, "total_bytes": null},
+            "disk": {"data_dir": "(data)", "free_bytes": null, "total_bytes": null},
             "logs": {"file": null, "size_bytes": 0, "rotated": []},
             "recent_errors": [],
         })))
@@ -411,21 +411,48 @@ pub(crate) async fn logs_tail(
         .clamp(1, 2000);
     // rust 控制面的日志走 stdout；若有 Python 侧落盘日志则读取尾部
     let log_path = std::path::Path::new(&st.data_dir).join("logs/server.log");
-    let lines: Vec<String> = match std::fs::read_to_string(&log_path) {
-        Ok(content) => content
-            .lines()
-            .rev()
-            .take(limit)
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect(),
-        Err(_) => Vec::new(),
+    // P2-3（安全审计）：尾部读取（2MB 上限防内存放大）+ 脱敏（对齐 Python redact：
+    // TOKEN/KEY/SECRET/PASSWORD/WEBHOOK 类值打码），file 字段不再回显绝对路径
+    let lines: Vec<String> = match std::fs::metadata(&log_path) {
+        Ok(m) if m.len() > 0 => {
+            let content = std::fs::read(&log_path).unwrap_or_default();
+            let start = (content.len() as u64).saturating_sub(2 * 1024 * 1024) as usize;
+            let text = String::from_utf8_lossy(&content[start..]);
+            text.lines()
+                .rev()
+                .take(limit)
+                .map(redact_line)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        }
+        _ => Vec::new(),
     };
-    Json(json!({"lines": lines, "file": log_path.to_string_lossy(),
+    Json(json!({"lines": lines, "file": "logs/server.log",
                 "note": if lines.is_empty() { "rust 控制面日志走 stdout（无落盘文件）" } else { "" }}))
         .into_response()
+}
+
+/// 行内脱敏（对齐 Python redact.redact_line 口径）：键含敏感词时值打码。
+fn redact_line(line: &str) -> String {
+    let sensitive = ["token", "key", "secret", "password", "webhook"];
+    let lower = line.to_ascii_lowercase();
+    if sensitive.iter().any(|w| lower.contains(w)) {
+        // 键=值 形态：保留键，值打码
+        match line.split_once('=') {
+            Some((k, _)) => format!("{k}=***"),
+            None => {
+                if lower.contains("bearer ") {
+                    format!("{} ***", &line[..lower.find("bearer").unwrap_or(0) + 6])
+                } else {
+                    line.to_string()
+                }
+            }
+        }
+    } else {
+        line.to_string()
+    }
 }
 
 pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
@@ -444,7 +471,10 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
             "active": installed,
             "license_confirmed_required": !installed,
             "license_notice": "实验服模型权重由 Roboflow 训练数据集派生，具体许可仍待确认（Q-08）。下载即表示你已阅读并接受该数据集的用途限制。",
-            "model_path": model_path,
+            "model_path": model_path.as_ref().map(|p| {
+                // P2-6：只回显文件名（不泄露目录布局）
+                std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned())
+            }),
             "note": "rust 控制面只读状态；下载端点在 Python 服务（含 SHA256 校验）",
         }))
         .into_response())
@@ -622,7 +652,7 @@ pub(crate) async fn face_register(
     let mut consent = false;
     let mut photo: Option<Vec<u8>> = None;
     const MAX: usize = 10 * 1024 * 1024;
-    while let Ok(Some(field)) = mp.next_field().await {
+    while let Ok(Some(mut field)) = mp.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "subject" => subject = field.text().await.unwrap_or_default(),
@@ -639,12 +669,29 @@ pub(crate) async fn face_register(
                 )
             }
             "photo" => {
-                let data = field.bytes().await.unwrap_or_default();
-                if data.len() > MAX {
-                    return detail_err(StatusCode::PAYLOAD_TOO_LARGE, "照片超过 10MB 上限")
-                        .into_response();
+                // RA2 反思修正：流式累积 + 超限即断——原 field.bytes() 会把
+                // 任意大小的上传先全量读进内存再检查 10MB 上限（DoS 面）
+                let mut buf: Vec<u8> = Vec::new();
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if buf.len() + chunk.len() > MAX {
+                                return detail_err(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    "照片超过 10MB 上限",
+                                )
+                                .into_response();
+                            }
+                            buf.extend_from_slice(&chunk);
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            return detail_err(StatusCode::BAD_REQUEST, "照片读取失败")
+                                .into_response()
+                        }
+                    }
                 }
-                photo = Some(data.to_vec());
+                photo = Some(buf);
             }
             _ => {}
         }
@@ -757,7 +804,8 @@ pub(crate) async fn ppe_download(State(st): State<Shared>, Json(body): Json<Valu
     let Ok(lock_raw) = std::fs::read_to_string(&lock_path) else {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({"detail": format!("assets.lock.json 不存在: {}", lock_path.display())})),
+            // P2-6（安全审计）：错误体不回显内部绝对路径
+            Json(json!({"detail": "assets.lock.json 不存在（检查 data_dir/scripts 布局）"})),
         )
             .into_response();
     };
@@ -839,10 +887,36 @@ pub(crate) async fn ppe_download(State(st): State<Shared>, Json(body): Json<Valu
                 .call()
             {
                 Ok(resp) => {
-                    let mut bytes = Vec::new();
+                    // P2-8（安全审计）：流式下载 + want_size 提前截断——
+                    // 原 read_to_end 无上限，白名单源被攻陷时可内存耗尽
+                    let mut bytes: Vec<u8> = Vec::with_capacity(want_size.max(0) as usize);
                     use std::io::Read;
-                    if resp.into_reader().read_to_end(&mut bytes).is_err() {
+                    let mut reader = resp.into_reader();
+                    let mut overflow = false;
+                    let mut io_err = false;
+                    loop {
+                        let mut chunk = [0u8; 65536];
+                        match reader.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                bytes.extend_from_slice(&chunk[..n]);
+                                if (bytes.len() as i64) > want_size {
+                                    overflow = true;
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                io_err = true;
+                                break;
+                            }
+                        }
+                    }
+                    if io_err {
                         last_err = "下载中断".into();
+                        continue;
+                    }
+                    if overflow {
+                        last_err = "响应超过期望大小（已截断）".into();
                         continue;
                     }
                     let got_sha = sha256_hex(&bytes);
