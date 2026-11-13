@@ -33,6 +33,7 @@ mod plugins;
 mod router;
 mod state;
 mod util;
+mod vlm;
 mod worker;
 
 mod url {
@@ -300,6 +301,15 @@ async fn main() {
                 }
                 st.jobs.set_alert_channels(channels);
             }
+        }
+    }
+    // RA5：独立部署自举——全新库（零 Python 部署）由 Rust 建 v13 全量 schema
+    // （幂等；已有库/迁移链仍归 Python，ADR-0008 口径不变）
+    if let Ok(s) = ls_store::Store::open(&st.db_path) {
+        match s.ensure_schema() {
+            Ok(true) => println!("[ls-server] 全新库——已自举 v13 schema（Rust 形态独立部署）"),
+            Ok(false) => {}
+            Err(e) => eprintln!("[ls-server] schema 自举失败: {e}"),
         }
     }
     let app = build_router(st.clone());

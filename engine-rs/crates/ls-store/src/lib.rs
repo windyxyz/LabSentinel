@@ -68,6 +68,80 @@ impl Store {
         &self.conn
     }
 
+    /// RA5（ADR-0011 独立部署缺口）：Rust 形态自举建表——v13 全量 schema
+    /// 的幂等 CREATE（IF NOT EXISTS；与 Python 已建库共存安全，已有表不动）。
+    /// 迁移链仍归 Python（ADR-0008）——本方法只覆盖"零 Python 部署"的初次
+    /// 自举，ALTER 类列迁移不做（老库由 Python 升级）。
+    /// 返回 true = 本次执行了建表（全新库）。
+    pub fn ensure_schema(&self) -> rusqlite::Result<bool> {
+        let fresh = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n == 0)
+            .unwrap_or(true);
+        if !fresh {
+            return Ok(false);
+        }
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
+             INSERT OR IGNORE INTO schema_version VALUES(13, 'rust-bootstrap');
+             CREATE TABLE IF NOT EXISTS cameras(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
+               status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
+               analyzer TEXT DEFAULT 'python');
+             CREATE TABLE IF NOT EXISTS zones(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
+             CREATE TABLE IF NOT EXISTS rules(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, zone_id INTEGER, \
+               behavior TEXT, level INTEGER, cooldown_s INTEGER, \
+               time_start TEXT, time_end TEXT, threshold INTEGER, enabled INTEGER, \
+               days_of_week TEXT DEFAULT '1,2,3,4,5,6,7', holiday_only INTEGER DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS calendar_exceptions(\
+               date TEXT PRIMARY KEY, mode TEXT NOT NULL, note TEXT);
+             CREATE TABLE IF NOT EXISTS rule_templates(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, \
+               config_json TEXT NOT NULL, created_ts TEXT, updated_ts TEXT);
+             CREATE TABLE IF NOT EXISTS events(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, type TEXT, \
+               level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT, \
+               status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, \
+               escalated_ts TEXT, ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT);
+             CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+             CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);
+             CREATE TABLE IF NOT EXISTS face_consents(subject TEXT PRIMARY KEY, ts TEXT);
+             CREATE TABLE IF NOT EXISTS alert_deliveries(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER, channel TEXT, \
+               status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0, \
+               last_error TEXT, updated_ts TEXT);
+             CREATE TABLE IF NOT EXISTS alert_silences(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, target TEXT, \
+               reason TEXT, created_ts TEXT NOT NULL, until_ts TEXT NOT NULL, created_by TEXT);
+             CREATE TABLE IF NOT EXISTS audit_log(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, request_id TEXT, \
+               actor TEXT, action TEXT NOT NULL, target TEXT, status_code INTEGER, detail TEXT);
+             CREATE TABLE IF NOT EXISTS folder_images(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER NOT NULL, path TEXT NOT NULL, \
+               name TEXT, mtime_ns INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL DEFAULT 0, \
+               ts TEXT NOT NULL, processed_ts TEXT NOT NULL, width INTEGER, height INTEGER, \
+               persons INTEGER DEFAULT 0, in_zone INTEGER DEFAULT 0, ppe_no INTEGER DEFAULT 0, \
+               ppe_wearing INTEGER DEFAULT 0, zones TEXT, violations TEXT, key INTEGER DEFAULT 0, \
+               violation INTEGER DEFAULT 0, event_id INTEGER, snapshot TEXT, error TEXT);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_images_uniq \
+               ON folder_images(camera_id, path, mtime_ns, size);
+             CREATE TABLE IF NOT EXISTS app_settings(\
+               key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ts TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS devices(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
+               platform TEXT DEFAULT '', token_hash TEXT NOT NULL UNIQUE, \
+               created_ts TEXT NOT NULL, last_seen_ts TEXT, revoked INTEGER DEFAULT 0);",
+        )?;
+        Ok(true)
+    }
+
     /// 双向兼容自检：schema_version 表存在且 ≥ 当前代码期望。
     pub fn schema_version(&self) -> rusqlite::Result<i64> {
         self.conn.query_row(

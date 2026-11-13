@@ -286,6 +286,9 @@ pub struct WorkerConfig {
     pub zones: Vec<ls_analyzer::pipeline::ZoneSpec>,
     pub rules: Vec<ls_analyzer::pipeline::RuleSpec>,
     pub calendar: HashMap<String, String>,
+    /// cameras.analyzer 列原值（python/rust/vlm）——RA5 模型模块化：
+    /// "vlm" = 该路强制走外部联网模型判定
+    pub analyzer: String,
     pub detector: ls_analyzer::detector::DetectorConfig,
     /// RA2-S1：PPE 级联配置（None = 未配置模型/下载未完成 → 仅人员检测）
     pub ppe: Option<ls_analyzer::ppe::PpeConfig>,
@@ -388,6 +391,7 @@ impl WorkerConfig {
         });
         Ok(Some(WorkerConfig {
             camera_id: cid,
+            analyzer: c.analyzer.clone(),
             spec: ls_analyzer::pipeline::CameraSpec {
                 id: c.id,
                 name: c.name,
@@ -532,6 +536,17 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         rtsp_transport_tcp: true,
     });
     let sink = EventSink::new(Arc::clone(&st));
+    // RA5：外部联网 VLM 视频判定（LS_ANALYZER_BACKEND=vlm）——抽样多帧交
+    // 外部模型判定违规；限流默认 6 次/分钟/路（token 成本克制）。
+    // 模型模块化：per-camera cameras.analyzer="vlm" 也可插拔启用（优先于全局 env）。
+    let mut vlm_cfg = crate::vlm::cfg_from_env();
+    if cfg.analyzer == "vlm" {
+        vlm_cfg.enabled = true;
+    }
+    let vlm_interval = std::time::Duration::from_secs(
+        (60f64 / env_f64("LS_VLM_MAX_PER_MIN", 6.0).max(0.1)).round() as u64,
+    );
+    let mut last_vlm = std::time::Instant::now() - vlm_interval; // 首帧即可判
     let mut restarts = 0u32;
     #[allow(unused_assignments)] // 每轮 spawn 成功时重置（None 初始值仅首次可读路径）
     let mut alive_since: Option<std::time::Instant> = None;
@@ -615,6 +630,70 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     if !running_marked {
                         let _ = store.set_camera_status(cfg.camera_id, "running");
                         running_marked = true;
+                    }
+                    // RA5：外部联网 VLM 视频判定抽样（限流：证据环多帧 → Gemini
+                    // 原生视频 / openai_compat 多图 → violations → 事件）。
+                    // 判定在帧循环线程做一次同步 HTTP（间隔由 vlm_interval 限流，
+                    // 默认 6 次/分钟/路——单次最坏 30s 不会淹没帧率）。
+                    if vlm_cfg.enabled && last_vlm.elapsed() >= vlm_interval {
+                        last_vlm = std::time::Instant::now();
+                        let ring_frames: Vec<Vec<u8>> = evidence
+                            .ring
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref()
+                            .map(|r| r.snapshot().into_iter().map(|f| f.data).collect())
+                            .unwrap_or_default();
+                        let sampled = crate::vlm::sample_frames(&ring_frames, 8);
+                        if !sampled.is_empty() {
+                            match crate::vlm::analyze_frames(
+                                &vlm_cfg,
+                                crate::vlm::VLM_PROMPT,
+                                &sampled,
+                            ) {
+                                Ok(v) => {
+                                    let violations: Vec<String> = v["violations"]
+                                        .as_array()
+                                        .map(|a| {
+                                            a.iter()
+                                                .filter_map(|x| x.as_str().map(String::from))
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let summary = v["summary"].as_str().unwrap_or("").to_string();
+                                    let persons = v["persons"].as_i64().unwrap_or(0);
+                                    let ts = ls_analyzer::pipeline::frame_ts_for(
+                                        frame.index,
+                                        cfg.spec.analysis_fps,
+                                    );
+                                    // 违规截图：证据环尾帧（最新画面）
+                                    let jpeg = ring_frames.last().cloned().unwrap_or_default();
+                                    for behavior in &violations {
+                                        let cand = ls_analyzer::pipeline::Candidate {
+                                            camera_id: cfg.camera_id,
+                                            zone_id: None,
+                                            behavior: behavior.clone(),
+                                            level: 2,
+                                            track_id: 0,
+                                            detail: format!(
+                                                "VLM 视频判定：{behavior}（{persons}人）— {summary}"
+                                            ),
+                                            ts_iso: ts.clone(),
+                                            evidence_key: format!("vlm:{}:{behavior}", frame.index),
+                                        };
+                                        if let Ok(Some(veid)) = sink.record(&cand, Some(&jpeg)) {
+                                            spawn_finalize(&st, &evidence, veid);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[ls-worker] cam-{} VLM 判定失败（降级跳过）: {e}",
+                                        cfg.camera_id
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(None) => break, // 流结束（文件源 EOF）
@@ -757,6 +836,10 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let interval = env_f64("LS_FOLDER_POLL_S", 3.0).max(0.5);
     let scan_cfg = ls_ingest::folder::FolderScanConfig::default();
     let internal = Some(PathBuf::from(&st.data_dir)); // 截图/视频数据目录不入库
+    let mut vlm_cfg = crate::vlm::cfg_from_env();
+    if cfg.analyzer == "vlm" {
+        vlm_cfg.enabled = true; // RA5 模型模块化：per-camera 插拔外部联网模型
+    }
     let mut marked: Option<String> = None;
     let mut set_status = |v: &str| {
         if marked.as_deref() != Some(v) {
@@ -840,6 +923,136 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 if row.width.is_some() {
                     continue;
                 }
+            }
+            // RA5：外部联网 VLM 判定路径（LS_ANALYZER_BACKEND=vlm + LS_VLM_*）——
+            // 解码后单图交外部模型，persons/violations 真值回填+事件；失败降级
+            // 如实落 error（绝不误报）。与 YOLO 路径互斥，continue 隔离。
+            if vlm_cfg.enabled {
+                let (bgr, w, h) = match ls_ingest::decode_image(&c.path, 1280, 720) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = store.update_folder_image_analysis(
+                            iid,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            "[]",
+                            "[]",
+                            false,
+                            false,
+                            None,
+                            Some(&format!("无法解码（损坏或非图片文件）: {e}")),
+                            &processed_ts,
+                        );
+                        continue;
+                    }
+                };
+                let jpeg = ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h).unwrap_or_default();
+                let verdict = if jpeg.is_empty() {
+                    Err("JPEG 编码失败".into())
+                } else {
+                    crate::vlm::analyze_frames(
+                        &vlm_cfg,
+                        crate::vlm::VLM_PROMPT,
+                        std::slice::from_ref(&jpeg),
+                    )
+                };
+                match verdict {
+                    Ok(v) => {
+                        let persons = v["persons"].as_i64().unwrap_or(0);
+                        let violations: Vec<String> = v["violations"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let no_ppe = v["no_ppe"].as_i64().unwrap_or(0);
+                        let key = persons > 0;
+                        let violation = !violations.is_empty();
+                        let (snapshot_path, snapshot_jpeg) = if violation {
+                            let snap_dir = PathBuf::from(&st.data_dir).join("snapshots");
+                            let _ = std::fs::create_dir_all(&snap_dir);
+                            let snap_path = snap_dir.join(format!("folder_{iid}.jpg"));
+                            if !jpeg.is_empty() && std::fs::write(&snap_path, &jpeg).is_ok() {
+                                (Some(snap_path.to_string_lossy().into_owned()), Some(jpeg))
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        };
+                        // verdict 全量存 zones 列（诊断：summary+计数字段）
+                        let zones_json = v.to_string();
+                        let violations_json =
+                            serde_json::to_string(&violations).unwrap_or_else(|_| "[]".into());
+                        let _ = store.update_folder_image_analysis(
+                            iid,
+                            w as i64,
+                            h as i64,
+                            persons,
+                            persons,
+                            no_ppe,
+                            persons.saturating_sub(no_ppe),
+                            &zones_json,
+                            &violations_json,
+                            key,
+                            violation,
+                            snapshot_path.as_deref(),
+                            None,
+                            &processed_ts,
+                        );
+                        if violation {
+                            for behavior in &violations {
+                                let cand = ls_analyzer::pipeline::Candidate {
+                                    camera_id: cfg.camera_id,
+                                    zone_id: None,
+                                    behavior: behavior.clone(),
+                                    level: 2,
+                                    track_id: 0,
+                                    detail: format!(
+                                        "VLM 判定：图片 {} 命中 {}（{}人/未穿服 {}）— {}",
+                                        name.as_deref().unwrap_or(""),
+                                        behavior,
+                                        persons,
+                                        no_ppe,
+                                        v["summary"].as_str().unwrap_or("")
+                                    ),
+                                    ts_iso: processed_ts.clone(),
+                                    evidence_key: format!("folder:{iid}:{behavior}"),
+                                };
+                                if let Ok(Some(veid)) = sink.record(&cand, snapshot_jpeg.as_deref())
+                                {
+                                    let _ = store.set_folder_image_event(iid, veid);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = store.update_folder_image_analysis(
+                            iid,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            "[]",
+                            "[]",
+                            false,
+                            false,
+                            None,
+                            Some(&format!("VLM 判定失败: {e}")),
+                            &processed_ts,
+                        );
+                    }
+                }
+                scanned += 1;
+                continue;
             }
             // 单图解码 → BGR 1280x720（ffmpeg；中文路径安全）
             let (bgr, w, h) = match ls_ingest::decode_image(&c.path, 1280, 720) {

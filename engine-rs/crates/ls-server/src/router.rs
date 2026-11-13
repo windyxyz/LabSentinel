@@ -102,6 +102,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/folders/:cid/scan"), // RA1.3：最后一条摘牌（folder worker 扫描登记）
     ("GET", "/api/logs"),
     ("GET", "/api/models/ppe/status"),
+    ("GET", "/api/models/local"), // RA5：模型模块化——本地可用 ONNX 清单
     // ---- R2-309 批次 3 ----
     ("POST", "/api/config/import"),
     ("GET", "/api/events/:eid/evidence.zip"),
@@ -212,6 +213,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/folders/:cid/scan", post(folder_scan)) // RA1.3：摘最后一条 503
         .route("/logs", get(logs_tail))
         .route("/models/ppe/status", get(ppe_status))
+        .route("/models/local", get(models_local)) // RA5：模型模块化清单
         // ---- R2-309 批次 3 ----
         .route("/config/import", post(config_import))
         .route("/events/:eid/evidence.zip", get(event_evidence_zip))

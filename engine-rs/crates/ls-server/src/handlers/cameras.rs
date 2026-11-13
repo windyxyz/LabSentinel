@@ -99,10 +99,12 @@ pub(crate) async fn set_camera_analyzer(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    if impl_ != "python" && impl_ != "rust" {
+    // RA5（模型模块化）：rust 形态新增 "vlm"——外部联网模型后端
+    // （LS_VLM_URL/MODEL/KEY 全局配置；per-camera 可插拔选择）
+    if impl_ != "python" && impl_ != "rust" && impl_ != "vlm" {
         return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "analyzer 必须是 python|rust",
+            "analyzer 必须是 python|rust|vlm",
         )
         .into_response();
     }

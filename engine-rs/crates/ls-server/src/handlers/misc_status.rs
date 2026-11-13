@@ -176,6 +176,54 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
+/// RA5（模型模块化）：本地可用模型清单——models/ 目录 + LS_MODEL_PATH/
+/// LS_PPE_MODEL 指向项，供网页端"检测后端"选择（用户自备第三方 ONNX 亦入册）。
+pub(crate) async fn models_local(State(st): State<Shared>) -> Response {
+    let mut items: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    // 扫描目录：data_dir/models/（按需下载/自备模型落位）+ env 指向项
+    let models_dir = std::path::Path::new(&st.data_dir).join("models");
+    if let Ok(rd) = std::fs::read_dir(&models_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map(|x| x == "onnx").unwrap_or(false) {
+                let name = p
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if seen.insert(name.clone()) {
+                    items.push(json!({
+                        "name": name,
+                        "path": p.to_string_lossy(),
+                        "kind": "onnx",
+                        "size_bytes": std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
+                    }));
+                }
+            }
+        }
+    }
+    for env_key in ["LS_MODEL_PATH", "LS_PPE_MODEL", "LS_MODEL_FP32"] {
+        if let Ok(p) = std::env::var(env_key) {
+            let pp = std::path::Path::new(p.trim()).to_path_buf();
+            if pp.is_file() {
+                let name = pp
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if seen.insert(name.clone()) {
+                    items.push(json!({
+                        "name": name,
+                        "path": pp.to_string_lossy(),
+                        "kind": env_key,
+                        "size_bytes": std::fs::metadata(&pp).map(|m| m.len()).unwrap_or(0),
+                    }));
+                }
+            }
+        }
+    }
+    Json(json!({"models": items})).into_response()
+}
+
 pub(crate) async fn model_status() -> Response {
     // RA2-S9：形状对齐 Python api.model_status（只读上报，不加载 ONNX）。
     let fp32 = std::env::var("LS_MODEL_FP32").unwrap_or_default();

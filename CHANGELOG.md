@@ -6,6 +6,29 @@
 
 ## [Unreleased]
 
+### RA5：外部联网 VLM 检测后端——模型模块化（ADR-0011 增量，2026-11-14）
+- **底座/模型解耦**：检测后端可插拔三选一——① 本地训练 ONNX（YOLO/tract，
+  LS_MODEL_PATH）② 用户自备第三方 ONNX（任意路径，/api/models/local 入册）
+  ③ **外部联网模型**（新增 `vlm.rs`：openai_compat 通用协议 / ollama 本地 /
+  **gemini 原生视频**三 provider）。
+- **图片检测接 VLM**：folder worker `LS_ANALYZER_BACKEND=vlm`（或 per-camera
+  `PUT /cameras/{id}/analyzer {"analyzer":"vlm"}`）→ 单图交外部模型判定
+  persons/no_ppe/violations 真值回填 + 违规事件。判定失败降级落 error 不误报。
+- **视频检测接 VLM（"AI 看视频"）**：两条通路（2025 调研：原生视频输入是
+  Gemini 类特例，多帧采样是通用主流）——**gemini provider 原生视频**（帧序列
+  → ffmpeg 临时 mp4 → inline_data base64，<20MB 限制如实报错）+ 多帧采样
+  （openai_compat/ollama，≤8 帧均匀采样首尾保留）。视频 worker 按路限流
+  （默认 6 次/分钟）从证据环抽帧判定 → 违规事件走全链（入库/WS/MQTT/首发）。
+- **独立部署自举**：`ls-store.ensure_schema`——全新库（零 Python 部署）由
+  Rust 建 v13 全量 schema（幂等 IF NOT EXISTS；迁移链仍归 Python）。
+- **模拟验收 9/9 PASS**：`scripts/mock_vlm_server.py`（OpenAI 兼容协议替身，
+  内容启发式判定）+ `scripts/acceptance_vlm.py`（真实素材：演示视频抽帧
+  有人帧+空场景帧）——mock 协议帧 ×2 / 判定回填真值 / no_ppe 事件入库 /
+  models.local 清单 / --launch 消解件全链验证。真外部模型（需 API key）
+  质量验收同口径复跑 acceptance_vlm.py 即可。
+- 门禁：workspace **118 passed / 0 failed**（+3 vlm 测试）+ clippy/fmt/ruff
+  全绿。
+
 ### 全面安全/性能审计修复（2026-11-14，反思自查 + 双专项）
 - **P0-1 WebSocket 握手零鉴权（CSWSH）**：`/ws/events` 此前无 Origin 校验、
   无令牌校验——恶意网页 drive-by 可实时读取事件流并绕过读保护。修复：Origin
