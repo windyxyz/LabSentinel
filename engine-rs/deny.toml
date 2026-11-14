@@ -9,10 +9,14 @@ ignore = [
     # rumqttc 0.25 传递依赖钉在 rustls-webpki 0.102.8（该线已停更且无修复版）——
     # 本项目 MQTT 默认关闭（LS_MQTT_* 未配置零行为），TLS 客户端仅在显式启用时
     # 连自家 broker；webpki 0.102 修复线在 rumqttc 主版本升级时跟进。
-    { crate = "rustls-webpki@0.102.8", reason = "RUSTSEC-2026-0049/0098/0099/0104/0382：仅经 rumqttc 0.25 传递（可选 MQTT 通道，默认关闭）；无 0.103 兼容版本，升级随 rumqttc 主版本" },
-    # rustls-pemfile 仅被 rumqttc 0.25 在「用户提供 CA PEM」路径使用；本项目 MQTT
-    # TLS 走 rustls-native-certs 系统信任源（mqtt.rs），不经此解析器。
-    { crate = "rustls-pemfile@2.2.0", reason = "RUSTSEC-2025-0134 unmaintained：仅 rumqttc 0.25 可选 PEM 解析路径；本项目不使用该路径" },
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0382",
+    { crate = "rustls-webpki@0.102.8", reason = "仅经 rumqttc 0.25 传递（可选 MQTT 通道，默认关闭）；rumqttc 钉 0.102.8，无 0.103 兼容版本，升级随 rumqttc 主版本" },
+    "RUSTSEC-2025-0134",
+    { crate = "rustls-pemfile@2.2.0", reason = "unmaintained：仅 rumqttc 0.25 可选 PEM 解析路径；本项目 MQTT TLS 走 rustls-native-certs 系统信任源，不经此解析器" },
 ]
 
 [licenses]
