@@ -8,6 +8,7 @@ pub(crate) mod folder_images;
 pub(crate) mod misc_status;
 pub(crate) mod ops;
 pub(crate) mod pairing;
+pub(crate) mod setup;
 pub(crate) mod stats;
 pub(crate) mod zones_rules;
 
@@ -20,5 +21,6 @@ pub(crate) use folder_images::*;
 pub(crate) use misc_status::*;
 pub(crate) use ops::*;
 pub(crate) use pairing::*;
+pub(crate) use setup::*;
 pub(crate) use stats::*;
 pub(crate) use zones_rules::*;

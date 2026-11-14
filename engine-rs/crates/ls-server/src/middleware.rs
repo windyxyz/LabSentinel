@@ -244,7 +244,7 @@ pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
 
 /// P2-2（安全审计）：常数时间令牌比较（双 SHA256 后定长比较——长度恒 32，
 /// 无早退分支；对齐 Python hmac.compare_digest）。
-fn ct_eq(a: &str, b: &str) -> bool {
+pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
     use sha2::{Digest, Sha256};
     Sha256::digest(a.as_bytes()).as_slice() == Sha256::digest(b.as_bytes()).as_slice()
 }

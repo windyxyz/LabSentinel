@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { api, adminToken, mediaUrl } from '../api'
 import WebrtcPlayer from '../components/WebrtcPlayer.vue'
 import AsyncState from '../components/AsyncState.vue'
+import FsPicker from '../components/FsPicker.vue'
 
 const cams = ref([])
 const form = ref({ name: '', source: '', type: 'file', autostart: false, group_name: '' })
@@ -188,6 +189,35 @@ const pluginsError = ref('')
 const pluginsLoaded = ref(false)
 const pluginBusy = ref('')
 const pluginLog = ref(null)
+// RA5-UX：目录选择器 + 插件 zip 上传
+const fsPick = ref(null)
+const fsPickTitle = ref('选择文件夹')
+function pickSource() {
+  fsPickTitle.value = '选择截图文件夹'
+  fsPick.value?.openAt(form.value.source || '')
+}
+function onPicked(p) {
+  form.value.source = p
+}
+async function onUploadZip(e) {
+  const f = e.target.files?.[0]
+  if (!f) return
+  pluginBusy.value = 'upload'
+  try {
+    const fd = new FormData()
+    fd.append('file', f)
+    await api.pluginsUpload(fd)
+    await loadPlugins()
+  } catch (err) {
+    const m = String(err.message || err)
+    pluginsError.value = m.includes('401') || m.includes('403')
+      ? '需要管理令牌——请在页面顶部填写后重试'
+      : '安装失败：' + m
+  } finally {
+    pluginBusy.value = ''
+    e.target.value = ''
+  }
+}
 
 async function loadPlugins() {
   try {
@@ -529,6 +559,9 @@ async function watchLive(cam) {
       插件具备完整代码执行能力，默认禁用，需管理员在此显式启用后才可运行。</p>
     <div class="row" style="margin-bottom:6px">
       <button class="ghost" @click="loadPlugins">刷新插件</button>
+      <label class="ghost" style="cursor:pointer">
+        上传插件 zip<input type="file" accept=".zip" hidden @change="onUploadZip" />
+      </label>
       <span v-if="pluginsError" class="muted">{{ pluginsError }}</span>
     </div>
     <table v-if="plugins.length">
@@ -574,6 +607,7 @@ async function watchLive(cam) {
       <input v-else v-model="form.source"
              :placeholder="form.type === 'folder' ? '截图文件夹路径，如 D:\\screenshots（支持中文/网络盘）' : 'RTSP 地址 / 视频文件路径 / 0 (USB)'"
              :aria-label="form.type === 'folder' ? '图片文件夹路径' : '摄像头地址'" style="flex:1" />
+      <button v-if="form.type === 'folder'" class="ghost" @click="pickSource">浏览…</button>
       <select v-model="form.type">
         <option value="file">视频文件</option>
         <option value="rtsp">RTSP</option>
@@ -720,6 +754,7 @@ async function watchLive(cam) {
       <pre style="white-space:pre-wrap; font-size:12px; margin-top:8px">{{ pluginLog.text }}</pre>
     </div>
   </div>
+  <FsPicker ref="fsPick" :title="fsPickTitle" @pick="onPicked" />
 </template>
 
 <style scoped>

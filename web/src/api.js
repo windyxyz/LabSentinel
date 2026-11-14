@@ -9,6 +9,12 @@ export const adminToken = {
 // T-108（S-07）：签名媒体 URL——令牌不再进 URL/日志。按路径缓存签名参数（页面内复用），
 // 首次同步返回带旧 ?token= 的兼容 URL，签名到达后触发自定义事件让视图刷新（异步收尾）。
 const _sigCache = new Map()
+
+// RA5-UX：Welcome 引导向导完成标记（localStorage；跳过/完成均写入不再弹出）
+export const setupDone = {
+  isDone: () => localStorage.getItem('ls-welcome-done') === '1',
+  mark: () => localStorage.setItem('ls-welcome-done', '1'),
+}
 export function mediaUrl(path) {
   const t = adminToken.get()
   if (!t) return path
@@ -65,6 +71,13 @@ export const api = {
   pluginsList: () => req('GET', '/api/plugins'),
   pluginAction: (id, action) => req('POST', `/api/plugins/${id}/${action}`),
   pluginLogs: (id, tail = 200) => req('GET', `/api/plugins/${id}/logs?tail=${tail}`),
+  // RA5-UX：插件 zip 上传（multipart）+ 目录浏览 + Welcome 向导状态 + 模型切换
+  pluginsUpload: (file) => req('POST', '/api/plugins/upload', file),
+  fsList: (path) => req('GET', '/api/fs/list?' + new URLSearchParams({ path })),
+  setupStatus: () => req('GET', '/api/setup/status'),
+  setModelActive: (path) => req('PUT', '/api/models/active', { path }),
+  modelsLocal: () => req('GET', '/api/models/local'),
+  setModelActive: (path) => req('PUT', '/api/models/active', { path }),
   eventsTimeline: (params = {}) => req('GET', '/api/events/timeline?' + new URLSearchParams(params)),
   setCameraAnalyzer: (id, analyzer) => req('PUT', `/api/cameras/${id}/analyzer`, { analyzer }),
   startCamera: (id) => req('POST', `/api/cameras/${id}/start`),

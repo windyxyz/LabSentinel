@@ -373,11 +373,17 @@ impl WorkerConfig {
         // 模型路径：进程 env LS_MODEL_PATH（未设 = NullDetector，仅人员检测为空）。
         // RA2 接模型管理（assets.lock/网页端许可确认）后改从 settings 组装。
         let mut detector = ls_analyzer::detector::DetectorConfig::default();
-        if let Ok(p) = std::env::var("LS_MODEL_PATH") {
-            if !p.trim().is_empty() {
-                detector.model_path = Some(PathBuf::from(p.trim()));
-            }
-        }
+        // RA5（模型模块化）：app_settings 的 model.active 优先（/api/models/active
+        // UI 切换写入）→ 回退 env LS_MODEL_PATH；都空 = NullDetector
+        let model_active = s
+            .setting_get("model.active")
+            .ok()
+            .flatten()
+            .filter(|p| !p.is_empty());
+        let model_env = std::env::var("LS_MODEL_PATH")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        detector.model_path = model_active.or(model_env).map(PathBuf::from);
         // RA2-S1：PPE 级联（env LS_PPE_MODEL 若配，过锚点校验；类名/阈值走
         // PpeConfig 默认——与 sidecar 默认口径一致）
         let ppe = std::env::var("LS_PPE_MODEL").ok().and_then(|raw| {

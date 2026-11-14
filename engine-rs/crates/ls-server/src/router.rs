@@ -102,7 +102,11 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/folders/:cid/scan"), // RA1.3：最后一条摘牌（folder worker 扫描登记）
     ("GET", "/api/logs"),
     ("GET", "/api/models/ppe/status"),
-    ("GET", "/api/models/local"), // RA5：模型模块化——本地可用 ONNX 清单
+    ("GET", "/api/models/local"),  // RA5：模型模块化——本地可用 ONNX 清单
+    ("PUT", "/api/models/active"), // RA5：检测模型切换（UI 可选）
+    ("GET", "/api/fs/list"),       // RA5-UX：目录浏览（前端目录选择器数据源）
+    ("GET", "/api/setup/status"),  // RA5-UX：Welcome 引导向导状态
+    ("POST", "/api/plugins/upload"), // RA5-UX：插件 zip 上传安装
     // ---- R2-309 批次 3 ----
     ("POST", "/api/config/import"),
     ("GET", "/api/events/:eid/evidence.zip"),
@@ -214,6 +218,10 @@ pub fn build_router(state: Shared) -> Router {
         .route("/logs", get(logs_tail))
         .route("/models/ppe/status", get(ppe_status))
         .route("/models/local", get(models_local)) // RA5：模型模块化清单
+        .route("/models/active", put(models_active)) // RA5：检测模型切换
+        .route("/fs/list", get(fs_list)) // RA5-UX：目录浏览
+        .route("/setup/status", get(setup_status)) // RA5-UX：Welcome 向导状态
+        .route("/plugins/upload", post(plugins_upload)) // RA5-UX：插件 zip 上传
         // ---- R2-309 批次 3 ----
         .route("/config/import", post(config_import))
         .route("/events/:eid/evidence.zip", get(event_evidence_zip))

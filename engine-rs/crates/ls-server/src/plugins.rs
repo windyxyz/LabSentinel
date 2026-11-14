@@ -47,7 +47,7 @@ fn id_ok(id: &str) -> bool {
 }
 
 impl PluginManifest {
-    fn validate(&self, dir_name: &str) -> Result<(), String> {
+    pub fn validate(&self, dir_name: &str) -> Result<(), String> {
         if !id_ok(&self.id) || self.id != dir_name {
             return Err(format!("id 非法或与目录名不符: {}", self.id));
         }
@@ -340,6 +340,66 @@ impl PluginManager {
         let _ = child.kill();
         let rc = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
         (true, format!("已停止 rc={rc}"))
+    }
+
+    /// RA5-UX：插件 zip 上传安装——解压（防 zip slip）→ plugin.json 校验 →
+    /// 落位 data/plugins/<id>/。已存在同 id 插件 → 409 拒绝（防覆盖）。
+    /// 校验失败整包丢弃（不留半装状态）。
+    pub fn install_zip(&self, st: &Shared, zip_bytes: &[u8]) -> Result<String, (u16, String)> {
+        use std::io::Read;
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
+            .map_err(|e| (400u16, format!("zip 解析失败: {e}")))?;
+        // 顶层必须有 plugin.json
+        if archive.by_name("plugin.json").is_err() {
+            return Err((400, "zip 顶层缺少 plugin.json".into()));
+        }
+        // 先读 manifest 校验 id（落位目录名 = id）
+        let manifest_text = {
+            let mut mf = archive
+                .by_name("plugin.json")
+                .map_err(|e| (400u16, format!("plugin.json 读取失败: {e}")))?;
+            let mut buf = Vec::new();
+            mf.read_to_end(&mut buf)
+                .map_err(|e| (400u16, format!("plugin.json 读取失败: {e}")))?;
+            String::from_utf8_lossy(&buf).into_owned()
+        };
+        let m: PluginManifest = serde_json::from_str(&manifest_text)
+            .map_err(|e| (400u16, format!("清单 JSON 非法: {e}")))?;
+        m.validate(&m.id).map_err(|e| (400u16, e))?;
+        let target = plugin_dir(st).join(&m.id);
+        if target.exists() {
+            return Err((409u16, format!("插件 {} 已存在", m.id)));
+        }
+        // 解压：逐 entry 防 zip slip（canonicalize 后必须落在 target 内）
+        let target_c = target
+            .canonicalize()
+            .or_else(|_| std::fs::create_dir_all(&target).map(|_| target.clone()))
+            .map_err(|e| (500u16, format!("创建目录失败: {e}")))?;
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| (400u16, format!("zip 条目读取失败: {e}")))?;
+            let name = entry.name().to_string();
+            if name.ends_with('/') {
+                continue; // 目录条目
+            }
+            let dest = match entry.enclosed_name() {
+                Some(p) => target.join(p),
+                None => return Err((400u16, format!("zip 条目路径非法: {name}"))),
+            };
+            let dest_c = dest.canonicalize().unwrap_or_else(|_| dest.clone());
+            if !dest_c.starts_with(&target_c) {
+                return Err((400u16, format!("zip 条目逃逸安装目录: {name}")));
+            }
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut w =
+                std::fs::File::create(&dest).map_err(|e| (500u16, format!("写文件失败: {e}")))?;
+            std::io::copy(&mut entry, &mut w)
+                .map_err(|e| (500u16, format!("解压写入失败: {e}")))?;
+        }
+        Ok(m.id)
     }
 
     /// logs tail（默认 200 行）；id 正则防穿越，再校验解析后仍在插件目录内。

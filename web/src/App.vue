@@ -11,6 +11,7 @@ import Face from './views/Face.vue'
 import Wall from './views/Wall.vue'
 import Models from './views/Models.vue'
 import Devices from './views/Devices.vue'
+import Welcome from './components/Welcome.vue'
 
 // 图标为 Fluent 风格线性 SVG（16px），不依赖图标字体/库
 const tabs = [
@@ -56,5 +57,6 @@ const isWall = window.location.pathname.replace(/\/+$/, '') === '/wall'
     <main>
       <component :is="tabs.find(t => t.key === active).comp" />
     </main>
+    <Welcome @done="() => {}" />
   </div>
 </template>
