@@ -36,6 +36,9 @@ mod util;
 mod vlm;
 mod worker;
 
+// RA4.2（ADR-0011）：版本归档/回滚（install_portable 语义的 Rust 实现）
+mod deploy;
+
 mod url {
     /// 从 URL 提取 host（标准库解析；与 Python urlparse(url).hostname 等价的宽松实现）
     pub(crate) fn host_of(url: &str) -> Option<String> {
@@ -112,6 +115,37 @@ async fn main() {
         if a == "--selftest-http" {
             let ok = selftest_http().await;
             std::process::exit(if ok { 0 } else { 1 });
+        }
+        // RA4.2（ADR-0011）：版本归档/回滚——install_portable.py finalize --archive / rollback 同语义，
+        // 安装根取位置参数 → LS_INSTALL_DIR → 可执行文件推断。exit 0=成功 / 2=失败（不阻断安装）。
+        if a == "--archive" || a == "--rollback" {
+            let install = args
+                .next()
+                .filter(|s| !s.starts_with("--"))
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var("LS_INSTALL_DIR")
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(std::path::PathBuf::from)
+                })
+                .unwrap_or_else(deploy::default_install_root);
+            let action = a.trim_start_matches("--");
+            let res = if a == "--archive" {
+                deploy::archive(&install)
+            } else {
+                deploy::rollback(&install)
+            };
+            match res {
+                Ok(p) => {
+                    println!("[{action}] 完成 → {}", p.display());
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("[{action}] 失败：{e}");
+                    std::process::exit(2);
+                }
+            }
         }
     }
     let db_path =
