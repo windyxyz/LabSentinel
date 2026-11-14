@@ -357,11 +357,12 @@ impl WorkerConfig {
                 time_start: r.6.unwrap_or_default(),
                 time_end: r.7.unwrap_or_default(),
                 // RA1.1 起 rules_all 携带 days_of_week（CSV "1,2,3,4,5,6,7"）；
-                // RuleSpec.weekdays 口径 = "1-5" 或 "1,2,3"，空=全部
+                // RuleSpec.weekdays 口径 = "1-5" 或 "1,2,3"，空=全部；
+                // RA4.2 起 holiday_only 随行读出（节假日限定规则生效）
                 weekdays: r.10.unwrap_or_default(),
                 threshold: r.8,
                 enabled: r.9 != 0,
-                holiday_only: false, // proto v1/ls-store 列未随规则读出（RA2 随模型管理补）
+                holiday_only: r.11,
             })
             .collect();
         let calendar = s

@@ -59,6 +59,9 @@ impl Store {
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // RA4.2（性能审计）：synchronous=NORMAL 对齐 Python store.py——WAL 模式下
+        // FULL 每次提交 fsync 两遍是写放大；NORMAL 崩溃安全（WAL 保证一致性）
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(Store { conn })
     }
 
@@ -569,8 +572,9 @@ impl Store {
     pub fn rules_all(&self) -> rusqlite::Result<Vec<RuleFullRow>> {
         // RA1.1（ADR-0011）：补选 days_of_week——Python store.rules 读该列
         // （weekday/时段过滤依赖它），原缺口会让时段规则周末误触发（静默差异）。
+        // RA4.2（退役批）：补选 holiday_only——pipeline.holiday_allowed 消费。
         let mut stmt = self.conn.prepare(
-            "SELECT id,camera_id,zone_id,behavior,level,COALESCE(cooldown_s,0),time_start,time_end,COALESCE(threshold,0),enabled,days_of_week FROM rules ORDER BY camera_id,id")?;
+            "SELECT id,camera_id,zone_id,behavior,level,COALESCE(cooldown_s,0),time_start,time_end,COALESCE(threshold,0),enabled,days_of_week,holiday_only FROM rules ORDER BY camera_id,id")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -584,6 +588,7 @@ impl Store {
                 r.get(8)?,
                 r.get(9)?,
                 r.get(10)?,
+                r.get::<_, i64>(11)? != 0,
             ))
         })?;
         rows.collect()
@@ -1555,8 +1560,9 @@ fn map_folder_image(r: &Row<'_>) -> rusqlite::Result<FolderImageRow> {
 }
 
 /// 全量规则行：(id, camera_id, zone_id, behavior, level, cooldown_s,
-/// time_start, time_end, threshold, enabled, days_of_week)
-/// （days_of_week=CSV 文本 "1,2,3,4,5,6,7"，与 Python store.rules 同口径；RA1.1 补）
+/// time_start, time_end, threshold, enabled, days_of_week, holiday_only)
+/// （days_of_week=CSV 文本 "1,2,3,4,5,6,7"，与 Python store.rules 同口径；RA1.1 补；
+///   holiday_only=节假日限定标记，pipeline.holiday_allowed 消费；RA4.2 补）
 pub type RuleFullRow = (
     i64,
     i64,
@@ -1569,6 +1575,7 @@ pub type RuleFullRow = (
     i64,
     i64,
     Option<String>,
+    bool,
 );
 
 /// 时间线一天：(date, [(hour, total, l3), …24])
