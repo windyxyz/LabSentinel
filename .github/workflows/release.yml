@@ -1,7 +1,6 @@
-# T-402：发布流水线（76 文档 §8.2 目标形态的 Windows 先行版）。
-# verify → test-linux → test-win → build-win → package → publish（草稿）。
-# sign/provenance 作业占位：Certum 证书与 minisign 密钥属人工事项（77 文档 §五），
-# 办妥后在 sign 作业接入 signtool + minisign，再解除 publish 的 draft 手动确认。
+# RA4.2 / ADR-0011：发布流水线——Rust 单二进制正式产物（过渡期结束后的唯一发布形态）。
+# verify → test（tests.yml：Rust + Web）→ build-rust（Windows，资产齐全才出包）→ publish（草稿 Release）。
+# 历史版本的 Python 便携包/setup.exe 仍可从旧 tag 的 Release 获取；本流水线不再构建它们。
 name: release
 on:
   push:
@@ -17,36 +16,28 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: clean tree / tag == VERSION / CHANGELOG has this release
         run: |
-          # R2-004/N-10: the old `|| true` made this check a no-op.
           test -z "$(git status --porcelain)" || { echo "::error::工作区不干净"; git status --short; exit 1; }
           V=$(cat VERSION | tr -d ' \n')
           T="${GITHUB_REF_NAME#v}"
           test "$V" = "$T" || { echo "::error::tag $GITHUB_REF_NAME != VERSION $V"; exit 1; }
-          # R2-004/N-10: require a section for THIS version, not just [Unreleased].
           grep -qE "^## \[${V}\]|^## ${V}" CHANGELOG.md || {
             echo "::error::CHANGELOG 缺 ## [$V] 本版条目（发布前把 Unreleased 改名）"; exit 1; }
 
-  test-linux:
+  test:
     uses: ./.github/workflows/tests.yml
 
-  build-win:
-    needs: [verify, test-linux]
+  build-rust:
+    needs: [verify, test]
     runs-on: windows-latest
-    # 全 job 中文日志统一 UTF-8（fetch_assets/build_portable/smoke 等脚本 print
-    # 中文在 GBK 控制台 charmap 炸，2026-11-13 fetch base model 步骤实测）
+    # 中文日志统一 UTF-8（GBK 控制台 charmap 会炸）
     env:
       PYTHONIOENCODING: "utf-8"
-    # R2-303: cpu (default) + optional DirectML variant, same recipe.
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [cpu, dml]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-          cache: pip
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
@@ -57,136 +48,49 @@ jobs:
         run: |
           npm ci --registry=https://registry.npmmirror.com
           npm run build
-      # R2-004/N-09: yolo11n.onnx is gitignored. Fetch the hash-verified model
-      # into a scratch dir and point build_portable at it; a clean CI checkout
-      # must not depend on a developer machine's m0-spike/ files.
-      - name: fetch base model (hash-verified)
+      - name: 准备发行资产（模型/ffmpeg/ffprobe/onnxruntime，哈希校验）
+        run: |
+          python -m pip install --disable-pip-version-check onnxruntime==1.20.1
+          python scripts/prepare_rust_assets.py
+      - name: build_rust --strict --zip
+        run: python scripts/build_rust.py --strict --zip
+      - name: RA3/RA4 契约冒烟（解包→就绪→backend/版本→前端→停止）
         shell: pwsh
         run: |
-          $dir = Join-Path $env:RUNNER_TEMP "ls-models"
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          python -I scripts/fetch_assets.py --name yolo11n.onnx --out (Join-Path $dir "yolo11n.onnx")
-          if ($LASTEXITCODE -ne 0) { throw "模型下载/校验失败" }
-      - name: Inno Setup 6（ADR-0010：setup.exe 双形态编译前置）
-        shell: pwsh
-        run: |
-          choco install innosetup -y --no-progress
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe 未找到（choco 安装失败）" }
-      - name: portable build（含锁文件全新安装 + 冒烟断言 + setup.exe）
-        shell: pwsh
-        run: |
-          $dir = Join-Path $env:RUNNER_TEMP "ls-models"
-          python scripts/build_portable.py --zip --installer --variant ${{ matrix.variant }} --python (Get-Command python).Source --models-dir $dir
-          if ($LASTEXITCODE -ne 0) { throw "便携包构建失败" }
-      # T-410：Windows 冒烟进 CI——用刚产出的 zip 真实启动→健康/前端/DB 断言→停止；
-      # 随后 install/uninstall 到隔离临时目录，验证安装标记与安全卸载。
-      - name: T-410 portable zip 冒烟（隔离启动/健康/停止）
-        shell: pwsh
-        run: |
-          $pattern = if ("${{ matrix.variant }}" -eq "dml") { "LabSentinel-portable-*-dml.zip" } else { "LabSentinel-portable-*.zip" }
-          $zip = Get-ChildItem Resources/dist/$pattern | Where-Object { $_.Name -notlike "*-dml.zip" -or "${{ matrix.variant }}" -eq "dml" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          # smoke 依赖 httpx（运行时依赖，只在 staging site-packages 里）——
-          # setup-python 的裸 Python 没有；用 staging 自带的 runtime 跑冒烟自举
-          $staging = "Resources/dist/portable/LabSentinel"
-          & "$staging/runtime/python.exe" scripts/smoke_portable.py --zip $zip.FullName --timeout 90
-      - name: T-410 install/uninstall 冒烟（隔离目录）
-        shell: pwsh
-        run: |
-          $pkg = Get-Item Resources/dist/portable/LabSentinel
-          # 卸载白名单只放行 LOCALAPPDATA/PROGRAMFILES 下的二级目录（防误删，2026-11-13
-          # 实测 D:\a\_temp 被 [拒绝]）——用 LOCALAPPDATA\Programs 下符合受管语义的目录
-          $dir = Join-Path $env:LOCALAPPDATA "Programs\ls-install-smoke"
-          & "$pkg/runtime/python.exe" scripts/install_portable.py install --source $pkg.FullName --install-dir $dir --no-shortcuts --no-autostart
-          if ($LASTEXITCODE -ne 0) { throw "install 失败" }
-          & "$pkg/runtime/python.exe" scripts/install_portable.py uninstall --install-dir $dir
-          if ($LASTEXITCODE -ne 0) { throw "uninstall 失败" }
+          $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          python scripts/smoke_rust.py --zip $zip.FullName --timeout 90
       - name: SHA256SUMS
         shell: pwsh
         run: |
-          # zip + setup 双哈希；按变体过滤（cpu 无后缀 / dml 带 -dml，与 make_zip/make_installer 命名对齐）
-          $dml = "${{ matrix.variant }}" -eq "dml"
-          $files = @(Get-ChildItem Resources/dist/LabSentinel-portable-*.zip,
-                              Resources/dist/LabSentinel-setup-*.exe |
-                     Where-Object { ($_.Name -like "*-dml.*") -eq $dml })
-          if ($files.Count -lt 2) { throw "产物缺失（zip+setup 应各一）" }
-          $sums = "Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt"
-          Remove-Item $sums -ErrorAction SilentlyContinue
-          foreach ($f in $files) {
-            $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($f.Name)" | Out-File -FilePath $sums -Encoding ascii -Append
-          }
+          $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $sums = "Resources/dist/SHA256SUMS-rust.txt"
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($zip.Name)" | Out-File -FilePath $sums -Encoding ascii
           Get-Content $sums
-      - name: manifest（干净树来源记录）
-        run: |
-          python scripts/release_manifest.py
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-        with:
-          name: LabSentinel-portable-${{ matrix.variant }}
-          path: |
-            Resources/dist/LabSentinel-portable-*.zip
-            Resources/dist/LabSentinel-setup-*.exe
-            Resources/dist/SHA256SUMS-${{ matrix.variant }}.txt
-            Resources/dist/RELEASE-MANIFEST.json
-          if-no-files-found: error
-          retention-days: 14
-      # sign 占位（T-403）：证书办妥后接入
-      #   signtool sign /fd SHA256 /tr <RFC3161> /td SHA256 LabSentinel.exe
-      #   minisign -Sm Resources/dist/SHA256SUMS.txt
-      # provenance 占位（T-407 后）：actions/attest-build-provenance
-
-  nightly-rust:
-    # RA3（ADR-0011）：Rust 单二进制形态转正式产物——构建 + 冒烟 + 上传
-    # release 资产。保持独立 job：Rust 构建失败不阻塞 Windows 便携主链。
-    needs: [verify]
-    runs-on: windows-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
-      - name: web build
-        run: |
-          cd web; npm ci; npm run build
-      - name: build_rust.py --zip
-        run: python scripts/build_rust.py --zip
-      - name: RA3 冒烟（隔离启动/健康/前端/停止）
-        shell: pwsh
-        env:
-          PYTHONIOENCODING: utf-8
-        run: |
-          $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          python scripts/smoke_rust.py --zip $zip.FullName --timeout 90
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: labsentinel-rust
-          path: Resources/dist/labsentinel-rust-*.zip
+          path: |
+            Resources/dist/labsentinel-rust-*.zip
+            Resources/dist/SHA256SUMS-rust.txt
           if-no-files-found: error
           retention-days: 14
-      - name: 上传 release 资产（rust zip）
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          gh release upload $env:GITHUB_REF_NAME $zip.FullName --repo $env:GITHUB_REPOSITORY --clobber
 
   publish:
-    needs: [build-win]
+    needs: [build-rust]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806  # v4
         with:
-          pattern: LabSentinel-portable-*
-          merge-multiple: true
+          name: labsentinel-rust
           path: dist
       - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v2
         with:
           draft: true  # 签名作业接入前保持草稿，人工校验后发布
           files: |
-            dist/LabSentinel-portable-*.zip
-            dist/LabSentinel-setup-*.exe
-            dist/SHA256SUMS-*.txt
-            dist/RELEASE-MANIFEST.json
+            dist/labsentinel-rust-*.zip
+            dist/SHA256SUMS-rust.txt

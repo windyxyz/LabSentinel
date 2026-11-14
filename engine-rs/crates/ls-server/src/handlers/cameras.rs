@@ -223,9 +223,9 @@ pub(crate) async fn cameras_bulk(State(st): State<Shared>, Json(body): Json<Valu
 }
 
 pub(crate) async fn usb_devices() -> Response {
-    // rust 控制面不做 DirectShow 枚举（前端回退手输索引，与"未找到 ffmpeg"路径一致）
+    // 不做 DirectShow 枚举（前端回退手输索引）；保留端点形状以兼容前端
     Json(json!({"devices": [],
-                "error": "rust 控制面暂不支持 USB 枚举；启动 Python 服务后可用"}))
+                "error": "无法自动枚举 USB 设备，请手动填写设备索引（如 0 / 1）"}))
     .into_response()
 }
 

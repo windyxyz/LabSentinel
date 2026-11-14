@@ -1,9 +1,11 @@
 # 35 · API 契约（服务端 ⇄ 客户端）
 
-> **机器可读契约**：[docs/openapi.json](../openapi.json)——由 `python scripts/export_openapi.py` 生成（勿手改；CI/RC 用 `--check` 校验漂移）。
+> **机器可读契约**：[docs/openapi.json](../openapi.json)——静态快照，改 API 须同步更新
+> （不再由 Python 生成；Rust 路由清单用 `labsentinel-server --dump-routes` 对照）。
 
-> v0.1（2026-10-26）· 依据**当前真实实现**（server/app/api.py）整理。前后端/子代理开发以本文为准；改 API 必须同步更新本文。
-> Base URL：`http://127.0.0.1:8000`（Vite 开发代理 `/api`、`/ws`）。无鉴权（局域网内网部署，M3 加管理密码）。
+> v0.3（2026-11-14）· 依据 **Rust `ls-server` 真实实现**（`engine-rs/crates/ls-server/src/handlers/`）整理。
+> 前后端/子代理开发以本文为准；改 API 必须同步更新本文。
+> Base URL：`http://127.0.0.1:8000`（Vite 开发代理 `/api`、`/ws`）。本机默认可免鉴权（`LS_ADMIN_TOKEN` 为空）；局域网/公网部署必须配令牌。
 
 ## 通用约定
 
@@ -99,13 +101,13 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
   "id": 13, "ts": "2026-10-26T08:30:00", "camera_id": 1,
   "type": "enter_no_ppe", "level": 3, "track_id": 7,
   "detail": "进入安全区「reagent」未穿实验服，人员：张三",
-  "snapshot": "server/data/snapshots/ev_...jpg",  // 内部路径
-  "video": "server/data/videos/ev_13.mp4",
+  "snapshot": "data/snapshots/ev_...jpg",  // 内部路径
+  "video": "data/videos/ev_13.mp4",
   "has_snapshot": true, "has_video": true,
   "status": "new",  "handled_by": null, "handled_ts": null   // 任务12 事件闭环
 }
 ```
-`type` 中文映射见 `web/src/api.js` 的 TYPE_TEXT 与 `server/app/constants.py`。
+`type` 中文映射见 `web/src/api.js` 的 TYPE_TEXT 与 `ls-server` 告警文案模板。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

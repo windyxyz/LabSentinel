@@ -3,6 +3,9 @@
 - **状态**：Accepted（2026-11-13，维护者决策：「推进整个项目全面 Rust 重构（实在无法
   重构实现的功能除外）；后续新开发一律 Rust 优先——直接写 Rust，而不是先写 Python
   再迁移」；执行授权：「Rust 设计和自主开发就行」）
+  **过渡期结束（2026-11-14）**：RA1–RA4 + RA5（模型模块化）全部完成，Python 运行时
+  （`server/`）与 Python 便携打包链已退役；`labsentinel-rust-*.zip` 单二进制为唯一
+  发布形态，详见文末「执行结果」。
 - **背景**：0.2.0 时点（边界详见 `docs/dev/架构设计.md`）——数据面 ls-analyzer
   sidecar 已完成并灰度（默认 `analyzer_default="python"`）；控制面 ls-server 路由
   对齐 105/106 但独立模式缺分析 worker（start_camera/scan 503），不在任何生产启动链；
@@ -18,12 +21,13 @@
    过渡期缺陷修复（P1/P2 级）与行为契约参照，不再新增功能。
 3. **豁免清单（确实无法重构，逐项确认后固化）**：
    - `tools/` 训练与数据飞轮生态（ultralytics/torch——Rust 无等价训练栈，且
-     `tools/README-ENGINE-BOUNDARY.md` 已宣告其长期 Python 属性）；
-   - `deploy/windows/installer.iss`（Inno Setup 脚本，非进程代码）；
+     `tools/README-ENGINE-BOUNDARY.md` 已宣告其长期 Python 属性）；`scripts/` 下的
+     构建/验收支具同理（Python 仅作开发工具，不进分发）；
    - OpenVINO 推理后端（Rust 无官方绑定；CPU 用 tract、GPU 用 ort load-dynamic
-     的 DML/CUDA 替代，OpenVINO 随 L4 退役并在文档标注）。
-   - 待评估：Windows 启动 UX（托盘/双击体验）在 L4 后用 Rust 原生实现还是保留
-     薄壳——RA4 阶段决定。
+     的 DML/CUDA 替代，OpenVINO 随 L4 退役并在文档标注）；
+   - ~~`deploy/windows/installer.iss`~~：Inno Setup 安装器随过渡期结束退役，
+     发行形态改为“解压即用 zip + LabSentinel.bat”（版本归档/回滚由
+     `labsentinel-server --archive/--rollback` 承担），见执行结果。
 4. **灰度机制保留**：`analyzer_default` 开关与 Python 回退路径在过渡期不动；
    翻转条件从「N+1 版本」改为「RA1 验收通过」。
 5. **行为契约单一事实源**：`docs/openapi.json` 快照 + `proto/analyzer.proto` +
@@ -51,4 +55,20 @@
 ## 关联
 
 ADR-0002（server-side analysis）、ADR-0008（跨语言 schema 兼容）、
-ADR-0010（安装器双形态——Python 安装器能力在 RA4 前保留）。
+ADR-0010（安装器双形态——随过渡期结束退役，zip 单包 + --archive/--rollback 取代）。
+
+## 执行结果（2026-11-14，过渡期收口）
+
+| 阶段 | 结果 | 关键证据 |
+|---|---|---|
+| RA1 | ✅ | 进程内分析 worker（相机/文件夹）、首发 8 渠道、folders/scan 503 清零；路由 106/106 |
+| RA2 | ✅ | face/ppe/genai/plugins/MQTT/模型管理真实现；503 占位清零（USB 枚举豁免） |
+| RA3 | ✅ | `labsentinel-rust-*.zip` 单二进制（含模型/ffmpeg/onnxruntime/启动器），smoke_rust 4/4 |
+| RA4 | ✅ | `--archive/--rollback` Rust 化、`prepare_rust_assets.py` + `build_rust --strict`、数据目录/版本自举；分发物零嵌入式 Python |
+| RA5 | ✅ | VLM 三 provider + 按摄像头插拔 + 文件夹/视频通路；mock 验收 9/9 |
+
+退役前全量门禁（2026-11-14）：Python 631 passed / 7 skipped；Rust workspace 122；
+Web 44 + build；`acceptance_rust_only` 39/39；`acceptance_vlm` 9/9；`smoke_rust` PASS。
+退役动作：删除 `server/` 与 Python 便携打包/安装/运维脚本、Inno 安装器；
+`tests.yml` 改为 Rust + Web 门禁，`release.yml` 仅发布 Rust zip + `SHA256SUMS-rust.txt`。
+保留：`tools/` 训练工具链、`scripts/` 构建/验收支具（Python 仅作开发工具）。

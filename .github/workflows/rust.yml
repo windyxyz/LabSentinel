@@ -49,10 +49,9 @@ jobs:
         working-directory: engine-rs
         run: cargo fmt --all -- --check
 
-  cross_language_db:
-    # R2-005/N-36: the three DB bidirectional tests skip when the Rust binary
-    # is absent (tests.yml does not build Rust). Build ls-server here and run
-    # those cases for real with LS_SERVER_EXE instead of leaving them skipped.
+  route_coverage:
+    # R2-307：路由覆盖报告（Python 运行时退役后仅保留该统计；不再做 Python↔Rust
+    # 双向 DB 兼容测试——唯一实现已是 Rust）。
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -67,17 +66,6 @@ jobs:
       - name: cargo build -p ls-server
         working-directory: engine-rs
         run: cargo build -p ls-server
-      - name: Install Python deps (hash-pinned lock)
-        run: |
-          pip install --require-hashes --no-deps -r server/requirements-linux.lock
-          pip install pytest
-      - name: DB bidirectional compatibility (Python <-> Rust)
-        working-directory: server
-        run: python -m pytest tests/test_store_bidirectional.py -q
-        env:
-          LS_LOG_FILE: "0"
-          LS_SERVER_EXE: ${{ github.workspace }}/engine-rs/target/debug/labsentinel-server
-      # R2-307: route coverage is tracked (not gated) until L3 >=95%.
       - name: route coverage report (R2-307)
         run: |
           python -I scripts/rust_route_coverage.py \

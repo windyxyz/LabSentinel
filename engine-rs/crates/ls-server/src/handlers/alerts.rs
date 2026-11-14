@@ -21,7 +21,7 @@ pub(crate) async fn alerts_status(State(st): State<Shared>) -> Response {
             "configured": {"wecom": false, "dingtalk": false, "feishu": false,
                             "serverchan": false, "pushplus": false, "qmsg": false,
                             "email": false, "webhook": false},
-            "note": "渠道配置在 Python 服务（app_settings/env + 密钥加密）；rust 控制面只汇总投递",
+            "note": "渠道配置优先取网页端保存（app_settings，密钥加密），其次环境变量；此处汇总投递状态",
             "deliveries_summary": summary,
             "deliveries_total": counts.len(),
         }))
@@ -589,7 +589,7 @@ pub(crate) async fn alert_test(
     Json(
         json!({"ok": want.is_none() || results.iter().any(|r| r["ok"] == true),
                 "sent": sent, "results": results,
-                "note": "渠道配置读 env；网页端配置的渠道（app_settings）在 Python 服务"}),
+                "note": "渠道配置优先取网页端保存（app_settings），其次环境变量"}),
     )
     .into_response()
 }

@@ -65,15 +65,16 @@ def build_binary() -> Path:
     return exe
 
 
-def assemble() -> None:
+def assemble(strict: bool = False) -> None:
     DIST.mkdir(parents=True, exist_ok=True)
+    missing: list[str] = []
     exe = build_binary()
     shutil.copy2(exe, DIST / exe.name)
     web = ROOT / "web" / "dist"
     if (web / "index.html").exists():
         shutil.copytree(web, DIST / "web", dirs_exist_ok=True)
     else:
-        print("[警告] web/dist 不存在——先执行 npm run build，否则包内无前端")
+        missing.append("web/dist（先执行 npm run build）")
     models = DIST / "models"
     models.mkdir(exist_ok=True)
     # RA4.2：基础检测 + PPE 模型（含类别名）随包分发（缺失时提示，不阻断——仅检测功能降级）
@@ -82,21 +83,24 @@ def assemble() -> None:
         if src.exists():
             shutil.copy2(src, models / name)
         elif name == "yolo11n.onnx":
+            missing.append(f"模型 {src}（scripts/prepare_rust_assets.py）")
             print(f"[警告] 缺少基础模型 {src}（scripts/fetch_assets.py --name yolo11n.onnx）")
     # RA4.2：ffmpeg/ffprobe（RTSP/视频取流与存证）与 onnxruntime（ORT_DYLIB_PATH）
     ff_src = ROOT / "tools" / "ffmpeg"
-    if ff_src.is_dir():
+    if ff_src.is_dir() and (ff_src / "ffmpeg.exe").is_file():
         shutil.copytree(ff_src, DIST / "tools" / "ffmpeg", dirs_exist_ok=True)
     else:
-        print(f"[警告] 缺少 {ff_src}（RTSP/视频源将不可用）")
+        missing.append("tools/ffmpeg/ffmpeg.exe（scripts/prepare_rust_assets.py）")
+        print(f"[警告] 缺少 {ff_src}/ffmpeg.exe（RTSP/视频源将不可用）")
     ort_src = ROOT / "tools" / "onnxruntime"
-    if ort_src.is_dir():
+    if ort_src.is_dir() and (ort_src / "onnxruntime.dll").is_file():
         shutil.copytree(ort_src, DIST / "tools" / "onnxruntime", dirs_exist_ok=True)
         # exe 同目录兜底：Windows DLL 搜索优先应用目录，双击 exe 也能加载
         for dll in ort_src.glob("*.dll"):
             shutil.copy2(dll, DIST / dll.name)
     else:
-        print(f"[警告] 缺少 {ort_src}（推理将无法加载 onnxruntime.dll）")
+        missing.append("tools/onnxruntime/onnxruntime.dll（pip install onnxruntime 后重跑）")
+        print(f"[警告] 缺少 {ort_src}/onnxruntime.dll（推理将无法加载）")
     g2 = ROOT / "tools" / "go2rtc.exe"
     if g2.exists():
         (DIST / "tools").mkdir(exist_ok=True)
@@ -152,6 +156,10 @@ def assemble() -> None:
         "# 进程内分析 worker（LabSentinel.bat 已自动指向包内模型）\n"
         "# LS_MODEL_PATH=models/yolo11n.onnx\n"
         "# LS_PPE_MODEL=models/yolo11n_ppe.onnx\n", encoding="utf-8")
+    if missing:
+        if strict:
+            raise SystemExit("[失败] 发行包缺少必需资产：\n  - " + "\n  - ".join(missing))
+        print("[警告] 发行包资产不完整：" + "；".join(missing))
 
 
 def zip_it() -> Path:
@@ -165,7 +173,7 @@ def zip_it() -> Path:
 
 
 if __name__ == "__main__":
-    assemble()
+    assemble(strict="--strict" in sys.argv)
     if "--zip" in sys.argv:
         zip_it()
     print("[L4 构建] 完成")

@@ -5,6 +5,17 @@
 > 每批任务完成后更新对应行，附实际运行证据。
 > 口径：✅ 完成并验证 · 🟡 部分/有条件 · ⬜ 未开始 · ⏸ 明确暂缓（用户 2026-11-08 决定）。
 
+## 第五轮：RA4.2 过渡期收口——Python 退役（2026-11-14）
+
+| 项 | 结果与证据 |
+|---|---|
+| Rust 归档/回滚 | ✅ `labsentinel-server --archive/--rollback`（deploy.rs：排除 data/versions/缓存、版本名防穿越、不跟随符号链接、current.txt 选择次新归档）；4 单测 + 真二进制临时安装树冒烟（含无归档 rc=2） |
+| 发行资产自举 | ✅ `prepare_rust_assets.py`（模型/PPE/类别名、ffmpeg/ffprobe、onnxruntime DLL，哈希锁）；`build_rust.py --strict` 资产缺失即失败；包内 `VERSION` + `LabSentinel.bat`（数据默认 `%LOCALAPPDATA%\LabSentinel\data`） |
+| 发行/门禁切换 | ✅ release.yml 仅 Rust zip + SHA256SUMS-rust.txt；tests.yml = Rust workspace + Web；rust.yml 删跨语言 DB job 保留路由覆盖；security-weekly 更名 web+rust |
+| 退役清理 | ✅ 删除 `server/` 与 Python 便携打包/安装/运维脚本、Inno 安装器；保留 `tools/`（训练）与 `scripts/`（构建/验收支具） |
+| 全量门禁（退役前） | ✅ Python **631 passed / 7 skipped**（635s）；Rust workspace **122 passed**；Web **44 passed** + build；`acceptance_rust_only` **39/39**；`acceptance_vlm` **9/9**；`smoke_rust` PASS |
+| 验收发现 | ✅ P1 配对 claim 限流桶污染（39/39 前为 38/39）→ 独立桶；UI 令牌误用/向导弹窗关闭缺陷 → 修复并目检 |
+
 ## 第四轮：结构化拆分 + 安装包化 + 清理（2026-11-12，用户决策全量推进）
 
 | 批次 | commit | 内容与证据 |

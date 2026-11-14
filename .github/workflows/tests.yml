@@ -1,63 +1,26 @@
-# 测试工作流（T-004，合并原 ci.yml）：pytest + ruff 门禁 + pip-audit + 前端构建/审计 + OpenAPI 快照校验。
-# 发布/便携包构建走 release.yml（T-402 已重写；旧 portable.yml 已删除）。
-# 门禁说明：ruff 先取 E9/F821/PLE（真错误），规则集随 T-509 收紧。
-#
-# 2026-11-13 平台口径收紧：pytest 与 pip-audit 限定 **windows-latest**——
-# 项目是 Windows-first（安装器/启动链/doctor/plugins 语义全部绑定便携布局，
-# reg/taskkill/creationflags/mbcs 均为 Windows 专属），Linux runner 上的
-# 500+ 用例把 Windows 专属语义跑出七层连环失败（PosixPath('.')/creationflags/
-# mbcs/reg.exe/keepawake Win32/…），逐例跳过不可维护。Linux 保留 ruff（纯静态、
-# 跨平台）+ openapi-check（契约快照）+ web 三条真正跨平台的门禁。
+# 测试门禁（RA4.2 / ADR-0011 过渡期结束）：Rust 工作区 + Vue 前端。
+# Python 运行时（原 server/）已退役——Python 相关 pytest/ruff/openapi 门禁随之下线；
+# tools/ 训练工具链与 scripts/ 验收驱动仍以 Python 编写，属开发工具，不进分发、不参与本门禁。
 name: tests
 on:
   push:
     branches: [main]
   pull_request:
-  workflow_call: {}  # T-402：release.yml 复用本工作流作为发布门禁
+  workflow_call: {}  # release.yml 复用本工作流作为发布门禁
 
 permissions:
   contents: read
 
 jobs:
-  pytest:
+  rust:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install (from hash-pinned lock)
-        run: |
-          pip install --require-hashes --no-deps -r server/requirements-win.lock
-          pip install pytest pytest-cov ruff pip-audit
-      - name: pytest
-        working-directory: server
-        run: python -m pytest tests -q
-        env:
-          LS_LOG_FILE: "0"
-          LS_PPE_MODEL: ""
-          # 子进程（export_openapi/backup_data 等）的中文输出在 GBK 控制台炸
-          # charmap encode——强制 UTF-8（2026-11-13 CI 实测）
-          PYTHONIOENCODING: "utf-8"
-      - name: pip-audit (fail on high/critical in locked runtime deps)
-        # --disable-pip：跳过 pip-audit 内部 venv 安装（--require-hashes 会因锁的
-        # override —— supervision→opencv 未钉版 —— 拒绝解析，2026-11-13 CI 实测），
-        # 直接对锁文件解析出的版本集审计；本地实测 0 漏洞通过。
-        run: pip-audit -r server/requirements-win.lock --strict --disable-pip
-
-  ruff-linux:
-    # 纯静态语法/未定义名门禁（跨平台零依赖语义），保留 Linux runner 做双平台交叉
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - run: pip install ruff
-      - run: ruff check server/app scripts tools --select E9,F821,PLE
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
+      - name: cargo test --workspace
+        working-directory: engine-rs
+        run: cargo test --workspace
 
   web:
     runs-on: ubuntu-latest
@@ -78,17 +41,3 @@ jobs:
       - name: npm audit (production deps)
         working-directory: web
         run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
-
-  openapi-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install (from hash-pinned lock)
-        run: pip install --require-hashes --no-deps -r server/requirements-linux.lock
-      - name: export_openapi --check
-        run: python scripts/export_openapi.py --check

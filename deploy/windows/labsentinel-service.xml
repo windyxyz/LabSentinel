@@ -1,5 +1,5 @@
-<!-- T-611：Windows 服务模式（WinSW 包装，LocalService 账户）。
-     安装（管理员）：
+<!-- T-611 / RA4.2：Windows 服务模式（WinSW 包装，LocalService 账户）。
+     安装（管理员，把本文件与 WinSW.exe 放到解压后的安装根）：
        winsw.exe install deploy\windows\labsentinel-service.xml
        winsw.exe start
      限制：Session 0 无法访问 USB 摄像头——服务模式仅建议 RTSP/文件夹源。
@@ -7,10 +7,9 @@
 <service>
   <id>labsentinel</id>
   <name>LabSentinel 实验室安全监控</name>
-  <description>本地实验室安全行为监控（Rust 控制面 / Python 分析器）</description>
-  <executable>%BASE%\runtime\python.exe</executable>
-  <arguments>-m uvicorn app.main:app --host 127.0.0.1 --port 8000</arguments>
-  <workingdirectory>%BASE%\server</workingdirectory>
+  <description>本地实验室安全行为监控（Rust 单二进制，无外部运行时依赖）</description>
+  <executable>%BASE%\labsentinel-server.exe</executable>
+  <workingdirectory>%BASE%</workingdirectory>
   <logpath>%ProgramData%\LabSentinel\logs</logpath>
   <log mode="roll-by-size">
     <sizeThreshold>10485760</sizeThreshold>
@@ -18,12 +17,10 @@
   </log>
   <env name="LS_DATA_DIR" value="%ProgramData%\LabSentinel\data"/>
   <env name="LS_DB_PATH" value="%ProgramData%\LabSentinel\data\labsentinel.db"/>
-  <env name="LS_SNAPSHOT_DIR" value="%ProgramData%\LabSentinel\data\snapshots"/>
-  <env name="LS_VIDEO_DIR" value="%ProgramData%\LabSentinel\data\videos"/>
-  <env name="LS_ANNOTATION_POOL_DIR" value="%ProgramData%\LabSentinel\data\annotation_pool"/>
-  <env name="LS_BACKEND_ORDER" value="directml,openvino,cpu"/>
+  <env name="LS_WEB_DIST" value="%BASE%\web"/>
+  <env name="LS_MODEL_PATH" value="%BASE%\models\yolo11n.onnx"/>
   <env name="LS_HOST" value="127.0.0.1"/>
-  <env name="PYTHONUTF8" value="1"/>
+  <env name="LS_PORT" value="8000"/>
   <onfailure action="restart" delay="10 sec"/>
   <resetfailure>1 hour</resetfailure>
   <stoptimeout>30 sec</stoptimeout>

@@ -138,25 +138,37 @@ def main() -> int:
              st == 200 and j.get("started") is True, f"msg={j.get('msg')}")
 
         # [6] 等识别回填（mock 内容启发式：两素材 persons 不同）
+        # 2026-11-14 实测抖动：processed_ts 先可见、判定列随后落盘会让单次读取
+        # 看到 persons=0。改为等到「两行都有 width 且 persons 均 >0」再断言。
         ok6, detail6 = False, ""
         rows: list[dict] = []
         for _ in range(30):
             st, body = get(f"{base}/api/folder-images?camera_id={cid}")
             rows = json.loads(body).get("items", [])
             done = [r for r in rows if r.get("processed_ts")]
-            if len(done) >= 2:
-                pv = {r["persons"] for r in done}
-                errs = [r.get("error") for r in done if r.get("error")]
-                ok6 = all(r["width"] for r in done) and not errs
+            pv = {r["persons"] for r in done}
+            errs = [r.get("error") for r in done if r.get("error")]
+            if len(done) >= 2 and all(r.get("width") for r in done) \
+                    and all((r.get("persons") or 0) > 0 for r in done):
+                ok6 = not errs
                 detail6 = (f"rows={len(rows)} persons 集合={sorted(pv)} "
                            + (f"errors={errs}" if errs else ""))
                 break
             time.sleep(1)
+        else:
+            detail6 = (f"rows={len(rows)} 未在超时内完成回填 "
+                       f"done={len([r for r in rows if r.get('processed_ts')])}")
         step("6 VLM 判定回填（width/persons 真值）", ok6, detail6)
 
-        # [7] mock /stats：帧协议断言
+        # [7] mock /stats：帧协议断言（请求计数在响应后才累加，轮询到 2）
         st, body = get("http://127.0.0.1:8899/stats")
         stats = json.loads(body)
+        for _ in range(10):
+            if stats.get("images", 0) >= 2:
+                break
+            time.sleep(1)
+            st, body = get("http://127.0.0.1:8899/stats")
+            stats = json.loads(body)
         step("7 mock 收到 openai_compat 帧协议", stats["images"] >= 2,
              f"images={stats['images']} requests={stats['requests']}")
 

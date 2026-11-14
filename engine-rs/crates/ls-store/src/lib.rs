@@ -95,7 +95,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
-               analyzer TEXT DEFAULT 'python');
+               analyzer TEXT DEFAULT 'rust');
              CREATE TABLE IF NOT EXISTS zones(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
              CREATE TABLE IF NOT EXISTS rules(\
@@ -354,10 +354,10 @@ impl Store {
         )
     }
 
-    /// L3 控制面：新增摄像头（与 Python store.add_camera 同列/默认值）
+    /// L3 控制面：新增摄像头（列/默认值与历史 schema 兼容；新相机默认本地检测）
     pub fn conn_add_camera(&self, name: &str, source: &str, type_: &str) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO cameras(name,source,type,group_name) VALUES(?,?,?,'')",
+            "INSERT INTO cameras(name,source,type,group_name,analyzer) VALUES(?,?,?,'','rust')",
             params![name, source, type_],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -1361,7 +1361,7 @@ impl Store {
         group_name: &str,
     ) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO cameras(name,source,type,group_name) VALUES(?,?,?,?)",
+            "INSERT INTO cameras(name,source,type,group_name,analyzer) VALUES(?,?,?,?,'rust')",
             params![name, source, type_, group_name],
         )?;
         Ok(self.conn.last_insert_rowid())

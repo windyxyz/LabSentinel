@@ -11,7 +11,7 @@ M0 实测背景见 [../docs/archive/40-roadmap.md](../docs/archive/40-roadmap.md
 | **m0-venv** | `D:\LabSentinel\m0-venv\Scripts\python.exe` | Python 3.14 | 数据下载、训练、导出 ONNX（ultralytics 8.4.188 / roboflow / torch CPU / onnxruntime-directml） |
 | **npu-venv** | `D:\LabSentinel\npu-venv\Scripts\python.exe` | Python 3.12 | 仅量化（amd-quark 0.12 / onnxruntime-vitisai 1.23.2 / numpy 钉 1.26.4） |
 
-快照：`m0-spike/npu-venv-freeze.txt`。**改 venv 包版本是禁忌**（会破坏现有 server 推理与量化环境）。
+快照：`m0-spike/npu-venv-freeze.txt`。**改 venv 包版本是禁忌**（会破坏量化环境与历史复现）。
 
 ## 一.5 摄像头联调工具（任务 56）
 
@@ -40,7 +40,7 @@ $PY tools/train_ppe.py --epochs 100 --patience 50 --name runs/ppe_v2
 
 # 3) 导出 FP32 ONNX（opset 13 / imgsz 640，打印 10 类别顺序并验证输入 1x3x640x640）
 $PY tools/export_onnx.py
-#   -> m0-spike/yolo11n_ppe.onnx（server/.env 的 LS_PPE_MODEL 指向它）
+#   -> m0-spike/yolo11n_ppe.onnx（网页「模型管理」选择，或 env LS_PPE_MODEL 指向它）
 
 # 4) NPU XINT8 量化（必须 npu-venv；检测头 /model.23 保留 FP32；valid 集抽 20 张校准）
 $NPY tools/quantize_npu.py
@@ -117,7 +117,8 @@ python tools/preannotate.py --images datasets/frames --out datasets/labels \
 
 - `--classes-file` 支持一行一个类名，或直接给 `data.yaml`（自动解析 `names:` 列表）；**类名顺序必须与模型输出一致**
 - 输出与图片同名的 YOLO txt（空检测写空文件）+ `preview/` 带框目检图
-- 推理复用 `server/app/engine.py` 的 Engine（`Engine._run` 全局串行锁）；**禁止改成直接 sess.run**
+- 推理为独立 onnxruntime 实现（DirectML 可用时优先，否则 CPU），单进程顺序执行，
+  不与在线服务并发；`--classes-file` 给 data.yaml 时按 `names:` 顺序解码
 - 跑完打印每类框数与平均置信度，用于估算人工修正工作量
 
 ### 7.3 上传 Roboflow 修正并合入训练集
@@ -128,23 +129,21 @@ python tools/preannotate.py --images datasets/frames --out datasets/labels \
 4. 每轮把新版本导出 YOLO 格式，与 datasets/lab-ppe、datasets/merged 一起按 `datasets/README` 的合并脚本（如被删则重建）重跑训练
 5. 注意：预标注只是起点，**必须人工过一遍**（尤其 No Lab Coat 与 Lab Coat 的混淆样本）
 
-### 7.4 评估 `eval_report.py`（飞轮④）
+### 7.4 评估（训练侧 ultralytics val / 在线口径 ls-analyzer）
 
 ```bash
-# v1 基线（当前 10 类模型在 merged test 集，491 图，已落盘历史模型评估记录（已清理））
-python tools/eval_report.py --model m0-spike/yolo11n_ppe.onnx \
-    --data datasets/merged/data.yaml --classes m0-spike/yolo11n_ppe.classes.txt \
-    --label "v1" --report docs/model-eval-v1.md
+# 训练侧 mAP（与训练同一环境，指标口径稳定）
+$PY -c "from ultralytics import YOLO; YOLO('m0-spike/yolo11n_ppe.onnx').val(data='datasets/merged/data.yaml', split='val')"
 
-# v2 训完后对比（同一 test 集再跑一次，追加到同一文件）
-python tools/eval_report.py --model m0-spike/yolo11n_ppe_v2.onnx \
-    --data datasets/merged/data.yaml --classes m0-spike/yolo11n_ppe_v2.classes.txt \
-    --label "v2(11类,merged)" --report docs/model-eval-v1.md
+# 在线推理口径对齐（Rust 黄金语料运行器，产出 jsonl 事件流）
+engine-rs/target/release/ls-analyzer --golden <video> --out events.jsonl --model m0-spike/yolo11n_ppe.onnx
+
+# 两份事件流一致性对比（历史迁移期工具，保留）
+python tools/golden_diff.py a.jsonl b.jsonl
 ```
 
-逐类 GT/TP/FP/检出率/平均置信度表；多版本追加同一文件即成对比报告。`--limit N` 冒烟、`--split valid` 换划分。
-口径：IoU≥0.5 贪心匹配；"检出率"列实为精确率 P=TP/(TP+FP)；FP 偏高 = 该类误报多。
-推理走 `Engine._run`（全局串行锁），符合并发铁律。
+> 历史 `eval_report.py`（Python Engine 逐类 P/TP/FP 报告）随 Python 运行时退役删除；
+> 需要同类逐类报告时用 ultralytics `val` 的输出（per-class P/R/mAP）即可。
 
 ### 7.5 版本打包 `export_dataset.py`（飞轮③→发布前置）
 
@@ -193,16 +192,15 @@ D:/LabSentinel/gpu-venv/Scripts/python.exe tools/train_ppe.py \
 
 ## 九、黄金语料归档工具（S7 验收留档，非日常流水线）
 
-以下 4 个脚本服务于 2026-11-06 的 `docs/archive/验证记录-S7-L1黄金语料对齐.md`
-（Python ↔ Rust 检测/跟踪逐帧对齐验证），**不参与生产运行、不在 CI 中调用**，
-仅保留用于复现历史验收结论。日常训练/推理/评估请用上文一至八节的工具。
+以下脚本服务于 2026-11-06 的 `docs/archive/验证记录-S7-L1黄金语料对齐.md`
+（Python ↔ Rust 检测/跟踪逐帧对齐验证）。**过渡期结束（2026-11-14）后**：
+`detect_compare.py` / `export_track_vectors.py` / `export_real_track_vector.py` /
+`golden_run.py` / `eval_report.py` / `perf_baseline.py` 已删除（依赖 Python 服务端运行时），
+对齐结论已固化在 `testdata/vectors/*.json` 与 Rust 契约测试中；`golden_diff.py`
+（纯文本比对）保留。
 
-| 脚本 | 用途 | 复现入口 |
+| 保留脚本 | 用途 | 复现入口 |
 |---|---|---|
 | `golden_diff.py` | 比对两份 gold jsonl 事件流，输出一致率与差异明细 | 验证记录 §逐帧对齐 |
-| `detect_compare.py` | Python 与 Rust 检测框 IoU / 置信度差值对比（58/58 ≥ 0.99） | 验证记录 §检测对齐 |
-| `export_track_vectors.py` | 从标注语料导出跟踪向量（合成语料用） | 验证记录 §跟踪向量 |
-| `export_real_track_vector.py` | 从真实视频导出跟踪向量（大语料 track-agnostic 85%） | 验证记录 §真实语料 |
 
-> 归档口径：R2-308 计划补齐 ≥10 段场景（遮挡/夜间/断流等）时，这些脚本会重新
-> 成为主力；当前保留原地，不删除、不纳入常规 README 主流程。
+> 需要重新生成黄金事件流时用 Rust：`ls-analyzer --golden <video> --out <jsonl>`。

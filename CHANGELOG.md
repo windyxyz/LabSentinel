@@ -6,6 +6,30 @@
 
 ## [Unreleased]
 
+### RA4.2：Python 运行时退役，Rust 单二进制成为唯一发布形态（2026-11-14）
+- **发行形态切换**：`release.yml` 只构建 `labsentinel-rust-<版本>-<日期>.zip` +
+  `SHA256SUMS-rust.txt`（包内自带检测模型、ffmpeg/ffprobe、onnxruntime、前端与
+  `LabSentinel.bat` 启动器）；`tests.yml` 门禁改为 Rust workspace + Web，
+  Python pytest/ruff/openapi 门禁随运行时下线。
+- **退役清理**：删除 `server/`（FastAPI 运行时与 631 例测试）及 Python 便携打包链
+  （`build_portable` / `install_portable` / `installer` / `portable_launcher` /
+  `smoke_portable` / `deploy` / `doctor` / `health_check` / `backup_data` /
+  `seed_demo` / `export_openapi` / `release_manifest` / `release_check` /
+  `rc_regression` / `probe_runtime` / `secrets_rekey` / `verify_sidecar_evidence` /
+  `opentip_hashes` / `make_sbom` / `soak_mixed_gray` / `build_launcher_exe`）与
+  Inno 安装器脚本；`tools/` 训练工具链与 `scripts/` 构建/验收支具保留（Python
+  仅作开发工具，不进分发）。
+- **替代能力**：`labsentinel-server --archive/--rollback` 承接版本归档/回滚
+  （排除 data/、拒绝路径穿越、回写 current.txt）；`prepare_rust_assets.py` 按哈希锁
+  准备模型/ffmpeg/onnxruntime，`build_rust.py --strict` 资产齐全才出包；
+  `/api/system` 版本读包内 `VERSION`；默认数据目录改为 `data/`（跟随 `LS_DATA_DIR`）。
+- **退役前全量门禁**：Python 631 passed / 7 skipped；Rust workspace **122 passed**；
+  Web **44 passed** + build；`acceptance_rust_only` **39/39**；`acceptance_vlm`
+  **9/9**；`smoke_rust` PASS。
+- **验收发现并修复**：配对 `claim` 限流桶与普通写共用（写满 10 次后配对必 429）→
+  独立桶；引导向导/目录选择器误用未定义 CSS 变量导致浅色主题黑字压深底不可见 →
+  统一设计令牌，并修复向导「浏览…」不弹窗、完成后不关闭。
+
 ### RA5：外部联网 VLM 检测后端——模型模块化（ADR-0011 增量，2026-11-14）
 - **底座/模型解耦**：检测后端可插拔三选一——① 本地训练 ONNX（YOLO/tract，
   LS_MODEL_PATH）② 用户自备第三方 ONNX（任意路径，/api/models/local 入册）

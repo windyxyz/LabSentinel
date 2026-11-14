@@ -54,12 +54,15 @@ function onPicked(p) {
 }
 
 
-// T-336：一键切换/回退分析器（python↔rust）；运行中由服务端自动重启该路
+// RA5/RA4.2：分析器切换——本地检测模型 / 外部联网模型（VLM）；运行中由服务端自动重启该路
+function analyzerOf(c) {
+  return c.analyzer === 'vlm' ? 'vlm' : 'rust'  // 历史值 python 一律视为本地检测
+}
 async function setAnalyzer(c, ev) {
   const impl = ev.target.value
-  const word = impl === 'rust' ? '切换到 Rust 分析器（灰度）' : '回退到 Python 分析器'
+  const word = impl === 'vlm' ? '改用外部联网模型（VLM）' : '改用本地检测模型'
   if (!confirm(`确定把「${c.name}」${word}？运行中将自动重启该路。`)) {
-    ev.target.value = c.analyzer || 'python'
+    ev.target.value = analyzerOf(c)
     return
   }
   try {
@@ -67,7 +70,7 @@ async function setAnalyzer(c, ev) {
     await refresh()
   } catch (e) {
     liveErr.value = `切换失败: ${e.message || e}`
-    ev.target.value = c.analyzer || 'python'
+    ev.target.value = analyzerOf(c)
   }
 }
 
@@ -334,13 +337,13 @@ async function watchLive(cam) {
         </td>
         <td><img v-if="snap[c.id]" :src="mediaUrl(`/api/cameras/${c.id}/snapshot?t=${snap[c.id]}`)" alt="摄像头最新画面缩略图" class="snap" @click="snap[c.id] = Date.now()" /></td>
         <td>
-          <!-- T-336：迁移期一键切换/回退分析器（folder 源 rust 数据面不支持，不展示） -->
-          <select v-if="c.type !== 'folder'" :value="c.analyzer || 'python'"
-                  :aria-label="`分析器实现 摄像头${c.id}`"
-                  title="分析器实现：python=默认 / rust=灰度；运行中切换将自动重启该路"
+          <!-- RA5 模型模块化：本地检测 / 外部联网模型（VLM）按摄像头插拔 -->
+          <select :value="analyzerOf(c)"
+                  :aria-label="`分析方式 摄像头${c.id}`"
+                  title="分析方式：本地=包内 ONNX 模型 / 外部联网=按 LS_VLM_* 或模型设置接入的视觉大模型；运行中切换将自动重启该路"
                   style="margin-right:6px" @change="setAnalyzer(c, $event)">
-            <option value="python">py</option>
-            <option value="rust">rust</option>
+            <option value="rust">本地模型</option>
+            <option value="vlm">外部联网模型</option>
           </select>
           <button class="ghost" style="margin-right:6px" @click="snap[c.id] = Date.now()">看快照</button>
           <button v-if="c.type !== 'folder'" class="ghost" style="margin-right:6px" @click="watchLive(c)">实时画面</button>

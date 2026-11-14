@@ -222,7 +222,7 @@ pub fn render_monthly(r: &MonthlyReport) -> Vec<u8> {
         9.0,
         50.0,
         46.0,
-        "数据保留策略见 server/.env.example；人脸模块（如启用）默认关闭且需单独同意。",
+        "数据保留策略见《安装与卸载》文档；人脸模块（如启用）默认关闭且需单独同意。",
     );
 
     assemble_pdf(c.as_bytes())

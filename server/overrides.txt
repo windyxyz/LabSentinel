@@ -1,5 +1,0 @@
-# T-002 / B-03: supervision pulls opencv-python (GUI build), which writes the same
-# cv2/ directory as the headless build. Uninstalling/upgrading either breaks the
-# other. This override makes the resolver never select opencv-python; the headless
-# build is listed explicitly in requirements.in / requirements-cuda.in.
-opencv-python ; sys_platform == "never"

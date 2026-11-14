@@ -1,4 +1,4 @@
-# Q-13 / T-409：每周定时依赖漏洞审计（Python / Web / Rust 三栈）。
+# Q-13 / T-409：每周定时依赖漏洞审计（Web / Rust 两栈；Python 运行时已退役）。
 # 复用 tests.yml 与 rust.yml 的 workflow_call 门禁；失败时自动开 issue 跟踪。
 name: security-weekly
 on:
@@ -12,7 +12,7 @@ permissions:
   issues: write
 
 jobs:
-  python-web-audit:
+  web-audit:
     uses: ./.github/workflows/tests.yml
     secrets: inherit
 
@@ -21,7 +21,7 @@ jobs:
     secrets: inherit
 
   open-issue-on-failure:
-    needs: [python-web-audit, rust-audit]
+    needs: [web-audit, rust-audit]
     if: failure()
     runs-on: ubuntu-latest
     steps:
@@ -32,7 +32,7 @@ jobs:
             const body = [
               'Q-13：每周定时审计出现 High/Critical 漏洞或审计门禁失败。',
               '',
-              `- Python/Web: \`${{ needs.python-web-audit.result }}\``,
+              `- Web: \`${{ needs.web-audit.result }}\``,
               `- Rust: \`${{ needs.rust-audit.result }}\``,
               `- 运行记录: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',

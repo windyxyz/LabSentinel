@@ -1,5 +1,0 @@
-# Deprecated: use requirements.in (source) / requirements-<os>.lock (install).
-# R2-002: this file used to list onnxruntime-directml>=1.17 on Windows while the
-# locks pinned onnxruntime==1.31.1 (CPU). Kept as a compatibility shim for old
-# tooling; deploy.py install now installs the platform lock file.
--r requirements.in

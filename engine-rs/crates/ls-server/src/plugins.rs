@@ -252,7 +252,9 @@ impl PluginManager {
             let Some(py) = py else {
                 return (
                     false,
-                    "{python} 占位不可用：未找到 Python 解释器（Rust 形态不自带）".into(),
+                    "{python} 占位不可用：未找到 Python 解释器（便携包不内置；\
+                     如插件需要请安装 Python 并加入 PATH）"
+                        .into(),
                 );
             };
             cmd[0] = cmd[0].replace("{python}", &py.to_string_lossy());

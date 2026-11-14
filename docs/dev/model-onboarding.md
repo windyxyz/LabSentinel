@@ -42,7 +42,7 @@ python -c "import yaml;print('\n'.join(yaml.safe_load(open('Resources/datasets/m
 
 ## 2. 服务端接入（零代码改动）
 
-`server/.env`：
+环境变量（或网页「模型管理」选择路径）：
 ```ini
 LS_PPE_MODEL=D:/User/Desktop/TOOLS/监控识别/m0-spike/yolo11n_ppe.onnx
 LS_PPE_CLASS_NAMES=lab coat        # 穿戴证据类别（精确匹配优先）
@@ -83,4 +83,4 @@ LS_PPE_WEARING_CONF=0.20           # 穿戴证据阈值
 | 'lab coat' 命中 'No Lab Coat' | 匹配逻辑退化为子串 | 确认 detect_class 精确匹配优先（已实现）；类别名大小写核对 |
 | 置信度普遍偏低 | 域差距/量化误差 | 走数据飞轮（90-data-flywheel.md）而不是硬降阈值 |
 | NPU 后端推理报错 | XINT8 模型/量化不符 | NPU 为可选，回退 directml 即可 |
-| 换模型后内存暴涨 | 旧 session 未释放（进程未重启） | 必须重启服务端（uvicorn 不热换模型） |
+| 换模型后内存暴涨 | 旧 session 未释放（进程未重启） | 必须重启服务端（运行中不热换模型） |

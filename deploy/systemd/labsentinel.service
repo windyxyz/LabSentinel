@@ -1,5 +1,5 @@
 [Unit]
-Description=LabSentinel 实验室安全监控
+Description=LabSentinel 实验室安全监控（Rust 单二进制）
 After=network-online.target
 Wants=network-online.target
 
@@ -7,16 +7,15 @@ Wants=network-online.target
 Type=simple
 User=labsentinel
 Group=labsentinel
-WorkingDirectory=/opt/labsentinel/server
+WorkingDirectory=/opt/labsentinel
 Environment=LS_DATA_DIR=/var/lib/labsentinel/data
 Environment=LS_DB_PATH=/var/lib/labsentinel/data/labsentinel.db
-Environment=LS_SNAPSHOT_DIR=/var/lib/labsentinel/data/snapshots
-Environment=LS_VIDEO_DIR=/var/lib/labsentinel/data/videos
-Environment=LS_ANNOTATION_POOL_DIR=/var/lib/labsentinel/data/annotation_pool
-Environment=LS_BACKEND_ORDER=openvino,cpu
+Environment=LS_WEB_DIST=/opt/labsentinel/web
+Environment=LS_MODEL_PATH=/opt/labsentinel/models/yolo11n.onnx
 Environment=LS_HOST=127.0.0.1
+Environment=LS_PORT=8000
 EnvironmentFile=-/etc/labsentinel/config.env
-ExecStart=/opt/labsentinel/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/labsentinel/labsentinel-server
 Restart=on-failure
 RestartSec=5
 StateDirectory=labsentinel

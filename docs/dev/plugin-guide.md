@@ -33,7 +33,8 @@
 必须非空字符串数组（**不接受 shell 字符串**）；`permissions` ⊆ `read`/`write`；
 `env` **不允许覆盖 `LS_*`** 系统变量；未知字段拒绝（extra=forbid）。
 
-`command[0]` 解析顺序：`{python}`（宿主当前解释器，推荐）→ PATH 上的裸命令（如 `python`）
+`command[0]` 解析顺序：`{python}`（宿主查找 `runtime\python.exe` → PATH 的 Python；
+**便携包不再内置解释器**，需系统安装 Python 或改用自带运行时的插件）→ PATH 上的裸命令
 → 插件目录内相对路径；**目录外绝对路径一律拒绝**（`..` 逃逸 resolve 后也必须仍在插件目录内）。
 
 ## 2. 宿主注入的环境

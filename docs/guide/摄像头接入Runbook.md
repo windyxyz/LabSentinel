@@ -15,7 +15,7 @@
 | 账号 | 已知摄像头 IP/账号密码；建议建**只读子账号**（看不到的通道给不了权限） | 管理账号泄露风险 |
 | 磁盘 | 主机剩余 ≥ 20GB（服务端另有 5GB 下限预警） | 截图/视频把盘写满触发紧急清理 |
 | 时间 | 主机 NTP 同步（`w32tm /query /status` 核对） | 事件时间线错乱、报表按天分组漂移 |
-| 软件 | LabSentinel 已部署且 `doctor.py` 10 项 0 FAIL | 先跑 `python scripts\doctor.py` |
+| 软件 | LabSentinel 已部署且 `/api/health/ready` 返回 ready | 先看 `checks` 逐项原因 |
 
 ## 1. 接入前预检（不进系统也能做）
 
@@ -101,7 +101,7 @@ python tools\camera_soak.py --all --duration 24h --interval 30
 | 连不上（超时） | 网段不通/防火墙拦 554 → 先 ping，再 ffprobe（§1a） |
 | 连不上（401） | 账号错/密码带特殊字符未转义 → URL-encode `@:#?=` 等字符 |
 | 连上但无画面 | H.265 子码流 → 摄像头后台改 H.264；或分辨率过高 → 换子码流 |
-| 能连但不出事件 | 区域没画/画错位置 → 实时画面叠加确认；规则时间窗没覆盖当前时段；模型类别不匹配（`LS_PPE_VIOLATION_CLASS`，见 [.env.example](../../server/.env.example)） |
+| 能连但不出事件 | 区域没画/画错位置 → 实时画面叠加确认；规则时间窗没覆盖当前时段；模型类别不匹配（`LS_PPE_VIOLATION_CLASS`，见根 [README 环境变量表](../../README.md)） |
 | 画面卡顿/帧龄涨 | 码率太高 → 摄像头端降子码流码率；多路 DML 负载 → 降低 analysis_fps（`LS_ANALYSIS_FPS`） |
 | 误报多 | 阈值/区域/夜红外 → 收紧区域、加 cooldown、夜间缩小规则生效窗、`LS_PPE_CONF` 上调；长期治理走误报池标注（[标注与模型迭代手册](../标注与模型迭代手册.md)） |
 | 告警不发 | 渠道未配/静默生效/过滤规则（`LS_ALERT_FILTERS`）→ 告警面板自测 + `GET /api/alerts/status` 失败列表 |
@@ -124,6 +124,6 @@ python tools\camera_soak.py --all --duration 24h --interval 30
 - 停单路：「摄像头」页点「停止」（守护不拉已手动停止的摄像头）；
 - 恢复旧配置：配置导出/导入（`POST /api/config/import`，merge/replace 双模式，
   [35-api-reference](../dev/api-reference.md) §10）；导入前先 `GET /api/config/export` 留底；
-- 数据备份：`python scripts\backup_data.py`（备份 API 保证 WAL 一致，别直接拷 .db）；
-- 卸载服务：便携版「卸载.bat」/ 控制面板卸载（数据目录自动改名备份，不直接删）；
-  全流程见 [59-portable-install](安装与卸载.md)。
+- 数据备份：`POST /api/backups/run`（SQLite 一致快照，别直接拷 .db）；
+- 卸载服务：网页「设置 → 服务控制」停止 → 删除解压目录（数据目录按需保留）；
+  全流程见 [安装与卸载](安装与卸载.md)。

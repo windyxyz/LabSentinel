@@ -8,21 +8,21 @@
 |---|---|
 | [部署指南.md](guide/部署指南.md) | Windows 部署、摄像头接入、告警配置、合规自查 |
 | [部署指南-Linux.md](guide/部署指南-Linux.md) | Linux systemd 原生部署（Docker 路线已终止） |
-| [安装与卸载.md](guide/安装与卸载.md) | 安装包（setup.exe）与便携包两种形态：安装/升级/卸载/自启/杀软告警 |
+| [安装与卸载.md](guide/安装与卸载.md) | Rust 单包：安装/升级（--archive）/回滚（--rollback）/数据位置/卸载 |
 | [运维手册.md](guide/运维手册.md) | 日常运维一本通：巡检/排障/备份恢复/升级回滚/故障速查 |
 | [摄像头接入Runbook.md](guide/摄像头接入Runbook.md) | 摄像头接入一条龙：预检/接线/区域规则/告警验证/24h 观察 |
 | [摄像头24h验收清单.md](guide/摄像头24h验收清单.md) | 24h 稳定性验收执行表 |
 | [图片文件夹接入.md](guide/图片文件夹接入.md) | 截图目录接入：关键/违规定义、配置与排障 |
-| [部署FAQ.md](guide/部署FAQ.md) | 踩坑集中答疑；启动失败先跑 `python scripts/doctor.py` |
+| [部署FAQ.md](guide/部署FAQ.md) | 踩坑集中答疑；启动失败先看 `/api/health/ready` 的 checks |
 | [杀毒软件误报说明.md](guide/杀毒软件误报说明.md) | 杀软启发式误报的用户处理指引 |
 | [标注与模型迭代手册.md](标注与模型迭代手册.md) | 误报/漏检治理实操：抽帧→标注→训练→接入（数据飞轮） |
-| [快速开始.md](guide/快速开始.md) | demo 包/源码一键入口 |
+| [快速开始.md](guide/快速开始.md) | 发布包/源码运行入口 |
 
 ## dev/ — 开发者
 
 | 文档 | 内容 |
 |---|---|
-| [架构设计.md](dev/架构设计.md) | 双运行时架构：Python 主运行时 + Rust 数据面/控制面、模块地图、线程模型、约束 |
+| [架构设计.md](dev/架构设计.md) | Rust 单二进制架构：控制面/分析 worker/存储/派发、模块地图、线程模型、约束 |
 | [api-reference.md](dev/api-reference.md) + [openapi.json](openapi.json) | REST/WS API 完整契约（客户端开发唯一依据） |
 | [mqtt-protocol.md](dev/mqtt-protocol.md) | MQTT 事件总线协议 v1 |
 | [plugin-guide.md](dev/plugin-guide.md) | 插件（外挂）指南：清单/权限/示例/安全红线 |
@@ -30,7 +30,7 @@
 | [data-flywheel.md](dev/data-flywheel.md) | 数据飞轮：采集→预标注→训练→部署闭环 |
 | [requirements.md](dev/requirements.md) | 需求文档 v0.2 |
 | [GLOSSARY.md](dev/GLOSSARY.md) | 领域术语表 |
-| [../adr/](adr/) | 架构决策记录（0001–0010） |
+| [../adr/](adr/) | 架构决策记录（0001–0011；0011 含 Rust 过渡期收口与 Python 退役记录） |
 
 ## releases/ — 发布
 

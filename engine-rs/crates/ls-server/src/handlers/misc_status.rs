@@ -523,7 +523,7 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
                 // P2-6：只回显文件名（不泄露目录布局）
                 std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned())
             }),
-            "note": "rust 控制面只读状态；下载端点在 Python 服务（含 SHA256 校验）",
+            "note": "按需下载实验服模型（SHA256 校验，写入数据目录 models/）",
         }))
         .into_response())
     })

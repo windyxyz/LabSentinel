@@ -86,17 +86,14 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     if let Some(a) = args.next() {
         if a == "--healthcheck" {
-            let db = args
-                .next()
-                .unwrap_or_else(|| "server/data/labsentinel.db".into());
+            let db = args.next().unwrap_or_else(|| "data/labsentinel.db".into());
             let ok = ls_store::Store::open(&db)
                 .ok()
                 .and_then(|s| s.integrity_check().ok())
                 .is_some_and(|v| v == "ok");
             std::process::exit(if ok { 0 } else { 1 });
         }
-        // T-332：跨语言 DB 兼容驱动——对指定库写一条事件/投递并读回（exit 0=成功）。
-        // 由 server/tests/test_store_bidirectional.py 调用，实现三路径兼容验收。
+        // T-332：DB 自检驱动——对指定库写一条事件/投递并读回（exit 0=成功）。
         if a == "--selftest-db" {
             let db = args.next().expect("--selftest-db <path>");
             let code = ls_store::selftest::run(&db);
@@ -148,8 +145,14 @@ async fn main() {
             }
         }
     }
-    let db_path =
-        std::env::var("LS_DB_PATH").unwrap_or_else(|_| "server/data/labsentinel.db".into());
+    // RA4.2：数据目录默认相对当前目录的 data/；DB 未显式指定时跟随数据目录
+    let data_dir = std::env::var("LS_DATA_DIR").unwrap_or_else(|_| "data".into());
+    let db_path = std::env::var("LS_DB_PATH").unwrap_or_else(|_| {
+        std::path::Path::new(&data_dir)
+            .join("labsentinel.db")
+            .to_string_lossy()
+            .into_owned()
+    });
     let token = std::env::var("LS_ADMIN_TOKEN").unwrap_or_default();
     let read_token = std::env::var("LS_READ_TOKEN").unwrap_or_default();
     let read_protected = std::env::var("LS_AUTH_READ_PROTECTED")

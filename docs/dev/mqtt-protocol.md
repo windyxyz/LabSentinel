@@ -21,8 +21,8 @@ LS_MQTT_RETAIN=false
 LS_PUBLIC_BASE_URL=           # payload api_base 用；空=不写
 ```
 
-依赖 `paho-mqtt`（`server/requirements.txt` 已含；懒加载——未安装时服务照常启动，
-`/api/mqtt/status` 显示 `available:false`）。状态端点：
+依赖 `rumqttc`（`ls-dispatch` 内置；默认关闭，`LS_MQTT_*` 未配置时零行为变化）。
+状态端点：
 `GET /api/mqtt/status` → `{enabled,available,connected,published,dropped,failed,queue_depth,…}`。
 
 ## 2. 主题

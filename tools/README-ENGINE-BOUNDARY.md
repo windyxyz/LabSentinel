@@ -11,10 +11,10 @@
 | `camera_soak.py` / `e2e_smoke.py` / `golden_run.py` | 标准库/httpx | 压测与回归（Python 实现参照） |
 
 ## 推理后端（T-325）
-`ls-infer` 采用 **tract 纯 Rust ONNX 运行时**（feature=`tract`）：无需 ONNX Runtime 动态库/
-libclang，windows-gnu 目标直接构建；预处理（letterbox 114 灰边 + BGR→RGB + /255 + NCHW）
-与 `server/app/engine.py` 对齐，解码/NMS 复用 `post.rs` 的共享实现。原计划的 ort 绑定方案
-因本机缺 libclang 暂缓，后续可作为同一 `Detector` 接口的替换实现接入（需 libclang/预生成绑定）。
+`ls-infer` 采用 **tract 纯 Rust ONNX 运行时**（feature=`tract`）与 **ort（load-dynamic）**
+双后端：无需 libclang 的 tract 用于离线/CI，ort 用于发行包 GPU/CPU 推理。预处理（letterbox 114
+灰边 + BGR→RGB + /255 + NCHW）与历史 Python 引擎逐位对齐（对齐结论已固化在
+`testdata/vectors/*.json`），解码/NMS 复用 `post.rs` 的共享实现。
 模型路径由 `LS_MODEL_FP32` 传入；缺失时 `ls-analyzer` 自动回退空检测（数据面/状态机照常）。
 
 ## 交付契约（Python → Rust 引擎，唯一接口）
@@ -31,9 +31,8 @@ libclang，windows-gnu 目标直接构建；预处理（letterbox 114 灰边 + B
    Rust 引擎按**角色**取类别（不按文件数量硬编码），合并模型/级联模型共用同一代码路径。
 
 ## 评测闭环
-- `tools/eval_report.py --engine rust`（T-334 增强项）：用 `ls-analyzer` 离线评测子命令跑固定验证集，
-  保证训练侧与线上推理口径一致；Python 与 Rust 输出 mAP 偏差 > 1% 视为不通过（76 §9.7）。
+- `tools/eval_report` 类离线评估已退役；在线口径由 `ls-analyzer --golden` + Rust 契约测试保证。
 
 ## 禁止事项
-- 运行时代码不得回调 Python（`server/app` 为 legacy，L4 后删除；Rust 引擎不 import 任何 Python）。
+- 运行时代码不得回调 Python（Python 服务端已退役；Rust 引擎不 import 任何 Python）。
 - `tools/` 脚本不得成为生产路径的一部分（仅构建/训练/评测/压测时人工运行）。
