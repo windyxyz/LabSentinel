@@ -18,11 +18,12 @@
 - **安装器能力**：中英双语；双模式（默认「仅为我安装」→ `%LOCALAPPDATA%\Programs\LabSentinel`，
   提权「为所有用户」→ `%ProgramFiles%\LabSentinel`）；完成页可选开始菜单/桌面快捷方式；
   升级前 `labsentinel-server --archive` 归档旧版、安装后 `--selftest-http` 真实探活
-  （失败可 `--rollback`）；卸载先 `taskkill` 结束常驻服务再删文件；数据目录不随卸载删除。
+  （失败可 `--rollback`）；卸载先 `taskkill` 结束常驻服务再删文件，并清理自建快捷方式
+  （`CreateShellLink` 产物不在 Inno 安装日志内）；数据目录不随卸载删除。
 - **CI**：`release.yml` 的 build-rust 增加「安装 Inno Setup 7.1.1（官方安装器 + SHA256
-  钉死，choco 仅有 6.x）」→「编译 setup.exe」；`SHA256SUMS-rust.txt` 同时列出
-  zip 与 setup.exe，artifact/publish 清单同步。此前随 Python 退役一并移除安装器
-  属误删，本次恢复。
+  钉死，choco 仅有 6.x）」→「编译 setup.exe」→「安装→探活→卸载零残留冒烟」；
+  `SHA256SUMS-rust.txt` 同时列出 zip 与 setup.exe，artifact/publish 清单同步。
+  此前随 Python 退役一并移除安装器属误删，本次恢复。
 
 ### CI 门禁重构收口 + RustSec 漏洞清零（2026-11-14）
 - **CI 全绿（main @ 4568a45）**：`tests`（Rust nextest 双平台 + Web）与 `rust`

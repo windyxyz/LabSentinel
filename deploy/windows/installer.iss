@@ -82,6 +82,13 @@ Name: "installservice"; Description: "{cm:ServiceTask}"; \
 Source: "{#LsSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [UninstallDelete]
+; CreateShellLink 生成的快捷方式不在 Inno 安装日志里，卸载需显式删除；
+; {group} 随安装模式（仅我/所有用户）自动指向对应用户或公共开始菜单。
+Type: files; Name: "{group}\LabSentinel.lnk"
+Type: files; Name: "{group}\Uninstall LabSentinel.lnk"
+Type: dirifempty; Name: "{group}"
+Type: files; Name: "{userdesktop}\LabSentinel.lnk"
+Type: files; Name: "{commondesktop}\LabSentinel.lnk"
 ; 用户数据（%LOCALAPPDATA%\LabSentinel）与 versions/ 归档不随卸载删除；
 ; 需清理时手工删除：数据 %LOCALAPPDATA%\LabSentinel\，归档 {app}\versions\
 

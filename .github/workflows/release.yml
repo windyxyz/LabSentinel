@@ -73,6 +73,35 @@ jobs:
           Get-Item C:\InnoSetup7\ISCC.exe | Select-Object FullName
       - name: 编译 setup.exe（ISCC：deploy/windows/installer.iss）
         run: python scripts/build_setup_exe.py
+      - name: setup.exe 安装→探活→卸载 冒烟（零残留）
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem Resources/dist/LabSentinel-setup-*.exe |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $dir = Join-Path $env:RUNNER_TEMP "ls-setup-smoke"
+          Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $setup.FullName -Wait -PassThru -ArgumentList `
+            "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$dir`""
+          if ($p.ExitCode -ne 0) { throw "静默安装失败：rc=$($p.ExitCode)" }
+          foreach ($f in @("labsentinel-server.exe", "VERSION", "web\index.html")) {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "安装缺文件：$f" }
+          }
+          $group = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\LabSentinel"
+          if (-not (Test-Path (Join-Path $group "LabSentinel.lnk"))) { throw "缺开始菜单快捷方式" }
+          $st = Start-Process -FilePath (Join-Path $dir "labsentinel-server.exe") `
+            -ArgumentList "--selftest-http" -WorkingDirectory $dir -Wait -PassThru
+          if ($st.ExitCode -ne 0) { throw "安装后 --selftest-http 失败：rc=$($st.ExitCode)" }
+          $u = Start-Process -FilePath (Join-Path $dir "unins000.exe") -Wait -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+          if ($u.ExitCode -ne 0) { throw "静默卸载失败：rc=$($u.ExitCode)" }
+          Start-Sleep -Seconds 10
+          if (Test-Path (Join-Path $dir "labsentinel-server.exe")) { throw "卸载后 exe 残留" }
+          if (Test-Path $group) { throw "卸载后开始菜单组残留" }
+          $desk = [Environment]::GetFolderPath('Desktop')
+          if (Test-Path (Join-Path $desk "LabSentinel.lnk")) { throw "卸载后桌面快捷方式残留" }
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{9C7B3A41-5E2D-4F86-A1C9-2B7D6E4F8A10}_is1"
+          if (Test-Path $key) { throw "卸载后注册表卸载项残留" }
+          "setup.exe 冒烟通过：安装/探活/快捷方式/卸载零残留"
       - name: RA3/RA4 契约冒烟（解包→就绪→backend/版本→前端→停止）
         shell: pwsh
         run: |
