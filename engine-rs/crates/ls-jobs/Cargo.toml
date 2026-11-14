@@ -8,10 +8,10 @@ license.workspace = true
 [dependencies]
 ls-store = { version = "0.1.0", path = "../ls-store" }
 ls-dispatch = { version = "0.1.0", path = "../ls-dispatch" }
-rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 fs2 = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

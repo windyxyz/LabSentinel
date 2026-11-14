@@ -225,7 +225,7 @@ pub fn run_backup(cfg: &BackupConfig, out: &Path) -> JobResult<BackupOutcome> {
         });
         let file = File::create(out).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipWriter::new(file);
-        let opts = zip::write::FileOptions::default()
+        let opts = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .unix_permissions(0o644);
         zip.start_file("manifest.json", opts)
@@ -279,7 +279,11 @@ pub fn run_auto_backup(cfg: &BackupConfig) -> JobResult<BackupOutcome> {
 pub fn verify_zip(zip_path: &Path) -> JobResult<VerifyReport> {
     let file = File::open(zip_path).map_err(|e| format!("zip 不存在: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip 损坏: {e}"))?;
-    let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(Result::ok)
+        .map(|s| s.to_string())
+        .collect();
     if let Some(bad) = names.iter().find(|n| !safe_entry(n)) {
         return Err(format!("发现不安全条目路径: {bad}"));
     }
@@ -433,6 +437,7 @@ pub fn restore_zip(
     if !no_media {
         for name in archive
             .file_names()
+            .filter_map(Result::ok)
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
         {

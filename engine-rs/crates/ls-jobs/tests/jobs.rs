@@ -246,7 +246,11 @@ fn backup_zip_layout_verify_and_python_tool_compat() {
     assert_eq!(outcome.integrity_check, "ok");
 
     let mut archive = zip::ZipArchive::new(fs::File::open(&out).unwrap()).unwrap();
-    let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(Result::ok)
+        .map(|s| s.to_string())
+        .collect();
     assert!(names.contains(&"manifest.json".to_string()));
     assert!(names.contains(&"labsentinel.db".to_string()));
     assert!(names.contains(&"media/snapshots/x.jpg".to_string()));

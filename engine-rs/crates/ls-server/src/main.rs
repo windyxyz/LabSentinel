@@ -440,12 +440,15 @@ async fn selftest_http() -> bool {
     };
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let base = format!("http://{addr}");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(2)))
+        .build()
+        .into();
     let mut ok = false;
     for _ in 0..60 {
         let url = format!("{base}/api/health/ready");
-        let req = ureq::get(&url).timeout(std::time::Duration::from_secs(2));
-        if let Ok(r) = req.call() {
-            if r.status() == 200 {
+        if let Ok(r) = agent.get(&url).call() {
+            if r.status().as_u16() == 200 {
                 ok = true;
                 break;
             }

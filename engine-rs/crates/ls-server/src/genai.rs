@@ -251,9 +251,10 @@ pub fn call_provider(
     timeout_s: u64,
     b64: &str,
 ) -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(timeout_s.max(1)))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(timeout_s.max(1))))
+        .build()
+        .into();
     let (endpoint, body) = if provider == "ollama" {
         (
             format!("{}/api/generate", url.trim_end_matches('/')),
@@ -278,14 +279,16 @@ pub fn call_provider(
     };
     let mut req = agent
         .post(&endpoint)
-        .set("Content-Type", "application/json");
+        .header("Content-Type", "application/json");
     if !api_key.is_empty() && provider == "openai_compat" {
-        req = req.set("Authorization", &format!("Bearer {api_key}"));
+        req = req.header("Authorization", format!("Bearer {api_key}"));
     }
-    let text = req
-        .send_string(&body.to_string())
-        .map_err(|e| format!("VLM 请求失败: {e}"))?
-        .into_string()
+    let mut resp = req
+        .send(body.to_string())
+        .map_err(|e| format!("VLM 请求失败: {e}"))?;
+    let text = resp
+        .body_mut()
+        .read_to_string()
         .map_err(|e| format!("VLM 响应读取失败: {e}"))?;
     let data: Value = serde_json::from_str(&text).map_err(|_| "VLM 响应非 JSON".to_string())?;
     if provider == "ollama" {

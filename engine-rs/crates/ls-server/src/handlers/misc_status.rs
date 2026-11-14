@@ -403,14 +403,17 @@ pub(crate) async fn update_check_status(
         return Json(result).into_response();
     }
     let fetched: Result<Value, String> = (|| {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(5))
-            .build();
-        let text = agent
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .build()
+            .into();
+        let mut resp = agent
             .get(&manifest)
             .call()
-            .map_err(|e| format!("清单拉取失败: {e}"))?
-            .into_string()
+            .map_err(|e| format!("清单拉取失败: {e}"))?;
+        let text = resp
+            .body_mut()
+            .read_to_string()
             .map_err(|e| format!("清单读取失败: {e}"))?;
         serde_json::from_str(&text).map_err(|_| "清单非 JSON".to_string())
     })();
@@ -930,16 +933,17 @@ pub(crate) async fn ppe_download(State(st): State<Shared>, Json(body): Json<Valu
                 last_err = format!("url 不在白名单或非 https: {url}");
                 continue;
             }
-            match ureq::get(url)
-                .timeout(std::time::Duration::from_secs(60))
-                .call()
-            {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(60)))
+                .build()
+                .into();
+            match agent.get(url).call() {
                 Ok(resp) => {
                     // P2-8（安全审计）：流式下载 + want_size 提前截断——
                     // 原 read_to_end 无上限，白名单源被攻陷时可内存耗尽
                     let mut bytes: Vec<u8> = Vec::with_capacity(want_size.max(0) as usize);
                     use std::io::Read;
-                    let mut reader = resp.into_reader();
+                    let mut reader = resp.into_body().into_reader();
                     let mut overflow = false;
                     let mut io_err = false;
                     loop {

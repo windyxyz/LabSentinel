@@ -40,9 +40,11 @@ impl FaceClient {
     }
 
     fn agent(&self) -> ureq::Agent {
-        ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(self.timeout_s.max(1)))
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(self.timeout_s.max(1))))
+            .http_status_as_error(false)
             .build()
+            .into()
     }
 
     /// multipart/form-data 手工拼装（ureq 无原生 multipart；仅一个 file 字段）。
@@ -72,34 +74,34 @@ impl FaceClient {
         let resp = self
             .agent()
             .post(&url)
-            .set("x-api-key", &self.api_key)
-            .set(
+            .header("x-api-key", &self.api_key)
+            .header(
                 "Content-Type",
-                &format!("multipart/form-data; boundary={boundary}"),
+                format!("multipart/form-data; boundary={boundary}"),
             )
-            .send_bytes(&body)
+            .send(&body[..])
             .map_err(|e| format!("CompreFace 注册失败: {e}"))?;
-        // RA2 反思修正：ureq 2.x 对 4xx/5xx 返回 Ok(Response)——必须显式校验
-        // 状态码，否则 CompreFace 拒绝（如 subject 非法/重复）会被当成功
-        if resp.status() >= 300 {
-            return Err(format!("CompreFace 注册 HTTP {}", resp.status()));
+        // 显式校验状态码（http_status_as_error(false) 时 4xx/5xx 仍返回 Ok）
+        if resp.status().as_u16() >= 300 {
+            return Err(format!("CompreFace 注册 HTTP {}", resp.status().as_u16()));
         }
         Ok(())
     }
 
     pub fn list_persons(&self) -> Result<Vec<String>, String> {
         let url = format!("{}/recognition/subjects", self.base_url);
-        let resp = self
+        let mut resp = self
             .agent()
             .get(&url)
-            .set("x-api-key", &self.api_key)
+            .header("x-api-key", &self.api_key)
             .call()
             .map_err(|e| format!("CompreFace 列表失败: {e}"))?;
-        if resp.status() >= 300 {
-            return Err(format!("CompreFace 列表 HTTP {}", resp.status()));
+        if resp.status().as_u16() >= 300 {
+            return Err(format!("CompreFace 列表 HTTP {}", resp.status().as_u16()));
         }
         let text = resp
-            .into_string()
+            .body_mut()
+            .read_to_string()
             .map_err(|e| format!("CompreFace 响应读取失败: {e}"))?;
         let v: Value =
             serde_json::from_str(&text).map_err(|_| "CompreFace 列表非 JSON".to_string())?;
@@ -128,12 +130,12 @@ impl FaceClient {
         let resp = self
             .agent()
             .delete(&url)
-            .set("x-api-key", &self.api_key)
+            .header("x-api-key", &self.api_key)
             .call()
             .map_err(|e| format!("CompreFace 删除失败: {e}"))?;
-        // RA2 反思修正：同 add_person——显式校验状态码
-        if resp.status() >= 300 {
-            return Err(format!("CompreFace 删除 HTTP {}", resp.status()));
+        // 显式校验状态码（http_status_as_error(false) 时 4xx/5xx 仍返回 Ok）
+        if resp.status().as_u16() >= 300 {
+            return Err(format!("CompreFace 删除 HTTP {}", resp.status().as_u16()));
         }
         Ok(())
     }

@@ -136,11 +136,12 @@ impl MqttBus {
         if config.tls {
             // 系统信任源（rustls-native-certs，与 Python `tls_set()` 同口径）；
             // 不提供跳过校验开关。平台无根证书时连接失败（与 Python 一致）。
+            // 只编 ring provider（aws-lc 在 windows-gnu 交叉链接不可用）
+            let _ = rustls::crypto::ring::default_provider().install_default();
             let mut roots = rustls::RootCertStore::empty();
-            if let Ok(certs) = rustls_native_certs::load_native_certs() {
-                for cert in certs {
-                    let _ = roots.add(cert);
-                }
+            let native = rustls_native_certs::load_native_certs();
+            for cert in native.certs {
+                let _ = roots.add(cert);
             }
             let tls_cfg = rustls::ClientConfig::builder()
                 .with_root_certificates(roots)

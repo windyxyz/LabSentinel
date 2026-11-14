@@ -9,7 +9,8 @@ license.workspace = true
 ls-store = { version = "0.1.0", path = "../ls-store" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-ureq = { version = "2", features = ["tls"] }
+ureq = { version = "3", features = ["rustls"] }
+http = "1"
 hmac = "0.12"
 sha2 = "0.10"
 # T-329：邮件渠道（纯 Rust rustls 栈，Windows mingw 免 OpenSSL）
@@ -20,9 +21,9 @@ lettre = { version = "0.11", default-features = false, features = [
 ] }
 # T-329：MQTT 事件总线（payload v1 与 Python mqtt_bridge 同语义）
 rumqttc = { workspace = true }
-# MQTT TLS 系统信任源（rumqttc 0.24 的 Simple 需显式 CA；Rustls 注入用同版本线）
-rustls = "0.22"
-rustls-native-certs = "0.7"
+# MQTT TLS 系统信任源（rumqttc 0.25 → tokio-rustls 0.26 / rustls 0.23；只编 ring，避免 aws-lc 交叉链接）
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

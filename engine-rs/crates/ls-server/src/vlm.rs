@@ -90,9 +90,10 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
     if frames.is_empty() {
         return Err("无帧可分析".into());
     }
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(cfg.timeout_s))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(cfg.timeout_s)))
+        .build()
+        .into();
     let imgs: Vec<String> = frames
         .iter()
         .map(|f| base64::engine::general_purpose::STANDARD.encode(f))
@@ -107,20 +108,21 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                     "image_url": {"url": format!("data:image/jpeg;base64,{b64}")}
                 }));
             }
-            let resp = agent
+            let mut resp = agent
                 .post(&format!("{}/v1/chat/completions", cfg.url))
-                .set("Content-Type", "application/json")
-                .send_string(
-                    &json!({
+                .header("Content-Type", "application/json")
+                .send(
+                    json!({
                         "model": cfg.model, "temperature": 0, "max_tokens": 400,
                         "messages": [{"role": "user", "content": content}],
                     })
                     .to_string(),
                 )
                 .map_err(|e| format!("VLM 请求失败: {e}"))?;
-            let status = resp.status();
+            let status = resp.status().as_u16();
             let text = resp
-                .into_string()
+                .body_mut()
+                .read_to_string()
                 .map_err(|e| format!("响应读取失败: {e}"))?;
             if status >= 300 {
                 return Err(format!("VLM HTTP {status}"));
@@ -134,11 +136,11 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
         }
         // ollama 本地：images 数组多元素
         "ollama" => {
-            let resp = agent
+            let mut resp = agent
                 .post(&format!("{}/api/generate", cfg.url))
-                .set("Content-Type", "application/json")
-                .send_string(
-                    &json!({
+                .header("Content-Type", "application/json")
+                .send(
+                    json!({
                         "model": cfg.model, "prompt": prompt,
                         "images": imgs, "stream": false,
                         "format": "json", "options": {"temperature": 0},
@@ -146,9 +148,10 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                     .to_string(),
                 )
                 .map_err(|e| format!("VLM 请求失败: {e}"))?;
-            let status = resp.status();
+            let status = resp.status().as_u16();
             let text = resp
-                .into_string()
+                .body_mut()
+                .read_to_string()
                 .map_err(|e| format!("响应读取失败: {e}"))?;
             if status >= 300 {
                 return Err(format!("VLM HTTP {status}"));
@@ -182,11 +185,11 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                 cfg.model,
                 cfg.api_key
             );
-            let resp = agent
+            let mut resp = agent
                 .post(&url)
-                .set("Content-Type", "application/json")
-                .send_string(
-                    &json!({
+                .header("Content-Type", "application/json")
+                .send(
+                    json!({
                         "contents": [{"parts": [
                             {"text": prompt},
                             {"inline_data": {"mime_type": "video/mp4", "data": b64}},
@@ -196,9 +199,10 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                     .to_string(),
                 )
                 .map_err(|e| format!("VLM 请求失败: {e}"))?;
-            let status = resp.status();
+            let status = resp.status().as_u16();
             let text = resp
-                .into_string()
+                .body_mut()
+                .read_to_string()
                 .map_err(|e| format!("响应读取失败: {e}"))?;
             if status >= 300 {
                 return Err(format!("VLM HTTP {status}"));

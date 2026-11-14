@@ -308,29 +308,36 @@ pub fn deliver_with_backoff(
         };
     }
     let mut error = None;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .http_status_as_error(false)
+        .build()
+        .into();
     for attempt in 0..4u32 {
         // Python httpx timeout=5 同口径
-        let req = ureq::post(&cfg.url).timeout(Duration::from_secs(5));
+        let req = agent.post(&cfg.url);
         let (status, resp_body) = match ch {
             // Qmsg：表单 qq+msg（Python data= dict 同口径）
-            Channel::Qmsg => resp_body(req.send_form(&[("qq", cfg.qq.as_str()), ("msg", text)])),
+            Channel::Qmsg => resp_body(req.send_form([("qq", cfg.qq.as_str()), ("msg", text)])),
             _ => {
                 let body = build_body(ch, level, text, cfg).to_string();
-                let req = req.set("Content-Type", "application/json");
+                let req = req.header("Content-Type", "application/json");
                 let req = if ch == Channel::Webhook {
                     let ts = unix_secs().to_string();
-                    let r = req.set("X-LS-Event", "alert").set("X-LS-Timestamp", &ts);
+                    let r = req
+                        .header("X-LS-Event", "alert")
+                        .header("X-LS-Timestamp", &ts);
                     if !cfg.secret.is_empty() {
                         let sig =
                             format!("sha256={}", hmac_sha256_hex(&cfg.secret, body.as_bytes()));
-                        r.set("X-LS-Signature", &sig)
+                        r.header("X-LS-Signature", &sig)
                     } else {
                         r
                     }
                 } else {
                     req
                 };
-                resp_body(req.send_string(&body))
+                resp_body(req.send(body.as_str()))
             }
         };
         if is_ok(ch, status, &resp_body) {
@@ -361,12 +368,14 @@ pub fn deliver_with_backoff(
     }
 }
 
-fn resp_body(r: Result<ureq::Response, ureq::Error>) -> (u16, String) {
+fn resp_body(r: Result<http::Response<ureq::Body>, ureq::Error>) -> (u16, String) {
     match r {
-        Ok(resp) => {
-            let st = resp.status();
-            (st, resp.into_string().unwrap_or_default())
+        Ok(mut resp) => {
+            let st = resp.status().as_u16();
+            let body = resp.body_mut().read_to_string().unwrap_or_default();
+            (st, body)
         }
+        Err(ureq::Error::StatusCode(code)) => (code, String::new()),
         Err(e) => (0, e.to_string()),
     }
 }
