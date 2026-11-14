@@ -35,9 +35,17 @@
 | B · Inno Setup 双形态 | dedae39 | ADR-0010 入库（调研覆盖 Jellyfin NSIS+NSSM / mpv.net Inno+zip 双形态 / Tautulli Python 服务 NSIS / Navidrome WinSW / fsplayer·NipaPlay·Ruffle·NextPlayer 查证）；`deploy/windows/installer.iss`（按用户/覆盖升级/快捷方式/HKCU 卸载项/可选服务勾选页/finalize 健康检查/SignTool 占位）；`install_portable.py finalize` 复用 health_check；`build_portable.py --installer`（find_iscc 探测，未装警告跳过 zip-only）；release.yml 加 choco ISCC 步骤与 setup.exe artifact；59-portable-install/部署指南补双形态。验证：py_compile、本机无 ISCC 警告跳过实测、安装器回归 5 passed；**ISCC 编译待 CI 验证**（本机未装 Inno Setup，如实保留） |
 | C · 清理 | 83e93d8 | 删根目录 78 原件（docs/plan 正本保留）与 `%SBOX%` 空目录；release_check 移除 openssl allowlist（复跑 11 PASS/0 FAIL）；`docs/dev/架构设计.md` 重写为 0.2.0 双运行时现状；tools/README 补「黄金语料归档工具」章节（4 近孤儿脚本原地保留）；45-model-onboarding 悬空引用改指 78 号 §T-321；TEMP 冒烟残留与孤儿 go2rtc 清理 |
 
-**遗留**：ISCC.exe 编译 setup.exe 需 CI（GitHub runner `choco install innosetup`）实证，
-本机未装；数字签名（T-403）仍为人工事项。历史文档（40-roadmap/70-release-plan/
-验证记录/20-research/m0-spike）按用户决策保留不动。
+## 第六轮：Inno Setup 7 安装器恢复为必发布资产（2026-11-14）
+
+| 项 | 结果与证据 |
+|---|---|
+| 安装器重建 | ✅ `deploy/windows/installer.iss` 以 Rust staging 树为源（中英双语；仅我/所有用户双模式；完成页快捷方式；`ssInstall` 调 `--archive` 归档旧版；装后 `--selftest-http` 探活；卸载先 `{sys}\taskkill` 结束常驻服务，修正无参 `Exec` 会挂住卸载器）；`scripts/build_setup_exe.py` 跨环境编译（版本取 `VERSION`，`ISCC` 环境变量可覆盖）；本机 Inno 7.1.1 编译 rc=0（79.1MB，含本机 PPE 模型），`.isl` 补 UTF-8 BOM |
+| CI 必发布 | ✅ `release.yml` build-rust 增「安装 Inno Setup 7.1.1（官方安装器 + SHA256 钉死 `8a5a6711…`；choco 仅有 6.x）」→「编译 setup.exe」；`SHA256SUMS-rust.txt` 与 artifact/publish 清单同时含 zip 与 setup。重打 v0.2.0 tag（`6d06068`）实测 run **43580580849 全绿 17m41s** |
+| 资产校验 | ✅ Release v0.2.0 正式（draft=false）三资产齐全：zip `77c1b7fc…`、setup `a329735a…`、`SHA256SUMS-rust.txt`；两行哈希与 API digest 逐字一致 |
+| 文档 | ✅ 安装与卸载补 setup.exe 安装/升级/卸载全节；部署指南形态表、README 快速开始、CHANGELOG 补记「随 Python 退役误删安装器」与恢复；release-notes-v0.2.0 标注为初版（2026-11-12）历史 |
+
+**遗留**：代码签名（T-403）仍为人工事项（未签名安装器可能触发 SmartScreen）。
+历史文档（40-roadmap/70-release-plan/验证记录/20-research/m0-spike）按用户决策保留不动。
 
 ## 二轮审查基线与本轮目标
 
