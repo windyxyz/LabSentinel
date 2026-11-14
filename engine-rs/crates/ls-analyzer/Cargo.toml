@@ -13,12 +13,12 @@ name = "ls-analyzer"
 path = "src/main.rs"
 
 [dependencies]
-ls-proto = { path = "../ls-proto" }
-ls-core = { path = "../ls-core" }
-ls-track = { path = "../ls-track" }
-ls-ingest = { path = "../ls-ingest" }
-ls-dispatch = { path = "../ls-dispatch" }  # R2-305: 渠道快照转 ChannelConfig
-ls-infer = { path = "../ls-infer", features = ["tract", "ort"] }
+ls-proto = { version = "0.1.0", path = "../ls-proto" }
+ls-core = { version = "0.1.0", path = "../ls-core" }
+ls-track = { version = "0.1.0", path = "../ls-track" }
+ls-ingest = { version = "0.1.0", path = "../ls-ingest" }
+ls-dispatch = { version = "0.1.0", path = "../ls-dispatch" }  # R2-305: 渠道快照转 ChannelConfig
+ls-infer = { version = "0.1.0", path = "../ls-infer", features = ["tract", "ort"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tonic = "0.13"
 prost = "0.13"

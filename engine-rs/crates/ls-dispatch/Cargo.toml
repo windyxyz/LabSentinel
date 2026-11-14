@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ls-store = { path = "../ls-store" }
+ls-store = { version = "0.1.0", path = "../ls-store" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ureq = { version = "2", features = ["tls"] }

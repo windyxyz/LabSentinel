@@ -101,10 +101,13 @@ pub fn rollback(install: &Path) -> Result<PathBuf, String> {
         .filter(|n| safe_component(n).is_some() && n != &current)
         .collect();
     cands.sort();
-    let target_name = cands.pop().ok_or_else(|| "没有可回滚的旧版本".to_string())?;
+    let target_name = cands
+        .pop()
+        .ok_or_else(|| "没有可回滚的旧版本".to_string())?;
     let target = versions.join(&target_name);
     copy_tree(&target, install, true).map_err(|e| format!("回滚复制失败: {e}"))?;
-    fs::write(install.join(CURRENT_MARK), &target_name).map_err(|e| format!("写 current.txt 失败: {e}"))?;
+    fs::write(install.join(CURRENT_MARK), &target_name)
+        .map_err(|e| format!("写 current.txt 失败: {e}"))?;
     Ok(target)
 }
 
@@ -202,7 +205,10 @@ mod tests {
             fs::read_to_string(root.join("app/server/main.py")).unwrap(),
             "old-1.1"
         );
-        assert_eq!(fs::read_to_string(root.join("current.txt")).unwrap(), "1.1.0");
+        assert_eq!(
+            fs::read_to_string(root.join("current.txt")).unwrap(),
+            "1.1.0"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

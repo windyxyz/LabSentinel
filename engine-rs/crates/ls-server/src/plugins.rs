@@ -381,14 +381,17 @@ impl PluginManager {
             let mut entry = archive
                 .by_index(i)
                 .map_err(|e| (400u16, format!("zip 条目读取失败: {e}")))?;
-            let name = entry.name().to_string();
+            let name = entry
+                .name()
+                .map_err(|e| (400u16, format!("zip 条目名读取失败: {e}")))?
+                .to_string();
             if name.ends_with('/') {
                 continue; // 目录条目
             }
-            let dest = match entry.enclosed_name() {
-                Some(p) => target.join(p),
-                None => return Err((400u16, format!("zip 条目路径非法: {name}"))),
-            };
+            let safe = entry
+                .enclosed_name()
+                .ok_or_else(|| (400u16, format!("zip 条目路径非法: {name}")))?;
+            let dest = target.join(&safe);
             let dest_c = dest.canonicalize().unwrap_or_else(|_| dest.clone());
             if !dest_c.starts_with(&target_c) {
                 return Err((400u16, format!("zip 条目逃逸安装目录: {name}")));

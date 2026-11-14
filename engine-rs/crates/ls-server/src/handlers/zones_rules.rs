@@ -80,7 +80,7 @@ pub(crate) fn rule_json(
         i64,
         i64,
         Option<String>, // days_of_week（RA1.1 补列，与 Python store.rules 同口径）
-        bool, // holiday_only（RA4.2 补列，节假日限定规则）
+        bool,           // holiday_only（RA4.2 补列，节假日限定规则）
     ),
 ) -> Value {
     json!({"id": t.0, "camera_id": t.1, "zone_id": t.2, "behavior": t.3,

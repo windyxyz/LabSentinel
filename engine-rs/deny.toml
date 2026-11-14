@@ -31,6 +31,8 @@ allow = [
     # 复合表达式由 cargo-deny 按单个 SPDX license 逐项匹配（MIT/Apache-2.0 已在上方），
     # 不再列出 "MIT OR Apache-2.0" 之类表达式——新版本只接受 license 或 WITH 例外。
     "CDLA-Permissive-2.0",
+    "IJG",
+    "AGPL-3.0-only",
 ]
 # 例外：个别 crate 的许可证字段用非 SPDX 文本或双许可歧义，显式澄清后放行
 # （新增前必须在 PR 说明并链接上游 Cargo.toml/LICENSE）。

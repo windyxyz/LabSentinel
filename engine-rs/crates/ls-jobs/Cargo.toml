@@ -6,8 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ls-store = { path = "../ls-store" }
-ls-dispatch = { path = "../ls-dispatch" }
+ls-store = { version = "0.1.0", path = "../ls-store" }
+ls-dispatch = { version = "0.1.0", path = "../ls-dispatch" }
 rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1721,7 +1721,9 @@ pub mod selftest {
             return 1;
         };
         if ver < 12 {
-            eprintln!("[selftest-db] schema v{ver} < 12（库过旧：用新版服务启动一次完成自举/升级）");
+            eprintln!(
+                "[selftest-db] schema v{ver} < 12（库过旧：用新版服务启动一次完成自举/升级）"
+            );
             return 1;
         }
         let Ok(cams) = s.cameras() else {
