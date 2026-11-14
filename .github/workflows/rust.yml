@@ -100,6 +100,14 @@ jobs:
       - name: cargo deny check（licenses / advisories / bans / sources）
         working-directory: engine-rs
         run: cargo deny check
-      - name: cargo audit（RustSec 公告）
+      - name: cargo audit（RustSec 公告；与 deny 共用豁免清单，见 engine-rs/deny.toml）
         working-directory: engine-rs
-        run: cargo audit
+        # rumqttc 0.25 钉死 rustls-webpki 0.102.8（见 deny.toml ignore 理由），
+        # 与 deny 同口径豁免 5 条 webpki 公告
+        run: >
+          cargo audit
+          --ignore RUSTSEC-2026-0049
+          --ignore RUSTSEC-2026-0098
+          --ignore RUSTSEC-2026-0099
+          --ignore RUSTSEC-2026-0104
+          --ignore RUSTSEC-2026-0382
