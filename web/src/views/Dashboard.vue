@@ -93,7 +93,7 @@ onUnmounted(() => clearInterval(pollTimer))
     <div class="cards" v-if="sys">
       <div class="card" :title="`onnxruntime providers: ${(sys.providers || []).join(', ') || '探测失败'}`">
         <div class="muted">后端</div>
-        <div class="num">{{ sys.backend }}</div>
+        <div class="num" style="padding-right:10px">{{ sys.backend }}</div>
         <div class="muted" style="font-size:12px; margin-top:4px">{{ gpuHint }}</div>
       </div>
       <div class="card"><div class="muted">今日事件</div><div class="num">{{ Object.values(sys.today_counts || {}).reduce((a, b) => a + b, 0) }}</div></div>

@@ -61,12 +61,12 @@ async function clearAll() {
       <span :class="status.enabled ? 'lv2' : 'lv1'" style="border-radius:10px; padding:1px 8px; font-size:12px">
         {{ status.enabled ? '已开启' : '未开启（默认）' }}
       </span>
-      <span class="muted">服务状态：{{ status.configured ? '已配置' : '未配置（缺 LS_COMPREFACE_API_KEY）' }}</span>
+      <span class="muted">服务状态：{{ status.configured ? '已配置' : '未配置（未完成服务对接）' }}</span>
       <span class="muted">识别阈值：{{ status.threshold }}</span>
     </div>
     <p class="muted" style="margin-top:6px">
-      开关只能通过 .env 的 LS_FACE_ENABLED 修改后重启，界面不提供开关（防误开）。
-      开启前必读 README「人脸比对合规」章节：需单独取得本人同意、现场设置提示标识、超 10 万人需备案。
+      人脸功能默认关闭；如需开启，请在服务配置中设置后重启本页生效。
+      开启前请确认已满足合规要求：取得被采集人同意、现场设置采集提示标识。
     </p>
   </div>
 

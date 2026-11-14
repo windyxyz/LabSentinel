@@ -197,9 +197,10 @@ async function loadPlugins() {
   } catch (e) {
     const msg = String(e.message || e)
     pluginsLoaded.value = true
+    // 产品化：网络异常（Failed to fetch 等）不裸露浏览器原文
     pluginsError.value = msg.includes('401') || msg.includes('403')
       ? '需要管理令牌——请在页面顶部填写后重试'
-      : msg
+      : '无法连接服务，请确认服务正在运行'
   }
 }
 function pluginStateLabel(p) {
@@ -405,7 +406,7 @@ async function watchLive(cam) {
       <button @click="saveToken">保存令牌</button>
       <span v-if="tokenMsg" class="muted">{{ tokenMsg }}</span>
     </div>
-    <p class="muted" style="margin-top:4px">令牌仅保存在本浏览器 localStorage；服务端未启用鉴权（LS_ADMIN_TOKEN 为空）时无需填写。</p>
+    <p class="muted" style="margin-top:4px">令牌仅保存在本浏览器；服务端未启用鉴权时无需填写。</p>
 
     <h3 style="margin:14px 0 10px">告警渠道状态</h3>
     <table>
@@ -424,7 +425,7 @@ async function watchLive(cam) {
       <button :disabled="alertTesting" @click="runAlertTest">{{ alertTesting ? '测试中…' : '发送测试告警' }}</button>
       <span v-if="alertTestMsg" class="muted">{{ alertTestMsg }}</span>
     </div>
-    <p class="muted" style="margin-top:2px">渠道申请与配置方法见仓库 docs/guide/部署指南.md「4. 告警渠道配置」。</p>
+    <p class="muted" style="margin-top:2px">各渠道的申请与配置方法见《部署指南》「告警渠道配置」章节。</p>
 
     <h3 style="margin:14px 0 10px">失败投递（最近 10 条）</h3>
     <table v-if="failedDeliveries.length">
@@ -482,7 +483,7 @@ async function watchLive(cam) {
     <p v-else class="muted">无静默（事件照常推送）</p>
     <p v-if="silenceMsg" class="muted" style="margin-top:4px">{{ silenceMsg }}</p>
 
-    <h3 style="margin:14px 0 10px">配置导入导出（任务79）</h3>
+    <h3 style="margin:14px 0 10px">配置导入导出</h3>
     <div class="row" style="align-items:center">
       <button class="ghost" :disabled="cfgBusy" @click="exportConfig">
         {{ cfgBusy ? '导出中…' : '导出配置 JSON' }}</button>
@@ -501,14 +502,14 @@ async function watchLive(cam) {
     </div>
     <p v-if="cfgMsg" class="muted" style="margin-top:6px; white-space:pre-wrap">{{ cfgMsg }}</p>
     <p class="muted" style="margin-top:4px">
-      导出默认脱敏 RTSP 密码（***:***@）；含密码版本需另行处理。导入不自动启动摄像头。</p>
+      导出的配置不含摄像头密码（已脱敏）；导入后不会自动启动摄像头。</p>
 
-    <h3 style="margin:14px 0 10px">告警文案模板（任务85）</h3>
+    <h3 style="margin:14px 0 10px">告警文案模板</h3>
     <div class="row" style="align-items:center">
       <button class="ghost" :disabled="tplBusy" @click="loadTemplate">
         {{ tplBusy ? '加载中…' : '加载当前模板' }}</button>
       <button class="ghost" :disabled="tplBusy || !tpl.text" @click="previewTemplate">预览</button>
-      <span class="muted">修改模板请改 .env/config.env 的 LS_ALERT_TEMPLATE_*，重启生效</span>
+      <span class="muted">模板通过配置文件修改，重启后生效</span>
     </div>
     <textarea v-if="tpl.text" readonly class="muted"
               style="width:100%; height:80px; margin-top:6px; font-size:12px">{{ tpl.text }}</textarea>
@@ -517,17 +518,15 @@ async function watchLive(cam) {
     <div v-if="tplPreview" class="muted" style="white-space:pre-wrap; border:1px solid var(--divider); border-radius:6px; padding:8px; margin-top:6px">
       {{ tplPreview }}</div>
 
-    <h3 style="margin:14px 0 10px">服务控制（任务120）</h3>
+    <h3 style="margin:14px 0 10px">服务控制</h3>
     <div class="row" style="align-items:center">
       <button class="ghost" @click="shutdownServer">停止服务…</button>
-      <span class="muted">停止后摄像头分析、事件推送全部暂停；重新启动程序（快捷方式/启动.bat）恢复。</span>
+      <span class="muted">停止后摄像头分析与事件推送将暂停；重新启动程序后恢复。</span>
     </div>
 
-    <h3 style="margin:14px 0 10px">插件（外挂）<span class="muted" style="font-size:12px">（任务131，默认禁用）</span></h3>
+    <h3 style="margin:14px 0 10px">插件（外挂）<span class="muted" style="font-size:12px">（默认禁用）</span></h3>
     <p class="muted" style="margin:0 0 6px">
-      插件=代码执行：默认禁用、管理员显式启用。清单放
-      <code>&lt;数据目录&gt;/plugins/&lt;id&gt;/plugin.json</code>，
-      指南见 docs/dev/plugin-guide.md。</p>
+      插件具备完整代码执行能力，默认禁用，需管理员在此显式启用后才可运行。</p>
     <div class="row" style="margin-bottom:6px">
       <button class="ghost" @click="loadPlugins">刷新插件</button>
       <span v-if="pluginsError" class="muted">{{ pluginsError }}</span>

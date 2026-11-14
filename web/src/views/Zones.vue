@@ -225,7 +225,7 @@ async function addRule(zoneId) {
     </div>
 
     <!-- 任务112：日期例外表 -->
-    <h3 style="margin:14px 0 10px">日期例外（任务112）</h3>
+    <h3 style="margin:14px 0 10px">日期例外</h3>
     <div class="row">
       <input type="date" v-model="newCal.date" style="width:150px" />
       <select v-model="newCal.mode">
@@ -275,7 +275,7 @@ async function addRule(zoneId) {
       </table>
     </details>
 
-    <h3 style="margin:14px 0 10px">复制到其他摄像头（任务80）</h3>
+    <h3 style="margin:14px 0 10px">复制到其他摄像头</h3>
     <div v-if="cams.length <= 1" class="muted">只有一路摄像头——先在「摄像头」页添加更多，再来复制配置。</div>
     <template v-else>
       <div class="row" style="align-items:flex-start">
