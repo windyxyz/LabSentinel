@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, adminToken, mediaUrl } from '../api'
+import { api, mediaUrl } from '../api'
 import WebrtcPlayer from '../components/WebrtcPlayer.vue'
 import AsyncState from '../components/AsyncState.vue'
 import FsPicker from '../components/FsPicker.vue'
@@ -42,72 +42,17 @@ watch(() => form.value.type, t => { if (t === 'usb') loadUsb() })
 const snap = ref({})  // id -> timestamp (用于强制刷新 img)
 const live = ref(null)   // { id, name, wsUrl } 正在观看实时画面的摄像头
 const liveErr = ref('')
-const tokenInput = ref(adminToken.get())
-const tokenMsg = ref('')
-// 任务23：告警渠道状态与自测
-const CHANNEL_NAMES = {
-  wecom: '企业微信', dingtalk: '钉钉', feishu: '飞书', serverchan: 'Server酱·微信',
-  pushplus: 'PushPlus·微信', qmsg: 'Qmsg·QQ', email: '邮件',
+// RA5-UX：截图文件夹目录选择器（图片文件夹接入用）
+const fsPick = ref(null)
+const fsPickTitle = ref('选择文件夹')
+function pickSource() {
+  fsPickTitle.value = '选择截图文件夹'
+  fsPick.value?.openAt(form.value.source || '')
 }
-const alertChannels = ref([])
-const alertTesting = ref(false)
-const alertTestMsg = ref('')
-const failedDeliveries = ref([])
-
-async function loadAlerts() {
-  try {
-    alertChannels.value = (await api.alertsStatus()).channels
-    failedDeliveries.value = await api.alertDeliveries({ status: 'failed', limit: 10 })
-    silences.value = await api.alertSilences()  // 任务81
-  } catch { /* 服务未就绪时静默 */ }
+function onPicked(p) {
+  form.value.source = p
 }
 
-// 任务81：告警静默
-const silences = ref([])
-const silenceMsg = ref('')
-const silenceScope = ref('global')
-const silenceTarget = ref('')
-const silenceDuration = ref(3600)
-const silenceReason = ref('')
-
-async function addSilence(scope, target = silenceTarget.value, duration_s = silenceDuration.value) {
-  silenceMsg.value = ''
-  try {
-    await api.addAlertSilence({ scope, target: target || null, duration_s,
-                                reason: silenceReason.value || null })
-    silenceReason.value = ''
-    loadAlerts()
-  } catch (e) { silenceMsg.value = String(e.message || e) }
-}
-
-async function removeSilence(id) {
-  try { await api.deleteAlertSilence(id); loadAlerts() }
-  catch (e) { silenceMsg.value = String(e.message || e) }
-}
-
-async function runAlertTest() {
-  alertTesting.value = true
-  alertTestMsg.value = ''
-  try {
-    const results = await api.alertTest()
-    const okN = results.filter(r => r.ok).length
-    alertTestMsg.value = `测试完成：${okN}/${results.length} 渠道成功` +
-      results.filter(r => !r.ok).map(r => `（${CHANNEL_NAMES[r.channel] || r.channel}：${r.error || '失败'}）`).join('')
-    loadAlerts()
-  } catch (e) { alertTestMsg.value = String(e.message || e) }
-  alertTesting.value = false
-}
-
-async function retryDelivery(d) {
-  try { await api.alertDeliveryRetry(d.id); loadAlerts() }
-  catch (e) { alert(String(e.message || e)) }
-}
-
-function saveToken() {
-  adminToken.set(tokenInput.value.trim())
-  tokenMsg.value = adminToken.get() ? '令牌已保存（仅存本浏览器）' : '令牌已清除'
-  refresh()
-}
 
 // T-336：一键切换/回退分析器（python↔rust）；运行中由服务端自动重启该路
 async function setAnalyzer(c, ev) {
@@ -181,93 +126,8 @@ function viewFor(c) {
   const m = sys.value.cameras.find(x => x.id === c.id) || {}
   return { ...c, ...m }
 }
-onMounted(() => { refresh(); loadAlerts(); loadPlugins() })
+onMounted(() => { refresh() })
 
-// 任务131：插件（外挂）管理（默认禁用；启用=管理员显式授权）
-const plugins = ref([])
-const pluginsError = ref('')
-const pluginsLoaded = ref(false)
-const pluginBusy = ref('')
-const pluginLog = ref(null)
-// RA5-UX：目录选择器 + 插件 zip 上传
-const fsPick = ref(null)
-const fsPickTitle = ref('选择文件夹')
-function pickSource() {
-  fsPickTitle.value = '选择截图文件夹'
-  fsPick.value?.openAt(form.value.source || '')
-}
-function onPicked(p) {
-  form.value.source = p
-}
-async function onUploadZip(e) {
-  const f = e.target.files?.[0]
-  if (!f) return
-  pluginBusy.value = 'upload'
-  try {
-    const fd = new FormData()
-    fd.append('file', f)
-    await api.pluginsUpload(fd)
-    await loadPlugins()
-  } catch (err) {
-    const m = String(err.message || err)
-    pluginsError.value = m.includes('401') || m.includes('403')
-      ? '需要管理令牌——请在页面顶部填写后重试'
-      : '安装失败：' + m
-  } finally {
-    pluginBusy.value = ''
-    e.target.value = ''
-  }
-}
-
-async function loadPlugins() {
-  try {
-    plugins.value = (await api.pluginsList()).plugins
-    pluginsError.value = ''
-    pluginsLoaded.value = true
-  } catch (e) {
-    const msg = String(e.message || e)
-    pluginsLoaded.value = true
-    // 产品化：网络异常（Failed to fetch 等）不裸露浏览器原文
-    pluginsError.value = msg.includes('401') || msg.includes('403')
-      ? '需要管理令牌——请在页面顶部填写后重试'
-      : '无法连接服务，请确认服务正在运行'
-  }
-}
-function pluginStateLabel(p) {
-  if (p.last_error && !p.running) return p.last_error
-  if (p.running) return `运行中 (pid ${p.pid})`
-  if (p.returncode !== null && p.returncode !== undefined)
-    return `已退出 (rc=${p.returncode})`
-  return p.enabled ? '已启用 · 未运行' : '未启用'
-}
-async function pluginAct(p, action) {
-  if (pluginBusy.value) return
-  const word = { enable: '启用', disable: '停用', start: '启动', stop: '停止' }[action] || action
-  if (action === 'enable' && (p.permissions || []).includes('write')) {
-    if (!confirm(`「${p.name}」含 write 权限：启用后将获得管理员令牌（等同完全控制本服务）。
-确定继续？`)) return
-  } else if (!confirm(`确定${word}插件「${p.name}」？`)) return
-  pluginBusy.value = p.id
-  try {
-    await api.pluginAction(p.id, action)
-    await loadPlugins()
-  } catch (e) {
-    const msg = String(e.message || e)
-    alert(msg + (msg.includes('401') || msg.includes('403') ? '\n请先在页面顶部填写管理令牌' : ''))
-  }
-  pluginBusy.value = ''
-}
-async function showPluginLog(p) {
-  if (pluginBusy.value) return
-  pluginBusy.value = p.id
-  try {
-    const r = await api.pluginLogs(p.id)
-    pluginLog.value = { id: p.id, text: r.logs || '（暂无日志输出）' }
-  } catch (e) {
-    pluginLog.value = { id: p.id, text: '日志读取失败: ' + (e.message || e) }
-  }
-  pluginBusy.value = ''
-}
 
 // 任务113：局域网发现助手（只读探测；发现结果仅作填表参考，不自动添加）
 const discover = ref({ busy: false, devices: [], error: '', lan: [], shown: false })
@@ -306,86 +166,8 @@ async function probeIp(ip) {
   probeBusyIp.value = ''
 }
 
-// 任务79：配置导入导出
-const cfgBusy = ref(false)
-const cfgMsg = ref('')
-const importMode = ref('merge')
-const confirmReplace = ref(false)
-const importFile = ref(null)
 
-async function exportConfig() {
-  cfgBusy.value = true
-  cfgMsg.value = ''
-  try {
-    const data = await api.configExportDownload()
-    cfgMsg.value = `已导出 ${data.cameras.length} 摄像头 / ${data.zones.length} 区域 / ` +
-      `${data.rules.length} 规则（已下载到浏览器下载目录）`
-  } catch (e) { cfgMsg.value = String(e.message || e) }
-  cfgBusy.value = false
-}
 
-function onImportFile(ev) {
-  importFile.value = ev.target.files?.[0] || null
-  cfgMsg.value = ''
-}
-
-async function importConfig() {
-  if (!importFile.value || cfgBusy.value) return
-  if (importMode.value === 'replace' && !confirmReplace.value) {
-    cfgMsg.value = 'replace 模式需先勾选确认（将清空现有摄像头/区域/规则）'
-    return
-  }
-  cfgBusy.value = true
-  cfgMsg.value = '解析中…'
-  try {
-    const text = await importFile.value.text()
-    let data
-    try { data = JSON.parse(text) } catch { throw new Error('不是合法 JSON 文件') }
-    cfgMsg.value = '导入中…'
-    const r = await api.configImport({ mode: importMode.value,
-                                       confirm_replace: confirmReplace.value, data })
-    cfgMsg.value = `导入完成：新建 ${r.created.cameras} 摄像头 / ${r.created.zones} 区域 / ` +
-      `${r.created.rules} 规则；跳过 ${r.skipped.cameras.length}/${r.skipped.zones.length}/` +
-      `${r.skipped.rules.length}` + (r.warnings.length ? `\n${r.warnings.join('\n')}` : '')
-    refresh()
-  } catch (e) { cfgMsg.value = String(e.message || e) }
-  cfgBusy.value = false
-  importFile.value = null
-}
-
-// 任务85：告警文案模板（只读展示 + 预览）
-const tpl = ref({ text: '', title: '', placeholders: {} })
-const tplPreview = ref('')
-const tplBusy = ref(false)
-const tplSample = ref({ level: 3, type: 'enter_no_ppe', camera_id: 1, track_id: 7,
-                        detail: '示例：有人未穿实验服进入试剂区' })
-
-async function loadTemplate() {
-  tplBusy.value = true
-  try {
-    tpl.value = await api.alertTemplate()
-    tplPreview.value = ''
-  } catch (e) { tplPreview.value = String(e.message || e) }
-  tplBusy.value = false
-}
-
-async function previewTemplate() {
-  tplBusy.value = true
-  try {
-    const r = await api.alertTemplatePreview(tplSample.value)
-    tplPreview.value = `标题：${r.title}\n正文：${r.text}`
-  } catch (e) { tplPreview.value = String(e.message || e) }
-  tplBusy.value = false
-}
-
-// 任务120：网页端停止服务（响应返回后服务进程 ~1s 内退出）
-async function shutdownServer() {
-  if (!confirm('确定停止 LabSentinel 服务？\n停止后面板将断开，重新启动程序后才能再次访问。')) return
-  try {
-    await api.shutdownServer()
-  } catch { /* 停止瞬间连接中断属预期，忽略 */ }
-  alert('停止指令已发出。服务退出后本页面将无法刷新；可关闭浏览器窗口。')
-}
 
 async function add() {
   if (!form.value.name || !form.value.source || adding.value) return
@@ -430,170 +212,6 @@ async function watchLive(cam) {
 
 <template>
   <div class="panel">
-    <h3 style="margin-bottom:10px">管理令牌</h3>
-    <div class="row">
-      <input v-model="tokenInput" placeholder="服务端启用鉴权时填写（LS_ADMIN_TOKEN）" aria-label="管理令牌" style="flex:1" />
-      <button @click="saveToken">保存令牌</button>
-      <span v-if="tokenMsg" class="muted">{{ tokenMsg }}</span>
-    </div>
-    <p class="muted" style="margin-top:4px">令牌仅保存在本浏览器；服务端未启用鉴权时无需填写。</p>
-
-    <h3 style="margin:14px 0 10px">告警渠道状态</h3>
-    <table>
-      <tr><th>渠道</th><th>配置状态</th><th>投递 ok</th><th>failed</th><th>pending</th></tr>
-      <tr v-for="ch in alertChannels" :key="ch.name">
-        <td>{{ CHANNEL_NAMES[ch.name] || ch.name }}</td>
-        <td>
-          <span :class="'lv' + (ch.configured ? 1 : 2)">{{ ch.configured ? '已配置 ✓' : '未配置' }}</span>
-        </td>
-        <td>{{ ch.deliveries.ok }}</td>
-        <td :style="ch.deliveries.failed ? 'color:var(--l3); font-weight:600' : ''">{{ ch.deliveries.failed }}</td>
-        <td>{{ ch.deliveries.pending }}</td>
-      </tr>
-    </table>
-    <div class="row" style="margin-top:8px">
-      <button :disabled="alertTesting" @click="runAlertTest">{{ alertTesting ? '测试中…' : '发送测试告警' }}</button>
-      <span v-if="alertTestMsg" class="muted">{{ alertTestMsg }}</span>
-    </div>
-    <p class="muted" style="margin-top:2px">各渠道的申请与配置方法见《部署指南》「告警渠道配置」章节。</p>
-
-    <h3 style="margin:14px 0 10px">失败投递（最近 10 条）</h3>
-    <table v-if="failedDeliveries.length">
-      <tr><th>ID</th><th>事件</th><th>渠道</th><th>尝试次数</th><th>最近错误</th><th></th></tr>
-      <tr v-for="d in failedDeliveries" :key="d.id">
-        <td>{{ d.id }}</td>
-        <td>#{{ d.event_id }}</td>
-        <td>{{ CHANNEL_NAMES[d.channel] || d.channel }}</td>
-        <td>{{ d.attempts }}</td>
-        <td class="muted" style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">{{ d.last_error || '-' }}</td>
-        <td><button class="ghost" @click="retryDelivery(d)">重发</button></td>
-      </tr>
-    </table>
-    <p v-else class="muted">无失败投递 ✓</p>
-
-    <h3 style="margin:14px 0 10px">告警静默（维护窗口）</h3>
-    <div class="row" style="align-items:center">
-      <button class="ghost" :disabled="cfgBusy" @click="addSilence('global', null, 3600)">
-        全局静默 1h</button>
-      <select v-model="silenceTarget" aria-label="摄像头" style="max-width:160px">
-        <option value="">选摄像头…</option>
-        <option v-for="c in cams" :key="c.id" :value="String(c.id)">{{ c.name }}</option>
-      </select>
-      <button class="ghost" :disabled="cfgBusy || !silenceTarget"
-              @click="addSilence('camera', silenceTarget, 3600)">本摄像头静默 1h</button>
-      <button class="ghost" :disabled="cfgBusy || !silenceTarget"
-              @click="addSilence('camera', silenceTarget, 14400)">4h</button>
-      <button class="ghost" :disabled="cfgBusy || !silenceTarget"
-              @click="addSilence('camera', silenceTarget, 86400)">24h</button>
-    </div>
-    <div class="row" style="margin-top:6px; align-items:center">
-      <select v-model="silenceScope" aria-label="静默范围">
-        <option value="global">全局</option>
-        <option value="camera">摄像头（填 ID）</option>
-        <option value="level">级别（1/2/3）</option>
-        <option value="type">类型</option>
-      </select>
-      <input v-model="silenceTarget" placeholder="target（ID/级别/类型）" style="width:140px" />
-      <select v-model.number="silenceDuration" aria-label="时长">
-        <option :value="3600">1 小时</option><option :value="14400">4 小时</option>
-        <option :value="86400">24 小时</option><option :value="604800">7 天</option>
-      </select>
-      <input v-model="silenceReason" placeholder="原因（可选）" style="width:160px" />
-      <button class="ghost" @click="addSilence()">添加</button>
-    </div>
-    <table v-if="silences.length" style="margin-top:8px">
-      <tr><th>ID</th><th>范围</th><th>目标</th><th>剩余</th><th>原因</th><th></th></tr>
-      <tr v-for="s in silences" :key="s.id">
-        <td>#{{ s.id }}</td><td>{{ s.scope }}</td><td>{{ s.target ?? '—' }}</td>
-        <td class="muted">{{ Math.ceil(s.remaining_s / 60) }} 分钟</td>
-        <td class="muted">{{ s.reason || '—' }}</td>
-        <td><button class="ghost" @click="removeSilence(s.id)">解除</button></td>
-      </tr>
-    </table>
-    <p v-else class="muted">无静默（事件照常推送）</p>
-    <p v-if="silenceMsg" class="muted" style="margin-top:4px">{{ silenceMsg }}</p>
-
-    <h3 style="margin:14px 0 10px">配置导入导出</h3>
-    <div class="row" style="align-items:center">
-      <button class="ghost" :disabled="cfgBusy" @click="exportConfig">
-        {{ cfgBusy ? '导出中…' : '导出配置 JSON' }}</button>
-      <input type="file" accept=".json,application/json" style="max-width:220px"
-             aria-label="选择配置 JSON 文件" @change="onImportFile" />
-      <select v-model="importMode" aria-label="导入模式">
-        <option value="merge">合并（跳过同名）</option>
-        <option value="replace">替换（清空现有配置）</option>
-      </select>
-      <label v-if="importMode === 'replace'" class="muted">
-        <input type="checkbox" v-model="confirmReplace" style="margin:0 4px 0 0" />
-        确认清空现有摄像头/区域/规则（事件保留但失去关联）
-      </label>
-      <button :disabled="cfgBusy || !importFile" @click="importConfig">
-        {{ cfgBusy ? '导入中…' : '导入' }}</button>
-    </div>
-    <p v-if="cfgMsg" class="muted" style="margin-top:6px; white-space:pre-wrap">{{ cfgMsg }}</p>
-    <p class="muted" style="margin-top:4px">
-      导出的配置不含摄像头密码（已脱敏）；导入后不会自动启动摄像头。</p>
-
-    <h3 style="margin:14px 0 10px">告警文案模板</h3>
-    <div class="row" style="align-items:center">
-      <button class="ghost" :disabled="tplBusy" @click="loadTemplate">
-        {{ tplBusy ? '加载中…' : '加载当前模板' }}</button>
-      <button class="ghost" :disabled="tplBusy || !tpl.text" @click="previewTemplate">预览</button>
-      <span class="muted">模板通过配置文件修改，重启后生效</span>
-    </div>
-    <textarea v-if="tpl.text" readonly class="muted"
-              style="width:100%; height:80px; margin-top:6px; font-size:12px">{{ tpl.text }}</textarea>
-    <p v-if="tpl.text" class="muted" style="font-size:12px">
-      占位符：{{ Object.keys(tpl.placeholders || {}).join(' / ') }}</p>
-    <div v-if="tplPreview" class="muted" style="white-space:pre-wrap; border:1px solid var(--divider); border-radius:6px; padding:8px; margin-top:6px">
-      {{ tplPreview }}</div>
-
-    <h3 style="margin:14px 0 10px">服务控制</h3>
-    <div class="row" style="align-items:center">
-      <button class="ghost" @click="shutdownServer">停止服务…</button>
-      <span class="muted">停止后摄像头分析与事件推送将暂停；重新启动程序后恢复。</span>
-    </div>
-
-    <h3 style="margin:14px 0 10px">插件（外挂）<span class="muted" style="font-size:12px">（默认禁用）</span></h3>
-    <p class="muted" style="margin:0 0 6px">
-      插件具备完整代码执行能力，默认禁用，需管理员在此显式启用后才可运行。</p>
-    <div class="row" style="margin-bottom:6px">
-      <button class="ghost" @click="loadPlugins">刷新插件</button>
-      <label class="ghost" style="cursor:pointer">
-        上传插件 zip<input type="file" accept=".zip" hidden @change="onUploadZip" />
-      </label>
-      <span v-if="pluginsError" class="muted">{{ pluginsError }}</span>
-    </div>
-    <table v-if="plugins.length">
-      <tr><th>插件</th><th>版本</th><th>权限</th><th>状态</th><th></th></tr>
-      <tr v-for="p in plugins" :key="p.id">
-        <td>{{ p.name }}<div class="muted" style="font-size:11px">{{ p.id }}</div></td>
-        <td class="muted">{{ p.version }}</td>
-        <td>
-          <span v-for="perm in (p.permissions || [])" :key="perm"
-                :style="perm === 'write' ? 'color:#dc2626; font-weight:600' : ''">{{ perm }}</span>
-          <span v-if="!(p.permissions || []).length" class="muted">无</span>
-        </td>
-        <td :class="p.running ? 'st-ok' : 'muted'">{{ pluginStateLabel(p) }}</td>
-        <td style="white-space:nowrap">
-          <button v-if="!p.enabled" class="ghost" :disabled="pluginBusy === p.id"
-                  @click="pluginAct(p, 'enable')">启用</button>
-          <button v-else class="ghost" :disabled="pluginBusy === p.id"
-                  @click="pluginAct(p, 'disable')">停用</button>
-          <button v-if="p.enabled && !p.running" :disabled="pluginBusy === p.id"
-                  @click="pluginAct(p, 'start')">启动</button>
-          <button v-if="p.running" class="ghost" :disabled="pluginBusy === p.id"
-                  @click="pluginAct(p, 'stop')">停止</button>
-          <button class="ghost" :disabled="pluginBusy === p.id"
-                  @click="showPluginLog(p)">看日志</button>
-        </td>
-      </tr>
-    </table>
-    <p v-else-if="pluginsLoaded && !pluginsError" class="muted" style="margin:6px 0">
-      暂无插件——把插件目录（含 plugin.json）放到数据目录 plugins/ 下，点「刷新插件」。</p>
-    <p class="muted" style="font-size:12px; margin:6px 0 0">
-      含 <b style="color:#dc2626">write</b> 权限的插件启用后将获得管理员令牌；未配置鉴权时插件以无令牌运行（内网使用）。</p>
-
     <h3 style="margin:14px 0 10px">添加摄像头</h3>
     <div class="row">
       <input v-model="form.name" placeholder="名称" aria-label="摄像头名称" style="width:120px" />
@@ -743,15 +361,6 @@ async function watchLive(cam) {
     <div style="width:min(92vw, 960px); cursor:default" @click.stop>
       <WebrtcPlayer :ws-url="live.wsUrl" :label="live.name" />
       <p class="muted" style="text-align:center; margin-top:8px">实时画面（WebRTC，延迟约 1s）· 点击空白处关闭</p>
-    </div>
-  </div>
-  <div v-if="pluginLog" style="position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:60" @click.self="pluginLog = null">
-    <div style="background:var(--panel, #16202e); color:inherit; border:1px solid var(--divider); border-radius:8px; padding:12px; width:min(760px, 92vw); max-height:80vh; overflow:auto">
-      <div style="display:flex; align-items:center; justify-content:space-between">
-        <b>插件日志 · {{ pluginLog.id }}</b>
-        <button class="ghost" @click="pluginLog = null">关闭</button>
-      </div>
-      <pre style="white-space:pre-wrap; font-size:12px; margin-top:8px">{{ pluginLog.text }}</pre>
     </div>
   </div>
   <FsPicker ref="fsPick" :title="fsPickTitle" @pick="onPicked" />
