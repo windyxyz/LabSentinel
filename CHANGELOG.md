@@ -4,7 +4,11 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 SemVer
 （决策 77-Q-05：下一版 0.2.0；构建元数据 `+<YYYYMMDD>.<shortsha>`）。
 
-## [Unreleased]
+## [0.2.0] - 2026-11-14（Rust 形态重发布）
+
+> 同一版本号二次发布：0.2.0 初版（2026-11-12，Python 双形态）发布后，
+> ADR-0011 过渡期完成、Python 运行时退役，正式形态改为 Rust 单二进制 zip。
+> 本段起为重发布内容；原 0.2.0（2026-11-12）段落保留在下方作历史记录。
 
 ### CI 门禁重构收口 + RustSec 漏洞清零（2026-11-14）
 - **CI 全绿（main @ 4568a45）**：`tests`（Rust nextest 双平台 + Web）与 `rust`
@@ -281,7 +285,7 @@
   zip+setup 双哈希，publish 上传清单补 setup；中文语言文件随仓库
   `deploy/windows/languages/`（choco 的 innosetup 不含 unofficial translations）。
 
-## [0.2.0] - 2026-11-12
+## [0.2.0（初版历史）] - 2026-11-12
 
 ### 结构化拆分 + 安装包化 + 清理（第四轮，2026-11-12）
 - **ls-server 细粒度拆分**：`engine-rs/crates/ls-server/src/main.rs` 5179→1349 行，
