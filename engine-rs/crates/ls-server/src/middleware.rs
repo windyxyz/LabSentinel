@@ -97,12 +97,19 @@ pub(crate) async fn guard_middleware(
         } else {
             (120, 60)
         };
+        // 2026-11-14 验收实证：claim 与普通写共用 IP 桶时，运行中写满 10 次后
+        // claim 必然 429（配对链断）。两类窗口独立计数（与 Python 分通道语义一致）。
+        let bucket = if path == "/api/pairing/claim" {
+            format!("{ip}|claim")
+        } else {
+            ip
+        };
         let now = std::time::Instant::now();
         let mut allowed = true;
         if !st.testing {
             if let Ok(mut m) = RATE.lock() {
                 let m = m.get_or_insert_with(std::collections::HashMap::new);
-                let e = m.entry(ip).or_default();
+                let e = m.entry(bucket).or_default();
                 e.retain(|t| now.duration_since(*t).as_secs() < window);
                 if e.len() >= limit {
                     allowed = false;
