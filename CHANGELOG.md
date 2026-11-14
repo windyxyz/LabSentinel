@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### CI 门禁重构收口 + RustSec 漏洞清零（2026-11-14）
+- **CI 全绿（main @ 4568a45）**：`tests`（Rust nextest 双平台 + Web）与 `rust`
+  （test/clippy/fmt + audit + route_coverage）全绿。
+- **依赖安全升级**：rusqlite/libsqlite3-sys 0.31→0.41（bundled SQLite ≥3.54.1，
+  RUSTSEC-2026-0459）；ureq 2→3（rustls 0.23.46，RUSTSEC-2026-0346/0349；
+  全调用点迁移到 `Agent::config_builder().timeout_global` API）；zip →9.5.1
+  （RUSTSEC-2026-0367~0429 解压内存放大/符号链接提权批）；rumqttc 0.24→0.25
+  （rustls 0.23 + ring provider 显式安装）。
+- **cargo-deny 钉 0.19.9**：0.20 的 spdx 升级使 allow 列表复合 SPDX 表达式逐项
+  拒绝（全量误报），0.18.3 解析不了 advisory 库的 CVSS 4.0 条目；deny.toml 重写为
+  单 id 白名单 + 显式 RUSTSEC ID 豁免（rumqttc 钉死的 rustls-webpki@0.102.8 与
+  rustls-pemfile@2.2.0，理由入库）；cargo audit 同口径 `--ignore`。
+- **CI 修复**：rust-toolchain 显式 `toolchain: stable`；ls-proto build.rs 旁路目录
+  改 OUT_DIR ASCII（修 Linux protoc）；sccache 移除；无工具链的交叉编译矩阵 job 删除。
+
 ### RA4.2：Python 运行时退役，Rust 单二进制成为唯一发布形态（2026-11-14）
 - **发行形态切换**：`release.yml` 只构建 `labsentinel-rust-<版本>-<日期>.zip` +
   `SHA256SUMS-rust.txt`（包内自带检测模型、ffmpeg/ffprobe、onnxruntime、前端与

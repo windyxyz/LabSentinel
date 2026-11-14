@@ -5,6 +5,17 @@
 > 每批任务完成后更新对应行，附实际运行证据。
 > 口径：✅ 完成并验证 · 🟡 部分/有条件 · ⬜ 未开始 · ⏸ 明确暂缓（用户 2026-11-08 决定）。
 
+## 第六轮：CI 门禁重构收口 + RustSec 漏洞清零（2026-11-14）
+
+| 项 | 结果与证据 |
+|---|---|
+| rust.yml/tests.yml 门禁适配退役 | ✅ dtolnay/rust-toolchain 显式 `toolchain: stable`（新 runner 缺省输入即报错）；ls-proto build.rs 旁路目录改 OUT_DIR ASCII（修 Linux protoc --proto_path）；sccache 移除（GHA cache env 在 reusable workflow 不可用致 nextest 全灭）；无工具链的 cross 矩阵 job 删除 |
+| cargo-deny 版本兼容三角 | ✅ 0.20 的 spdx 使 allow 列表 OR/AND 复合表达式逐项拒绝（adler2 等误报）→ 钉 `tool: cargo-deny@0.19.9`（0.18.3 解析不了 advisory 库 CVSS 4.0 条目）；deny.toml 重写：licenses.allow 仅单个 SPDX id（补 MIT-0/BSL-1.0/BlueOak-1.0.0/LGPL-2.1-or-later），advisories.ignore 显式列 RUSTSEC ID + crate@ver 理由（rumqttc 0.25 钉死的 rustls-webpki@0.102.8 / rustls-pemfile@2.2.0） |
+| RustSec 漏洞清零 | ✅ rusqlite/libsqlite3-sys 0.31→0.41（bundled SQLite ≥3.54.1，RUSTSEC-2026-0459）；ureq 2→3（rustls 0.22→0.23.46；dispatch/face/genai/vlm/update-check/ppe-download/selftest-http 全调用点适配，http_status_as_error(false) 保持显式状态码语义）；rumqttc 0.24→0.25（use-rustls-no-provider + ring 显式 provider，避免 aws-lc windows-gnu 交叉链接）；zip 0.6/2→9.5.1（RUSTSEC-2026-0367~0429 + GHSA-q7v9-x93c-xqv3；SimpleFileOptions/file_names Result 迭代适配） |
+| cargo audit 豁免 | ✅ 与 deny 同口径 --ignore 五条 webpki 公告（理由见 engine-rs/deny.toml） |
+| CI 终态 | ✅ run 43567333020/43567333145 **tests ✅ + rust ✅ 全绿**（main @ 4568a45） |
+| 收口后全量复验 | ✅ Rust workspace tests + clippy -D warnings + fmt 绿；`acceptance_rust_only` 39/39；`acceptance_vlm` PASS；插件 zip 上传/zip-slip 拒绝真 HTTP 实测；发行 zip（105MB，0 .py，必需资产齐）smoke_rust 4/4 PASS |
+
 ## 第五轮：RA4.2 过渡期收口——Python 退役（2026-11-14）
 
 | 项 | 结果与证据 |
