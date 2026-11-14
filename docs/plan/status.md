@@ -40,8 +40,9 @@
 | 项 | 结果与证据 |
 |---|---|
 | 安装器重建 | ✅ `deploy/windows/installer.iss` 以 Rust staging 树为源（中英双语；仅我/所有用户双模式；完成页快捷方式；`ssInstall` 调 `--archive` 归档旧版；装后 `--selftest-http` 探活；卸载先 `{sys}\taskkill` 结束常驻服务，修正无参 `Exec` 会挂住卸载器）；`scripts/build_setup_exe.py` 跨环境编译（版本取 `VERSION`，`ISCC` 环境变量可覆盖）；本机 Inno 7.1.1 编译 rc=0（79.1MB，含本机 PPE 模型），`.isl` 补 UTF-8 BOM |
-| CI 必发布 | ✅ `release.yml` build-rust 增「安装 Inno Setup 7.1.1（官方安装器 + SHA256 钉死 `8a5a6711…`；choco 仅有 6.x）」→「编译 setup.exe」；`SHA256SUMS-rust.txt` 与 artifact/publish 清单同时含 zip 与 setup。重打 v0.2.0 tag（`6d06068`）实测 run **43580580849 全绿 17m41s** |
-| 资产校验 | ✅ Release v0.2.0 正式（draft=false）三资产齐全：zip `77c1b7fc…`、setup `a329735a…`、`SHA256SUMS-rust.txt`；两行哈希与 API digest 逐字一致 |
+| CI 必发布 | ✅ `release.yml` build-rust 增「安装 Inno Setup 7.1.1（官方安装器 + SHA256 钉死 `8a5a6711…`；choco 仅有 6.x）」→「编译 setup.exe」→「安装→探活→卸载零残留冒烟」；`SHA256SUMS-rust.txt` 与 artifact/publish 清单同时含 zip 与 setup。重打 v0.2.0 tag（`8ced0eb`）实测 run **43582464267 全绿 20m45s**（build-rust 15m51s，含 setup 冒烟） |
+| 实测缺陷修复 | ✅ 用发布出的 setup.exe 静默安装→卸载实测：文件/探活/快捷方式/注册表均正常，但**卸载后开始菜单与桌面 lnk 残留**（`CreateShellLink` 产物不入 Inno 卸载日志）→ `[UninstallDelete]` 显式删 `{group}` 双 lnk + `dirifempty` + `{userdesktop}/{commondesktop}` 桌面 lnk；复测安装→卸载零残留 |
+| 资产校验 | ✅ Release v0.2.0 正式（draft=false）三资产齐全：zip `15d0bd5a…`、setup `30d37287…`（62.0MB）、`SHA256SUMS-rust.txt`；两行哈希与 API digest 逐字一致 |
 | 文档 | ✅ 安装与卸载补 setup.exe 安装/升级/卸载全节；部署指南形态表、README 快速开始、CHANGELOG 补记「随 Python 退役误删安装器」与恢复；release-notes-v0.2.0 标注为初版（2026-11-12）历史 |
 
 **遗留**：代码签名（T-403）仍为人工事项（未签名安装器可能触发 SmartScreen）。
