@@ -30,8 +30,8 @@ HairNet
 ## 1. 训练完成后的导出（标准流程）
 
 ```bash
-# 1) 评估（见执行报告要求：逐类 AP50 截图/表格）
-python tools/eval_report.py --weights Resources/runs/detect/<run>/weights/best.pt --data Resources/datasets/merged/data.yaml
+# 1) 评估（逐类 P/R/mAP：训练环境内用 ultralytics val）
+python -c "from ultralytics import YOLO; YOLO('Resources/runs/detect/<run>/weights/best.pt').val(data='Resources/datasets/merged/data.yaml', split='val')"
 
 # 2) 导出 ONNX（opset13、imgsz640、nms=False——服务端自己后处理）
 python tools/export_onnx.py --weights Resources/runs/detect/<run>/weights/best.pt --out m0-spike/yolo11n_ppe.onnx

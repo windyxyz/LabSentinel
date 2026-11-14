@@ -59,7 +59,7 @@
 - [x] web_dist 缓存策略：0.2.0 已接线（middleware static_cache_policy：
       assets/* immutable 1 年 + SPA 回退 no-cache），冒烟抽验资产 200 通过
 
-## RA4：部署/启动链替换评估（2026-11-13 评估完成 + 核心消解件落地）
+## RA4：部署/启动链替换评估（2026-11-13 评估完成；2026-11-14 过渡期收口完成）
 
 逐项判定（install_portable / portable_launcher 能力矩阵）：
 
@@ -72,7 +72,7 @@
 | 覆盖升级 | **Inno 消解** | UsePreviousAppDir |
 | 单实例锁/端口试探/开浏览器 | **Rust 重写 ✅ 已落地** | `--launch`（端口试探防双实例 + launcher.lock "pid port" 契约对齐 + 就绪开浏览器） |
 | finalize 健康检查（health_check.py） | **Rust 重写 ✅ 已落地** | `--selftest-http`（临时端口真启动轮询 ready ≤60s，本机实测 exit=0） |
-| 升级版本归档/回滚（versions/） | **RA4.2 保留 Python** | install_portable 归档/回滚带硬链接优化与 DB 备份联动；Python 安装器按 ADR-0010 保留一个过渡周期 |
+| 升级版本归档/回滚（versions/） | **Rust 重写 ✅ 已落地** | `--archive/--rollback`（排除 data/versions/缓存、版本名防穿越、current.txt 选次新归档；4 单测 + 真二进制冒烟） |
 | deploy.py（源码模式） | **豁免** | 开发工具，长期 Python |
 | tools/ 训练工具链 | **豁免** | ADR-0011 豁免清单 |
 
@@ -83,12 +83,17 @@
       内两条路径并存）
 - [x] 分发物零嵌入式 Python 验证：Rust 形态 zip 30.8MB 本就不含 runtime
       （RA3 冒烟覆盖）；Python 便携包/installer 按 ADR-0010/RA4.2 保留
-- [ ] RA4.2（过渡期末）：升级归档/回滚 Rust 化 + Inno finalize 切 `--selftest-http`
-      + Python 分发物退役清单执行
+- [x] RA4.2（过渡期末，2026-11-14 完成）：升级归档/回滚 Rust 化；Inno 安装器随
+      Python 分发物退役（发行形态改为 zip + `LabSentinel.bat`）；`server/` 与 Python
+      便携打包/安装/运维脚本全部删除；release.yml/tests.yml 改为 Rust 单产物门禁
 - [x] 过渡期 Python 纪律：P1/P2 必修（已全部闭环），P3 仅台账，不再大重构
 
-## 过渡期纪律
+> **收口记录（2026-11-14）**：RA1–RA5 全部完成；退役前全量门禁 Python 631 passed /
+> Rust 122 / Web 44 / acceptance_rust_only 39/39 / acceptance_vlm 9/9 / smoke_rust PASS。
+> 详见 ADR-0011「执行结果」与 `docs/plan/status.md` 第五轮。
 
-- Python 侧：只修 bug 不加功能；契约测试 626 例持续全绿。
+## 过渡期纪律（历史，已随 2026-11-14 收口结束）
+
+- Python 侧：只修 bug 不加功能；契约测试 626 例持续全绿（退役前 631 passed / 7 skipped）。
 - Rust 侧：routes_guard（inventory 同步）+ 黄金向量 + `--selftest-db` 三护住。
 - 灰度开关 `analyzer_default` 翻转点 = RA1 验收（替代原 N+1 版本节奏）。
