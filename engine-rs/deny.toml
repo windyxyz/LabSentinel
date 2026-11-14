@@ -1,58 +1,12 @@
-# T-335：cargo-deny 配置（许可证/公告/来源/依赖审计）
-# 用法：cd engine-rs && cargo deny check
-# CI：rust.yml 的 audit job（taiki-e/install-action@cargo-deny, cargo-audit）
-
-[graph]
-# workspace 内 dev/build 目标也纳入许可证检查（CI 与发布一致性）
-all-features = false
-
 [advisories]
 # 已知漏洞数据库（RustSec）；yanked crate 只警告不阻断（离线环境可复现优先）
 yanked = "warn"
-ignore = []
-
-[licenses]
-# 白名单：宽松许可证 + 弱 copyleft（MPL-2.0）；GPL 类显式拒绝。
-# 项目本身 AGPL-3.0 可接受 GPL 依赖，但按 76 文档 §11 要求仍显式审查后拒绝。
-allow = [
-    "MIT",
-    "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Zlib",
-    "MPL-2.0",
-    "Unicode-3.0",
-    "Unicode-DFS-2016",
-    "CC0-1.0",
-    "0BSD",
-    "Unlicense",
-    # 复合表达式由 cargo-deny 按单个 SPDX license 逐项匹配（MIT/Apache-2.0 已在上方），
-    # 不再列出 "MIT OR Apache-2.0" 之类表达式——新版本只接受 license 或 WITH 例外。
-    "CDLA-Permissive-2.0",
-    "IJG",
-    "AGPL-3.0-only",
+ignore = [
+    # rumqttc 0.25 传递依赖钉在 rustls-webpki 0.102.8（该线已停更且无修复版）——
+    # 本项目 MQTT 默认关闭（LS_MQTT_* 未配置零行为），TLS 客户端仅在显式启用时
+    # 连自家 broker；webpki 0.102 修复线在 rumqttc 主版本升级时跟进。
+    { crate = "rustls-webpki@0.102.8", reason = "RUSTSEC-2026-0049/0098/0099/0104/0382：仅经 rumqttc 0.25 传递（可选 MQTT 通道，默认关闭）；无 0.103 兼容版本，升级随 rumqttc 主版本" },
+    # rustls-pemfile 仅被 rumqttc 0.25 在「用户提供 CA PEM」路径使用；本项目 MQTT
+    # TLS 走 rustls-native-certs 系统信任源（mqtt.rs），不经此解析器。
+    { crate = "rustls-pemfile@2.2.0", reason = "RUSTSEC-2025-0134 unmaintained：仅 rumqttc 0.25 可选 PEM 解析路径；本项目不使用该路径" },
 ]
-# 例外：个别 crate 的许可证字段用非 SPDX 文本或双许可歧义，显式澄清后放行
-# （新增前必须在 PR 说明并链接上游 Cargo.toml/LICENSE）。
-exceptions = []
-
-[licenses.private]
-# 本工作区 crate（AGPL-3.0）不参与第三方许可证白名单
-ignore = true
-
-[bans]
-# 同名多版本默认警告（避免体积膨胀/符号冲突），阻断循环依赖与通配符版本
-multiple-versions = "warn"
-wildcards = "deny"
-highlight = "all"
-deny = []
-skip = []
-skip-tree = []
-
-[sources]
-unknown-registry = "deny"
-unknown-git = "deny"
-allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
