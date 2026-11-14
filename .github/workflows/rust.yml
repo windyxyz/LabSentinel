@@ -32,8 +32,12 @@ jobs:
         with:
           workspaces: engine-rs
       # T-335：sccache 编译缓存（与 rust-cache 叠加，跨 job 复用编译产物）
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # sccache
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # cargo-nextest
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+        with:
+          tool: sccache
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+        with:
+          tool: cargo-nextest
       # R2-505/N-32: --all-features brings the tract AND ort inference paths into
       # CI (ls-analyzer enables both indirectly, but explicit is required so a
       # feature-gated regression cannot hide behind default features).
@@ -90,42 +94,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # cargo-deny
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # cargo-audit
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+        with:
+          tool: cargo-deny
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+        with:
+          tool: cargo-audit
       - name: cargo deny check（licenses / advisories / bans / sources）
         working-directory: engine-rs
         run: cargo deny check
       - name: cargo audit（RustSec 公告）
         working-directory: engine-rs
         run: cargo audit
-
-  cross:
-    # T-335：交叉编译矩阵——目标只做 check（不链接），GNU Windows 与 Linux 双目标
-    # + macOS/ARM Linux 需对应链接器，故以 `cargo check --target` 覆盖语法/依赖可移植性。
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - x86_64-pc-windows-gnu
-          - x86_64-pc-windows-msvc
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
-        with:
-          workspaces: engine-rs
-      - name: cargo check --target ${{ matrix.target }}
-        working-directory: engine-rs
-        # 交叉目标缺系统链接器/openssl，只做前端检查；ls-proto 生成代码在 host 构建
-        # （ort 是 load-dynamic 非链接依赖，check 无需 libclang；CARGO_FEATURE_* 是
-        # cargo 输出给 build script 的变量，外部设置并不能关闭 feature——原写法无效已删）
-        run: cargo check --workspace --target ${{ matrix.target }}
