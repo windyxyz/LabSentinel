@@ -89,9 +89,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+      # 0.20 起 allow 列表不再接受 OR/AND 复合表达式语义变化导致大量误报——
+      # 先钉 0.18.3（最后一个接受完整 SPDX 表达式匹配的版本），升级需重审 deny.toml
+      - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
+          version: 0.18.3
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
         with:
           tool: cargo-audit
