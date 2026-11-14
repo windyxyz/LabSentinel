@@ -1,6 +1,7 @@
 # RA4.2 / ADR-0011：发布流水线——Rust 单二进制正式产物（过渡期结束后的唯一发布形态）。
 # verify → test（tests.yml：Rust + Web）→ build-rust（Windows：zip + Inno setup.exe）→ publish（Release）。
-# setup.exe 为必发布资产：Inno Setup 6（choco）编译 deploy/windows/installer.iss，源为 Rust staging 树。
+# setup.exe 为必发布资产：Inno Setup 7.1.1（官方安装器 + SHA256 钉死）编译
+# deploy/windows/installer.iss，源为 Rust staging 树。
 # 历史版本的 Python 便携包仍可从旧 tag 的 Release 获取；本流水线不再构建 Python 形态。
 name: release
 on:

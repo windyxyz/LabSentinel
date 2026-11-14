@@ -1,5 +1,10 @@
 # Release Notes · LabSentinel v0.2.0
 
+> **历史文档**：本文件记录 0.2.0 初版（2026-11-12，嵌入式 Python 双形态）。
+> 2026-11-14 该版本号以 **Rust 单二进制形态重发布**（zip + Inno Setup 7 setup.exe，
+> 无 Python 运行时），以 `CHANGELOG.md` 的 [`[0.2.0] - 2026-11-14（Rust 形态重发布）`
+> 段落与 GitHub Release 说明为准。
+
 > GitHub Release v0.2.0（2026-11-12 发布，CI release workflow 全链实证）。
 > **未签名预览版**——签名证书未到位（T-403），安装时 SmartScreen 可能提示，
 > 请核对 `SHA256SUMS-*.txt` 校验和。

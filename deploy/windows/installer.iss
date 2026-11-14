@@ -1,6 +1,7 @@
 ; LabSentinel Windows 安装器（RA4.2 Rust 形态版，2026-11-14）
 ; 包装「Rust 单二进制 zip」为 setup.exe：解压安装 + 快捷方式 + 卸载项 + 可选服务。
-; 由 ISCC.exe 手动编译（CI 不再产 setup）；版本由 /DLsAppVersion= 传入。
+; 由 ISCC.exe 编译（本地 Inno Setup 7；CI 由 release.yml 安装 Inno 7.1.1 后
+; scripts/build_setup_exe.py 调用）；版本由 /DLsAppVersion= 传入。
 ;
 ; 多语言/双模式（沿用 2026-11-13 版设计）：
 ; - 首页语言选择：简体中文 / English（.isl 随仓库 deploy/windows/languages/）
