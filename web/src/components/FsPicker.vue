@@ -83,26 +83,26 @@ function pickHere() {
 </template>
 
 <style scoped>
-.fsp-overlay { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:1000;
-  display:flex; align-items:center; justify-content:center; }
-.fsp-box { background:var(--panel, #fff); border-radius:8px; width:520px; max-width:92vw;
-  max-height:80vh; display:flex; flex-direction:column; padding:14px; }
+/* 目录选择器：全局令牌（theme.css），浅/深主题一致可读 */
+.fsp-overlay { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:1300;
+  display:flex; align-items:center; justify-content:center;
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.fsp-box { background:var(--dialog-bg); color:var(--text-primary);
+  border:1px solid var(--stroke-default); border-radius:var(--overlay-radius);
+  box-shadow:var(--shadow-dialog);
+  width:520px; max-width:92vw; max-height:80vh; display:flex; flex-direction:column; padding:14px; }
 .fsp-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
-.fsp-path { background:var(--divider, #eee); border-radius:6px; padding:6px 8px; margin-bottom:8px;
-  word-break:break-all; }
-.fsp-list { flex:1; overflow-y:auto; max-height:46vh; border:1px solid var(--divider, #ddd);
-  border-radius:6px; }
-.fsp-sec { font-size:12px; color:var(--muted, #888); padding:6px 8px 2px; }
+.fsp-path { background:var(--ctrl-fill-secondary); border:1px solid var(--stroke-default);
+  border-radius:var(--control-radius); padding:6px 8px; margin-bottom:8px; word-break:break-all; }
+.fsp-list { flex:1; overflow-y:auto; max-height:46vh; border:1px solid var(--stroke-default);
+  border-radius:var(--control-radius); }
+.fsp-sec { font-size:12px; color:var(--text-secondary); padding:6px 8px 2px; }
 .fsp-item { padding:6px 10px; cursor:pointer; display:flex; align-items:center; gap:6px; }
-.fsp-item:hover { background:var(--divider, #f0f0f0); }
+.fsp-item:hover { background:var(--subtle-hover); }
 .fsp-item.dir { font-weight:600; }
 .fsp-ico { width:20px; text-align:center; }
 .fsp-open { margin-left:auto; font-size:12px; }
-.fsp-load { padding:12px; color:var(--muted, #888); }
+.fsp-load { padding:12px; color:var(--text-secondary); }
 .fsp-foot { display:flex; justify-content:space-between; align-items:center; margin-top:10px; }
-.primary { background:var(--accent, #1b3366); color:#fff; border:none; border-radius:6px;
-  padding:6px 14px; cursor:pointer; }
-.ghost { background:none; border:1px solid var(--divider, #ccc); border-radius:6px;
-  padding:4px 10px; cursor:pointer; }
-.muted { color:var(--muted, #888); }
+.muted { color:var(--text-secondary); }
 </style>

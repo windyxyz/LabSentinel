@@ -456,8 +456,8 @@ onMounted(() => { loadAlerts(); loadPlugins(); loadCams() })
       </section>
     </div>
   </div>
-  <div v-if="pluginLog" style="position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:60" @click.self="pluginLog = null">
-    <div style="background:var(--panel, #16202e); color:inherit; border:1px solid var(--divider); border-radius:8px; padding:12px; width:min(760px, 92vw); max-height:80vh; overflow:auto">
+  <div v-if="pluginLog" style="position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:60; -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px)" @click.self="pluginLog = null">
+    <div style="background:var(--dialog-bg); color:var(--text-primary); border:1px solid var(--stroke-default); box-shadow:var(--shadow-dialog); border-radius:var(--overlay-radius); padding:14px; width:min(760px, 92vw); max-height:80vh; overflow:auto">
       <div style="display:flex; align-items:center; justify-content:space-between">
         <b>插件日志 · {{ pluginLog.id }}</b>
         <button class="ghost" @click="pluginLog = null">关闭</button>

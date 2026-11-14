@@ -40,6 +40,7 @@ const tabs = [
     icon: '<path d="M3 5h10M3 11h10"/><circle cx="6" cy="5" r="1.6"/><circle cx="10" cy="11" r="1.6"/>' },
 ]
 const active = ref('dash')
+const showWelcome = ref(true)
 // T-709：值班大屏路由（无 vue-router 的轻量判定）——/wall 全屏无导航
 const isWall = window.location.pathname.replace(/\/+$/, '') === '/wall' 
 </script>
@@ -60,6 +61,6 @@ const isWall = window.location.pathname.replace(/\/+$/, '') === '/wall'
     <main>
       <component :is="tabs.find(t => t.key === active).comp" />
     </main>
-    <Welcome @done="() => {}" />
+    <Welcome v-if="showWelcome" @done="() => (showWelcome = false)" />
   </div>
 </template>
