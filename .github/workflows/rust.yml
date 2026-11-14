@@ -89,11 +89,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
         with:
           toolchain: stable
-      # 0.20 起 spdx 升级使 allow 列表的 OR/AND 复合表达式逐项拒绝（adler2 等全部误报）——
-      # 钉 0.18.3（现行 deny.toml 语义验证通过）；升级需重审 allow 列表
+      # 版本兼容三角：0.20 的 spdx 使 deny.toml 的 OR/AND 复合 allow 逐项拒绝（误报），
+      # 但 0.18.3 又解析不了 advisory 库新条目的 CVSS 4.0 → 需 0.19.9（两者都兼容）
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
         with:
-          tool: cargo-deny@0.18.3
+          tool: cargo-deny@0.19.9
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
         with:
           tool: cargo-audit
