@@ -156,7 +156,11 @@ async fn main() {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let data_dir = std::env::var("LS_DATA_DIR").unwrap_or_else(|_| "server/data".into());
-    let version = std::env::var("LS_VERSION").unwrap_or_else(|_| "0.2.0".into());
+    // RA4.2：版本号优先 LS_VERSION，其次包内 VERSION/app/VERSION（发行包自带），最后兜底
+    let version = std::env::var("LS_VERSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| deploy::read_version(&deploy::default_install_root()));
     let port: u16 = std::env::var("LS_PORT")
         .ok()
         .and_then(|v| v.parse().ok())

@@ -1,8 +1,9 @@
-"""T-333（L4）：Rust 单二进制分发构建（实验产物，未达 L3 门槛不进正式 Release）。
+"""T-333（L4）/RA4.2：Rust 单二进制正式分发构建（ADR-0011 过渡期末形态）。
 
-产物包：labsentinel-server.exe + web/dist + models/ + go2rtc + THIRD_PARTY_LICENSES.txt
-（不含嵌入式 CPython runtime ≈ 280MB → 单二进制 + 资源 ≈ 数十 MB）。
-Python 源码按 76 文档 L4 语义保留一个版本周期于 server/（legacy），训练工具链 tools/ 长期保留。
+产物包：labsentinel-server.exe + VERSION + LabSentinel.bat + web/dist + models/
+（yolo11n + PPE）+ tools/ffmpeg + tools/onnxruntime + go2rtc + 许可/说明。
+不含嵌入式 CPython runtime → 单二进制 + 资源，双击启动即用，无需 Python/Node。
+Python 源码在过渡期内保留于 server/（legacy，退役后移除）；训练工具链 tools/ 长期保留。
 
 用法: python scripts/build_rust.py [--zip]
 
@@ -71,37 +72,85 @@ def assemble() -> None:
     web = ROOT / "web" / "dist"
     if (web / "index.html").exists():
         shutil.copytree(web, DIST / "web", dirs_exist_ok=True)
+    else:
+        print("[警告] web/dist 不存在——先执行 npm run build，否则包内无前端")
     models = DIST / "models"
     models.mkdir(exist_ok=True)
-    for name in ("yolo11n.onnx",):
+    # RA4.2：基础检测 + PPE 模型（含类别名）随包分发（缺失时提示，不阻断——仅检测功能降级）
+    for name in ("yolo11n.onnx", "yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt"):
         src = ROOT / "m0-spike" / name
         if src.exists():
             shutil.copy2(src, models / name)
+        elif name == "yolo11n.onnx":
+            print(f"[警告] 缺少基础模型 {src}（scripts/fetch_assets.py --name yolo11n.onnx）")
+    # RA4.2：ffmpeg/ffprobe（RTSP/视频取流与存证）与 onnxruntime（ORT_DYLIB_PATH）
+    ff_src = ROOT / "tools" / "ffmpeg"
+    if ff_src.is_dir():
+        shutil.copytree(ff_src, DIST / "tools" / "ffmpeg", dirs_exist_ok=True)
+    else:
+        print(f"[警告] 缺少 {ff_src}（RTSP/视频源将不可用）")
+    ort_src = ROOT / "tools" / "onnxruntime"
+    if ort_src.is_dir():
+        shutil.copytree(ort_src, DIST / "tools" / "onnxruntime", dirs_exist_ok=True)
+        # exe 同目录兜底：Windows DLL 搜索优先应用目录，双击 exe 也能加载
+        for dll in ort_src.glob("*.dll"):
+            shutil.copy2(dll, DIST / dll.name)
+    else:
+        print(f"[警告] 缺少 {ort_src}（推理将无法加载 onnxruntime.dll）")
     g2 = ROOT / "tools" / "go2rtc.exe"
     if g2.exists():
         (DIST / "tools").mkdir(exist_ok=True)
         shutil.copy2(g2, DIST / "tools" / "go2rtc.exe")
+    gy = ROOT / "tools" / "go2rtc.yaml"
+    if gy.exists():
+        shutil.copy2(gy, DIST / "tools" / "go2rtc.yaml")
     notice = ROOT / "NOTICE"
     if notice.exists():
         shutil.copy2(notice, DIST / "NOTICE.txt")
+    (DIST / "VERSION").write_text(f"{VERSION}\n", encoding="ascii")
+    # RA4.2：便携启动器（双击即起服务并开控制台；数据默认落 LOCALAPPDATA）
+    launcher = (
+        "@echo off\r\n"
+        "setlocal\r\n"
+        'cd /d "%~dp0"\r\n'
+        'if "%LS_DATA_DIR%"=="" set "LS_DATA_DIR=%LOCALAPPDATA%\\LabSentinel\\data"\r\n'
+        'if "%LS_DB_PATH%"=="" set "LS_DB_PATH=%LS_DATA_DIR%\\labsentinel.db"\r\n'
+        'if "%LS_WEB_DIST%"=="" set "LS_WEB_DIST=%~dp0web"\r\n'
+        'if "%LS_MODEL_PATH%"=="" if exist "%~dp0models\\yolo11n.onnx" '
+        'set "LS_MODEL_PATH=%~dp0models\\yolo11n.onnx"\r\n'
+        'if "%LS_PPE_MODEL%"=="" if exist "%~dp0models\\yolo11n_ppe.onnx" '
+        'set "LS_PPE_MODEL=%~dp0models\\yolo11n_ppe.onnx"\r\n'
+        'if "%ORT_DYLIB_PATH%"=="" if exist "%~dp0onnxruntime.dll" '
+        'set "ORT_DYLIB_PATH=%~dp0onnxruntime.dll"\r\n'
+        'if not exist "%LS_DATA_DIR%" mkdir "%LS_DATA_DIR%"\r\n'
+        '"%~dp0labsentinel-server.exe" --launch\r\n'
+        "if errorlevel 1 pause\r\n"
+    )
+    (DIST / "LabSentinel.bat").write_bytes(launcher.encode("ascii"))
     (DIST / "THIRD_PARTY_LICENSES.txt").write_text(
         "Rust crates: 见 engine-rs/Cargo.lock（cargo-deny 生成完整清单）\n"
-        "go2rtc: MIT · onnxruntime: MIT · OpenCV(ffmpeg): 见 NOTICE\n", encoding="utf-8")
+        "go2rtc: MIT · onnxruntime: MIT · FFmpeg: LGPL/GPL（见 tools/ffmpeg 附带的许可文本）\n"
+        "模型权重许可与来源见 models/ 与 docs/adr/0009-alignment-vs-gpu-and-model-provenance.md\n",
+        encoding="utf-8")
     (DIST / "README.txt").write_text(
-        f"LabSentinel {VERSION} — Rust 单二进制分发（ADR-0011 RA3 正式形态）\n"
-        "启动: labsentinel-server.exe（LS_DB_PATH / LS_DATA_DIR / LS_PORT / LS_ADMIN_TOKEN；\n"
-        "      进程内分析 worker：LS_MODEL_PATH=models/yolo11n.onnx 即启用检测）\n"
-        "模型目录 models/，前端 web/（SPA 回退+immutable 缓存），实时画面 go2rtc 见 tools/\n"
-        "安装/升级/卸载链仍走 Python 便携包（RA4 评估替换）；训练工具链 tools/（Python）\n", encoding="utf-8")
+        f"LabSentinel {VERSION} — Rust 单二进制分发（ADR-0011 正式形态，无需 Python/Node）\n"
+        "\n启动：双击 LabSentinel.bat（数据默认 %LOCALAPPDATA%\\LabSentinel\\data，浏览器自动打开）\n"
+        "  等价命令行：labsentinel-server.exe --launch\n"
+        "  停止：网页「设置 → 服务控制 → 停止服务」，或任务管理器结束进程\n"
+        "升级：解压新包覆盖（旧版本自动归档到 versions/）；回滚：\n"
+        "  labsentinel-server.exe --rollback <安装根>\n"
+        "\n可选环境变量：LS_PORT（默认 8000）/ LS_ADMIN_TOKEN / LS_HOST（局域网必须配令牌）\n"
+        "  LS_MODEL_PATH=models/yolo11n.onnx  LS_PPE_MODEL=models/yolo11n_ppe.onnx\n"
+        "  LS_FFMPEG / LS_FFPROBE 覆盖外部二进制路径（默认 tools/ffmpeg/）\n"
+        "\n包内：web/（前端）models/（检测模型）tools/ffmpeg（取流）tools/onnxruntime（推理）\n"
+        "      tools/go2rtc.exe（实时画面，可选）\n", encoding="utf-8")
     (DIST / ".env.example").write_text(
-        "# LabSentinel Rust 形态最小配置（重命名 .env 生效；全部可省略）\n"
-        "LS_DB_PATH=data/labsentinel.db\n"
-        "LS_DATA_DIR=data\n"
+        "# LabSentinel 最小配置（重命名 .env 生效；全部可省略）\n"
         "LS_PORT=8000\n"
-        "# 局域网暴露必须配令牌（否则拒绝启动，与 Python 同语义）\n"
+        "# 局域网暴露必须配令牌（否则拒绝启动）\n"
         "# LS_HOST=0.0.0.0\n# LS_ADMIN_TOKEN=<随机>\n"
-        "# 进程内分析 worker\n"
-        "LS_MODEL_PATH=models/yolo11n.onnx\n"
+        "# 进程内分析 worker（LabSentinel.bat 已自动指向包内模型）\n"
+        "# LS_MODEL_PATH=models/yolo11n.onnx\n"
         "# LS_PPE_MODEL=models/yolo11n_ppe.onnx\n", encoding="utf-8")
 
 
