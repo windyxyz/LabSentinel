@@ -85,6 +85,9 @@ def assemble(strict: bool = False) -> None:
         elif name == "yolo11n.onnx":
             missing.append(f"模型 {src}（scripts/prepare_rust_assets.py）")
             print(f"[警告] 缺少基础模型 {src}（scripts/fetch_assets.py --name yolo11n.onnx）")
+        else:
+            # Q-08：PPE 许可待确认不随包分发——缺失仅警告（CI 无该资产）
+            print(f"[警告] 缺少 {name}（Q-08：实验服模型按需在网页端确认许可后下载）")
     # RA4.2：ffmpeg/ffprobe（RTSP/视频取流与存证）与 onnxruntime（ORT_DYLIB_PATH）
     ff_src = ROOT / "tools" / "ffmpeg"
     if ff_src.is_dir() and (ff_src / "ffmpeg.exe").is_file():

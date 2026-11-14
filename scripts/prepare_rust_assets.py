@@ -30,6 +30,8 @@ def log(msg: str) -> None:
 
 
 def ensure_models(force: bool) -> None:
+    """基础模型（yolo11n.onnx）失败即退出；PPE 模型按 Q-08 口径降级为警告
+    （许可待确认不随包分发，资产源仓库尚未就绪——CI 不因它阻塞）。"""
     MODELS.mkdir(parents=True, exist_ok=True)
     for name in MODEL_ASSETS:
         out = MODELS / name
@@ -38,7 +40,11 @@ def ensure_models(force: bool) -> None:
             continue
         rc = fetch_assets.download(name, out)
         if rc != 0:
-            raise SystemExit(f"[失败] 模型资产下载失败: {name}")
+            if name == "yolo11n.onnx":
+                raise SystemExit(f"[失败] 基础模型下载失败: {name}")
+            log(f"警告: {name} 下载失败（许可/资产源未就绪，Q-08）——"
+                "发行包不含实验服模型，用户可在网页端按需确认许可后下载")
+
 
 
 def ensure_ffmpeg(force: bool) -> None:
