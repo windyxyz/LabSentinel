@@ -10,6 +10,20 @@
 > ADR-0011 过渡期完成、Python 运行时退役，正式形态改为 Rust 单二进制 zip。
 > 本段起为重发布内容；原 0.2.0（2026-11-12）段落保留在下方作历史记录。
 
+### Inno Setup 7 安装器恢复为必发布资产（2026-11-14 补）
+- **发行形态补齐**：`LabSentinel-setup-<版本>.exe` 与 zip 同为必发布产物。
+  `deploy/windows/installer.iss` 重写为 Rust 形态：源为
+  `Resources/dist/rust/labsentinel-server` staging 树，Inno Setup 7.1.1 编译
+  （`scripts/build_setup_exe.py`，版本取 `VERSION`，ISCC 支持环境变量覆盖）。
+- **安装器能力**：中英双语；双模式（默认「仅为我安装」→ `%LOCALAPPDATA%\Programs\LabSentinel`，
+  提权「为所有用户」→ `%ProgramFiles%\LabSentinel`）；完成页可选开始菜单/桌面快捷方式；
+  升级前 `labsentinel-server --archive` 归档旧版、安装后 `--selftest-http` 真实探活
+  （失败可 `--rollback`）；卸载先 `taskkill` 结束常驻服务再删文件；数据目录不随卸载删除。
+- **CI**：`release.yml` 的 build-rust 增加「安装 Inno Setup 7.1.1（官方安装器 + SHA256
+  钉死，choco 仅有 6.x）」→「编译 setup.exe」；`SHA256SUMS-rust.txt` 同时列出
+  zip 与 setup.exe，artifact/publish 清单同步。此前随 Python 退役一并移除安装器
+  属误删，本次恢复。
+
 ### CI 门禁重构收口 + RustSec 漏洞清零（2026-11-14）
 - **CI 全绿（main @ 4568a45）**：`tests`（Rust nextest 双平台 + Web）与 `rust`
   （test/clippy/fmt + audit + route_coverage）全绿。
@@ -35,9 +49,9 @@
   `smoke_portable` / `deploy` / `doctor` / `health_check` / `backup_data` /
   `seed_demo` / `export_openapi` / `release_manifest` / `release_check` /
   `rc_regression` / `probe_runtime` / `secrets_rekey` / `verify_sidecar_evidence` /
-  `opentip_hashes` / `make_sbom` / `soak_mixed_gray` / `build_launcher_exe`）与
-  Inno 安装器脚本；`tools/` 训练工具链与 `scripts/` 构建/验收支具保留（Python
-  仅作开发工具，不进分发）。
+  `opentip_hashes` / `make_sbom` / `soak_mixed_gray` / `build_launcher_exe`）；
+  Inno 安装器随后按「必发布资产」决定以 Rust 形态恢复（见上节）；`tools/` 训练工具链
+  与 `scripts/` 构建/验收支具保留（Python 仅作开发工具，不进分发）。
 - **替代能力**：`labsentinel-server --archive/--rollback` 承接版本归档/回滚
   （排除 data/、拒绝路径穿越、回写 current.txt）；`prepare_rust_assets.py` 按哈希锁
   准备模型/ffmpeg/onnxruntime，`build_rust.py --strict` 资产齐全才出包；

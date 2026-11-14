@@ -34,9 +34,18 @@
 
 ## 🚀 快速开始
 
-### 方式 A：发布包（推荐，免安装）
+### 方式 A：安装器（推荐，双击安装）
 
-下载 **`labsentinel-rust-<版本>-<日期>.zip`**（[Releases](https://github.com/windyxyz/LabSentinel/releases)）→
+下载 **`LabSentinel-setup-<版本>.exe`**（[Releases](https://github.com/windyxyz/LabSentinel/releases)）→
+双击安装（中英双语；默认「仅为我安装」，可选「为所有用户安装」）→ 完成页生成
+开始菜单/桌面快捷方式 → 双击 **LabSentinel** 打开控制台。
+
+- 安装器在升级时自动归档旧版（`versions\`），装完自动 `--selftest-http` 探活
+- 卸载走后「设置 → 应用」；数据目录 `%LOCALAPPDATA%\LabSentinel` 不随卸载删除
+
+### 方式 B：便携 zip（免安装）
+
+下载 **`labsentinel-rust-<版本>-<日期>.zip`** →
 解压到可写目录 → 双击 **`LabSentinel.bat`** → 浏览器自动打开控制台。
 
 - 包内自带模型、ffmpeg、onnxruntime 与前端，**不需要安装 Python / Node**，运行无需联网
@@ -44,7 +53,7 @@
   [安装与卸载](docs/guide/安装与卸载.md)
 - 升级/回滚：`labsentinel-server.exe --archive .` / `--rollback .`（详见同上文档）
 
-### 方式 B：源码运行（开发模式）
+### 方式 C：源码运行（开发模式）
 
 ```bash
 # 1) 前端

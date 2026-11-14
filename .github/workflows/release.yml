@@ -1,6 +1,7 @@
 # RA4.2 / ADR-0011：发布流水线——Rust 单二进制正式产物（过渡期结束后的唯一发布形态）。
-# verify → test（tests.yml：Rust + Web）→ build-rust（Windows，资产齐全才出包）→ publish（草稿 Release）。
-# 历史版本的 Python 便携包/setup.exe 仍可从旧 tag 的 Release 获取；本流水线不再构建它们。
+# verify → test（tests.yml：Rust + Web）→ build-rust（Windows：zip + Inno setup.exe）→ publish（Release）。
+# setup.exe 为必发布资产：Inno Setup 6（choco）编译 deploy/windows/installer.iss，源为 Rust staging 树。
+# 历史版本的 Python 便携包仍可从旧 tag 的 Release 获取；本流水线不再构建 Python 形态。
 name: release
 on:
   push:
@@ -56,26 +57,46 @@ jobs:
           python scripts/prepare_rust_assets.py
       - name: build_rust --strict --zip
         run: python scripts/build_rust.py --strict --zip
+      - name: 安装 Inno Setup 7.1.1（setup.exe 为必发布资产；choco 仅有 6.x，故用官方安装器 + 哈希校验）
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP "innosetup-7.1.1-x64.exe"
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+          $want = "8A5A6711C3766A6E5FB74F280BA0E3551E719CE94538D901FDBD1F8F9920B3F0"
+          $got = (Get-FileHash $exe -Algorithm SHA256).Hash
+          if ($got -ne $want) { throw "Inno 7 安装器哈希不符：$got" }
+          Start-Process -FilePath $exe `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=C:\InnoSetup7" -Wait
+          "ISCC=C:\InnoSetup7\ISCC.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Get-Item C:\InnoSetup7\ISCC.exe | Select-Object FullName
+      - name: 编译 setup.exe（ISCC：deploy/windows/installer.iss）
+        run: python scripts/build_setup_exe.py
       - name: RA3/RA4 契约冒烟（解包→就绪→backend/版本→前端→停止）
         shell: pwsh
         run: |
           $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           python scripts/smoke_rust.py --zip $zip.FullName --timeout 90
-      - name: SHA256SUMS
+      - name: SHA256SUMS（zip + setup.exe）
         shell: pwsh
         run: |
           $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $setup = Get-ChildItem Resources/dist/LabSentinel-setup-*.exe |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
           $sums = "Resources/dist/SHA256SUMS-rust.txt"
-          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($zip.Name)" | Out-File -FilePath $sums -Encoding ascii
+          $lines = @($zip, $setup) | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          $lines | Out-File -FilePath $sums -Encoding ascii
           Get-Content $sums
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: labsentinel-rust
           path: |
             Resources/dist/labsentinel-rust-*.zip
+            Resources/dist/LabSentinel-setup-*.exe
             Resources/dist/SHA256SUMS-rust.txt
           if-no-files-found: error
           retention-days: 14
@@ -95,4 +116,5 @@ jobs:
           draft: true  # 签名作业接入前保持草稿，人工校验后发布
           files: |
             dist/labsentinel-rust-*.zip
+            dist/LabSentinel-setup-*.exe
             dist/SHA256SUMS-rust.txt
