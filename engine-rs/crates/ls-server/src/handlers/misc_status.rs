@@ -52,6 +52,14 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
     for (lv, n) in &today {
         today_counts.insert(lv.to_string(), n);
     }
+    // UX2：检测模式与 cascade 用量（仪表盘卡片/设置横幅共用数据源）
+    let detect = {
+        let dcfg = crate::detect::DetectCfg::load(&s, std::path::Path::new(&st.data_dir));
+        let u = crate::detect::usage_today(&s, &dcfg);
+        json!({"mode": dcfg.mode,
+               "usage": {"count": u.count, "budget": u.budget,
+                         "exhausted": u.exhausted()}})
+    };
     Json(json!({
         "version": st.version,
         "schema_version": s.schema_version().unwrap_or(0),
@@ -63,6 +71,7 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
         "alerts": {"pending": pending, "failed": failed, "ok": ok},
         "components": {"engine": {"state": "idle"}, "go2rtc": {"ok": false}},
         "config_issues": {"fail": 0, "warn": 0, "source_issues": []},
+        "detect": detect,
     }))
 }
 
@@ -460,13 +469,33 @@ pub(crate) async fn logs_tail(
         .and_then(|v| v.parse().ok())
         .unwrap_or(200)
         .clamp(1, 2000);
-    // rust 控制面的日志走 stdout；若有 Python 侧落盘日志则读取尾部
-    let log_path = std::path::Path::new(&st.data_dir).join("logs/server.log");
+    // rust 控制面日志：UX3 起落盘 data/logs/server-YYYYMMDD.log（按天滚动），
+    // 回退旧 server.log（Python 时代历史文件）
+    let log_dir = std::path::Path::new(&st.data_dir).join("logs");
+    let today = {
+        // 本地日期 YYYYMMDD（与 logger::today_local 同口径；util 的 civil_from_days）
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let (y, m, d) = crate::util::civil_from_days(secs.div_euclid(86400));
+        format!("{y:04}{m:02}{d:02}")
+    };
+    let candidates = [
+        log_dir.join(format!("server-{today}.log")),
+        log_dir.join("server.log"),
+    ];
+    let picked = candidates.iter().find(|p| {
+        std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
+    });
+    let log_name = picked
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "logs/server.log".into());
     // P2-3（安全审计）：尾部读取（2MB 上限防内存放大）+ 脱敏（对齐 Python redact：
     // TOKEN/KEY/SECRET/PASSWORD/WEBHOOK 类值打码），file 字段不再回显绝对路径
-    let lines: Vec<String> = match std::fs::metadata(&log_path) {
-        Ok(m) if m.len() > 0 => {
-            let content = std::fs::read(&log_path).unwrap_or_default();
+    let lines: Vec<String> = match picked {
+        Some(p) => {
+            let content = std::fs::read(p).unwrap_or_default();
             let start = (content.len() as u64).saturating_sub(2 * 1024 * 1024) as usize;
             let text = String::from_utf8_lossy(&content[start..]);
             text.lines()
@@ -478,10 +507,10 @@ pub(crate) async fn logs_tail(
                 .rev()
                 .collect()
         }
-        _ => Vec::new(),
+        None => Vec::new(),
     };
-    Json(json!({"lines": lines, "file": "logs/server.log",
-                "note": if lines.is_empty() { "rust 控制面日志走 stdout（无落盘文件）" } else { "" }}))
+    Json(json!({"lines": lines, "file": format!("logs/{log_name}"),
+                "note": if lines.is_empty() { "暂无落盘日志（GUI 启动后写 data/logs/server-*.log）" } else { "" }}))
         .into_response()
 }
 
@@ -587,11 +616,12 @@ pub(crate) async fn discovery_probe(
 
 // ==== R2-309 批次 3b：图片记录详情/导出/模板预览与应用/关机/快照占位 ====
 
-pub(crate) async fn shutdown_server() -> Response {
-    // Python _do_shutdown 同语义：先应答再退出（延迟给响应送达留窗口）
-    tokio::spawn(async {
+pub(crate) async fn shutdown_server(State(st): State<Shared>) -> Response {
+    // Python _do_shutdown 同语义：先应答再退出（延迟给响应送达留窗口）。
+    // UX4：托盘退出与本 handler 共用 graceful_shutdown（停 workers → flush WAL → exit）
+    tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        std::process::exit(0);
+        crate::graceful_shutdown(&st, "网页停止服务");
     });
     Json(json!({"ok": true, "message": "服务将在 300ms 内退出"})).into_response()
 }

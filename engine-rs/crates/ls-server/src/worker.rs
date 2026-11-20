@@ -12,7 +12,7 @@
 //! 生命周期接入（复用 ls_dispatch::deliver + escalation 既有链路）。
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -89,6 +89,18 @@ impl EventSink {
         cand: &ls_analyzer::pipeline::Candidate,
         snapshot_jpeg: Option<&[u8]>,
     ) -> Result<Option<i64>, String> {
+        self.record_ext(cand, snapshot_jpeg, true)
+    }
+
+    /// UX2 cascade：`dispatch=false` 时事件入库 + WS 广播，但 **跳过 MQTT 与
+    /// 首发派发**——待 VLM 复核（肯定 → `deliver_deferred` 补投递；否定且
+    /// on_negative=suppress → `set_event_vlm_suppressed` 标记，永不投递）。
+    pub fn record_ext(
+        &self,
+        cand: &ls_analyzer::pipeline::Candidate,
+        snapshot_jpeg: Option<&[u8]>,
+        dispatch: bool,
+    ) -> Result<Option<i64>, String> {
         {
             let mut d = self.dedup.lock().map_err(|_| "dedup poison")?;
             let key = Self::dedup_key(cand);
@@ -146,6 +158,22 @@ impl EventSink {
             .flatten()
             .map(|c| c.name)
             .unwrap_or_default();
+        if dispatch {
+            self.deliver_deferred(eid, cand, &cam_name, snapshot.is_some());
+        }
+        Ok(Some(eid))
+    }
+
+    /// 事件外发（MQTT 总线 + 8 渠道首发派发）。record 常规路径立即调用；
+    /// cascade 复核肯定时延迟调用（on_negative=keep 也可先派发后回填判定）。
+    fn deliver_deferred(
+        &self,
+        eid: i64,
+        cand: &ls_analyzer::pipeline::Candidate,
+        cam_name: &str,
+        has_snapshot: bool,
+    ) {
+        let st = &self.st;
         // RA2-S2：MQTT 总线发布（独立于静默/渠道过滤——Python alerts.dispatch
         // 入口同位；连接失败不阻塞事件链）。zones 契约数组：候选不带区域名，空数组。
         if let Some(bus) = &st.mqtt {
@@ -159,13 +187,13 @@ impl EventSink {
                 id: eid,
                 ts: &cand.ts_iso,
                 camera_id: cand.camera_id,
-                camera_name: Some(&cam_name),
+                camera_name: Some(cam_name),
                 type_: &cand.behavior,
                 level: cand.level,
                 track_id: cand.track_id,
                 detail: &cand.detail,
                 zones: &[],
-                has_snapshot: snapshot.is_some(),
+                has_snapshot,
                 api_base: &api_base,
             };
             let _ = bus.publish_event(&fields);
@@ -183,22 +211,34 @@ impl EventSink {
             level: cand.level,
             detail: cand.detail.clone(),
             ts: cand.ts_iso.clone(),
-            camera_name: cam_name,
+            camera_name: cam_name.to_string(),
         };
         let jobs = Arc::clone(&st.jobs);
         let db_path = st.db_path.clone();
-        let eid_log = eid;
         let _ = std::thread::Builder::new()
             .name(format!("ls-dispatch-{eid}"))
             .spawn(move || {
                 if let Ok(s) = ls_store::Store::open(&db_path) {
                     let submitted = jobs.dispatch_event(&s, &dev);
                     if submitted > 0 {
-                        println!("[ls-dispatch] event#{eid_log} 首发派发 {submitted} 渠道");
+                        println!("[ls-dispatch] event#{eid} 首发派发 {submitted} 渠道");
                     }
                 }
             });
-        Ok(Some(eid))
+    }
+
+    /// cascade 复核线程的放行入口（cam_name 现查；has_snapshot 只进 MQTT 字段）。
+    pub(crate) fn deliver_deferred_pub(
+        &self,
+        eid: i64,
+        cand: &ls_analyzer::pipeline::Candidate,
+        has_snapshot: bool,
+    ) {
+        let cam_name = ls_store::Store::open(&self.st.db_path)
+            .ok()
+            .and_then(|s| s.camera(cand.camera_id).ok().flatten().map(|c| c.name))
+            .unwrap_or_default();
+        self.deliver_deferred(eid, cand, &cam_name, has_snapshot);
     }
 
     /// 存证收尾：帧序列 → MP4 → video 回填（先入库后写视频，与 Python worker
@@ -464,6 +504,71 @@ pub fn stop_worker(st: &Shared, cid: i64) -> bool {
     true
 }
 
+/// UX2：软重启单路（运行中才重启；配置组载失败保持停止并写 error）。
+/// 用于 analyzer/全局检测模式变更后的即时生效（对齐 Python 重启语义）。
+pub fn restart_camera_if_running(st: &Shared, store: &ls_store::Store, cid: i64) -> bool {
+    let was_running = store
+        .camera(cid)
+        .ok()
+        .flatten()
+        .map(|c| c.status == "running")
+        .unwrap_or(false);
+    if !was_running {
+        return false;
+    }
+    stop_worker(st, cid);
+    match WorkerConfig::from_db(store, cid) {
+        Ok(Some(cfg)) => match start_worker(st, cfg) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("[ls-worker] cam-{cid} 软重启失败: {e}");
+                let _ = store.set_camera_status(cid, "error");
+                false
+            }
+        },
+        _ => {
+            eprintln!("[ls-worker] cam-{cid} 软重启配置载入失败");
+            let _ = store.set_camera_status(cid, "error");
+            false
+        }
+    }
+}
+
+/// UX4（2026-11-20）：优雅关停第一步——停掉全部运行中 worker（ffmpeg 子进程
+/// 一并强杀解除阻塞读）。返回停掉的路数。
+pub fn stop_all_workers(st: &Shared) -> usize {
+    let ids: Vec<i64> = {
+        let Ok(m) = st.workers.map.lock() else {
+            return 0;
+        };
+        m.keys().copied().collect()
+    };
+    let mut n = 0;
+    for cid in ids {
+        if st.workers.remove_and_stop(cid).is_some() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// UX2：全局检测模式变更后，重启所有「跟随全局」（analyzer='default'/空）的
+/// 运行中相机；显式覆盖（rust/vlm/cascade）不受全局切换影响。返回重启路数。
+pub fn restart_following_global(st: &Shared, store: &ls_store::Store) -> usize {
+    let Ok(cams) = store.cameras() else {
+        return 0;
+    };
+    let running: Vec<i64> = cams
+        .iter()
+        .filter(|c| c.status == "running" && matches!(c.analyzer.as_str(), "default" | ""))
+        .map(|c| c.id)
+        .collect();
+    running
+        .iter()
+        .filter(|cid| restart_camera_if_running(st, store, **cid))
+        .count()
+}
+
 /// 可中断睡眠（停止标志每 200ms 检查；True=完整睡完，False=被停止打断）。
 fn sleep_interruptible(stop: &AtomicBool, d: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + d;
@@ -543,12 +648,19 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         rtsp_transport_tcp: true,
     });
     let sink = EventSink::new(Arc::clone(&st));
-    // RA5：外部联网 VLM 视频判定（LS_ANALYZER_BACKEND=vlm）——抽样多帧交
-    // 外部模型判定违规；限流默认 6 次/分钟/路（token 成本克制）。
-    // 模型模块化：per-camera cameras.analyzer="vlm" 也可插拔启用（优先于全局 env）。
-    let mut vlm_cfg = crate::vlm::cfg_from_env();
-    if cfg.analyzer == "vlm" {
-        vlm_cfg.enabled = true;
+    // UX2（2026-11-20）：检测模式解析——per-camera analyzer 覆盖全局策略
+    // （default=跟随全局 / rust=仅本地 / vlm=仅 API / cascade=协作）。
+    // 读取顺序 DB → env → 默认（DetectCfg::load）；api 模式沿用 RA5 抽样判定
+    // 限流（默认 6 次/分钟/路）；cascade 模式走异步复核队列（见下方触发门）。
+    let dcfg = crate::detect::DetectCfg::load(&store, Path::new(&st.data_dir));
+    let mode = crate::detect::effective_mode(&cfg.analyzer, &dcfg.mode);
+    let cascade_suppress = mode == "cascade" && dcfg.on_negative == "suppress";
+    let mut vlm_cfg = dcfg.to_vlm_cfg();
+    match mode.as_str() {
+        // UX2：per-camera 覆盖（analyzer=vlm）在全局 mode=local 时也必须生效——
+        // enabled 按 effective mode + 合规门算，不看全局 mode
+        "api" => vlm_cfg.enabled = dcfg.compliance_ok(),
+        _ => vlm_cfg.enabled = false, // cascade 走触发门 + 复核队列；local 零 API
     }
     let vlm_interval = std::time::Duration::from_secs(
         (60f64 / env_f64("LS_VLM_MAX_PER_MIN", 6.0).max(0.1)).round() as u64,
@@ -611,6 +723,10 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         &ts,
                         Some((&frame.data, frame.width, frame.height)),
                     );
+                    // UX2 cascade：suppress 策略下本地事件先不派发（复核肯定补投递）
+                    let dispatch_now = !cascade_suppress;
+                    let rules_hit = !cands.is_empty(); // 管线候选 = 规则/区域命中
+                    let mut ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)> = Vec::new();
                     if !cands.is_empty() {
                         // 事件帧快照：优先复用本帧抽帧结果，未命中 stride 则现编
                         let snap = match ev_snapshot {
@@ -623,9 +739,10 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             .unwrap_or_default(),
                         };
                         for cand in cands {
-                            match sink.record(&cand, Some(&snap)) {
+                            match sink.record_ext(&cand, Some(&snap), dispatch_now) {
                                 Ok(Some(eid)) => {
                                     spawn_finalize(&st, &evidence, eid);
+                                    ev_round.push((eid, cand));
                                 }
                                 Ok(None) => {} // 去重命中
                                 Err(e) => {
@@ -638,11 +755,57 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         let _ = store.set_camera_status(cfg.camera_id, "running");
                         running_marked = true;
                     }
-                    // RA5：外部联网 VLM 视频判定抽样（限流：证据环多帧 → Gemini
-                    // 原生视频 / openai_compat 多图 → violations → 事件）。
-                    // 判定在帧循环线程做一次同步 HTTP（间隔由 vlm_interval 限流，
-                    // 默认 6 次/分钟/路——单次最坏 30s 不会淹没帧率）。
-                    if vlm_cfg.enabled && last_vlm.elapsed() >= vlm_interval {
+                    // UX2 cascade 复核门：规则命中或人员在置信度灰区才产生 API
+                    // 调用（无人/无触发帧 0 调用 = 省钱第一验收指标）；限流与
+                    // 预算（detect.cascade.daily_budget）双重闸；复核异步不阻塞帧循环。
+                    if mode == "cascade" {
+                        let persons = dets.len() as i64;
+                        let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
+                        if crate::detect::cascade_should_review(&dcfg, persons, max_conf, rules_hit)
+                            && last_vlm.elapsed() >= vlm_interval
+                        {
+                            last_vlm = std::time::Instant::now();
+                            let ring_frames: Vec<Vec<u8>> = evidence
+                                .ring
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .as_ref()
+                                .map(|r| r.snapshot().into_iter().map(|f| f.data).collect())
+                                .unwrap_or_default();
+                            let sampled = crate::vlm::sample_frames(&ring_frames, 8);
+                            if !sampled.is_empty() {
+                                let usage = crate::detect::usage_today(&store, &dcfg);
+                                if usage.exhausted() {
+                                    // 预算耗尽 → 自动降级 local-only：事件标 unreviewed，
+                                    // suppress 策略下暂扣的派发按 keep 放行（丢告警比多花
+                                    // API 更糟——降级语义只停调用，不吞通知）
+                                    let ts = crate::util::iso_now();
+                                    for (eid, cand) in &ev_round {
+                                        let _ = store.set_event_vlm(
+                                            *eid,
+                                            r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
+                                            &ts,
+                                        );
+                                        if cascade_suppress {
+                                            sink.deliver_deferred_pub(*eid, cand, false);
+                                        }
+                                    }
+                                } else {
+                                    spawn_cascade_review(CascadeReview {
+                                        st: Arc::clone(&st),
+                                        camera_id: cfg.camera_id,
+                                        cfg: dcfg.clone(),
+                                        frames: sampled,
+                                        ev_round: ev_round.clone(),
+                                        suppress: cascade_suppress,
+                                        evidence: Some(Arc::clone(&evidence)),
+                                        evidence_key_prefix: format!("vlmc:{}", frame.index),
+                                    });
+                                }
+                            }
+                        }
+                        ev_round.clear();
+                    } else if vlm_cfg.enabled && last_vlm.elapsed() >= vlm_interval {
                         last_vlm = std::time::Instant::now();
                         let ring_frames: Vec<Vec<u8>> = evidence
                             .ring
@@ -790,6 +953,169 @@ fn spawn_finalize(st: &Shared, evidence: &Arc<ls_analyzer::evidence::Evidence>, 
     }
 }
 
+// ---- UX2 cascade（2026-11-20）：本地+API 协作复核队列 ----
+
+/// UX2 cascade：异步复核任务（不阻塞帧循环；VLM HTTP 在复核线程同步执行，
+/// 频率受 vlm_interval 限流 + detect.cascade.daily_budget 预算双重闸）。
+pub(crate) struct CascadeReview {
+    st: Shared,
+    camera_id: i64,
+    /// 发起时刻的配置快照（复核期间 PUT 不影响本轮）
+    cfg: crate::detect::DetectCfg,
+    /// 送审帧（视频=证据环 ≤8 帧采样；folder=单图）
+    frames: Vec<Vec<u8>>,
+    /// 本轮本地事件 (eid, 候选)——verdict 回填/抑制对象
+    ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)>,
+    /// on_negative=suppress（否定时抑制不投递）
+    suppress: bool,
+    /// 视频路带证据环（VLM 新发现的违规可回填录像）；folder=None
+    evidence: Option<Arc<ls_analyzer::evidence::Evidence>>,
+    /// VLM 独立事件的 evidence_key 前缀（去重键）
+    evidence_key_prefix: String,
+}
+
+pub(crate) fn spawn_cascade_review(r: CascadeReview) {
+    let spawned = std::thread::Builder::new()
+        .name(format!("ls-cascade-{}", r.camera_id))
+        .spawn(move || cascade_review_run(r));
+    if let Err(e) = spawned {
+        eprintln!("[ls-cascade] 复核线程创建失败: {e}");
+    }
+}
+
+/// VLM 否定 = 明确无人且无违规（抑制仅对「明确否定」生效，模糊/错误不吞告警）。
+fn cascade_is_negative(v: &serde_json::Value, violations: &[String]) -> bool {
+    v["persons"].as_i64().unwrap_or(0) == 0 && violations.is_empty()
+}
+
+fn cascade_review_run(r: CascadeReview) {
+    let ts = crate::util::iso_now();
+    let store = match ls_store::Store::open(&r.st.db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[ls-cascade] cam-{} DB 打不开，复核中止: {e}", r.camera_id);
+            return;
+        }
+    };
+    let sink = EventSink::new(Arc::clone(&r.st));
+    // 预算复核（usage_bump 先到先得；超预算 → unreviewed + suppress 放行）
+    let (exhausted, _n) = crate::detect::usage_bump(&store, &r.cfg);
+    if exhausted {
+        println!(
+            "[ls-cascade] cam-{} 今日预算耗尽——降级 local-only（{} 事件标 unreviewed）",
+            r.camera_id,
+            r.ev_round.len()
+        );
+        for (eid, cand) in &r.ev_round {
+            let _ = store.set_event_vlm(
+                *eid,
+                r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
+                &ts,
+            );
+            if r.suppress {
+                sink.deliver_deferred_pub(*eid, cand, false);
+            }
+        }
+        return;
+    }
+    // 合规红线再确认（回环免确认；远程需 DB/env 确认位——未授权绝不外发截图）
+    if !r.cfg.compliance_ok() {
+        println!(
+            "[ls-cascade] cam-{} 外部服务未授权（远程未确认），本轮复核跳过",
+            r.camera_id
+        );
+        for (eid, _) in &r.ev_round {
+            let _ = store.set_event_vlm(
+                *eid,
+                r#"{"status":"error","reason":"remote_not_allowed"}"#,
+                &ts,
+            );
+        }
+        if r.suppress {
+            for (eid, cand) in &r.ev_round {
+                sink.deliver_deferred_pub(*eid, cand, false);
+            }
+        }
+        return;
+    }
+    let mut vlm_cfg = r.cfg.to_vlm_cfg();
+    vlm_cfg.enabled = true; // 合规门已过（上方 compliance_ok）；enabled 仅是通路开关
+    let started = std::time::Instant::now();
+    match crate::vlm::analyze_frames(&vlm_cfg, crate::vlm::VLM_PROMPT, &r.frames) {
+        Ok(v) => {
+            let persons = v["persons"].as_i64().unwrap_or(0);
+            let violations: Vec<String> = v["violations"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let verdict_s = v.to_string();
+            let negative = cascade_is_negative(&v, &violations);
+            // 本轮本地事件：verdict 回填；suppress 策略按判定放行/抑制
+            for (eid, cand) in &r.ev_round {
+                let _ = store.set_event_vlm(*eid, &verdict_s, &ts);
+                if r.suppress {
+                    if negative {
+                        let _ = store.set_event_vlm_suppressed(*eid);
+                    } else {
+                        sink.deliver_deferred_pub(*eid, cand, true);
+                    }
+                }
+            }
+            // VLM 独立发现（本地漏报的违规类型）→ 补建事件走全链（去重键独立）
+            let local_behaviors: HashSet<String> =
+                r.ev_round.iter().map(|(_, c)| c.behavior.clone()).collect();
+            let jpeg = r.frames.last().cloned().unwrap_or_default();
+            for behavior in &violations {
+                if local_behaviors.contains(behavior) {
+                    continue; // 本地已建同类型事件，verdict 已回填，不再重复
+                }
+                let cand = ls_analyzer::pipeline::Candidate {
+                    camera_id: r.camera_id,
+                    zone_id: None,
+                    behavior: behavior.clone(),
+                    level: 2,
+                    track_id: 0,
+                    detail: format!(
+                        "VLM 复核判定：{behavior}（{persons}人）— {}",
+                        v["summary"].as_str().unwrap_or("")
+                    ),
+                    ts_iso: ts.clone(),
+                    evidence_key: format!("{}:{behavior}", r.evidence_key_prefix),
+                };
+                if let Ok(Some(veid)) =
+                    sink.record(&cand, if jpeg.is_empty() { None } else { Some(&jpeg) })
+                {
+                    if let Some(ev) = &r.evidence {
+                        spawn_finalize(&r.st, ev, veid);
+                    }
+                }
+            }
+            println!(
+                "[ls-cascade] cam-{} 复核完成（{}ms）：persons={persons} violations={violations:?} → 回填 {} 事件",
+                r.camera_id,
+                started.elapsed().as_millis(),
+                r.ev_round.len()
+            );
+        }
+        Err(e) => {
+            // 判定失败：verdict 记 error（绝不误报）；suppress 放行（fail-open，
+            // 合规/网络故障不应静默吞掉本地告警）
+            let err_s = serde_json::json!({"status": "error", "reason": e}).to_string();
+            for (eid, cand) in &r.ev_round {
+                let _ = store.set_event_vlm(*eid, &err_s, &ts);
+                if r.suppress {
+                    sink.deliver_deferred_pub(*eid, cand, false);
+                }
+            }
+            eprintln!("[ls-cascade] cam-{} 复核失败（降级跳过）: {e}", r.camera_id);
+        }
+    }
+}
+
 /// post 等待 = VIDEO_POST_S + 0.5s 容差（evidence.feed 的 done 判定同值）+ 1s 余量。
 const VIDEO_POST_WAIT_S: f64 = ls_analyzer::evidence::VIDEO_POST_S + 1.5;
 
@@ -843,10 +1169,17 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let interval = env_f64("LS_FOLDER_POLL_S", 3.0).max(0.5);
     let scan_cfg = ls_ingest::folder::FolderScanConfig::default();
     let internal = Some(PathBuf::from(&st.data_dir)); // 截图/视频数据目录不入库
-    let mut vlm_cfg = crate::vlm::cfg_from_env();
-    if cfg.analyzer == "vlm" {
-        vlm_cfg.enabled = true; // RA5 模型模块化：per-camera 插拔外部联网模型
-    }
+                                                      // UX2：检测模式解析（default=跟随全局 / rust=仅本地 / vlm=仅 API / cascade=协作）
+    let dcfg = crate::detect::DetectCfg::load(&store, Path::new(&st.data_dir));
+    let mode = crate::detect::effective_mode(&cfg.analyzer, &dcfg.mode);
+    let cascade_suppress = mode == "cascade" && dcfg.on_negative == "suppress";
+    let mut vlm_cfg = dcfg.to_vlm_cfg();
+    // UX2：per-camera 覆盖（analyzer=vlm）在全局 mode=local 时也必须生效
+    vlm_cfg.enabled = mode == "api" && dcfg.compliance_ok();
+    let review_interval = std::time::Duration::from_secs(
+        (60f64 / env_f64("LS_VLM_MAX_PER_MIN", 6.0).max(0.1)).round() as u64,
+    );
+    let mut last_review = std::time::Instant::now() - review_interval; // 首图即可复核
     let mut marked: Option<String> = None;
     let mut set_status = |v: &str| {
         if marked.as_deref() != Some(v) {
@@ -1185,6 +1518,9 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 &processed_ts,
             );
             // 违规 → 事件（走 EventSink：入库 + WS 广播 + MQTT + 首发派发）
+            // UX2 cascade：suppress 策略下先不派发，VLM 复核后放行/抑制
+            let dispatch_now = !cascade_suppress;
+            let mut ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)> = Vec::new();
             if violation {
                 for behavior in &violations {
                     let cand = ls_analyzer::pipeline::Candidate {
@@ -1203,8 +1539,50 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         ts_iso: processed_ts.clone(),
                         evidence_key: format!("folder:{iid}:{behavior}"),
                     };
-                    if let Ok(Some(eid)) = sink.record(&cand, snapshot_jpeg.as_deref()) {
+                    if let Ok(Some(eid)) =
+                        sink.record_ext(&cand, snapshot_jpeg.as_deref(), dispatch_now)
+                    {
                         let _ = store.set_folder_image_event(iid, eid);
+                        ev_round.push((eid, cand));
+                    }
+                }
+            }
+            // UX2 cascade 复核门：本地扫到人（灰区置信）或规则命中才送 API 精判；
+            // 空场景 0 调用 = 省钱第一验收指标
+            if mode == "cascade" {
+                let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
+                if crate::detect::cascade_should_review(&dcfg, persons, max_conf, violation)
+                    && last_review.elapsed() >= review_interval
+                {
+                    last_review = std::time::Instant::now();
+                    let review_jpeg =
+                        ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h).unwrap_or_default();
+                    if !review_jpeg.is_empty() {
+                        let usage = crate::detect::usage_today(&store, &dcfg);
+                        if usage.exhausted() {
+                            let ts = crate::util::iso_now();
+                            for (eid, cand) in &ev_round {
+                                let _ = store.set_event_vlm(
+                                    *eid,
+                                    r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
+                                    &ts,
+                                );
+                                if cascade_suppress {
+                                    sink.deliver_deferred_pub(*eid, cand, false);
+                                }
+                            }
+                        } else {
+                            spawn_cascade_review(CascadeReview {
+                                st: Arc::clone(&st),
+                                camera_id: cfg.camera_id,
+                                cfg: dcfg.clone(),
+                                frames: vec![review_jpeg],
+                                ev_round,
+                                suppress: cascade_suppress,
+                                evidence: None,
+                                evidence_key_prefix: format!("vlmc-f:{iid}"),
+                            });
+                        }
                     }
                 }
             }

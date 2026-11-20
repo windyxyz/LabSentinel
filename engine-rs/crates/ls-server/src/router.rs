@@ -138,6 +138,11 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/alerts/config/reset"),
     ("GET", "/api/discovery/cameras"),
     ("POST", "/api/discovery/probe"),
+    // ---- UX2（2026-11-20）：检测模式全局策略（local/api/cascade） ----
+    ("GET", "/api/detect/config"),
+    ("PUT", "/api/detect/config"),
+    ("POST", "/api/detect/test"),
+    ("GET", "/api/detect/usage"),
 ];
 
 pub fn build_router(state: Shared) -> Router {
@@ -254,6 +259,13 @@ pub fn build_router(state: Shared) -> Router {
         .route("/alerts/config/reset", post(alerts_config_reset))
         .route("/discovery/cameras", get(discovery_cameras))
         .route("/discovery/probe", post(discovery_probe))
+        // ---- UX2：检测模式全局策略 ----
+        .route(
+            "/detect/config",
+            get(detect_config_get).put(detect_config_put),
+        )
+        .route("/detect/test", post(detect_test))
+        .route("/detect/usage", get(detect_usage))
         .with_state(state.clone());
     let ws = Router::new()
         .route("/ws/events", get(ws_events))

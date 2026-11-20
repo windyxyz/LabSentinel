@@ -4,6 +4,45 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 SemVer
 （决策 77-Q-05：下一版 0.2.0；构建元数据 `+<YYYYMMDD>.<shortsha>`）。
 
+## [Unreleased]（UX 轮，2026-11-20/21 开发完成；版本号随发布定为 0.3.0）
+
+### 桌面体验与界面简化（docs/plan/ux-roadmap-2026-11-20.md 全项落地）
+- **检测模式三选一（UX2，核心）**：设置中心新增「模型与检测」分区（置顶）——
+  仅本地（零成本离线）/ 仅 API（全量精判）/ **本地+API 协作 ⭐**（本地先扫人与
+  可疑，触发帧才交 API 精判省费用）。`app_settings` detect.* 键族（DB → env →
+  默认读取顺序，环境变量降级为兜底）；api_key fernet 加密落盘、GET 一律脱敏；
+  远程 URL 双确认红线不降级（DB/env 任一确认位）。新增 API：GET/PUT
+  `/api/detect/config`、POST `/api/detect/test`（测试连接）、GET
+  `/api/detect/usage`（当日调用数/预算余量）；`/api/system` 增 detect 块。
+- **cascade 引擎**：触发门 = 规则命中或人员置信度灰区（conf_lo~conf_hi），
+  空/低置信/高置信帧零 API 调用（**省钱红线有实证：acceptance_vlm 11b 空场景
+  mock 调用计数恒 0**）；异步复核线程不阻塞帧循环；每日预算耗尽自动降级
+  local-only + unreviewed 标记 + 次日恢复；on_negative=suppress 时 VLM 明确
+  否定的事件不投递（fail-open：复核失败照常投递）。schema v13→v14（events 加
+  vlm_verdict/vlm_ts/vlm_suppressed；存量库幂等迁移归 Rust——Python 退役后
+  迁移链收编）。相机级 analyzer 扩展四选：default（跟随全局）/ rust / vlm /
+  cascade；新建相机默认跟随全局；切换即时生效（运行中软重启）。
+- **导航简化（UX1）**：主导航 11 → 5（仪表盘/监控源/事件/告警/设置）——图片
+  识别与安全区配置并入「监控源」分段；报表并入仪表盘双视图；人脸/设备/模型
+  迁入设置中心（9 分区 + 搜索）。旧 hash 路由 replace 重定向（无 404）。
+- **无黑框启动（UX3）**：release 双击无控制台（windows_subsystem=windows；
+  GUI 子系统管道语义先经 UX3.0 spike 实证——CI 冒烟/安装器自检不受影响）；
+  `--console` 显式附着排障通道；日志落盘 `data/logs/server-YYYYMMDD.log`
+  （按天滚动保留 14 天，panic hook 同文件）；致命启动错误弹原生 MessageBox；
+  设置→服务控制新增「查看服务日志」。LabSentinel.bat 改 start 拉起无窗口。
+- **系统托盘（UX4）**：tray-icon（tauri 团队，纯 win32，不引入 Tauri 运行时），
+  内嵌品牌图标；双击开控制台；菜单 = 打开控制台/复制访问地址/退出；
+  **退出 = 优雅关停**（与网页停止服务同一函数：停 workers → WAL checkpoint →
+  退出）；创建失败降级仅日志。本机实测：无窗口启动 → 托盘就绪 → shutdown
+  → 进程退出端口释放。
+- **验收**：Rust workspace 134 passed（+12）；Web 50 passed（+6）；clippy/fmt/
+  cargo-deny 全绿（chrono unmaintained 与 gtk 传递栈按台账口径豁免/图限定
+  Windows）；acceptance_vlm **14/14**（cascade 全链）；acceptance_rust_only
+  **39/39**；路由覆盖 106/106 = 100%。
+- **顺带修复**：is_loopback 取端口而非主机名的 RA5 遗留 bug（带端口回环地址
+  恒判非回环）；内置样张 usize 下溢 panic；新建相机 analyzer 默认值与
+  「全局定策略」语义冲突。
+
 ## [0.2.0] - 2026-11-14（Rust 形态重发布）
 
 > 同一版本号二次发布：0.2.0 初版（2026-11-12，Python 双形态）发布后，

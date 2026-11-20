@@ -77,7 +77,12 @@ export const api = {
   setupStatus: () => req('GET', '/api/setup/status'),
   setModelActive: (path) => req('PUT', '/api/models/active', { path }),
   modelsLocal: () => req('GET', '/api/models/local'),
-  setModelActive: (path) => req('PUT', '/api/models/active', { path }),
+  // UX2（2026-11-20）：检测模式全局策略（local/api/cascade）
+  detectConfig: () => req('GET', '/api/detect/config'),
+  saveDetectConfig: (d) => req('PUT', '/api/detect/config', d),
+  detectTest: () => req('POST', '/api/detect/test', {}),
+  detectUsage: () => req('GET', '/api/detect/usage'),
+  logsTail: (limit = 200) => req('GET', '/api/logs?limit=' + limit),
   eventsTimeline: (params = {}) => req('GET', '/api/events/timeline?' + new URLSearchParams(params)),
   setCameraAnalyzer: (id, analyzer) => req('PUT', `/api/cameras/${id}/analyzer`, { analyzer }),
   startCamera: (id) => req('POST', `/api/cameras/${id}/start`),

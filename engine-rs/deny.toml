@@ -1,6 +1,13 @@
 [graph]
 # workspace 内 dev/build 目标也纳入许可证检查（CI 与发布一致性）
 all-features = false
+# UX4（2026-11-20）：产品仅出 Windows 产物（tray-icon 为 Windows-only 目标依赖），
+# deny 图限定 Windows 三元组——tray-icon 的 Linux gtk 传递栈（glib/gtk/atk，
+# 经 proc-macro-error 报 RUSTSEC-2024-0370）从不参与编译，不入图。
+targets = [
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "x86_64-pc-windows-gnu" },
+]
 
 [advisories]
 # 已知漏洞数据库（RustSec）；yanked crate 只警告不阻断（离线环境可复现优先）
@@ -17,6 +24,12 @@ ignore = [
     { crate = "rustls-webpki@0.102.8", reason = "仅经 rumqttc 0.25 传递（可选 MQTT 通道，默认关闭）；rumqttc 钉 0.102.8，无 0.103 兼容版本，升级随 rumqttc 主版本" },
     "RUSTSEC-2025-0134",
     { crate = "rustls-pemfile@2.2.0", reason = "unmaintained：仅 rumqttc 0.25 可选 PEM 解析路径；本项目 MQTT TLS 走 rustls-native-certs 系统信任源，不经此解析器" },
+    # chrono 被宣布无人维护（RUSTSEC-2026-0543，2026-11 公告）——unmaintained
+    # 非漏洞；ls-jobs/ls-analyzer 用其本地时区时间与日期算术（retention/
+    # escalation/backup/golden），替换为自研 civil_from_days 系（ls-store 已有）
+    # 列独立重构项跟进，不阻塞 UX 轮。
+    # 0.19.9 的 crate@ver 匹配只对「有具体版本号公告」生效；全版本公告须用 ID 豁免
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]

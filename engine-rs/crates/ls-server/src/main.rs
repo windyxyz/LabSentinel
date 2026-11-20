@@ -1,3 +1,8 @@
+// UX3（2026-11-20）：release 双击启动无控制台（GUI 子系统）；debug 保留控制台。
+// 管道语义已实测（UX3.0 spike）：父进程管道重定向时 stdout/exit code 照常——
+// CI 冒烟 / smoke_rust / 安装器 --selftest-http 不受影响；排障走 --console。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! ls-server（L3/T-331）：axum 控制面单二进制。
 //!
 //! 契约 1:1 对齐 Python FastAPI（docs/openapi.json 快照）：
@@ -36,8 +41,22 @@ mod util;
 mod vlm;
 mod worker;
 
+// UX2（2026-11-20）：检测模式全局策略（local/api/cascade）——detect.* 三条 API
+// + cascade 复核引擎的数据面
+mod detect;
+
+pub(crate) use detect::{detect_config_get, detect_config_put, detect_test, detect_usage};
+
 // RA4.2（ADR-0011）：版本归档/回滚（install_portable 语义的 Rust 实现）
 mod deploy;
+
+// UX3/UX4（2026-11-20）：无黑框启动三件套——控制台/弹窗 FFI（唯二 unsafe 收口模块
+// 之一）、日志文件化（data/logs 按天滚动 14 天）、系统托盘（唯一常驻 UI）
+mod logger;
+mod tray;
+mod wincon;
+
+pub(crate) use tray::graceful_shutdown;
 
 mod url {
     /// 从 URL 提取 host（标准库解析；与 Python urlparse(url).hostname 等价的宽松实现）
@@ -64,9 +83,15 @@ pub(crate) use state::{AppState, PairState, Shared};
 
 #[tokio::main]
 async fn main() {
+    // UX3：--console 必须早于任何 println!（GUI release 下附着父控制台重指
+    // CONOUT$；CI 管道/安装器自检已有控制台，幂等直接返回）
+    if std::env::args().any(|x| x == "--console") {
+        crate::wincon::attach_parent_console();
+    }
     // 健康自检（原为容器 HEALTHCHECK 设计，Docker 路线已终止——保留作通用探活）：
     // `labsentinel-server --healthcheck <db>` 只读探活即退出
     let launch_mode = std::env::args().any(|x| x == "--launch");
+    let tray_mode = std::env::args().any(|x| x == "--tray");
     if launch_mode {
         // RA4（ADR-0011）：portable_launcher 消解件——端口试探防双实例：
         // 目标端口已被监听 = 已有实例在跑 → 开浏览器即退（锁文件照写对齐 Python 语义）
@@ -344,12 +369,30 @@ async fn main() {
             }
         }
     }
-    // RA5：独立部署自举——全新库（零 Python 部署）由 Rust 建 v13 全量 schema
-    // （幂等；已有库/迁移链仍归 Python，ADR-0008 口径不变）
+    // UX3：日志文件化 + panic hook（无黑框 ≠ 黑盒；data/logs 按天滚动 14 天）
+    let log_file = crate::logger::init(std::path::Path::new(&st.data_dir));
+    crate::logger::install_panic_hook();
+    crate::logger::info(&format!(
+        "[start] LabSentinel {} · http://127.0.0.1:{port}/ · 日志 {:?}",
+        st.version,
+        log_file.unwrap_or_else(|| "<不可写，仅控制台>".into())
+    ));
+    // RA5：独立部署自举——全新库（零 Python 部署）由 Rust 建全量 schema（幂等；
+    // 已有库走 migrate 增量列迁移——Python 退役后迁移链归 Rust）
     if let Ok(s) = ls_store::Store::open(&st.db_path) {
         match s.ensure_schema() {
-            Ok(true) => println!("[ls-server] 全新库——已自举 v13 schema（Rust 形态独立部署）"),
-            Ok(false) => {}
+            Ok(true) => println!(
+                "[ls-server] 全新库——已自举 v{} schema（Rust 形态独立部署）",
+                ls_store::SCHEMA_VERSION_LATEST
+            ),
+            Ok(false) => {
+                // UX2：存量库 v13→v14（events cascade 判定列；幂等可重复执行）
+                match s.migrate() {
+                    Ok(v) if v >= 14 => {}
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[ls-server] schema 迁移失败: {e}"),
+                }
+            }
             Err(e) => eprintln!("[ls-server] schema 自举失败: {e}"),
         }
     }
@@ -360,7 +403,19 @@ async fn main() {
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[ls-server] 端口 {port} 绑定失败: {e}——可能已有实例在运行");
+            crate::logger::error(&format!(
+                "[ls-server] 端口 {port} 绑定失败: {e}——可能已有实例在运行"
+            ));
+            // UX3：致命启动错误必须可见（GUI 无控制台 → 原生弹窗）
+            crate::wincon::fatal_error_box(
+                "LabSentinel 启动失败",
+                &format!(
+                    "端口 {port} 被占用（可能已有 LabSentinel 在运行）。
+诊断：
+- 日志：数据目录 logs/server-*.log
+- 命令行排障：labsentinel-server.exe --console --launch"
+                ),
+            );
             if launch_mode {
                 open_browser(port);
                 std::process::exit(0);
@@ -369,6 +424,11 @@ async fn main() {
         }
     };
     println!("labsentinel-server READY port={port}");
+    // UX4：系统托盘（唯一常驻 UI；--tray 开启，安装器快捷方式 = --launch --tray）。
+    // 创建失败只 warn 降级，不影响服务。
+    if tray_mode {
+        crate::tray::start(Arc::clone(&st), port);
+    }
     // RA4：--launch 模式（portable_launcher 消解件）——单实例锁（对齐 Python
     // "pid port" 契约，位置 data 上一级 logs/）+ 就绪后开浏览器
     if launch_mode {

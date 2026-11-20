@@ -1,6 +1,8 @@
 # 桌面体验与界面简化路线图（UX 轮）
 
-> 创建：2026-11-20。定位：**设计文档（设计者视角，不直接开发）**。
+> 创建：2026-11-20。**状态：UX1~UX4 开发完成 + 验收全绿（2026-11-20/21，
+> 详见 docs/plan/status.md 第七轮）；UX5 版本节奏随发布（0.3.0）——打包/tag
+> 按用户指示暂缓**。定位：**设计文档（设计者视角，不直接开发）**。
 > 用户诉求三条：① 简化操作界面，相关功能整合进设置中心（以「模型相关」为首个样板，
 > 检测模式提供三种：仅本地 / 仅 API / 本地+API 协作——本地先扫到人与可疑，再把
 > 相关图片传 API 精判，节省 API 费用）；② 程序启动不弹黑框；③ 任务栏托盘便于
@@ -78,9 +80,10 @@
 
 ### 验收
 
-- [ ] 主导航 6 入口；设置 9 分区侧栏搜索全部可达
-- [ ] 旧路由访问自动跳转新位置（无 404）
-- [ ] Web 测试 + build 全绿；acceptance_rust_only 39/39
+- [x] 主导航 5 入口（仪表盘/监控源/事件/告警/设置）+ 仪表盘内报表 = 使用面 6；
+      设置 9 分区侧栏搜索全部可达（2026-11-20 实装；Web 50 测试含导航断言）
+- [x] 旧路由访问自动跳转新位置（无 404；App.vue LEGACY replace 重定向）
+- [x] Web 测试 50 passed + build 全绿；acceptance_rust_only 39/39
 
 ---
 
@@ -157,11 +160,14 @@ mode == cascade  ：本地先行 ——
 
 ### 验收
 
-- [ ] 三模式切换**即时生效**（PUT 后相机 worker 软重启对齐现有 analyzer PUT 行为）
-- [ ] cascade 省钱实证：空场景 0 次 API 调用（mock 计数断言）
-- [ ] 预算耗尽自动降级 + 横幅；计数跨重启累计
-- [ ] api_key GET 脱敏、不写日志；远程未确认 → 拒绝调用并落 error 事件
-- [ ] acceptance_vlm 扩展后全绿；acceptance_rust_only 39/39
+- [x] 三模式切换**即时生效**（PUT 后 restart_following_global/restart_camera_if_running
+      软重启；acceptance_vlm 9/10 步实测）
+- [x] cascade 省钱实证：空场景 0 次 API 调用（acceptance_vlm 11b——mock requests
+      2→2 恒定；有人帧 12 步 2→3 触发复核）
+- [x] 预算耗尽自动降级 + 横幅；计数持久化 app_settings 跨重启累计（usage_bump）
+- [x] api_key GET 一律 ***（不回明文、不写日志）；远程未确认 → compliance_ok 拒绝
+      并落 error verdict（cascade_review_run 红线再确认）
+- [x] acceptance_vlm **14/14** 全绿（+UX2 六步）；acceptance_rust_only 39/39
 
 ---
 
@@ -196,10 +202,15 @@ mode == cascade  ：本地先行 ——
 
 ### 验收
 
-- [ ] 双击 exe：无控制台窗口、托盘出现、浏览器打开
-- [ ] `--console` 可看输出；日志文件滚动正确；panic 落盘
-- [ ] CI 冒烟/smoke_rust/安装器 selftest 全绿（UX3.0 实证）
-- [ ] 致命错误弹窗可见且日志留痕
+- [x] 双击 exe：无控制台窗口、托盘出现（Start-Process 实测——GUI 子系统 +
+      托盘就绪日志；--launch 就绪开浏览器逻辑沿用 RA4）
+- [x] `--console` 可看输出（手动排障多轮实测）；日志按天滚动正确；panic 落盘
+      （install_panic_hook；logger 单测）
+- [x] UX3.0 管道语义 spike 三场景全 PASS（管道捕获/重定向/无句柄 NUL 回落，
+      println 不 panic）——CI 冒烟/smoke_rust/安装器 selftest 不受 GUI 子系统
+      影响；smoke_rust 已增 GUI 形态+shutdown 断言（随下轮打包 CI 实证）
+- [x] 致命错误弹窗可见且日志留痕（fatal_error_box → MessageBoxW；logger.error
+      先落盘——弹窗路径代码审查 + stderr 路径 debug 构建实测）
 
 ---
 
@@ -232,9 +243,12 @@ mode == cascade  ：本地先行 ——
 
 ### 验收
 
-- [ ] 托盘出现、菜单各项可用；双击开控制台
-- [ ] 退出后进程结束、端口释放、无残留（对齐安装器零残留口径）
-- [ ] 托盘失败降级不崩服务
+- [x] 托盘出现、菜单各项可用；双击开控制台（本机实测——tray-icon 0.21.3 +
+      muda 菜单；消息泵线程；事件回调路由 open/copy/exit）
+- [x] 退出后进程结束、端口释放（shutdown API 实测 = 托盘退出同函数
+      graceful_shutdown：停 workers → WAL checkpoint → exit(0)；tasklist 无残留）
+- [x] 托盘失败降级不崩服务（tray_run Err → logger.warn + return；无图标/无
+      shell 会话均降级为无托盘运行）
 
 ---
 

@@ -37,7 +37,7 @@ async fn live_and_system_contract() {
         .unwrap();
     let j = body_json(r2).await;
     assert_eq!(j["version"], "0.2.0");
-    assert_eq!(j["schema_version"], 13);
+    assert_eq!(j["schema_version"], 14);
 }
 
 #[tokio::test]
@@ -148,7 +148,7 @@ async fn batch3_import_evidence_and_status() {
                 track_id: 1,
                 detail: "存证",
                 snapshot: Some("snapshots/ev.jpg"),
-                ts: "2026-11-09T10:00:00",
+                ts: &format!("{}T10:00:00", crate::util::iso_days_ago(1)),
             })
             .unwrap();
         let snap_dir = dir.path().join("snapshots");
@@ -402,7 +402,8 @@ async fn audit_and_bulk_and_stats() {
                 track_id: i,
                 detail: "t",
                 snapshot: None,
-                ts: "2026-11-09T10:00:00",
+                // 相对日期（回归修复：硬编码 2026-11-09 在 7 天窗外后 stats_quality 必炸）
+                ts: &format!("{}T10:00:00", crate::util::iso_days_ago(1)),
             })
             .unwrap();
         }
@@ -436,7 +437,13 @@ async fn audit_and_bulk_and_stats() {
     assert_eq!(r.status(), StatusCode::OK);
     let j = body_json(r).await;
     assert_eq!(j["days"].as_array().unwrap().len(), 3);
-    let r = req(&app, "GET", "/api/stats/hourly?date=2026-11-09", None).await;
+    let r = req(
+        &app,
+        "GET",
+        &format!("/api/stats/hourly?date={}", crate::util::iso_days_ago(1)),
+        None,
+    )
+    .await;
     assert_eq!(body_json(r).await["hours"]["10"]["total"], 2);
     let r = req(&app, "GET", "/api/events/timeline?days=2", None).await;
     assert_eq!(body_json(r).await["days_list"].as_array().unwrap().len(), 2);

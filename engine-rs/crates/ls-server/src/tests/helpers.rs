@@ -70,11 +70,12 @@ pub(crate) fn seed_schema(path: &std::path::Path) {
     let c = rusqlite::Connection::open(path).unwrap();
     c.execute_batch(
         "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-         INSERT INTO schema_version VALUES(13,'x');
+         INSERT INTO schema_version VALUES(14,'x');
          CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, \
          type TEXT, level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT, \
          status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, escalated_ts TEXT, \
-         ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT);
+         ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT, 
+         vlm_verdict TEXT, vlm_ts TEXT, vlm_suppressed INTEGER DEFAULT 0);
          CREATE TABLE cameras(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, \
          type TEXT, status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
          analyzer TEXT DEFAULT 'python');

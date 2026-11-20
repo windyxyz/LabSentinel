@@ -54,13 +54,22 @@ function onPicked(p) {
 }
 
 
-// RA5/RA4.2：分析器切换——本地检测模型 / 外部联网模型（VLM）；运行中由服务端自动重启该路
+// RA5/RA4.2 → UX2（2026-11-20）：分析器切换升级为四选——跟随全局（默认，全局
+// 策略见设置→模型与检测）/ 仅本地 / 仅 API / 本地+API 协作；运行中由服务端软重启该路
+const ANALYZER_LABELS = {
+  default: '跟随全局（默认）', rust: '仅本地', vlm: '仅 API',
+  cascade: '本地+API 协作',
+}
 function analyzerOf(c) {
-  return c.analyzer === 'vlm' ? 'vlm' : 'rust'  // 历史值 python 一律视为本地检测
+  if (c.analyzer === 'python') return 'rust' // 历史值 python 一律视为仅本地
+  return ANALYZER_LABELS[c.analyzer] ? c.analyzer : 'default' // 未知值回退跟随全局
 }
 async function setAnalyzer(c, ev) {
   const impl = ev.target.value
-  const word = impl === 'vlm' ? '改用外部联网模型（VLM）' : '改用本地检测模型'
+  const word = {
+    default: '改为跟随全局策略', rust: '改为仅本地检测', vlm: '改为仅 API 精判',
+    cascade: '改为本地+API 协作（本地先行，可疑帧交 API）',
+  }[impl] || impl
   if (!confirm(`确定把「${c.name}」${word}？运行中将自动重启该路。`)) {
     ev.target.value = analyzerOf(c)
     return
@@ -337,13 +346,15 @@ async function watchLive(cam) {
         </td>
         <td><img v-if="snap[c.id]" :src="mediaUrl(`/api/cameras/${c.id}/snapshot?t=${snap[c.id]}`)" alt="摄像头最新画面缩略图" class="snap" @click="snap[c.id] = Date.now()" /></td>
         <td>
-          <!-- RA5 模型模块化：本地检测 / 外部联网模型（VLM）按摄像头插拔 -->
+          <!-- UX2 检测模式：跟随全局 / 仅本地 / 仅 API / 本地+API 协作（全局策略在 设置→模型与检测） -->
           <select :value="analyzerOf(c)"
                   :aria-label="`分析方式 摄像头${c.id}`"
-                  title="分析方式：本地=包内 ONNX 模型 / 外部联网=按 LS_VLM_* 或模型设置接入的视觉大模型；运行中切换将自动重启该路"
+                  title="分析方式：跟随全局=设置中心的检测模式策略；仅本地=包内 ONNX 零成本；仅 API=全量交外部联网模型；协作=本地先扫可疑帧再精判（省费用）。运行中切换将自动重启该路"
                   style="margin-right:6px" @change="setAnalyzer(c, $event)">
-            <option value="rust">本地模型</option>
-            <option value="vlm">外部联网模型</option>
+            <option value="default">跟随全局（默认）</option>
+            <option value="rust">仅本地</option>
+            <option value="vlm">仅 API</option>
+            <option value="cascade">本地+API 协作</option>
           </select>
           <button class="ghost" style="margin-right:6px" @click="snap[c.id] = Date.now()">看快照</button>
           <button v-if="c.type !== 'folder'" class="ghost" style="margin-right:6px" @click="watchLive(c)">实时画面</button>

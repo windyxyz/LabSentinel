@@ -35,6 +35,24 @@
 | B · Inno Setup 双形态 | dedae39 | ADR-0010 入库（调研覆盖 Jellyfin NSIS+NSSM / mpv.net Inno+zip 双形态 / Tautulli Python 服务 NSIS / Navidrome WinSW / fsplayer·NipaPlay·Ruffle·NextPlayer 查证）；`deploy/windows/installer.iss`（按用户/覆盖升级/快捷方式/HKCU 卸载项/可选服务勾选页/finalize 健康检查/SignTool 占位）；`install_portable.py finalize` 复用 health_check；`build_portable.py --installer`（find_iscc 探测，未装警告跳过 zip-only）；release.yml 加 choco ISCC 步骤与 setup.exe artifact；59-portable-install/部署指南补双形态。验证：py_compile、本机无 ISCC 警告跳过实测、安装器回归 5 passed；**ISCC 编译待 CI 验证**（本机未装 Inno Setup，如实保留） |
 | C · 清理 | 83e93d8 | 删根目录 78 原件（docs/plan 正本保留）与 `%SBOX%` 空目录；release_check 移除 openssl allowlist（复跑 11 PASS/0 FAIL）；`docs/dev/架构设计.md` 重写为 0.2.0 双运行时现状；tools/README 补「黄金语料归档工具」章节（4 近孤儿脚本原地保留）；45-model-onboarding 悬空引用改指 78 号 §T-321；TEMP 冒烟残留与孤儿 go2rtc 清理 |
 
+## 第七轮：UX 轮——桌面体验与界面简化（2026-11-20/21，ux-roadmap-2026-11-20.md 全项落地）
+
+| 项 | 结果与证据 |
+|---|---|
+| UX3.0 预检 | ✅ GUI 子系统管道语义 spike 三场景全 PASS（管道捕获/重定向/无句柄 NUL 回落 println 不 panic）→ `windows_subsystem="windows"` 安全；tray-icon 0.21.3 过 cargo-deny（图限定 Windows 三元组隔离 gtk 传递栈） |
+| UX2 检测模式三选一 | ✅ `detect.rs` 新模块：DetectCfg（DB→env→默认链；api_key fernet `enc:v1:` 落盘 GET 脱敏）；三条 API（GET/PUT /api/detect/config、POST /api/detect/test、GET /api/detect/usage）+ `/api/system` detect 块；cascade 引擎——触发门（规则命中 ∨ 人员置信度灰区）→ 异步复核线程（CascadeReview）→ verdict 回填 v14 新列；预算耗尽降级 local-only + unreviewed；suppress 仅对明确否定生效（fail-open） |
+| UX1 导航简化 | ✅ 主导航 11→5（+仪表盘内报表=6 使用面）；Sources.vue 三分段（摄像头/图片文件夹/安全区规则）；Insights.vue 双视图；设置 9 分区（模型与检测置顶，吸收 Models/Devices/Face）；旧 hash 路由 LEGACY replace 重定向 |
+| UX2 前端 | ✅ DetectPanel.vue 三模式卡片 + API 服务卡（合规确认位）+ 协作策略卡（触发/预算/否定策略）+ 用量横幅 + 测试连接；Cameras.vue analyzer 四选下拉（default/rust/vlm/cascade） |
+| UX3 无黑框 | ✅ main.rs 顶部 `cfg_attr(all(windows, not(debug_assertions)), windows_subsystem="windows")`；`--console` attach（wincon.rs，唯二 unsafe 收口模块①）；logger.rs 日志按天滚动 14 天 + panic hook；致命错误 MessageBoxW；设置→服务控制「查看服务日志」（logs_tail 读当日 server-*.log） |
+| UX4 托盘 | ✅ tray.rs（唯二 unsafe 收口模块②）：tray-icon + muda 菜单（打开控制台/复制地址/退出）；**graceful_shutdown 共享函数**（停 workers → WAL checkpoint → exit）——网页停止服务与托盘退出同语义；消息泵线程；降级 warn |
+| schema v14 | ✅ events 加 vlm_verdict/vlm_ts/vlm_suppressed；ensure_schema 全新库直建 v14；**migrate() 幂等迁移存量库（Python 退役后迁移链归 Rust）**；main.rs 启动时执行 |
+| 模式门解耦修复 | ✅ compliance_ok 与 vlm_enabled 拆分——per-camera vlm/cascade 覆盖在全局 mode=local 时可判（回归测试锁定）；is_loopback 取端口 bug（rsplit(':')→取冒号前）；内置样张 usize 下溢 panic；**新建相机 analyzer 默认 'rust'→'default'（跟随全局——cascade 验收暴露的语义冲突）** |
+| 验收 | ✅ Rust workspace **134 passed**（+12）；clippy/fmt/cargo-deny 全绿（RUSTSEC-2026-0543 chrono unmaintained 按 ID 豁免=非漏洞，时间库替换列长期项）；Web **50 passed** + build；acceptance_vlm **14/14**（cascade 全链：空场景 mock requests 2→2 恒定省钱红线 / 有人帧 2→3 触发复核 / usage 计数 / test 端点 4ms）；acceptance_rust_only **39/39**；路由覆盖 **106/106=100%**（detect.* 4 条新路由） |
+| UX3/UX4 本机实测 | ✅ Start-Process 无窗口启动 release exe（GUI 子系统）→ /api/health/ready + **托盘就绪日志** → shutdown API → 进程退出/端口释放/WAL 合并留痕 |
+| UX5 文档（非打包部分） | ✅ CHANGELOG Unreleased 段；安装与卸载（无黑框/托盘/日志/三模式表）；README/部署指南形态表；roadmap 验收清单全打勾 |
+
+**遗留到发布时**：VERSION→0.3.0、打包（build_rust --zip + setup.exe）、smoke_rust GUI 断言 CI 实证、tag/release——**按用户指示暂缓（后续还要继续开发）**。
+
 ## 第六轮：Inno Setup 7 安装器恢复为必发布资产（2026-11-14）
 
 | 项 | 结果与证据 |

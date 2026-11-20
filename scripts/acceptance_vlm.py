@@ -99,6 +99,8 @@ def main() -> int:
             "LS_VLM_MODEL": "mock-model",
             # decode_image 需 ffmpeg（find 候选不含仓库根 tools/ffmpeg 子目录）
             "LS_FFMPEG": str(ROOT / "tools" / "ffmpeg" / "ffmpeg.exe"),
+            # UX2 cascade 本地先行：真 YOLO 模型扫人（触发门依赖本地检测）
+            "LS_MODEL_PATH": str(ROOT / "m0-spike" / "yolo11n.onnx"),
         })
         proc = subprocess.Popen(
             [str(EXE), "--launch"], cwd=str(ROOT), env=env,
@@ -183,6 +185,83 @@ def main() -> int:
                 break
             time.sleep(1)
         step("8 违规事件（no_ppe）入库", ok8, f"events={len(events)}")
+
+        # ---- UX2（2026-11-20）：cascade 协作模式——省钱第一验收指标 ----
+        st, j = post(f"{base}/api/detect/config",
+                     {"mode": "cascade",
+                      "vlm": {"url": "http://127.0.0.1:8899"},
+                      "cascade": {"conf_lo": 0, "conf_hi": 1,
+                                  "daily_budget": 50}}, method="PUT")
+        step("9 PUT /api/detect/config mode=cascade（灰区放开，便于触发）",
+             st == 200 and j.get("ok") is True)
+        st, body = get(f"{base}/api/detect/config")
+        cfg = json.loads(body)
+        step("10 GET config 回读 cascade + api_key 脱敏",
+             cfg.get("mode") == "cascade"
+             and cfg.get("vlm", {}).get("api_key") == "***"
+             and cfg.get("cascade", {}).get("daily_budget") == 50)
+
+        # [11] 空场景 0 API 调用（省钱红线）：仅放空场景帧的新 folder 相机
+        # （analyzer=default 跟随全局 cascade；本地扫不到人/规则 → 不送 API）
+        empty_dir = tmp / "casc-empty"
+        empty_dir.mkdir()
+        shutil.copy(imgs / "empty-frame.jpg", empty_dir / "empty.jpg")
+        st, j = post(f"{base}/api/cameras",
+                     {"name": "cascade-empty", "source": str(empty_dir),
+                      "type": "folder"})
+        cid2 = j.get("id", 0)
+        st, j = post(f"{base}/api/folders/{cid2}/scan", {})
+        step("11a cascade 空场景相机启动", st == 200 and j.get("started") is True)
+        st, body = get("http://127.0.0.1:8899/stats")
+        base_reqs = json.loads(body).get("requests", 0)
+        rows2: list = []
+        ok11, detail11 = False, ""
+        for _ in range(20):
+            st, body = get(f"{base}/api/folder-images?camera_id={cid2}")
+            rows2 = json.loads(body).get("items", [])
+            if rows2 and all(r.get("processed_ts") for r in rows2):
+                ok11 = True
+                break
+            time.sleep(1)
+        st, body = get("http://127.0.0.1:8899/stats")
+        after_reqs = json.loads(body).get("requests", 0)
+        step("11b 空场景 0 次 API 调用（省钱红线）",
+             ok11 and after_reqs == base_reqs,
+             f"empty_rows={len(rows2)} mock requests {base_reqs}->{after_reqs}")
+
+        # [12] 有人帧触发复核：同相机补有人帧 → mock 计数增长 + verdict 链
+        shutil.copy(imgs / "person-frame.jpg", empty_dir / "person.jpg")
+        st, j = post(f"{base}/api/folders/{cid2}/scan", {})
+        ok12, detail12 = False, ""
+        for _ in range(30):
+            st, body = get("http://127.0.0.1:8899/stats")
+            now_reqs = json.loads(body).get("requests", 0)
+            if now_reqs > after_reqs:
+                ok12 = True
+                detail12 = f"mock requests {after_reqs}->{now_reqs}"
+                break
+            time.sleep(1)
+        step("12 有人帧触发 API 复核（本地先行->精判）", ok12, detail12)
+
+        # [13] usage 端点：计数>0 + 预算字段（跨重启持久化在 app_settings）
+        ok13 = False
+        usage: dict = {}
+        for _ in range(10):
+            st, body = get(f"{base}/api/detect/usage")
+            usage = json.loads(body)
+            if usage.get("count", 0) > 0:
+                ok13 = True
+                break
+            time.sleep(1)
+        step("13 GET /api/detect/usage 计数/预算", ok13,
+             f"count={usage.get('count')} budget={usage.get('budget')} "
+             f"left={usage.get('left')}")
+
+        # [14] detect/test：连通性测试（真实发一帧给 mock）
+        st, j = post(f"{base}/api/detect/test", {})
+        step("14 POST /api/detect/test 测试连接",
+             st == 200 and j.get("ok") is True and "elapsed_ms" in j,
+             f"{st} elapsed={j.get('elapsed_ms')}ms")
 
         print(f"\n[结果] {'PASS' if ok_all else 'FAIL'}")
         return 0 if ok_all else 1

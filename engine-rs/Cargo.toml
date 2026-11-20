@@ -26,7 +26,9 @@ serde_json = "1"
 rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# UX3/UX4（2026-11-20）：deny + 两个显式 allow 模块收口（wincon.rs 控制台/弹窗
+# FFI、tray.rs 托盘消息泵）——每个模块头注释声明 FFI 清单，其余代码保持无 unsafe
+unsafe_code = "deny"
 
 [profile.release]
 lto = true

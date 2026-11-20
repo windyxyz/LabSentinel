@@ -101,8 +101,9 @@ Type: files; Name: "{commondesktop}\LabSentinel.lnk"
 Filename: "{app}\labsentinel-server.exe"; \
   Parameters: "--selftest-http"; WorkingDir: "{app}"; Flags: runhidden; \
   StatusMsg: "{cm:Verify}"
-Filename: "{app}\LabSentinel.bat"; Description: "{cm:Launch}"; \
-  Flags: nowait postinstall skipifsilent
+Filename: "{app}\labsentinel-server.exe"; \
+  Parameters: "--launch --tray"; WorkingDir: "{app}"; \
+  Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; 卸载前必须结束正在运行的 labsentinel-server.exe（无参数会常驻起服务，
@@ -173,14 +174,15 @@ begin
   ForceDirectories(GroupDir);
   CreateShellLink(GroupDir + '\Uninstall LabSentinel.lnk',
     'Uninstall LabSentinel', ExpandConstant('{uninstallexe}'), '', '', '', 0, SW_SHOWNORMAL);
+  // UX3：快捷方式直指 exe（--launch --tray）——无黑框；bat 保留一个版本周期兼容
   if WantMenu then
     CreateShellLink(GroupDir + '\LabSentinel.lnk',
-      CustomMessage('Launch'), ExpandConstant('{app}\LabSentinel.bat'),
-      '', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
+      CustomMessage('Launch'), ExpandConstant('{app}\labsentinel-server.exe'),
+      '--launch --tray', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
   if WantDesktop then
     CreateShellLink(DesktopDir + '\LabSentinel.lnk',
-      CustomMessage('Launch'), ExpandConstant('{app}\LabSentinel.bat'),
-      '', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
+      CustomMessage('Launch'), ExpandConstant('{app}\labsentinel-server.exe'),
+      '--launch --tray', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

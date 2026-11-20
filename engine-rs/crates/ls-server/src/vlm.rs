@@ -30,54 +30,23 @@ pub struct VlmCfg {
     pub enabled: bool,
 }
 
-pub fn cfg_from_env() -> VlmCfg {
-    let provider = std::env::var("LS_VLM_PROVIDER").unwrap_or_else(|_| "openai_compat".into());
-    let url: String = std::env::var("LS_VLM_URL")
-        .unwrap_or_default()
-        .trim_end_matches('/')
-        .into();
-    let allow_remote = env_bool("LS_VLM_ALLOW_REMOTE", false);
-    let enabled =
-        env_bool("LS_VLM_ENABLED", false) && !url.is_empty() && (is_loopback(&url) || allow_remote);
-    VlmCfg {
-        provider,
-        url,
-        model: std::env::var("LS_VLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into()),
-        api_key: std::env::var("LS_VLM_API_KEY").unwrap_or_default(),
-        timeout_s: env_u64("LS_VLM_TIMEOUT_S", 30).max(1),
-        enabled,
-    }
-}
+// UX2（2026-11-20）：env 组装（原 cfg_from_env）迁入 detect.rs 的
+// DetectCfg::load（DB → env → 默认统一链；VlmCfg 由 DetectCfg::to_vlm_cfg 组装）。
 
-fn env_bool(k: &str, d: bool) -> bool {
-    match std::env::var(k) {
-        Ok(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => d,
-    }
-}
-
-fn env_u64(k: &str, d: u64) -> u64 {
-    std::env::var(k)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(d)
-}
-
-fn is_loopback(url: &str) -> bool {
+/// URL 是否回环（UX2 合规判定复用：detect.rs 远程放行检查）。
+pub(crate) fn is_loopback(url: &str) -> bool {
     let rest = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .unwrap_or(url);
-    let host = rest
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .rsplit(':')
-        .next()
-        .unwrap_or("");
+    let hostport = rest.split('/').next().unwrap_or("");
+    // host:port 取冒号前；IPv6 [::1]:8000 取中括号内（UX2 修复：原 rsplit(':')
+    // 取到的是端口，带端口的回环地址恒判 false）
+    let host = if let Some(rest6) = hostport.strip_prefix('[') {
+        rest6.split(']').next().unwrap_or("")
+    } else {
+        hostport.split(':').next().unwrap_or("")
+    };
     matches!(
         host.to_ascii_lowercase().as_str(),
         "127.0.0.1" | "localhost" | "::1"
@@ -318,19 +287,11 @@ mod tests {
     }
 
     #[test]
-    fn cfg_gate_requires_loopback_or_optin() {
-        std::env::set_var("LS_VLM_ENABLED", "1");
-        std::env::set_var("LS_VLM_URL", "https://api.example.com");
-        std::env::remove_var("LS_VLM_ALLOW_REMOTE");
-        assert!(!cfg_from_env().enabled, "外发截图未授权 → 关");
-        std::env::set_var("LS_VLM_ALLOW_REMOTE", "true");
-        assert!(cfg_from_env().enabled);
-        std::env::set_var("LS_VLM_URL", "http://127.0.0.1:9999");
-        assert!(cfg_from_env().enabled, "回环不需要授权");
-        std::env::set_var("LS_VLM_ENABLED", "0");
-        assert!(!cfg_from_env().enabled, "显式关");
-        std::env::remove_var("LS_VLM_ENABLED");
-        std::env::remove_var("LS_VLM_URL");
-        std::env::remove_var("LS_VLM_ALLOW_REMOTE");
+    fn is_loopback_classification() {
+        // UX2 合规门依赖：回环免确认，其余（含内网/公网）需显式放行
+        assert!(is_loopback("http://127.0.0.1:8899/v1"));
+        assert!(is_loopback("http://localhost:11434"));
+        assert!(!is_loopback("https://api.example.com/v1"));
+        assert!(!is_loopback("http://192.168.1.10:8000"));
     }
 }

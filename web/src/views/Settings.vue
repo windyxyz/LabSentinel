@@ -1,18 +1,26 @@
 <script setup>
 // RA5-UX（ADR-0011）：设置中心——从「摄像头」页拆出的管理面（分类侧栏 + 搜索）。
 // 各区块整段搬移自 Cameras.vue（逻辑零改动）。
+// UX1（2026-11-20）：9 分区扩容——「模型与检测」置顶（UX2 三模式）；设备管理/
+// 人脸管理 从一级导航迁入；原「模型管理」页并入「模型与检测」的本地模型卡。
 import { computed, onMounted, ref } from 'vue'
 import { api, adminToken } from '../api'
+import DetectPanel from './DetectPanel.vue'
+import Devices from './Devices.vue'
+import Face from './Face.vue'
 
 const search = ref('')
-const active = ref('token')
+const active = ref('detect')
 const sections = [
+  { id: 'detect', label: '模型与检测', kw: '检测模式 本地 api 联网 协作 cascade 精判 省钱 预算 置信度 模型 vlm ppe 实验服', icon: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M5 7h6M5 10h4"/>' },
   { id: 'token', label: '管理令牌', kw: '令牌 token 鉴权 认证', icon: '<circle cx="5" cy="8" r="3"/><path d="M7.6 8H14v2.2M12 8v2.2"/>' },
   { id: 'notify', label: '通知与告警', kw: '渠道 测试 静默 投递 失败 告警 企业微信 钉钉 邮件', icon: '<path d="M8 2.5a3.5 3.5 0 0 1 3.5 3.5v3l1.5 2.5H3l1.5-2.5v-3A3.5 3.5 0 0 1 8 2.5z"/><path d="M6.5 13a1.8 1.8 0 0 0 3 0"/>' },
-  { id: 'data', label: '数据管理', kw: '导入 导出 备份 配置 json 迁移', icon: '<path d="M3 5.5C3 4.1 5.2 3 8 3s5 1.1 5 2.5S10.8 8 8 8 3 6.9 3 5.5z"/><path d="M3 5.5v5C3 11.9 5.2 13 8 13s5-1.1 5-2.5v-5"/>' },
   { id: 'template', label: '告警文案', kw: '模板 预览 占位符 文案 标题 正文', icon: '<path d="M3 4h10M3 8h10M3 12h6"/>' },
+  { id: 'devices', label: '设备与配对', kw: '设备 配对 令牌 移动端 手机 撤销 三级', icon: '<rect x="4.5" y="2" width="7" height="12" rx="1.5"/><path d="M7 12.2h2"/>' },
+  { id: 'face', label: '人脸识别', kw: '人脸 名册 注册 同意 合规 陌生人 删除', icon: '<circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 13.8c.9-2.7 3-4 5.5-4s4.6 1.3 5.5 4"/>' },
+  { id: 'data', label: '数据管理', kw: '导入 导出 备份 配置 json 迁移', icon: '<path d="M3 5.5C3 4.1 5.2 3 8 3s5 1.1 5 2.5S10.8 8 8 8 3 6.9 3 5.5z"/><path d="M3 5.5v5C3 11.9 5.2 13 8 13s5-1.1 5-2.5v-5"/>' },
   { id: 'plugins', label: '插件', kw: '插件 外挂 zip 上传 启用 日志 扩展', icon: '<path d="M6 2.5h4v2.2a1.6 1.6 0 1 0 2.2 2.2H14v4h-1.8a1.6 1.6 0 1 1 0 2.2H14v1.4H2v-1.4h1.8a1.6 1.6 0 1 0-2.2-2.2H2v-4h2.2A1.6 1.6 0 1 0 6 4.7z"/>' },
-  { id: 'service', label: '服务控制', kw: '停止 服务 重启 退出 关机', icon: '<path d="M8 2.5v5.5"/><path d="M4.6 4.8a4.8 4.8 0 1 0 6.8 0"/>' },
+  { id: 'service', label: '服务控制', kw: '停止 服务 重启 退出 关机 日志 尾部', icon: '<path d="M8 2.5v5.5"/><path d="M4.6 4.8a4.8 4.8 0 1 0 6.8 0"/>' },
 ]
 const visibleSections = computed(() => {
   const q = search.value.trim().toLowerCase()
@@ -185,6 +193,21 @@ async function shutdownServer() {
   alert('停止指令已发出。服务退出后本页面将无法刷新；可关闭浏览器窗口。')
 }
 
+// UX3（2026-11-20）：无黑框启动后的日志可见出口——服务日志尾部（脱敏后回显）
+const serverLog = ref(null)
+const serverLogBusy = ref(false)
+async function loadServerLog() {
+  serverLogBusy.value = true
+  try {
+    const r = await api.logsTail(200)
+    serverLog.value = {
+      file: r.file || 'logs/server.log',
+      lines: (r.lines || []).length ? (r.lines || []).join('\n') : '（暂无落盘日志）',
+    }
+  } catch (e) { serverLog.value = { file: '', lines: String(e.message || e) } }
+  serverLogBusy.value = false
+}
+
 
 // 任务131：插件（外挂）管理（默认禁用；启用=管理员显式授权）
 const plugins = ref([])
@@ -268,7 +291,12 @@ async function onUploadZip(e) {
 async function loadCams() {
   try { cams.value = await api.cameras() } catch { /* 服务未就绪时静默 */ }
 }
-onMounted(() => { loadAlerts(); loadPlugins(); loadCams() })
+onMounted(() => {
+  loadAlerts(); loadPlugins(); loadCams()
+  // UX1：hash 深链分区（#/settings/face 等，App.vue 旧路由重定向后落到这里）
+  const sub = window.location.hash.split('/')[2]
+  if (sections.some((s) => s.id === sub)) active.value = sub
+})
 </script>
 
 <template>
@@ -286,6 +314,9 @@ onMounted(() => { loadAlerts(); loadPlugins(); loadCams() })
       <p v-if="!visibleSections.length" class="muted settings-empty">未找到匹配的设置</p>
     </aside>
     <div class="settings-body">
+      <section v-show="show('detect')" class="panel detect-panel-host">
+        <DetectPanel />
+      </section>
       <section v-show="show('token')" class="panel">
     <h3 style="margin-bottom:10px">管理令牌</h3>
     <div class="row">
@@ -369,6 +400,12 @@ onMounted(() => { loadAlerts(); loadPlugins(); loadCams() })
     <p v-else class="muted">无静默（事件照常推送）</p>
     <p v-if="silenceMsg" class="muted" style="margin-top:4px">{{ silenceMsg }}</p>
       </section>
+      <section v-show="show('devices')" class="panel">
+        <Devices />
+      </section>
+      <section v-show="show('face')" class="panel">
+        <Face />
+      </section>
       <section v-show="show('data')" class="panel">
     <h3 style="margin:14px 0 10px">配置导入导出</h3>
     <div class="row" style="align-items:center">
@@ -451,8 +488,11 @@ onMounted(() => { loadAlerts(); loadPlugins(); loadCams() })
     <h3 style="margin:14px 0 10px">服务控制</h3>
     <div class="row" style="align-items:center">
       <button class="ghost" @click="shutdownServer">停止服务…</button>
+      <button class="ghost" :disabled="serverLogBusy" @click="loadServerLog">
+        {{ serverLogBusy ? '读取中…' : '查看服务日志（尾部 200 行）' }}</button>
       <span class="muted">停止后摄像头分析与事件推送将暂停；重新启动程序后恢复。</span>
     </div>
+    <div v-if="serverLog" class="muted" style="white-space:pre-wrap; border:1px solid var(--divider); border-radius:6px; padding:8px; margin-top:8px; max-height:260px; overflow:auto; font-size:12px">{{ serverLog.file ? `[${serverLog.file}]\n` : '' }}{{ serverLog.lines }}</div>
       </section>
     </div>
   </div>

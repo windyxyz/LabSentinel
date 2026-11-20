@@ -31,8 +31,17 @@ def http_get(url: str, timeout: float = 2.0) -> tuple[int, bytes]:
         return r.status, r.read()
 
 
+def http_post(url: str, obj: dict, timeout: float = 3.0) -> tuple[int, bytes]:
+    import urllib.request as _uq
+    req = _uq.Request(url, data=__import__("json").dumps(obj).encode(),
+                      headers={"Content-Type": "application/json"}, method="POST")
+    op = _uq.build_opener(_uq.ProxyHandler({}))
+    with op.open(req, timeout=timeout) as r:
+        return r.status, r.read()
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Rust 单二进制便携包冒烟（RA3）")
+    ap = argparse.ArgumentParser(description="Rust 单二进制便携包冒烟（RA3/UX3）")
     ap.add_argument("--zip", type=Path, required=True)
     ap.add_argument("--timeout", type=int, default=90)
     ap.add_argument("--keep", action="store_true")
@@ -123,6 +132,31 @@ def main() -> int:
             detail5 = repr(e)
         print(f"[{'PASS' if ok5 else 'FAIL'}] 5 前端 —— {detail5}")
         ok_all &= ok5
+
+        # [6] UX3 GUI 形态：无控制台子系统的 exe 照常就绪（步骤 3 即证——release
+        # 二进制 windows_subsystem="windows"；此处断言进程仍存活且 API 可响应），
+        # 加 shutdown API 优雅退出（托盘「退出」同一函数；0.5s 内进程消失）
+        ok6, detail6 = False, ""
+        try:
+            st, _ = http_get(f"{base}/api/health/live", timeout=2)
+            alive = proc.poll() is None
+            if st == 200 and alive:
+                st2, body2 = http_post(f"{base}/api/system/shutdown", {}, timeout=3)
+                exited = False
+                for _ in range(10):
+                    if proc.poll() is not None:
+                        exited = True
+                        break
+                    time.sleep(0.5)
+                rc = proc.returncode
+                ok6 = exited and rc == 0
+                detail6 = f"shutdown={st2} 进程退出={'是' if exited else '否'} rc={rc}"
+            else:
+                detail6 = f"live={st} alive={alive}"
+        except (OSError, ValueError) as e:
+            detail6 = repr(e)
+        print(f"[{'PASS' if ok6 else 'FAIL'}] 6 GUI 形态 + shutdown 优雅退出 —— {detail6}")
+        ok_all &= ok6
     finally:
         if proc is not None and proc.poll() is None:
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],

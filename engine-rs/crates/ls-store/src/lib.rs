@@ -1,15 +1,15 @@
 //! ls-store（T-332/ADR-0008）：与 Python `store.py` 共用同一 SQLite 文件与 schema。
 //!
-//! Rust 侧**不重复实现迁移链**：打开 Python 已建好的库（含 v1~v13 迁移）直接读写，
-//! 双向兼容由集成测试保证（Python 建库→Rust 读写 / Rust 建库→Python 读写）。
-//! L4 移除 Python 运行时时，迁移链逐条翻译到 `migrations.rs`（保持相同编号）。
+//! Python 运行时退役（2026-11-14）后迁移链归 Rust：`ensure_schema` 自举全新库，
+//! `migrate` 幂等推进存量库（v13→v14 起）。v14 = UX2 cascade（events 加
+//! vlm_verdict/vlm_ts/vlm_suppressed 三列）。
 
 use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
-/// 与 `server/app/store.py: SCHEMA_VERSION_LATEST` 的权威编号一致（v13 =
-/// 设备配对令牌表，T-620）；此处只作文档/诊断常量，不参与迁移执行。
-pub const SCHEMA_VERSION_LATEST: i64 = 13;
+/// schema 权威编号（v14 = UX2 cascade 判定列，2026-11-20）；文档/诊断常量，
+/// 实际迁移执行见 ensure_schema/migrate。
+pub const SCHEMA_VERSION_LATEST: i64 = 14;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
@@ -23,6 +23,12 @@ pub struct Event {
     pub snapshot: Option<String>,
     pub video: Option<String>,
     pub status: String,
+    /// UX2 cascade：VLM 复核判定（完整 JSON 文本；None=未复核）
+    pub vlm_verdict: Option<String>,
+    /// UX2 cascade：复核时间
+    pub vlm_ts: Option<String>,
+    /// UX2 cascade：VLM 否定且策略=suppress → 1（不投递告警渠道）
+    pub vlm_suppressed: i64,
 }
 
 /// T-325：rules 行（id, behavior, zone_id, time_start, time_end, cooldown_s）
@@ -91,11 +97,11 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(13, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(14, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
-               analyzer TEXT DEFAULT 'rust');
+               analyzer TEXT DEFAULT 'default');
              CREATE TABLE IF NOT EXISTS zones(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
              CREATE TABLE IF NOT EXISTS rules(\
@@ -112,7 +118,8 @@ impl Store {
                id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, type TEXT, \
                level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT, \
                status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, \
-               escalated_ts TEXT, ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT);
+               escalated_ts TEXT, ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT, \
+               vlm_verdict TEXT, vlm_ts TEXT, vlm_suppressed INTEGER DEFAULT 0);
              CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
              CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);
              CREATE TABLE IF NOT EXISTS face_consents(subject TEXT PRIMARY KEY, ts TEXT);
@@ -152,6 +159,41 @@ impl Store {
             [],
             |r| r.get(0),
         )
+    }
+
+    /// UX2（2026-11-20）：存量库列迁移——Python 退役后迁移链归 Rust（ADR-0008
+    /// 口径随 Python 退役失效）。v13→v14：events 加 cascade 判定三列。幂等：
+    /// 按 PRAGMA table_info 探列，已存在则跳过（多实例/重复启动安全）。
+    /// 返回应用后的 schema 版本。
+    pub fn migrate(&self) -> rusqlite::Result<i64> {
+        let has_vlm_verdict: bool = self
+            .conn
+            .prepare("PRAGMA table_info(events)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|c| c == "vlm_verdict");
+        if !has_vlm_verdict {
+            self.conn.execute_batch(
+                "ALTER TABLE events ADD COLUMN vlm_verdict TEXT;\
+                 ALTER TABLE events ADD COLUMN vlm_ts TEXT;\
+                 ALTER TABLE events ADD COLUMN vlm_suppressed INTEGER DEFAULT 0;",
+            )?;
+        }
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(14, 'rust-ux2-cascade')",
+            [],
+        )?;
+        Ok(14)
+    }
+
+    /// UX3/UX4 优雅关停：WAL checkpoint 回主库（托盘退出/shutdown 语义——
+    /// 停 workers 后调用，保证 -wal 文件合并后再退进程）。
+    pub fn checkpoint_wal(&self) -> rusqlite::Result<()> {
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                r.get::<_, i64>(0)
+            })?;
+        Ok(())
     }
 
     pub fn integrity_check(&self) -> rusqlite::Result<String> {
@@ -215,6 +257,23 @@ impl Store {
         Ok(())
     }
 
+    /// UX2 cascade：VLM 复核判定回填（verdict 为完整判定 JSON；verdict=NULL
+    /// 语义=未复核）。vlm_ts ISO 时间由调用方生成。
+    pub fn set_event_vlm(&self, eid: i64, verdict_json: &str, ts: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE events SET vlm_verdict=?, vlm_ts=? WHERE id=?",
+            params![verdict_json, ts, eid],
+        )?;
+        Ok(())
+    }
+
+    /// UX2 cascade：VLM 明确否定且 on_negative=suppress → 标记抑制（不投递）。
+    pub fn set_event_vlm_suppressed(&self, eid: i64) -> rusqlite::Result<()> {
+        self.conn
+            .execute("UPDATE events SET vlm_suppressed=1 WHERE id=?", [eid])?;
+        Ok(())
+    }
+
     pub fn events(
         &self,
         limit: i64,
@@ -222,7 +281,7 @@ impl Store {
         camera_id: Option<i64>,
         status: Option<&str>,
     ) -> rusqlite::Result<Vec<Event>> {
-        let mut sql = String::from("SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new') FROM events WHERE 1=1");
+        let mut sql = String::from("SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0) FROM events WHERE 1=1");
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(cid) = camera_id {
             sql.push_str(" AND camera_id=?");
@@ -243,7 +302,7 @@ impl Store {
 
     pub fn event_by_id(&self, id: i64) -> rusqlite::Result<Option<Event>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new') FROM events WHERE id=?")?;
+            "SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0) FROM events WHERE id=?")?;
         let mut rows = stmt.query_map(params![id], map_event)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
@@ -357,7 +416,9 @@ impl Store {
     /// L3 控制面：新增摄像头（列/默认值与历史 schema 兼容；新相机默认本地检测）
     pub fn conn_add_camera(&self, name: &str, source: &str, type_: &str) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO cameras(name,source,type,group_name,analyzer) VALUES(?,?,?,'','rust')",
+            // UX1（2026-11-20）：新建相机默认「跟随全局」（detect.mode）；显式
+            // rust=仅本地/vlm=仅 API/cascade=协作 为 per-camera 覆盖
+            "INSERT INTO cameras(name,source,type,group_name,analyzer) VALUES(?,?,?,'','default')",
             params![name, source, type_],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -623,7 +684,7 @@ impl Store {
     // ---- events（过滤 / 批量处置） ----
     pub fn events_query(&self, f: &EventsFilter<'_>) -> rusqlite::Result<Vec<Event>> {
         let mut sql = String::from(
-            "SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new') FROM events WHERE 1=1");
+            "SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0) FROM events WHERE 1=1");
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(v) = f.camera_id {
             sql.push_str(" AND camera_id=?");
@@ -1361,7 +1422,7 @@ impl Store {
         group_name: &str,
     ) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO cameras(name,source,type,group_name,analyzer) VALUES(?,?,?,?,'rust')",
+            "INSERT INTO cameras(name,source,type,group_name,analyzer) VALUES(?,?,?,?,'default')",
             params![name, source, type_, group_name],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -1667,6 +1728,9 @@ fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
         snapshot: r.get(7)?,
         video: r.get(8)?,
         status: r.get(9)?,
+        vlm_verdict: r.get(10)?,
+        vlm_ts: r.get(11)?,
+        vlm_suppressed: r.get(12)?,
     })
 }
 
@@ -1815,7 +1879,11 @@ mod tests {
               status TEXT, attempts INTEGER, last_error TEXT, updated_ts TEXT);").unwrap();
         drop(conn);
         let s = Store::open(p.to_str().unwrap()).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 12);
+        // UX2：v12 存量库先迁移到 v14（events cascade 列；幂等复跑安全），
+        // 之后的读写 SELECT 都含新列
+        assert_eq!(s.migrate().unwrap(), 14);
+        assert_eq!(s.migrate().unwrap(), 14); // 二次调用不炸
+        assert_eq!(s.schema_version().unwrap(), 14);
         let eid = s
             .add_event(&NewEvent {
                 camera_id: 1,
@@ -1837,5 +1905,38 @@ mod tests {
         let d = s.add_delivery(eid, "wecom").unwrap();
         s.update_delivery(d, "ok", 1, None).unwrap();
         assert_eq!(s.integrity_check().unwrap(), "ok");
+        s.set_event_vlm(eid, r#"{"persons":1}"#, "2026-01-01T00:00:03")
+            .unwrap();
+        s.set_event_vlm_suppressed(eid).unwrap();
+        let cols: Vec<String> = s
+            .conn()
+            .prepare("PRAGMA table_info(events)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(cols.contains(&"vlm_verdict".to_string()));
+        assert!(cols.contains(&"vlm_ts".to_string()));
+        assert!(cols.contains(&"vlm_suppressed".to_string()));
+        assert_eq!(s.schema_version().unwrap(), 14);
+    }
+
+    #[test]
+    fn fresh_bootstrap_schema_v14_has_cascade_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("fresh.db");
+        let s = Store::open(p.to_str().unwrap()).unwrap();
+        assert!(s.ensure_schema().unwrap());
+        let cols: Vec<String> = s
+            .conn()
+            .prepare("PRAGMA table_info(events)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(cols.iter().any(|c| c == "vlm_verdict"));
+        assert_eq!(s.schema_version().unwrap(), 14);
     }
 }

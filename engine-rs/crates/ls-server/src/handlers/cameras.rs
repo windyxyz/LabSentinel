@@ -99,12 +99,19 @@ pub(crate) async fn set_camera_analyzer(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // RA5（模型模块化）：rust 形态新增 "vlm"——外部联网模型后端
-    // （LS_VLM_URL/MODEL/KEY 全局配置；per-camera 可插拔选择）
-    if impl_ != "python" && impl_ != "rust" && impl_ != "vlm" {
+    // RA5（模型模块化）：rust 形态新增 "vlm"——外部联网模型后端；
+    // UX2（2026-11-20）：扩展 "cascade"（本地+API 协作）与 "default"（跟随
+    // 全局策略——detect.mode，PUT /api/detect/config 后软重启即时生效）。
+    // 历史 "python" 保留兼容（按 rust 语义存储）。
+    let normalized = if impl_ == "python" {
+        "rust".to_string()
+    } else {
+        impl_.clone()
+    };
+    if !["rust", "vlm", "cascade", "default"].contains(&normalized.as_str()) {
         return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "analyzer 必须是 python|rust|vlm",
+            "analyzer 必须是 rust|vlm|cascade|default（python 兼容映射 rust）",
         )
         .into_response();
     }
@@ -115,18 +122,18 @@ pub(crate) async fn set_camera_analyzer(
                 return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response())
             }
         };
-        if cam.analyzer == impl_ {
+        if cam.analyzer == normalized {
             return Ok(
-                Json(json!({"id": cid, "analyzer": impl_, "restarted": false})).into_response(),
+                Json(json!({"id": cid, "analyzer": normalized, "restarted": false}))
+                    .into_response(),
             );
         }
-        s.set_camera_analyzer(cid, &impl_)?;
-        // 运行中的摄像头需要重启才生效；rust 控制面独立模式无 worker，
-        // 如实标注 restarted=false 并提示（F2-02：切换前提是分析 worker 可用）。
+        s.set_camera_analyzer(cid, &normalized)?;
+        // UX2：运行中的相机软重启即时生效（不再要求手工重启该路）
+        let restarted = crate::worker::restart_camera_if_running(&st, s, cid);
         Ok(
-            Json(json!({"id": cid, "analyzer": impl_, "restarted": false,
-                       "note": "重启该路摄像头后生效"}))
-            .into_response(),
+            Json(json!({"id": cid, "analyzer": normalized, "restarted": restarted}))
+                .into_response(),
         )
     })
 }

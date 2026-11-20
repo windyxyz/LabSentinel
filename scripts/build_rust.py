@@ -116,6 +116,9 @@ def assemble(strict: bool = False) -> None:
         shutil.copy2(notice, DIST / "NOTICE.txt")
     (DIST / "VERSION").write_text(f"{VERSION}\n", encoding="ascii")
     # RA4.2：便携启动器（双击即起服务并开控制台；数据默认落 LOCALAPPDATA）
+    # UX3（2026-11-20）：无黑框——start 拉起 GUI 子系统 exe（--tray 托盘常驻），
+    # cmd 窗口立即关闭；致命错误由 exe 弹原生 MessageBox + 落盘日志（不再依赖
+    # 控制台 errorlevel 暂停）
     launcher = (
         "@echo off\r\n"
         "setlocal\r\n"
@@ -130,8 +133,7 @@ def assemble(strict: bool = False) -> None:
         'if "%ORT_DYLIB_PATH%"=="" if exist "%~dp0onnxruntime.dll" '
         'set "ORT_DYLIB_PATH=%~dp0onnxruntime.dll"\r\n'
         'if not exist "%LS_DATA_DIR%" mkdir "%LS_DATA_DIR%"\r\n'
-        '"%~dp0labsentinel-server.exe" --launch\r\n'
-        "if errorlevel 1 pause\r\n"
+        'start "" "%~dp0labsentinel-server.exe" --launch --tray\r\n'
     )
     (DIST / "LabSentinel.bat").write_bytes(launcher.encode("ascii"))
     (DIST / "THIRD_PARTY_LICENSES.txt").write_text(
@@ -141,8 +143,9 @@ def assemble(strict: bool = False) -> None:
         encoding="utf-8")
     (DIST / "README.txt").write_text(
         f"LabSentinel {VERSION} — Rust 单二进制分发（ADR-0011 正式形态，无需 Python/Node）\n"
-        "\n启动：双击 LabSentinel.bat（数据默认 %LOCALAPPDATA%\\LabSentinel\\data，浏览器自动打开）\n"
-        "  等价命令行：labsentinel-server.exe --launch\n"
+        "\n启动：双击 LabSentinel.bat（无窗口；数据默认 %LOCALAPPDATA%\\LabSentinel\\data，"
+        "浏览器自动打开；任务栏托盘常驻——打开控制台/复制地址/退出）\n"
+        "  等价命令行：labsentinel-server.exe --launch --tray（排障加 --console）\n"
         "  停止：网页「设置 → 服务控制 → 停止服务」，或任务管理器结束进程\n"
         "升级：解压新包覆盖（旧版本自动归档到 versions/）；回滚：\n"
         "  labsentinel-server.exe --rollback <安装根>\n"

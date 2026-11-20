@@ -22,7 +22,7 @@ fn make_db(dir: &Path) -> PathBuf {
         "INSERT INTO schema_version VALUES(13,'2026-01-01T00:00:00')",
         "CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, \
          type TEXT, level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT, \
-         status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, escalated_ts TEXT)",
+         status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, escalated_ts TEXT, \n         vlm_verdict TEXT, vlm_ts TEXT, vlm_suppressed INTEGER DEFAULT 0)",
         "CREATE TABLE alert_deliveries(id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER, \
          channel TEXT, status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0, \
          last_error TEXT, updated_ts TEXT)",

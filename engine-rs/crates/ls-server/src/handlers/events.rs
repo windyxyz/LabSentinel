@@ -38,10 +38,19 @@ pub(crate) struct EventsQuery {
 }
 
 pub(crate) fn event_json(e: &ls_store::Event) -> Value {
+    // UX2 cascade：VLM 复核结果随事件出（suppressed=已复核否定并抑制）；
+    // verdict JSON 解析失败不出该键（诊断可用 /api/events/:iid 全量字段）
+    let vlm_verdict = e
+        .vlm_verdict
+        .as_deref()
+        .and_then(|v| serde_json::from_str::<Value>(v).ok());
     json!({"id": e.id, "ts": e.ts, "camera_id": e.camera_id, "type": e.type_,
            "level": e.level, "track_id": e.track_id, "detail": e.detail,
            "has_snapshot": e.snapshot.is_some(), "has_video": e.video.is_some(),
-           "status": e.status})
+           "status": e.status,
+           "vlm_suppressed": e.vlm_suppressed != 0,
+           "vlm_ts": e.vlm_ts,
+           "vlm_verdict": vlm_verdict})
 }
 
 pub(crate) async fn events_count(State(st): State<Shared>) -> Json<Value> {
