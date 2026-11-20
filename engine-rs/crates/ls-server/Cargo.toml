@@ -31,7 +31,7 @@ hmac = "0.12"     # R2-309: media/sign HMAC-SHA256 (same as Python hmac.new)
 getrandom = "0.2" # system entropy for pairing tokens
 ureq = "3"       # R2-309 批次 3：ppe/download 与 alert-test 真实 HTTP（rustls 0.23）
 aes = "0.8"      # 批次 4：Fernet 兼容（AES-128-CBC，与 cryptography 互操作）
-cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
 base64 = "0.22"  # Fernet key/token 编解码
 zip = { version = "9", default-features = false, features = ["deflate"] } # RA5：插件 zip 上传解压（>=9 修复 GHSA-q7v9-x93c-xqv3）
 
