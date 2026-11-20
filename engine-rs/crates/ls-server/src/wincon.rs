@@ -22,10 +22,8 @@ pub fn is_gui_subsystem() -> bool {
     cfg!(not(debug_assertions))
 }
 
-#[cfg(not(windows))]
-pub fn is_gui_subsystem() -> bool {
-    false
-}
+// 非 Windows 无 GUI 子系统概念：is_gui_subsystem 不提供（仅 Windows 分支内部
+// 使用；恒 false 版本会在 linux CI 触发 dead_code -D warnings）。
 
 /// 当前进程是否已附着控制台（CI 管道/安装器启动时 stdout 已重定向，
 /// GetConsoleWindow 可能仍为 NULL——此探测只用于 --console 的幂等判定）。
