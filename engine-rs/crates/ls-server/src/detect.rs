@@ -609,7 +609,8 @@ mod tests {
         // UX2 回归：全局 mode=local + 回环 URL 时，per-camera vlm/cascade 覆盖
         // 必须能工作（compliance_ok 与全局 mode 解耦；vlm_enabled 仍受模式门控）
         let (dir, s) = seed();
-        s.setting_set("detect.vlm.url", "http://127.0.0.1:8899").unwrap();
+        s.setting_set("detect.vlm.url", "http://127.0.0.1:8899")
+            .unwrap();
         // 全局 mode 缺省 local
         let cfg = DetectCfg::load(&s, dir.path());
         assert_eq!(cfg.mode, "local");

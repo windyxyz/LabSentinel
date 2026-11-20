@@ -485,9 +485,9 @@ pub(crate) async fn logs_tail(
         log_dir.join(format!("server-{today}.log")),
         log_dir.join("server.log"),
     ];
-    let picked = candidates.iter().find(|p| {
-        std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
-    });
+    let picked = candidates
+        .iter()
+        .find(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false));
     let log_name = picked
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "logs/server.log".into());
