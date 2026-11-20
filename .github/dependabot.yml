@@ -1,21 +1,20 @@
 # R2-504/N-33：依赖自动更新（每周；配 .github/workflows 钉 SHA 策略）。
+# 2026-11-20：Python 退役（/server 已删）→ pip 段移除；npm/cargo 同样改
+# open-pull-requests-limit: 0（仅出安全提醒，不自动开 PR）——breaking 升级
+# （如 sha2 0.11 / hmac 0.13 / tonic 0.14）由主线统一评估处理，见第六轮决策
+# 「远端只留 main」。
 version: 2
 updates:
-  - package-ecosystem: pip
-    directory: "/server"
-    schedule:
-      interval: weekly
-    # 锁文件由 uv pip compile 生成，只更新 requirements.in 触发重锁评审
-    allow:
-      - dependency-type: "direct"
   - package-ecosystem: npm
     directory: "/web"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
   - package-ecosystem: cargo
     directory: "/engine-rs"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
