@@ -159,7 +159,13 @@ impl EventSink {
             .map(|c| c.name)
             .unwrap_or_default();
         if dispatch {
-            self.deliver_deferred(eid, cand, &cam_name, snapshot.is_some());
+            self.deliver_deferred(
+                eid,
+                cand,
+                &cam_name,
+                snapshot.is_some(),
+                snapshot.as_deref(),
+            );
         }
         Ok(Some(eid))
     }
@@ -172,6 +178,7 @@ impl EventSink {
         cand: &ls_analyzer::pipeline::Candidate,
         cam_name: &str,
         has_snapshot: bool,
+        snapshot_path: Option<&str>,
     ) {
         let st = &self.st;
         // RA2-S2：MQTT 总线发布（独立于静默/渠道过滤——Python alerts.dispatch
@@ -212,6 +219,8 @@ impl EventSink {
             detail: cand.detail.clone(),
             ts: cand.ts_iso.clone(),
             camera_name: cam_name.to_string(),
+            track_id: cand.track_id,
+            snapshot_path: snapshot_path.map(String::from),
         };
         let jobs = Arc::clone(&st.jobs);
         let db_path = st.db_path.clone();
@@ -238,7 +247,7 @@ impl EventSink {
             .ok()
             .and_then(|s| s.camera(cand.camera_id).ok().flatten().map(|c| c.name))
             .unwrap_or_default();
-        self.deliver_deferred(eid, cand, &cam_name, has_snapshot);
+        self.deliver_deferred(eid, cand, &cam_name, has_snapshot, None);
     }
 
     /// 存证收尾：帧序列 → MP4 → video 回填（先入库后写视频，与 Python worker
@@ -2154,6 +2163,8 @@ mod tests {
             detail: "x".into(),
             ts: "2026-11-13T00:00:00".into(),
             camera_name: "cam".into(),
+            track_id: 0,
+            snapshot_path: None,
         };
         let n = st.jobs.dispatch_event(&store, &dev);
         assert_eq!(n, 0, "无渠道配置 → 0 投递");

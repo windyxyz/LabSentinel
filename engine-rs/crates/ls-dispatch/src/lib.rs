@@ -105,6 +105,10 @@ pub struct DispatchEvent {
     pub detail: String,
     pub ts: String,
     pub camera_name: String,
+    /// UX（2026-11-21）：同人判定/推送冷却键（ByteTrack 跟踪 ID；API 模式恒 0）
+    pub track_id: i64,
+    /// UX（2026-11-21）：异常截图落盘路径（告警随消息发图；None=无图）
+    pub snapshot_path: Option<String>,
 }
 
 /// 静默规则（Python match_silence 等价：scope=all|camera|level|type）
@@ -286,7 +290,19 @@ pub struct Delivery {
 /// 单渠道投递（真实 HTTP；失败按 Python RETRY_BACKOFF=[1,4,15] 重试）。
 /// Email 渠道不走 HTTP，转 `deliver_email`（由派发层路由）。
 pub fn deliver(ch: Channel, cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
-    deliver_with_backoff(ch, cfg, level, text, &[1, 4, 15])
+    deliver_with_image(ch, cfg, level, text, None)
+}
+
+/// UX（2026-11-21）：带异常截图投递——wecom 发 image 消息（base64+md5）、
+/// webhook JSON 附 image_base64；其余渠道无图能力等价纯文本。
+pub fn deliver_with_image(
+    ch: Channel,
+    cfg: &ChannelConfig,
+    level: i64,
+    text: &str,
+    image: Option<&[u8]>,
+) -> Delivery {
+    deliver_with_backoff(ch, cfg, level, text, image, &[1, 4, 15])
 }
 
 /// N-34/R2-505：退避可注入（测试用 `[0,0,0]` 消除 20s 真实等待与桩计数竞态窗口）。
@@ -295,6 +311,7 @@ pub fn deliver_with_backoff(
     cfg: &ChannelConfig,
     level: i64,
     text: &str,
+    image: Option<&[u8]>,
     backoff_secs: &[u64],
 ) -> Delivery {
     if ch == Channel::Email {
@@ -320,7 +337,29 @@ pub fn deliver_with_backoff(
             // Qmsg：表单 qq+msg（Python data= dict 同口径）
             Channel::Qmsg => resp_body(req.send_form([("qq", cfg.qq.as_str()), ("msg", text)])),
             _ => {
-                let body = build_body(ch, level, text, cfg).to_string();
+                let mut body = build_body(ch, level, text, cfg);
+                // UX（2026-11-21）：异常截图随消息（wecom image 消息 / webhook 附 base64）
+                if let Some(d) = image {
+                    match ch {
+                        Channel::Wecom => {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(d);
+                            let md5_hex = format!("{:x}", md5::compute(d));
+                            body = json!({"msgtype": "image",
+                                          "image": {"base64": b64, "md5": md5_hex}});
+                        }
+                        Channel::Webhook => {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(d);
+                            if let Value::Object(m) = &mut body {
+                                m.insert("image_base64".into(), json!(b64));
+                                m.insert("image_bytes".into(), json!(d.len()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let body = body.to_string();
                 let req = req.header("Content-Type", "application/json");
                 let req = if ch == Channel::Webhook {
                     let ts = unix_secs().to_string();
@@ -676,6 +715,8 @@ mod tests {
             detail: String::new(),
             ts: String::new(),
             camera_name: String::new(),
+            track_id: 0,
+            snapshot_path: None,
         };
         let sil = vec![Silence {
             scope: "camera".into(),

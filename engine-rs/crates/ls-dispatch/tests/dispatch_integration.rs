@@ -134,7 +134,7 @@ fn business_code_and_retry_semantics() {
         allow_http: true,
         ..Default::default()
     };
-    let d = deliver_with_backoff(Channel::Webhook, &cfg, 2, "hi", &[0, 0, 0]);
+    let d = deliver_with_backoff(Channel::Webhook, &cfg, 2, "hi", None, &[0, 0, 0]);
     assert!(!d.ok);
     assert_eq!(d.attempts, 4, "失败重试 1+3 次");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -156,7 +156,7 @@ fn business_code_and_retry_semantics() {
         allow_http: true,
         ..Default::default()
     };
-    let d2 = deliver_with_backoff(Channel::Webhook, &cfg2, 2, "hi", &[0, 0, 0]);
+    let d2 = deliver_with_backoff(Channel::Webhook, &cfg2, 2, "hi", None, &[0, 0, 0]);
     assert!(d2.ok && d2.attempts == 1);
     // 厂商渠道的业务码判定（请求需打真实域名，此处只测 is_ok 纯函数）
     assert!(is_ok(Channel::Wecom, 200, "{\"errcode\":0}"));

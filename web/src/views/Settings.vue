@@ -440,6 +440,26 @@ onMounted(() => {
     </table>
     <p v-else class="muted">无静默（事件照常推送）</p>
     <p v-if="silenceMsg" class="muted" style="margin-top:4px">{{ silenceMsg }}</p>
+    <h3 style="margin:16px 0 8px">推送策略（防刷屏）</h3>
+    <div class="row" style="align-items:center; flex-wrap:wrap">
+      <label style="cursor:pointer">
+        <input type="checkbox" v-model="pushPolicy.send_image" />
+        告警随消息附带异常截图（企业微信发图 / Webhook 带 base64；邮件除外）
+      </label>
+    </div>
+    <div class="row" style="align-items:center; margin-top:6px; flex-wrap:wrap">
+      <span class="muted" style="flex-shrink:0">同一摄像头同一行为同一人的推送冷却：</span>
+      <input v-model.number="pushPolicy.cooldown_s" type="number" min="0" max="3600"
+             aria-label="推送冷却秒数" style="width:90px; margin:0 4px" />
+      <span class="muted">秒（0 = 关闭；默认 60。窗口内重复触发只记事件不重复推送）</span>
+    </div>
+    <p class="muted" style="font-size:12px; margin-top:4px">
+      说明：冷却窗口内的事件照常入库并在事件页可见，只是不重复向外部渠道推送。
+      同人判定用本地跟踪 ID（ByteTrack）；API(vlm) 判定模式按摄像头+行为合并兜底。改完点保存立即生效。</p>
+    <div class="row" style="margin-top:6px">
+      <button :disabled="pushBusy" @click="savePushPolicy">{{ pushBusy ? '保存中…' : '保存推送策略' }}</button>
+    </div>
+
       </section>
       <section v-show="show('devices')" class="panel">
         <Devices />

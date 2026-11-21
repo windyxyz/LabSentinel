@@ -834,4 +834,75 @@ pub(crate) async fn alert_test(
     .into_response()
 }
 
+/// UX（2026-11-21）：推送策略——告警随消息带截图开关 + 同人推送冷却秒数。
+/// GET /api/alerts/push-policy；PUT 同形状（即写即生效——派发每次现读设置）。
+pub(crate) async fn push_policy_get(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        Ok(Json(json!({
+            "send_image": push_send_image(s),
+            "cooldown_s": push_cooldown_s(s),
+        }))
+        .into_response())
+    })
+}
+
+pub(crate) async fn push_policy_put(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    with_store(&st, |s| {
+        if let Some(b) = body.get("send_image") {
+            match b.as_bool() {
+                Some(v) => {
+                    s.setting_set("alert.send_image", if v { "1" } else { "0" })?;
+                }
+                None => {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "send_image 必须是布尔",
+                    )
+                    .into_response())
+                }
+            }
+        }
+        if let Some(c) = body.get("cooldown_s") {
+            let n = c
+                .as_i64()
+                .or_else(|| c.as_str().and_then(|v| v.trim().parse().ok()));
+            match n {
+                Some(v) if (0..=3600).contains(&v) => {
+                    s.setting_set("alert.push_cooldown_s", &v.to_string())?;
+                }
+                _ => {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "cooldown_s 必须在 0-3600（秒；0=关闭冷却）",
+                    )
+                    .into_response())
+                }
+            }
+        }
+        Ok(Json(json!({
+            "ok": true,
+            "send_image": push_send_image(s),
+            "cooldown_s": push_cooldown_s(s),
+        }))
+        .into_response())
+    })
+}
+
+/// 派发时读取（与 ls-jobs dispatch_event 同键同默认）。
+fn push_send_image(s: &ls_store::Store) -> bool {
+    s.setting_get("alert.send_image")
+        .ok()
+        .flatten()
+        .map(|v| v.trim() != "0")
+        .unwrap_or(true)
+}
+
+fn push_cooldown_s(s: &ls_store::Store) -> i64 {
+    s.setting_get("alert.push_cooldown_s")
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(60)
+}
+
 // ---- PPE 按需下载（Q-08 复刻：锁文件白名单 + SHA256 + 许可确认） ----

@@ -135,6 +135,9 @@ pub struct Jobs {
     /// UX（2026-11-21）：告警文案网页编辑的运行时覆盖（PUT /api/alert-template
     /// 写 app_settings 并同步此处；None=用 cfg.escalation.template_text）
     alert_template_override: Mutex<Option<String>>,
+    /// UX（2026-11-21）：推送冷却去重（camera|type|track → 上次推送时刻；
+    /// alert.push_cooldown_s 秒窗口内同人同行为只推渠道一次）
+    push_dedup: Mutex<std::collections::HashMap<String, Instant>>,
 }
 
 impl Jobs {
@@ -151,6 +154,7 @@ impl Jobs {
             handles: Mutex::new(Vec::new()),
             alert_channels: Mutex::new(None),
             alert_template_override: Mutex::new(None),
+            push_dedup: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -306,6 +310,46 @@ impl Jobs {
             );
             return 0;
         }
+        // UX（2026-11-21）：推送冷却——同 camera|type|track 在
+        // alert.push_cooldown_s 秒内只推渠道一次（事件照常入库/WS 广播，
+        // 仅外部渠道静默）；0=关闭。API(vlm) 判定无 track → 同键合并兜底。
+        let cooldown_s: u64 = store
+            .setting_get("alert.push_cooldown_s")
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(60);
+        if cooldown_s > 0 {
+            let key = format!("{}|{}|{}", ev.camera_id, ev.type_, ev.track_id);
+            let mut dedup = lock(&self.push_dedup);
+            let suppressed = dedup
+                .get(&key)
+                .map(|t| t.elapsed() < Duration::from_secs(cooldown_s))
+                .unwrap_or(false);
+            if suppressed {
+                println!(
+                    "[alert] event#{} 冷却窗口内同人同行为——渠道不重复推送",
+                    ev.id
+                );
+                return 0;
+            }
+            dedup.insert(key, Instant::now());
+        }
+        // 带图开关（alert.send_image，默认开）+ 读快照字节（合法 JPEG 且 ≤2MB）
+        let send_image = store
+            .setting_get("alert.send_image")
+            .ok()
+            .flatten()
+            .map(|v| v.trim() != "0")
+            .unwrap_or(true);
+        let image: Option<Vec<u8>> = if send_image {
+            ev.snapshot_path
+                .as_deref()
+                .and_then(|p| std::fs::read(p).ok())
+                .filter(|d| d.starts_with(&[0xFF, 0xD8]) && d.len() <= 2 * 1024 * 1024)
+        } else {
+            None
+        };
         let mut submitted = 0;
         for (ch, ch_cfg) in &channels {
             if let Some(reason) = ls_dispatch::channel_filtered(*ch, ev, &filters) {
@@ -328,7 +372,7 @@ impl Jobs {
                 text.push_str(&format!("\n（上一窗口合并 {pending} 条）"));
             }
             let did = store.add_delivery(ev.id, ch.name()).ok();
-            let d = ls_dispatch::deliver(*ch, ch_cfg, ev.level, &text);
+            let d = ls_dispatch::deliver_with_image(*ch, ch_cfg, ev.level, &text, image.as_deref());
             if let Some(id) = did {
                 let _ = store.update_delivery(
                     id,
@@ -363,6 +407,8 @@ impl Jobs {
                 detail: row.detail.clone(),
                 ts: row.ts.clone(),
                 camera_name: String::new(),
+                track_id: 0,
+                snapshot_path: None,
             };
             if let Some(idx) = ls_dispatch::match_silence(&silences, &ev, &now_iso) {
                 println!(

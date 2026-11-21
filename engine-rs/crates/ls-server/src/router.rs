@@ -135,6 +135,8 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/cameras/:cid/snapshot"),
     // ---- R2-309 批次 4（L3 门槛冲刺） ----
     ("GET", "/api/alerts/config"),
+    ("GET", "/api/alerts/push-policy"), // UX：推送策略（带图/冷却）
+    ("PUT", "/api/alerts/push-policy"),
     ("PUT", "/api/alerts/config"),
     ("POST", "/api/alerts/config/reset"),
     ("GET", "/api/discovery/cameras"),
@@ -259,6 +261,10 @@ pub fn build_router(state: Shared) -> Router {
         .route(
             "/alerts/config",
             get(alerts_config_get).put(alerts_config_put),
+        )
+        .route(
+            "/alerts/push-policy",
+            get(push_policy_get).put(push_policy_put),
         )
         .route("/alerts/config/reset", post(alerts_config_reset))
         .route("/discovery/cameras", get(discovery_cameras))

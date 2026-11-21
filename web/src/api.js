@@ -112,6 +112,8 @@ export const api = {
   alertConfig: () => req('GET', '/api/alerts/config'),
   saveAlertConfig: (data) => req('PUT', '/api/alerts/config', data),
   resetAlertConfig: (channel) => req('POST', '/api/alerts/config/reset' + (channel ? `?channel=${encodeURIComponent(channel)}` : '')),
+  pushPolicy: () => req('GET', '/api/alerts/push-policy'),
+  savePushPolicy: (d) => req('PUT', '/api/alerts/push-policy', d),
   alertTest: (channel) => req('POST', '/api/alert-test' + (channel ? `?channel=${encodeURIComponent(channel)}` : '')),
   alertDeliveries: (params = {}) => req('GET', '/api/alert-deliveries?' + new URLSearchParams(params)),
   alertDeliveryRetry: (id) => req('POST', `/api/alert-deliveries/${id}/retry`),
