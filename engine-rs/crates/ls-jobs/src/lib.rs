@@ -165,6 +165,19 @@ impl Jobs {
         }
     }
 
+    /// 渠道快照克隆（alert-test 与实际派发**同源**：网页保存的 app_settings
+    /// 注入值优先、其次 env——此前 alert_test 自读 env，两源不一致导致
+    /// 「网页保存后点发送测试永远失败/不测」（2026-11-21 用户实测）。
+    pub fn alert_channels_snapshot(
+        &self,
+    ) -> Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> {
+        self.alert_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default()
+    }
+
     /// UX（2026-11-21）：网页端保存的告警文案即时生效（升级提醒渲染用）。
     pub fn set_alert_template(&self, text: String) {
         if let Ok(mut guard) = self.alert_template_override.lock() {

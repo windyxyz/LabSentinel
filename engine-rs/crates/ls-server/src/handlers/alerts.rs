@@ -617,68 +617,59 @@ pub(crate) async fn alert_template_preview(
 }
 
 pub(crate) async fn alert_test(
-    State(_st): State<Shared>,
+    State(st): State<Shared>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let want = q.get("channel").map(|s| s.as_str().to_string());
-    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-    // 渠道 -> (env key, ls-dispatch Channel)；URL 与 Python settings 同名 env
-    let candidates: Vec<(String, ls_dispatch::Channel, String)> = vec![
-        (
-            "wecom".into(),
-            ls_dispatch::Channel::Wecom,
-            env("LS_WECOM_WEBHOOK").unwrap_or_default(),
-        ),
-        (
-            "dingtalk".into(),
-            ls_dispatch::Channel::Dingtalk,
-            env("LS_DINGTALK_WEBHOOK").unwrap_or_default(),
-        ),
-        (
-            "feishu".into(),
-            ls_dispatch::Channel::Feishu,
-            env("LS_FEISHU_WEBHOOK").unwrap_or_default(),
-        ),
-        (
-            "webhook".into(),
-            ls_dispatch::Channel::Webhook,
-            env("LS_WEBHOOK_URL").unwrap_or_default(),
-        ),
+    // UX 修复（2026-11-21 用户实测）：测试必须与实际派发**同源**——此前自读
+    // env（网页保存的 SMTP/渠道凭据被无视）且 email/serverchan 等不在清单，
+    // 「保存后点发送测试」永远「未知错误」。改用 jobs 渠道快照（启动注入 +
+    // ApplyConfig 更新，与派发同一数据源）。
+    let snapshot = st.jobs.alert_channels_snapshot();
+    let all: &[(&str, ls_dispatch::Channel)] = &[
+        ("wecom", ls_dispatch::Channel::Wecom),
+        ("dingtalk", ls_dispatch::Channel::Dingtalk),
+        ("feishu", ls_dispatch::Channel::Feishu),
+        ("serverchan", ls_dispatch::Channel::Serverchan),
+        ("pushplus", ls_dispatch::Channel::Pushplus),
+        ("qmsg", ls_dispatch::Channel::Qmsg),
+        ("email", ls_dispatch::Channel::Email),
+        ("webhook", ls_dispatch::Channel::Webhook),
     ];
     let mut results: Vec<Value> = Vec::new();
     let mut sent = 0usize;
-    for (name, ch, url) in candidates {
+    for (name, ch) in all {
         if let Some(w) = &want {
-            if w != &name {
+            if w != name {
                 continue;
             }
         }
-        if url.is_empty() {
-            if want.as_deref() == Some(name.as_str()) {
-                // 显式点名但未配置：如实报告
-                results.push(json!({"channel": name, "ok": false,
-                                     "error": "未配置（env 为空）"}));
+        match snapshot.iter().find(|(c, _)| c == ch) {
+            Some((_, cfg)) => {
+                let d = ls_dispatch::deliver(*ch, cfg, 2, "LabSentinel 渠道自检测试");
+                if d.ok {
+                    sent += 1;
+                }
+                results.push(json!({"channel": name, "ok": d.ok, "attempts": d.attempts,
+                                     "error": d.error}));
             }
-            continue;
+            None => {
+                if want.as_deref() == Some(*name) {
+                    results.push(json!({"channel": name, "ok": false,
+                                         "error": "未配置——请先在网页保存该渠道凭据（或设置对应环境变量）"}));
+                }
+            }
         }
-        let cfg = ls_dispatch::ChannelConfig {
-            url,
-            allow_http: std::env::var("LS_WEBHOOK_ALLOW_HTTP")
-                .map(|v| v == "1")
-                .unwrap_or(false),
-            ..Default::default()
-        };
-        let d = ls_dispatch::deliver(ch, &cfg, 2, "LabSentinel 渠道自检测试（rust 控制面）");
-        if d.ok {
-            sent += 1;
+    }
+    if let Some(w) = &want {
+        if !all.iter().any(|(n, _)| n == w) {
+            results.push(json!({"channel": w, "ok": false, "error": "未知渠道"}));
         }
-        results.push(json!({"channel": name, "ok": d.ok, "attempts": d.attempts,
-                             "error": d.error}));
     }
     Json(
         json!({"ok": want.is_none() || results.iter().any(|r| r["ok"] == true),
                 "sent": sent, "results": results,
-                "note": "渠道配置优先取网页端保存（app_settings），其次环境变量"}),
+                "note": "渠道凭据与实际派发同源：网页保存（app_settings）优先，其次环境变量"}),
     )
     .into_response()
 }
