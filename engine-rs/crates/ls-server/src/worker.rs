@@ -433,7 +433,16 @@ impl WorkerConfig {
         let model_env = std::env::var("LS_MODEL_PATH")
             .ok()
             .filter(|v| !v.trim().is_empty());
-        detector.model_path = model_active.or(model_env).map(PathBuf::from);
+        // 0.3.0 修复：安装版快捷方式不经 LabSentinel.bat（无 env 注入）——发行包
+        // 自带 models/yolo11n.onnx 时按安装根兜底，避免新装机器静默退化为 NullDetector。
+        let bundled_model = {
+            let p = crate::deploy::default_install_root().join("models/yolo11n.onnx");
+            p.is_file().then(|| p.to_string_lossy().into_owned())
+        };
+        detector.model_path = model_active
+            .or(model_env)
+            .or(bundled_model)
+            .map(PathBuf::from);
         // UX（2026-11-21）：推理设备偏好（app_settings runtime.ep；默认 dml=GPU，
         // DML 初始化失败 ls-infer 自动回落 CPU——任意厂商 GPU 鲁棒）
         detector.use_gpu = s
@@ -444,7 +453,15 @@ impl WorkerConfig {
             .unwrap_or(true);
         // RA2-S1：PPE 级联（env LS_PPE_MODEL 若配，过锚点校验；类名/阈值走
         // PpeConfig 默认——与 sidecar 默认口径一致）
-        let ppe = std::env::var("LS_PPE_MODEL").ok().and_then(|raw| {
+        // 0.3.0 修复：未设 env 时按安装根兜底包内 models/yolo11n_ppe.onnx。
+        let ppe_raw = std::env::var("LS_PPE_MODEL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                let p = crate::deploy::default_install_root().join("models/yolo11n_ppe.onnx");
+                p.is_file().then(|| p.to_string_lossy().into_owned())
+            });
+        let ppe = ppe_raw.and_then(|raw| {
             let p = PathBuf::from(raw.trim());
             ls_analyzer::detector::anchor_model_file(&p).map(|model_path| {
                 ls_analyzer::ppe::PpeConfig {

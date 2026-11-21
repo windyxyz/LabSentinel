@@ -58,6 +58,15 @@
   复选框改为标准「选择附加任务」页（原生控件随 DPI 自适应）——此前手工定位的
   复选框会绘制在 ReadyMemo/RunList 之上造成文字重叠；完成页只保留「启动
   LabSentinel」。静默安装默认全选（CI 冒烟覆盖安装→探活→卸载零残留）。
+- **安装版启动即用修复**（用户实测：装到 `D:\Program Files (x86)\LabSentinel`
+  后打开 127.0.0.1:8000 显示「无法访问此页面」/ ready=503）：发行形态的默认
+  路径改按安装根解析——前端用 `<安装根>\web`（此前默认 `web/dist` 不存在 →
+  根路径 404）；数据目录 Windows 落 `%LOCALAPPDATA%\LabSentinel\data`（此前
+  `data/` 在 Program Files 不可写 → DB 打不开、日志写不出）；模型/PPE 未配
+  env 时按包内 `models/` 兜底（此前安装版静默退化为 NullDetector）；
+  `--launch` 开浏览器延后到监听就绪（消除慢启动 ERR_CONNECTION_REFUSED）。
+  源码开发形态与便携启动器（显式 env）行为不变。安装→根路径 200→ready→卸载
+  零残留已实测。
 - **告警文案人话化**：事件类型中文化（在场人数超限/有人未穿实验服…）、摄像头
   只显示名称、文件名去哈希截短、去裸时间戳行；标题修复「警告告警」叠词；
   VLM 三处 detail 同步（AI 精判措辞）。

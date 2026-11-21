@@ -170,9 +170,23 @@ async fn main() {
             }
         }
     }
-    // RA4.2：数据目录默认相对当前目录的 data/；DB 未显式指定时跟随数据目录
-    let data_dir = std::env::var("LS_DATA_DIR").unwrap_or_else(|_| "data".into());
-    let db_path = std::env::var("LS_DB_PATH").unwrap_or_else(|_| {
+    // RA4.2 / 0.3.0 修复：发行形态（安装版/便携包）的默认路径
+    // - 数据目录：LS_DATA_DIR 优先；发行形态 Windows 落 %LOCALAPPDATA%\LabSentinel\data
+    //   （安装到 Program Files 时安装目录不可写，此前 data/ 相对路径导致 DB 打不开、
+    //   /api/health/ready=503）；源码开发形态沿用 data/（仓库相对）。
+    // - 前端目录：LS_WEB_DIST 优先；发行形态用 <安装根>/web（包内布局），
+    //   源码开发用 web/dist——此前安装版根路径 404 即因默认 web/dist 不存在。
+    let install_root = deploy::default_install_root();
+    let dist_layout = install_root.join("web").join("index.html").is_file();
+    let env_path = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+    let data_dir = env_path("LS_DATA_DIR").unwrap_or_else(|| {
+        if dist_layout {
+            deploy::default_data_dir(&install_root)
+        } else {
+            "data".into()
+        }
+    });
+    let db_path = env_path("LS_DB_PATH").unwrap_or_else(|| {
         std::path::Path::new(&data_dir)
             .join("labsentinel.db")
             .to_string_lossy()
@@ -183,12 +197,15 @@ async fn main() {
     let read_protected = std::env::var("LS_AUTH_READ_PROTECTED")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let data_dir = std::env::var("LS_DATA_DIR").unwrap_or_else(|_| "server/data".into());
     // RA4.2：版本号优先 LS_VERSION，其次包内 VERSION/app/VERSION（发行包自带），最后兜底
-    let version = std::env::var("LS_VERSION")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| deploy::read_version(&deploy::default_install_root()));
+    let version = env_path("LS_VERSION").unwrap_or_else(|| deploy::read_version(&install_root));
+    let web_dist = env_path("LS_WEB_DIST").unwrap_or_else(|| {
+        if dist_layout {
+            install_root.join("web").to_string_lossy().into_owned()
+        } else {
+            "web/dist".into()
+        }
+    });
     let port: u16 = std::env::var("LS_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -204,8 +221,8 @@ async fn main() {
         read_protected,
         trusted_hosts: vec!["127.0.0.1".into(), "localhost".into(), "::1".into()],
         allowed_origins: vec![],
-        // 2026-11-11：与 Python 同名环境变量（LS_WEB_DIST），未设时按仓库相对布局。
-        web_dist: std::env::var("LS_WEB_DIST").unwrap_or_else(|_| "web/dist".into()),
+        // 2026-11-21：web_dist 已按发行/源码布局解析（LS_WEB_DIST 仍可覆盖）
+        web_dist,
         data_dir,
         version,
         events_tx: broadcast::channel(256).0,
@@ -316,7 +333,12 @@ async fn main() {
             logs.join("launcher.lock"),
             format!("{} {port}", std::process::id()),
         );
-        open_browser(port);
+        // 0.3.0 修复：等 axum::serve 真正开始 accept 再开浏览器（此前在 serve 前
+        // 调用；慢启动/冷迁移时浏览器先到 → ERR_CONNECTION_REFUSED）。
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            open_browser(port);
+        });
     }
     axum::serve(listener, app).await.unwrap();
 }

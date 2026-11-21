@@ -36,6 +36,28 @@ pub fn default_install_root() -> PathBuf {
     dir
 }
 
+/// 发行形态的默认数据目录（LS_DATA_DIR 未设置时）：
+/// - Windows：`%LOCALAPPDATA%\LabSentinel\data`——Program Files 安装目录不可写，
+///   且与便携启动器（LabSentinel.bat）口径一致，升级/重装不丢数据；
+/// - 其他平台：`<安装根>/data`。
+///
+/// 源码开发形态（无包内 web/index.html）不走这里，保持仓库相对 `data/`。
+pub fn default_data_dir(install: &Path) -> String {
+    #[cfg(windows)]
+    {
+        if let Ok(v) = std::env::var("LOCALAPPDATA") {
+            if !v.trim().is_empty() {
+                return Path::new(&v)
+                    .join("LabSentinel")
+                    .join("data")
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        }
+    }
+    install.join("data").to_string_lossy().into_owned()
+}
+
 /// 当前安装版本：`app/VERSION` → `VERSION` → `LS_VERSION` → "0.0.0"。
 pub fn read_version(install: &Path) -> String {
     for rel in ["app/VERSION", "VERSION"] {
