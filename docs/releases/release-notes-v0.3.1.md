@@ -26,6 +26,9 @@
   询问，静默卸载用 `/REMOVEDATA=1` 显式删除。
 - Windows 自身缓存项（MuiCache / BAM / CloudStore 等）由系统维护，卸载器不处理。
 
+### 界面
+- 左侧主导航吸顶：页面滚动时导航固定，不随内容滑动（与设置页右侧分区菜单一致）。
+
 ## 升级说明
 
 - 直接覆盖安装即可，数据目录 `%LOCALAPPDATA%\LabSentinel\data` 不受影响。

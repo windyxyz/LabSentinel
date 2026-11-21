@@ -20,6 +20,14 @@ body {
 nav {
   width: 216px;
   flex-shrink: 0;
+  /* 2026-11-21（用户反馈）：左侧主导航固定视口顶部，内容滚动时不跟随——
+     与设置页右侧分区菜单的 sticky 行为一致。 */
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  overflow-y: auto;
+  z-index: 20;
   padding: 12px 8px;
   background: var(--layer-fill);
   border-right: 1px solid var(--divider);
@@ -208,7 +216,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 /* ---------- 小屏适配 ---------- */
 @media (max-width: 760px) {
   .layout { flex-direction: column; }
-  nav { width: 100%; flex-direction: row; overflow-x: auto; padding: 8px; }
+  nav {
+    width: 100%; flex-direction: row; overflow-x: auto; padding: 8px;
+    /* 小屏顶部横排导航：不吸顶、不限高（保持原有滚动行为） */
+    position: static; height: auto; align-self: stretch;
+  }
   nav h1 { padding: 6px 10px; font-size: 14px; }
   nav a { min-height: 38px; white-space: nowrap; }
   nav a.active::before { display: none; }
