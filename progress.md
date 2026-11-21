@@ -2,19 +2,19 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID**: `LS-043`（已锁定 `ACTIVE`；`LS-042` 已验证完成并入库）
-- **Task-Name**: PPE 单次多类推理 2× 提速 + 灰度图 0 检出调优/诊断 + GUI 日志落盘 + Worker/ffmpeg/规则/跟踪器加固
+- **Task-ID**: `LS-044`（已锁定 `ACTIVE`；`LS-043` 已验证完成并入库）
+- **Task-Name**: 安全加固 + `retention` 相对路径防误删 + 派发重试/模板/MQTT 退避 + 完整 `graceful_shutdown` + `spawn_blocking`
 - **Files Changed**:
-  - `LS-042`：`handlers/{stats,folder_images,events,ops,alerts,cameras,zones_rules,config_io}.rs`、`router.rs`、`ls-server/Cargo.toml`、`web/src/{api.js,style.css}`、`web/src/views/{ReportsView,Events,FolderImages,Settings,Zones,Cameras,Wall,Devices,Models}.vue`、`web/src/components/{Welcome,FsPicker}.vue`、`web/tests/ls042_regressions.test.js`
+  - `LS-043`：`ls-infer/src/yolo.rs`（`detect_classes` 单次多类推理）、`ls-analyzer/src/{ppe,evidence,pipeline}.rs`（ROI 精检、交集比、防 `model.json` 覆盖、`Unknown` 不误报、`CREATE_NO_WINDOW`、`cooldown_s` 秒→帧）、`ls-ingest/src/lib.rs`（`CREATE_NO_WINDOW`、RTSP `-rw_timeout`、USB 15s 超时）、`ls-core/src/zones.rs`（`i128` 交叉乘）、`ls-server/src/{worker,handlers/misc_status}.rs`（可配 PPE 阈值、`folder_loop` 去饥饿、`Option<Instant>`、`given_up` 清理）
 - **Completed This Session**:
-  - `LS-040` 入库（`17da1fb`）；`LS-041` 入库（`da1dbd1`，141/141 Rust tests）。
-  - `LS-042` 完成并全绿：`npx vitest run` **66 passed / 0 failed**、`npm run build` PASS、Rust `fmt`/`clippy`/`test` **141 passed / 0 failed**。
+  - `LS-040`（`17da1fb`）、`LS-041`（`da1dbd1`）、`LS-042`（`4722d8c`）、`LS-043` 全部验证通过并入库（Rust 141 passed / clippy 0 / fmt OK；Web 66 passed + build 绿）。
 - **Open TODO**:
-  1. 执行 `LS-043`（PPE 单次多类推理 + 灰度图阈值可调/ROI 精检 + `log` 落盘 + Worker/ffmpeg/规则/跟踪器加固）；
-  2. 依次推进 `LS-044` → `LS-045` → `LS-046`。
+  1. 执行 `LS-044`（安全加固 + `retention` 防误删 + `mqtt` 退避 + 完整 `graceful_shutdown`）；
+  2. 执行 `LS-045`（CI 门禁 + `contract_audit.py` + 安装器 BOM/停服/Prefetch/`--rollback` + `LS_HOST`/`.env` + `[lints] workspace = true` + `NOTICE`/文档收口）；
+  3. 执行 `LS-046`（本机打包与安装/卸载冒烟实证）。
 - **Risks/Blockers**: 无阻断项。
 - **Next First Command**:
-  - 落地 `LS-043` 代码改动并跑 Rust 三连门禁。
+  - 落地 `LS-044` 安全与后台任务可靠性修复并跑 Rust 三连门禁。
 
 ---
 

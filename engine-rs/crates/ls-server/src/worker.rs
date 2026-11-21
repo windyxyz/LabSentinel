@@ -494,6 +494,31 @@ impl WorkerConfig {
             .flatten()
             .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
             .unwrap_or(true);
+        // LS-043：支持从 app_settings / 环境变量读取可配 PPE 置信度阈值（灰度/红外监控调优用）
+        let ppe_v_conf = s
+            .setting_get("ppe.violation_conf")
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .or_else(|| {
+                std::env::var("LS_PPE_CONF")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+            })
+            .map(|v| v.clamp(0.05, 0.95))
+            .unwrap_or(0.30);
+        let ppe_w_conf = s
+            .setting_get("ppe.wearing_conf")
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .or_else(|| {
+                std::env::var("LS_PPE_WEARING_CONF")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+            })
+            .map(|v| v.clamp(0.05, 0.95))
+            .unwrap_or(0.20);
         let ppe = ppe_raw.and_then(|raw| {
             if !ppe_enabled {
                 return None;
@@ -503,6 +528,8 @@ impl WorkerConfig {
                 ls_analyzer::ppe::PpeConfig {
                     model_path,
                     use_gpu: detector.use_gpu,
+                    violation_conf: ppe_v_conf,
+                    wearing_conf: ppe_w_conf,
                     ..Default::default()
                 }
             })
@@ -749,7 +776,8 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let vlm_interval = std::time::Duration::from_secs(
         (60f64 / env_f64("LS_VLM_MAX_PER_MIN", 6.0).max(0.1)).round() as u64,
     );
-    let mut last_vlm = std::time::Instant::now() - vlm_interval; // 首帧即可判
+    // LS-043：用 Option<Instant> 替代 `Instant::now() - vlm_interval`，防 Windows 刚开机减法下溢 panic
+    let mut last_vlm: Option<std::time::Instant> = None;
     let mut restarts = 0u32;
     #[allow(unused_assignments)] // 每轮 spawn 成功时重置（None 初始值仅首次可读路径）
     let mut alive_since: Option<std::time::Instant> = None;
@@ -852,9 +880,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
                         let mut dispatched_to_review = false;
                         if crate::detect::cascade_should_review(&dcfg, persons, max_conf, rules_hit)
-                            && last_vlm.elapsed() >= vlm_interval
+                            && last_vlm.is_none_or(|t| t.elapsed() >= vlm_interval)
                         {
-                            last_vlm = std::time::Instant::now();
+                            last_vlm = Some(std::time::Instant::now());
                             let ring_frames: Vec<Vec<u8>> = evidence
                                 .ring
                                 .lock()
@@ -899,8 +927,10 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             }
                         }
                         ev_round.clear();
-                    } else if vlm_cfg.enabled && last_vlm.elapsed() >= vlm_interval {
-                        last_vlm = std::time::Instant::now();
+                    } else if vlm_cfg.enabled
+                        && last_vlm.is_none_or(|t| t.elapsed() >= vlm_interval)
+                    {
+                        last_vlm = Some(std::time::Instant::now());
                         let ring_frames: Vec<Vec<u8>> = evidence
                             .ring
                             .lock()
@@ -984,6 +1014,14 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             return;
         }
         if !on_restart(&store, &cfg, &mut restarts, alive_since, "stream ended") {
+            evidence.flush();
+            if let Ok(mut m) = st.workers.map.lock() {
+                if m.get(&cfg.camera_id)
+                    .is_some_and(|cur| Arc::ptr_eq(cur, &handle))
+                {
+                    m.remove(&cfg.camera_id);
+                }
+            }
             return;
         }
         if !sleep_interruptible(&handle.stop, restart_backoff(restarts)) {
@@ -1287,7 +1325,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let review_interval = std::time::Duration::from_secs(
         (60f64 / env_f64("LS_VLM_MAX_PER_MIN", 6.0).max(0.1)).round() as u64,
     );
-    let mut last_review = std::time::Instant::now() - review_interval; // 首图即可复核
+    let mut last_review: Option<std::time::Instant> = None; // 首图即可复核（无下溢 panic）
     let mut marked: Option<String> = None;
     let mut set_status = |v: &str| {
         if marked.as_deref() != Some(v) {
@@ -1324,8 +1362,10 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         let cands = ls_ingest::folder::scan_candidates(&root, &scan_cfg, now, internal.as_deref());
         let max_per_tick = env_f64("LS_FOLDER_MAX_PER_TICK", 20.0).max(1.0) as usize;
         let mut scanned = 0usize;
-        for c in cands.iter().take(max_per_tick) {
-            if handle.stop.load(Ordering::SeqCst) {
+        // LS-043 修复饥饿：不再对全量 cands 截断 `.take(max_per_tick)`（此前目录 >20 张图时
+        // 前 20 张已处理图占满名额，第 21 张及更早图片永久不会被扫描），改为仅实际新识别满额后 break。
+        for c in cands.iter() {
+            if handle.stop.load(Ordering::SeqCst) || scanned >= max_per_tick {
                 break;
             }
             let ts = iso_secs(c.mtime_s as u64); // Python：ts=文件 mtime
@@ -1531,12 +1571,14 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 index: 0,
             };
             let mut dets = detector.detect(&frame);
-            // PPE 级联：逐人框判定（未配 PPE 模型 → ppe 恒 Unknown）
-            if let Some(runner) = ppe_runner.as_mut() {
-                let boxes: Vec<[f32; 4]> = dets.iter().map(|d| d.box_).collect();
-                let statuses = runner.statuses(&bgr, w, h, &boxes);
-                for (d, st) in dets.iter_mut().zip(statuses) {
-                    d.ppe = st;
+            // PPE 级联：逐人框判定（LS-043：空图 0 人跳过 PPE 推理节省算力）
+            if !dets.is_empty() {
+                if let Some(runner) = ppe_runner.as_mut() {
+                    let boxes: Vec<[f32; 4]> = dets.iter().map(|d| d.box_).collect();
+                    let statuses = runner.statuses(&bgr, w, h, &boxes);
+                    for (d, st) in dets.iter_mut().zip(statuses) {
+                        d.ppe = st;
+                    }
                 }
             }
             // 区域锚点 = 人框底边中点（与 pipeline.rs 同口径）；逐区统计
@@ -1670,9 +1712,9 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
                 let mut dispatched_to_review = false;
                 if crate::detect::cascade_should_review(&dcfg, persons, max_conf, violation)
-                    && last_review.elapsed() >= review_interval
+                    && last_review.is_none_or(|t| t.elapsed() >= review_interval)
                 {
-                    last_review = std::time::Instant::now();
+                    last_review = Some(std::time::Instant::now());
                     let review_jpeg =
                         ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h).unwrap_or_default();
                     if !review_jpeg.is_empty() {

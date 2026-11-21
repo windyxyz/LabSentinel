@@ -606,9 +606,23 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
         } else {
             None
         };
+        let violation_conf = s
+            .setting_get("ppe.violation_conf")
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(0.30);
+        let wearing_conf = s
+            .setting_get("ppe.wearing_conf")
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(0.20);
         Ok(Json(json!({
             "installed": installed,
             "enabled": enabled,
+            "violation_conf": violation_conf,
+            "wearing_conf": wearing_conf,
             "source": source,
             "bundled": bundled.is_some(),
             "mode": if installed && enabled && !classes.is_empty() { "ppe" } else { "person_only" },
@@ -639,16 +653,54 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
     })
 }
 
-/// PUT /api/models/ppe/config——启停实验服检测 {enabled: bool}；运行中相机软重启。
+/// PUT /api/models/ppe/config——启停实验服检测及可调置信度阈值 {enabled?, violation_conf?, wearing_conf?}；运行中相机软重启。
 pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
-    let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) else {
-        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "enabled 必须是布尔值")
+    let enabled = body.get("enabled").and_then(|v| v.as_bool());
+    let v_conf = body.get("violation_conf").and_then(|v| v.as_f64());
+    let w_conf = body.get("wearing_conf").and_then(|v| v.as_f64());
+    if enabled.is_none() && v_conf.is_none() && w_conf.is_none() {
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "至少提供 enabled / violation_conf / wearing_conf 之一",
+        )
+        .into_response();
+    }
+    if let Some(v) = v_conf {
+        if !(0.05..=0.95).contains(&v) {
+            return detail_err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "violation_conf 必须在 0.05~0.95 之间",
+            )
             .into_response();
-    };
+        }
+    }
+    if let Some(v) = w_conf {
+        if !(0.05..=0.95).contains(&v) {
+            return detail_err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "wearing_conf 必须在 0.05~0.95 之间",
+            )
+            .into_response();
+        }
+    }
     with_store(&st, |s| {
-        s.setting_set("ppe.enabled", if enabled { "1" } else { "0" })?;
+        if let Some(en) = enabled {
+            s.setting_set("ppe.enabled", if en { "1" } else { "0" })?;
+        }
+        if let Some(v) = v_conf {
+            s.setting_set("ppe.violation_conf", &format!("{v:.2}"))?;
+        }
+        if let Some(v) = w_conf {
+            s.setting_set("ppe.wearing_conf", &format!("{v:.2}"))?;
+        }
         let restarted = crate::worker::restart_all_running(&st, s);
-        Ok(Json(json!({"ok": true, "enabled": enabled, "restarted": restarted})).into_response())
+        let cur_en = s
+            .setting_get("ppe.enabled")
+            .ok()
+            .flatten()
+            .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
+            .unwrap_or(true);
+        Ok(Json(json!({"ok": true, "enabled": cur_en, "restarted": restarted})).into_response())
     })
 }
 

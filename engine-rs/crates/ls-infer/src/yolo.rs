@@ -268,8 +268,7 @@ impl YoloModel {
         self.detect_class(bgr, w, h, self.person_class, self.conf, self.min_box_area)
     }
 
-    /// T-325/Q-14：按**类别索引 + 独立阈值**检测（PPE 级联用：违规类 0.30 /
-    /// 穿戴类 0.20 与 Python `vision.ppe_boxes` 同口径）。每次调用 = 一次整图推理。
+    /// T-325/Q-14：按**类别索引 + 独立阈值**检测（单类便捷入口）。
     pub fn detect_class(
         &mut self,
         bgr: &[u8],
@@ -279,6 +278,22 @@ impl YoloModel {
         conf: f32,
         min_area: f32,
     ) -> Result<Vec<Det>, String> {
+        let mut all = self.detect_classes(bgr, w, h, &[(class_id, conf, min_area)])?;
+        Ok(all.pop().unwrap_or_default())
+    }
+
+    /// LS-043：单次前向推理多类解码（1 次 letterbox + 1 次 session.run 同时输出多个类别，
+    /// 消除 PPE 级联每帧 2+ 次整图重复推理，提速 ~2×）。
+    pub fn detect_classes(
+        &mut self,
+        bgr: &[u8],
+        w: u32,
+        h: u32,
+        specs: &[(usize, f32, f32)],
+    ) -> Result<Vec<Vec<Det>>, String> {
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
         let (data, geom) = letterbox_nchw(bgr, w, h, self.imgsz)?;
         match self.backend {
             #[cfg(feature = "tract")]
@@ -305,7 +320,12 @@ impl YoloModel {
                         .copied()
                         .ok_or_else(|| "输出索引越界".to_string())
                 })?;
-                Self::decode_static(&rows, &geom, class_id, conf, self.iou, min_area)
+                specs
+                    .iter()
+                    .map(|&(cid, conf, min_area)| {
+                        Self::decode_static(&rows, &geom, cid, conf, self.iou, min_area)
+                    })
+                    .collect()
             }
             #[cfg(not(feature = "tract"))]
             Backend::Tract => Err("tract feature 未启用".into()),
@@ -334,7 +354,12 @@ impl YoloModel {
                 let shape: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
                 let rows = rows_from_flat(&shape, flat)?;
                 drop(_dml_guard);
-                Self::decode_static(&rows, &geom, class_id, conf, self.iou, min_area)
+                specs
+                    .iter()
+                    .map(|&(cid, conf, min_area)| {
+                        Self::decode_static(&rows, &geom, cid, conf, self.iou, min_area)
+                    })
+                    .collect()
             }
             #[cfg(not(feature = "ort"))]
             Backend::Ort => Err("ort feature 未启用".into()),

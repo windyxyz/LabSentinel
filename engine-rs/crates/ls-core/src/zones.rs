@@ -19,11 +19,13 @@ pub fn point_in_polygon(poly: &[Point], p: Point) -> bool {
             return true;
         }
         if (a.1 > p.1) != (b.1 > p.1) {
-            // 交点 x 用 i64 中间量计算（坐标 ≤ 2^31 时无溢出），与 cv2 的整数语义对齐
-            let dx = b.0 - a.0;
-            let dy = b.1 - a.1;
-            let x_int = a.0 + (p.1 - a.1) * dx / dy;
-            if p.0 < x_int {
+            // LS-043：用 i128 交叉乘消除整数除法截断与大坐标溢出
+            let dx = (b.0 - a.0) as i128;
+            let dy = (b.1 - a.1) as i128;
+            let lhs = (p.0 - a.0) as i128 * dy;
+            let rhs = (p.1 - a.1) as i128 * dx;
+            let strictly_left = if dy > 0 { lhs < rhs } else { lhs > rhs };
+            if strictly_left {
                 inside = !inside;
             }
         }

@@ -352,17 +352,21 @@ impl CameraPipeline {
                             frame_ts,
                             &mut out,
                         );
-                        let detail = format!("进入安全区「{zname}」（实验服检测未启用）");
-                        self.try_fire(
-                            Some(zid),
-                            "enter_no_ppe",
-                            tid,
-                            &detail,
-                            2,
-                            &now,
-                            frame_ts,
-                            &mut out,
-                        );
+                        // LS-043：仅当 PPE 模型未启用时才回退发 enter_no_ppe 并提示「实验服检测未启用」；
+                        // 已启用 PPE 模型但证据不足（Unknown）时不误报未穿实验服。
+                        if self.ppe.is_none() {
+                            let detail = format!("进入安全区「{zname}」（实验服检测未启用）");
+                            self.try_fire(
+                                Some(zid),
+                                "enter_no_ppe",
+                                tid,
+                                &detail,
+                                2,
+                                &now,
+                                frame_ts,
+                                &mut out,
+                            );
+                        }
                     }
                 },
             }
@@ -451,10 +455,23 @@ impl CameraPipeline {
             return false;
         };
         let key = (rule.id, track_id);
+        // LS-043：cooldown_s 单位为秒，按 analysis_fps 换算为帧数（此前直接与 frame_index 比较缩短了 fps 倍）
+        let cd_frames = if rule.cooldown_s > 0 {
+            ((rule.cooldown_s as f64) * (self.camera.analysis_fps.max(1.0) as f64)).round() as u64
+        } else {
+            0
+        };
         if let Some(last) = self.last_fire.get(&key).copied() {
-            if self.frame_index.saturating_sub(last) < rule.cooldown_s.max(0) as u64 {
+            if self.frame_index.saturating_sub(last) < cd_frames {
                 return false;
             }
+        }
+        // 定期清理过期冷却键，防止 7×24 长跑内存单调增长
+        if self.last_fire.len() > 2048 {
+            let fi = self.frame_index;
+            let keep_window = (3600.0 * self.camera.analysis_fps.max(1.0) as f64) as u64;
+            self.last_fire
+                .retain(|_, &mut v| fi.saturating_sub(v) < keep_window);
         }
         self.last_fire.insert(key, self.frame_index);
         out.push(Candidate {
@@ -675,8 +692,8 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].behavior, "occupancy_over");
         assert!(first[0].detail.contains("在场人数 3 超过阈值 2"));
-        // 冷却期内（5 帧）不再触发
-        for _ in 0..4 {
+        // 冷却期内（5s * 5fps = 25 帧）不再触发
+        for _ in 0..24 {
             assert!(p.process(&three, ts).is_empty());
         }
         assert_eq!(p.process(&three, ts).len(), 1);

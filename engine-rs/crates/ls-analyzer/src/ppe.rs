@@ -76,7 +76,10 @@ pub fn load_class_names(model_path: &Path) -> Vec<String> {
     if let Ok(text) = std::fs::read_to_string(dir.join("model.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(c) = v.get("classes").and_then(|c| c.as_str()) {
-                file = anchored_child(dir, c); // 越界为 None → 使用回退名
+                // LS-043 修复：仅当 anchored_child 命中有效文件时覆盖，不把有效回退 file 置空
+                if let Some(p) = anchored_child(dir, c) {
+                    file = Some(p);
+                }
             }
         }
     }
@@ -102,8 +105,52 @@ pub struct YoloPpeRunner {
     wearing_conf: f32,
 }
 
-fn boxes_overlap(a: [f32; 4], b: [f32; 4]) -> bool {
-    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+/// LS-043：升级框归属判定——要求交集占较小框面积 ≥ 0.20 或 PPE 框中心落入人框内，
+/// 消除密集场景下 1 像素擦边误判。
+fn boxes_overlap(ppe_box: [f32; 4], person_box: [f32; 4]) -> bool {
+    let ix1 = ppe_box[0].max(person_box[0]);
+    let iy1 = ppe_box[1].max(person_box[1]);
+    let ix2 = ppe_box[2].min(person_box[2]);
+    let iy2 = ppe_box[3].min(person_box[3]);
+    if ix2 <= ix1 || iy2 <= iy1 {
+        return false;
+    }
+    let cx = (ppe_box[0] + ppe_box[2]) * 0.5;
+    let cy = (ppe_box[1] + ppe_box[3]) * 0.5;
+    if cx >= person_box[0] && cx <= person_box[2] && cy >= person_box[1] && cy <= person_box[3] {
+        return true;
+    }
+    let inter = (ix2 - ix1) * (iy2 - iy1);
+    let area_ppe = ((ppe_box[2] - ppe_box[0]) * (ppe_box[3] - ppe_box[1])).max(1.0);
+    let area_per = ((person_box[2] - person_box[0]) * (person_box[3] - person_box[1])).max(1.0);
+    inter / area_ppe.min(area_per) >= 0.20
+}
+
+/// 裁切 BGR 子图（带 15% padding），用于远景/灰度监控图人框 ROI 二次精检。
+fn crop_bgr_roi(bgr: &[u8], w: u32, h: u32, pb: [f32; 4]) -> Option<(Vec<u8>, u32, u32)> {
+    let bw = (pb[2] - pb[0]).max(0.0);
+    let bh = (pb[3] - pb[1]).max(0.0);
+    if bw < 32.0 || bh < 32.0 {
+        return None;
+    }
+    let pad_x = bw * 0.15;
+    let pad_y = bh * 0.15;
+    let x1 = ((pb[0] - pad_x).floor().max(0.0) as u32).min(w.saturating_sub(1));
+    let y1 = ((pb[1] - pad_y).floor().max(0.0) as u32).min(h.saturating_sub(1));
+    let x2 = ((pb[2] + pad_x).ceil().max(0.0) as u32).min(w);
+    let y2 = ((pb[3] + pad_y).ceil().max(0.0) as u32).min(h);
+    let rw = x2.saturating_sub(x1);
+    let rh = y2.saturating_sub(y1);
+    if rw < 32 || rh < 32 || bgr.len() < (w as usize) * (h as usize) * 3 {
+        return None;
+    }
+    let mut out = Vec::with_capacity((rw as usize) * (rh as usize) * 3);
+    for y in y1..y2 {
+        let start = ((y as usize) * (w as usize) + (x1 as usize)) * 3;
+        let end = start + (rw as usize) * 3;
+        out.extend_from_slice(&bgr[start..end]);
+    }
+    Some((out, rw, rh))
 }
 
 impl PpeRunner for YoloPpeRunner {
@@ -114,56 +161,55 @@ impl PpeRunner for YoloPpeRunner {
         h: u32,
         person_boxes: &[[f32; 4]],
     ) -> Vec<PpeStatus> {
-        let (Ok(no_boxes_raw), Ok(wear_raw)) = (
-            self.model
-                .detect_class(bgr, w, h, self.violation_class, self.violation_conf, 0.0),
-            self.model.detect_class(
-                bgr,
-                w,
-                h,
-                self.wearing_classes.first().copied().unwrap_or(0),
-                self.wearing_conf,
-                0.0,
-            ),
-        ) else {
-            println!(
-                "[ppe] detect_class 失败（violation_class={}/wearing={}）——全 Unknown",
-                self.violation_class,
-                self.wearing_classes.first().copied().unwrap_or(0)
-            );
+        if person_boxes.is_empty() {
+            return Vec::new();
+        }
+        // LS-043：单次前向推理同时解码 violation + 全部 wearing 类（消除 2× 重复推理）
+        let mut specs: Vec<(usize, f32, f32)> = Vec::with_capacity(1 + self.wearing_classes.len());
+        specs.push((self.violation_class, self.violation_conf, 0.0));
+        for &wc in &self.wearing_classes {
+            specs.push((wc, self.wearing_conf, 0.0));
+        }
+        let Ok(mut all_dets) = self.model.detect_classes(bgr, w, h, &specs) else {
             return vec![PpeStatus::Unknown; person_boxes.len()];
         };
-        // UX 排障（2026-11-21）：PPE 级联判定透明化（置信度低于阈值时静默是排障盲区）
-        println!(
-            "[ppe] no_dets={} wear_dets={} persons={}",
-            no_boxes_raw.len(),
-            wear_raw.len(),
-            person_boxes.len()
-        );
-        for d in &no_boxes_raw {
-            println!("[ppe] NoLabCoat box={:?} conf={:.2}", d.box_, d.score);
-        }
+        let no_boxes_raw = if !all_dets.is_empty() {
+            all_dets.remove(0)
+        } else {
+            Vec::new()
+        };
         let no_boxes: Vec<[f32; 4]> = no_boxes_raw.iter().map(|d| d.box_).collect();
-        let mut wear_boxes: Vec<[f32; 4]> = wear_raw.iter().map(|d| d.box_).collect();
-        // 多个穿戴类：额外每类一次推理（当前配置通常 1 类；合并模型 Q-14 后降为 1 次）
-        for class_id in self.wearing_classes.iter().skip(1) {
-            if let Ok(dets) = self
-                .model
-                .detect_class(bgr, w, h, *class_id, self.wearing_conf, 0.0)
-            {
-                wear_boxes.extend(dets.iter().map(|d| d.box_));
-            }
-        }
+        let wear_boxes: Vec<[f32; 4]> = all_dets
+            .into_iter()
+            .flat_map(|v| v.into_iter().map(|d| d.box_))
+            .collect();
+        let frame_area = ((w as f32) * (h as f32)).max(1.0);
         person_boxes
             .iter()
             .map(|pb| {
                 if no_boxes.iter().any(|nb| boxes_overlap(*nb, *pb)) {
-                    PpeStatus::NoPpe
-                } else if wear_boxes.iter().any(|wb| boxes_overlap(*wb, *pb)) {
-                    PpeStatus::Wearing
-                } else {
-                    PpeStatus::Unknown
+                    return PpeStatus::NoPpe;
                 }
+                if wear_boxes.iter().any(|wb| boxes_overlap(*wb, *pb)) {
+                    return PpeStatus::Wearing;
+                }
+                // LS-043：远景/灰度图整图无检出时，对较小人框裁切 ROI 二次精检（提升远景召回率）
+                let box_area = ((pb[2] - pb[0]).max(0.0)) * ((pb[3] - pb[1]).max(0.0));
+                if box_area / frame_area < 0.35 {
+                    if let Some((roi, rw, rh)) = crop_bgr_roi(bgr, w, h, *pb) {
+                        if let Ok(roi_dets) = self.model.detect_classes(&roi, rw, rh, &specs) {
+                            let has_no = roi_dets.first().is_some_and(|v| !v.is_empty());
+                            let has_wear = roi_dets.iter().skip(1).any(|v| !v.is_empty());
+                            if has_no {
+                                return PpeStatus::NoPpe;
+                            }
+                            if has_wear {
+                                return PpeStatus::Wearing;
+                            }
+                        }
+                    }
+                }
+                PpeStatus::Unknown
             })
             .collect()
     }

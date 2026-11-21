@@ -85,8 +85,18 @@ impl Ingest {
         // R2-301/N-22: portable layout keeps ffmpeg in tools/ (not on PATH).
         let mut c = Command::new(ls_core::bin::find("ffmpeg"));
         c.stdout(Stdio::piped()).stderr(Stdio::null());
-        if self.cfg.rtsp_transport_tcp && self.cfg.source.starts_with("rtsp") {
-            c.arg("-rtsp_transport").arg("tcp");
+        // LS-043：GUI 子系统下禁止弹 cmd 黑框
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000);
+        }
+        if self.cfg.source.starts_with("rtsp") {
+            if self.cfg.rtsp_transport_tcp {
+                c.arg("-rtsp_transport").arg("tcp");
+            }
+            // LS-043：RTSP 读写超时 10s，防止网络拔线半开连接永久阻塞 read_frame
+            c.args(["-rw_timeout", "10000000"]);
         }
         if self.cfg.file_loop {
             c.arg("-stream_loop").arg("-1");
@@ -230,6 +240,11 @@ pub fn decode_image(
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
     let mut child = c.spawn().map_err(|e| format!("ffmpeg 启动失败: {e}"))?;
     let mut out = Vec::new();
     if let Some(mut stdout) = child.stdout.take() {
@@ -318,13 +333,29 @@ pub fn list_usb_devices() -> Result<Vec<UsbDevice>, String> {
             c.creation_flags(0x0800_0000);
         }
         let mut child = c.spawn().map_err(|e| format!("ffmpeg 启动失败: {e}"))?;
-        let mut stderr = Vec::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_end(&mut stderr);
+        let err_pipe = child.stderr.take();
+        let reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = err_pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        });
+        // LS-043：真实 15s 超时保护，防止损坏的 DirectShow 驱动永久挂死 HTTP 线程
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => break,
+            }
         }
-        // -list_devices 必然"失败退出"（dummy 输入不存在）——退出码不判定，
-        // 以 stderr 内容为准；兜底 15s 等待防挂死
-        let _ = child.wait();
+        let stderr = reader.join().unwrap_or_default();
         let devices = parse_dshow_devices(&String::from_utf8_lossy(&stderr));
         if devices.is_empty() {
             return Err("未检测到 USB 摄像头（dshow 枚举为空）".into());
