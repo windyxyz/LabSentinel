@@ -52,6 +52,22 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
     for (lv, n) in &today {
         today_counts.insert(lv.to_string(), n);
     }
+    // UX（2026-11-21）：推理设备——providers 如实反映设置偏好（dml=DX12 统一
+    // 层：N/A/Intel 卡与核显；实际生效设备以 worker 日志为准，DML 失败回落 CPU）
+    let (providers, gpu_pref, gpu_active) = {
+        let ep = ls_store::Store::open(&st.db_path)
+            .ok()
+            .map(|s| crate::detect::runtime_ep_pref(&s))
+            .unwrap_or_else(|| "dml".into());
+        let arr = if ep == "dml" {
+            json!(["DmlExecutionProvider", "CPUExecutionProvider"])
+        } else {
+            json!(["CPUExecutionProvider"])
+        };
+        // 实际生效（模型加载后回填；None=尚无相机启动过）
+        let active = ls_infer::yolo::EP_USED.get().cloned();
+        (arr, ep, active)
+    };
     // UX2：检测模式与 cascade 用量（仪表盘卡片/设置横幅共用数据源）
     let detect = {
         let dcfg = crate::detect::DetectCfg::load(&s, std::path::Path::new(&st.data_dir));
@@ -72,6 +88,9 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
         "components": {"engine": {"state": "idle"}, "go2rtc": {"ok": false}},
         "config_issues": {"fail": 0, "warn": 0, "source_issues": []},
         "detect": detect,
+        "providers": providers,
+        "gpu_pref": gpu_pref,
+        "gpu_active": gpu_active,
     }))
 }
 

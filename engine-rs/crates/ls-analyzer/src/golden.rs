@@ -285,8 +285,17 @@ fn make_golden_detector(args: &GoldenArgs) -> Result<Box<dyn pipeline::Detector>
     if !path.is_file() {
         return Err(format!("模型不存在: {}", path.display()));
     }
-    let model = ls_infer::yolo::YoloModel::load(&path, 640, 0.40, 0.50, 1200.0, None)
-        .map_err(|e| format!("模型加载失败: {e}"))?;
+    // 黄金语料对齐验证固定 tract+CPU（可复现——GPU 浮点差异会破坏逐位对齐）
+    let model = ls_infer::yolo::YoloModel::load(
+        &path,
+        640,
+        0.40,
+        0.50,
+        1200.0,
+        Some(ls_infer::yolo::Backend::Tract),
+        false,
+    )
+    .map_err(|e| format!("模型加载失败: {e}"))?;
     Ok(Box::new(GoldenDetector { model }))
 }
 

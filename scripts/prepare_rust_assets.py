@@ -87,21 +87,42 @@ def ensure_ffmpeg(force: bool) -> None:
 
 
 def ensure_ort(force: bool) -> None:
+    """onnxruntime 运行时 DLL——**DirectML 版**（UX 2026-11-21：GPU 推理默认开）。
+
+    DML = DX12 统一层：N 卡 / A 卡 / Intel i 卡 / 各核显全部走同一 DLL（微软
+    官方 nuget Microsoft.ML.OnnxRuntime.DirectML；哈希钉死）。CPU-only 机器同
+    一 DLL 也可跑 CPU EP。依赖系统 DirectML.dll（Win10 1709+ 自带）。
+    """
     ORTDIR.mkdir(parents=True, exist_ok=True)
-    if (ORTDIR / "onnxruntime.dll").is_file() and not force:
-        log("onnxruntime.dll 已存在")
-        return
-    try:
-        import onnxruntime  # noqa: F401
-    except ImportError:
-        log("警告：未安装 onnxruntime（pip install onnxruntime），运行时 DLL 缺失")
-        return
-    capi = Path(onnxruntime.__file__).resolve().parent / "capi"
-    copied = 0
-    for dll in capi.glob("onnxruntime*.dll"):
-        shutil.copy2(dll, ORTDIR / dll.name)
-        copied += 1
-    log(f"onnxruntime DLL 复制 {copied} 个 <- {capi}")
+    target = ORTDIR / "onnxruntime.dll"
+    WANT_SHA256 = "903c92c54acc57caa77d44d4c856c829eb82f5cf6755b47367a8153bd3fabeb6"
+    NUGET_URL = "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/1.20.1"
+    if target.is_file():
+        import hashlib
+        got = hashlib.sha256(target.read_bytes()).hexdigest()
+        if got == WANT_SHA256:
+            log("onnxruntime.dll 已存在（DirectML 版，哈希一致）")
+            return
+        log(f"onnxruntime.dll 哈希不符（旧 CPU 版?）——重取 DML 版: {got[:16]}…")
+    # 下载 nuget（zip）→ 解压 win-x64 native onnxruntime.dll → 校验哈希 → 落盘
+    import hashlib
+    import tempfile
+    import urllib.request
+    import zipfile
+    with tempfile.TemporaryDirectory() as td:
+        pkg = Path(td) / "ortdml.nupkg"
+        log(f"下载 onnxruntime-directml nuget ← {NUGET_URL}")
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with op.open(NUGET_URL, timeout=600) as r, pkg.open("wb") as dst:
+            shutil.copyfileobj(r, dst)
+        with zipfile.ZipFile(pkg) as z:
+            member = "runtimes/win-x64/native/onnxruntime.dll"
+            data = z.read(member)
+        got = hashlib.sha256(data).hexdigest()
+        if got != WANT_SHA256:
+            raise SystemExit(f"[失败] onnxruntime.dll 哈希不符: {got}")
+        target.write_bytes(data)
+        log(f"onnxruntime.dll（DirectML 版 {len(data)/1e6:.1f}MB）已落盘，SHA256 一致")
 
 
 def main() -> int:

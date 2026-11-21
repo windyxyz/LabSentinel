@@ -291,9 +291,22 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
             },
             "usage": {"date": usage.date, "count": usage.count,
                       "budget": usage.budget, "exhausted": usage.exhausted()},
+            // UX（2026-11-21）：推理设备（DirectML——DX12 统一层，N/A/Intel 卡
+            // 与核显全通吃；dml 初始化失败自动回落 CPU）
+            "runtime": {"ep": runtime_ep_pref(s)},
         }))
         .into_response())
     })
+}
+
+/// runtime.ep 设置读取（dml|cpu；缺省 dml=GPU 优先——用户决策 2026-11-21）。
+pub fn runtime_ep_pref(s: &ls_store::Store) -> String {
+    s.setting_get("runtime.ep")
+        .ok()
+        .flatten()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| v == "dml" || v == "cpu")
+        .unwrap_or_else(|| "dml".into())
 }
 
 /// PUT /api/detect/config——增量写（缺字段/空串=不变更；api_key 仅在给出非
@@ -402,6 +415,24 @@ pub(crate) async fn detect_config_put(
                 ));
             }
         }
+        // runtime.ep：推理设备切换（dml|cpu）——写入后重启全部运行中相机
+        //（EP 变化影响所有模型加载，不限 analyzer）
+        let mut ep_changed = false;
+        if let Some(rt) = body.get("runtime") {
+            if let Some(ep) = rt.get("ep").and_then(|x| x.as_str()) {
+                let ep_l = ep.trim().to_ascii_lowercase();
+                if ep_l != "dml" && ep_l != "cpu" {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "runtime.ep 必须是 dml（GPU）或 cpu",
+                    )
+                    .into_response());
+                }
+                let cur = runtime_ep_pref(s);
+                s.setting_set("runtime.ep", &ep_l)?;
+                ep_changed = cur != ep_l;
+            }
+        }
         if let Some(c) = cascade {
             if let Some(t) = c.get("trigger").and_then(|x| x.as_str()) {
                 writes.push(("detect.cascade.trigger".into(), t.into()));
@@ -427,8 +458,11 @@ pub(crate) async fn detect_config_put(
                 detail_err(StatusCode::INTERNAL_SERVER_ERROR, &errs.join("；")).into_response(),
             );
         }
-        // 即时生效：运行中「跟随全局」的相机软重启（对齐 analyzer PUT 语义）
-        let restarted = crate::worker::restart_following_global(&st, s);
+        // 即时生效：运行中相机软重启（analyzer 跟随全局者；EP 变化时全部重启）
+        let mut restarted = crate::worker::restart_following_global(&st, s);
+        if ep_changed {
+            restarted += crate::worker::restart_all_running(&st, s);
+        }
         let cfg = DetectCfg::load(s, data_dir);
         let usage = usage_today(s, &cfg);
         Ok(Json(json!({

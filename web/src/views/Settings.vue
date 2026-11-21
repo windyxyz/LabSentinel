@@ -95,7 +95,14 @@ async function runAlertTest() {
   alertTesting.value = true
   alertTestMsg.value = ''
   try {
-    const results = await api.alertTest()
+    const raw = await api.alertTest()
+    // 后端形状兼容：数组（Python 契约）或 {results:[...]}（rust 现状）
+    const results = Array.isArray(raw) ? raw : (raw.results || [])
+    if (!results.length) {
+      alertTestMsg.value = '尚未配置任何渠道——请先在上方「告警渠道状态」里配置至少一个渠道（企业微信/钉钉/邮件等），再发测试'
+      loadAlerts()
+      return
+    }
     const okN = results.filter(r => r.ok).length
     alertTestMsg.value = `测试完成：${okN}/${results.length} 渠道成功` +
       results.filter(r => !r.ok).map(r => `（${CHANNEL_NAMES[r.channel] || r.channel}：${r.error || '失败'}）`).join('')

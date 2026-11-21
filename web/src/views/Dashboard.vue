@@ -43,9 +43,13 @@ const gpuOn = computed(() => (sys.value?.providers || []).includes('DmlExecution
 const gpuHint = computed(() => {
   const providers = sys.value?.providers || []
   const gpu = providers.filter((p) => !/CPU|Azure/i.test(p))
-  return gpuOn.value
-    ? `GPU 加速：开启（${gpu.join('/')}）`
-    : 'GPU 加速：未启用（CPU 推理；可选 GPU(DML) 变体包随 0.3.0 提供）'
+  // UX（2026-11-21）：gpu_active = 实际生效设备（DML 失败自动回落 CPU 时如实显示）
+  const active = sys.value?.gpu_active
+  if (active && /DirectML/i.test(active)) return `GPU 加速：已启用（${active}）`
+  if (active && /CPU/i.test(active)) return '推理设备：CPU（GPU 初始化失败已自动回落；可在 设置→模型与检测 切换）'
+  return gpu.length
+    ? 'GPU 加速：已配置（DirectML）——启动相机后生效'
+    : '推理设备：CPU（可在 设置→模型与检测 切换 GPU）'
 })
 const feed = ref([])
 const loading = ref(true)

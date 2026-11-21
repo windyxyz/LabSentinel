@@ -206,6 +206,9 @@ fn make_ppe_runner() -> Option<Box<dyn pipeline::PpeRunner>> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect(),
+        use_gpu: std::env::var("LS_GPU")
+            .map(|v| v.trim() != "0")
+            .unwrap_or(true),
     };
     ppe::make_ppe_runner(&cfg)
 }

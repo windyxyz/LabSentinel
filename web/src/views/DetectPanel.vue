@@ -29,6 +29,9 @@ const onNegative = ref('keep')
 
 const testBusy = ref(false)
 const testResult = ref(null)
+const apiCardEl = ref(null)
+const urlInputEl = ref(null)
+const runtimeEp = ref('dml')
 
 const MODES = [
   { id: 'local', title: '仅本地', desc: '零成本离线——ONNX 本地推理，数据不出本机', icon: '<rect x="2.5" y="4" width="11" height="8" rx="1.5"/><path d="M5 13.5h6"/>' },
@@ -59,6 +62,7 @@ async function load() {
     dailyBudget.value = d.cascade.daily_budget
     onNegative.value = d.cascade.on_negative
     usage.value = d.usage
+    runtimeEp.value = d.runtime?.ep || 'dml'
     msg.value = ''
   } catch (e) {
     msg.value = String(e.message || e)
@@ -84,6 +88,9 @@ function pickMode(id) {
   if (id === mode.value) return
   if (id !== 'local' && (!url.value || (isRemoteUrl.value && !allowRemote.value))) {
     msg.value = '先在下方「API 服务」卡填写地址并点「保存 API 配置」（远程地址需勾选合规确认），然后再点模式卡片切换'
+    // 交互引导：滚到 API 卡并聚焦地址框（点击必须有可见反应）
+    apiCardEl.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setTimeout(() => urlInputEl.value?.focus(), 350)
     return
   }
   save({ mode: id }, id === 'cascade' ? '已切换为本地+API 协作' : '已切换检测模式')
@@ -124,6 +131,20 @@ async function runTest() {
   load()
 }
 
+// 推理设备切换（GPU/CPU）：保存后全部运行中相机软重启（模型重新加载）
+async function saveRuntimeEp(ep) {
+  busy.value = true
+  msg.value = ''
+  try {
+    const r = await api.saveDetectConfig({ runtime: { ep } })
+    await load()
+    msg.value = ep === 'dml'
+      ? `已切换 GPU 推理（DirectML）——${r.restarted || 0} 路相机已重启生效`
+      : `已切换仅 CPU 推理——${r.restarted || 0} 路相机已重启生效`
+  } catch (e) { msg.value = String(e.message || e) }
+  busy.value = false
+}
+
 function clearKey() {
   apiKey.value = ''
   save({ vlm: { api_key: '' } }, 'API 密钥已清除')
@@ -155,14 +176,23 @@ onMounted(load)
       </p>
       <p v-if="msg" class="muted">{{ msg }}</p>
 
-      <!-- 本地模型（吸收原「模型管理」页） -->
+      <!-- 本地模型（吸收原「模型管理」页）+ 推理设备切换 -->
       <div class="card">
         <h3>本地模型</h3>
+        <div class="row" style="align-items:center; margin-bottom:10px">
+          <span class="muted" style="flex-shrink:0">推理设备：</span>
+          <label style="cursor:pointer"><input type="radio" value="dml" v-model="runtimeEp"
+            @change="saveRuntimeEp('dml')" /> GPU（推荐——DirectML，N 卡/A 卡/Intel 卡/核显通用）</label>
+          <label style="cursor:pointer; margin-left:16px"><input type="radio" value="cpu" v-model="runtimeEp"
+            @change="saveRuntimeEp('cpu')" /> 仅 CPU</label>
+          <span v-if="runtimeEp === 'dml'" class="muted" style="font-size:12px">
+            GPU 初始化失败会自动回落 CPU（看服务日志）</span>
+        </div>
         <Models />
       </div>
 
       <!-- API 服务（常显——首次配置 API 时必须先填这里，模式切换才有前提） -->
-      <div class="card">
+      <div class="card" ref="apiCardEl">
         <h3>API 服务
           <span v-if="mode === 'local'" class="muted" style="font-size:12px; font-weight:400">
             （当前仅本地模式；此处保存后，点上方「仅 API」或「本地 + API 协作」卡片即生效）</span>
@@ -173,7 +203,7 @@ onMounted(load)
             <option value="ollama">Ollama（本机）</option>
             <option value="gemini">Gemini（原生视频）</option>
           </select>
-          <input v-model="url" placeholder="API 地址，如 https://api.example.com/v1" aria-label="API 地址" style="flex:1; min-width:220px" />
+          <input v-model="url" ref="urlInputEl" placeholder="API 地址，如 https://api.example.com/v1" aria-label="API 地址" style="flex:1; min-width:220px" />
           <input v-model="model" placeholder="模型名" aria-label="模型名" style="width:170px" />
         </div>
         <div class="row" style="align-items:center; margin-top:8px; flex-wrap:wrap">

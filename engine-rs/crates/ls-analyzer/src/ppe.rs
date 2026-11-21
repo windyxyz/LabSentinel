@@ -23,6 +23,8 @@ pub struct PpeConfig {
     pub violation_class_name: String,
     /// 穿戴类名列表（逗号拆分后逐个查索引）
     pub wearing_class_names: Vec<String>,
+    /// UX（2026-11-21）：GPU 推理（与主检测同设备；DirectML，失败回落 CPU）
+    pub use_gpu: bool,
 }
 
 impl Default for PpeConfig {
@@ -37,6 +39,7 @@ impl Default for PpeConfig {
             wearing_conf: 0.20,
             violation_class_name: "no lab coat".into(),
             wearing_class_names: vec!["lab coat".into()],
+            use_gpu: true,
         }
     }
 }
@@ -192,6 +195,7 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
         cfg.iou,
         0.0,
         None,
+        cfg.use_gpu,
     ) {
         Ok(model) => {
             println!(

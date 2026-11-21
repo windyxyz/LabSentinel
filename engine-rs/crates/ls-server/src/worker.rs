@@ -425,6 +425,14 @@ impl WorkerConfig {
             .ok()
             .filter(|v| !v.trim().is_empty());
         detector.model_path = model_active.or(model_env).map(PathBuf::from);
+        // UX（2026-11-21）：推理设备偏好（app_settings runtime.ep；默认 dml=GPU，
+        // DML 初始化失败 ls-infer 自动回落 CPU——任意厂商 GPU 鲁棒）
+        detector.use_gpu = s
+            .setting_get("runtime.ep")
+            .ok()
+            .flatten()
+            .map(|v| v.trim().eq_ignore_ascii_case("dml") || v.trim().is_empty())
+            .unwrap_or(true);
         // RA2-S1：PPE 级联（env LS_PPE_MODEL 若配，过锚点校验；类名/阈值走
         // PpeConfig 默认——与 sidecar 默认口径一致）
         let ppe = std::env::var("LS_PPE_MODEL").ok().and_then(|raw| {
@@ -432,6 +440,7 @@ impl WorkerConfig {
             ls_analyzer::detector::anchor_model_file(&p).map(|model_path| {
                 ls_analyzer::ppe::PpeConfig {
                     model_path,
+                    use_gpu: detector.use_gpu,
                     ..Default::default()
                 }
             })
@@ -550,6 +559,19 @@ pub fn stop_all_workers(st: &Shared) -> usize {
         }
     }
     n
+}
+
+/// UX（2026-11-21）：推理设备（runtime.ep）变更后重启**全部**运行中相机
+/// （EP 影响所有模型加载；返回重启路数）。
+pub fn restart_all_running(st: &Shared, store: &ls_store::Store) -> usize {
+    let Ok(cams) = store.cameras() else {
+        return 0;
+    };
+    cams.iter()
+        .filter(|c| c.status == "running")
+        .map(|c| c.id)
+        .filter(|cid| restart_camera_if_running(st, store, *cid))
+        .count()
 }
 
 /// UX2：全局检测模式变更后，重启所有「跟随全局」（analyzer='default'/空）的

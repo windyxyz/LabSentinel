@@ -1739,6 +1739,7 @@ dependencies = [
  "ls-analyzer",
  "ls-core",
  "ls-dispatch",
+ "ls-infer",
  "ls-ingest",
  "ls-jobs",
  "ls-store",

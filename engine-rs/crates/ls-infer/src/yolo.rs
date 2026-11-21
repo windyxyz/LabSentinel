@@ -65,13 +65,23 @@ impl Backend {
                 }
             }
             _ => {
-                #[cfg(feature = "tract")]
+                // UX（2026-11-21）：缺省 **ort**（GPU/DirectML 路线的前提——tract
+                // 纯 Rust 推理无法走 GPU；发行形态自带 DML 版 onnxruntime.dll）。
+                // tract 仍可显式 `LS_INFER_BACKEND=tract`（黄金语料对齐用）。
+                #[cfg(feature = "ort")]
                 {
-                    Some(Backend::Tract) // 缺省 tract（零外部依赖）
+                    Some(Backend::Ort)
                 }
-                #[cfg(not(feature = "tract"))]
+                #[cfg(not(feature = "ort"))]
                 {
-                    None
+                    #[cfg(feature = "tract")]
+                    {
+                        Some(Backend::Tract) // 无 ort feature 时回退 tract
+                    }
+                    #[cfg(not(feature = "tract"))]
+                    {
+                        None
+                    }
                 }
             }
         }
@@ -117,8 +127,14 @@ pub struct YoloModel {
     min_box_area: f32,
 }
 
+/// 实际生效的推理设备（"DirectML(GPU)" / "CPU"）——load 成功后写入，
+/// /api/system 如实上报（设置偏好 ≠ 实际生效；DML 失败回落后前端可见）。
+pub static EP_USED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 impl YoloModel {
     /// 加载模型。`backend=None` 时按 `LS_INFER_BACKEND` 解析（缺省 tract）。
+    /// `use_gpu=true` 时注册 DirectML EP（DX12 统一层——N 卡/A 卡/Intel i 卡/
+    /// 核显全通吃），**失败自动回落 CPU**（任意设备鲁棒；实际生效设备见日志）。
     pub fn load(
         path: &Path,
         imgsz: u32,
@@ -126,6 +142,7 @@ impl YoloModel {
         iou: f32,
         min_box_area: f32,
         backend: Option<Backend>,
+        use_gpu: bool,
     ) -> Result<Self, String> {
         let backend = backend
             .or_else(Backend::from_env)
@@ -169,10 +186,31 @@ impl YoloModel {
                     .with_name("labsentinel")
                     .build()
                     .map_err(|e| format!("ORT 环境初始化失败: {e}（ORT_DYLIB_PATH 是否设置？）"))?;
-                let session = Session::builder(&environment)
-                    .map_err(|e| format!("ORT builder 失败: {e}"))?
-                    .commit_from_memory(&bytes)
-                    .map_err(|e| format!("ORT 加载模型失败: {e}"))?;
+                let build = |with_dml: bool| -> Result<Session, String> {
+                    let mut b = Session::builder(&environment)
+                        .map_err(|e| format!("ORT builder 失败: {e}"))?;
+                    if with_dml {
+                        b = b
+                            .with_execution_providers([ort::ep::DirectML::default().build()])
+                            .map_err(|e| format!("DirectML EP 注册失败: {e}"))?;
+                    }
+                    b.commit_from_memory(&bytes)
+                        .map_err(|e| format!("ORT 加载模型失败: {e}"))
+                };
+                // GPU 优先 + 自动回落：驱动太老/无 DX12/虚拟机等场景对任意设备鲁棒
+                let (session, ep_used) = if use_gpu {
+                    match build(true) {
+                        Ok(s) => (s, "DirectML(GPU)"),
+                        Err(e) => {
+                            eprintln!("[ls-infer] GPU(DirectML) 初始化失败，自动回落 CPU: {e}");
+                            (build(false)?, "CPU")
+                        }
+                    }
+                } else {
+                    (build(false)?, "CPU")
+                };
+                println!("[ls-infer] ORT 推理设备: {ep_used}");
+                let _ = EP_USED.set(ep_used.to_string());
                 model.ort_session = Some(session);
             }
             #[cfg(not(feature = "ort"))]
@@ -482,7 +520,8 @@ mod tests {
             eprintln!("skip: 仓库模型不存在");
             return;
         }
-        let mut m = YoloModel::load(&model, 640, 0.4, 0.5, 1200.0, None).expect("模型可加载");
+        let mut m =
+            YoloModel::load(&model, 640, 0.4, 0.5, 1200.0, None, false).expect("模型可加载");
         let frame = vec![114u8; 640 * 640 * 3];
         let dets = m.detect(&frame, 640, 640).expect("推理可执行");
         assert!(dets.is_empty(), "纯灰图不应检出目标，实得 {dets:?}");

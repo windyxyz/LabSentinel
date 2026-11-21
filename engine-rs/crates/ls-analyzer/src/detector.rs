@@ -19,17 +19,22 @@ pub struct DetectorConfig {
     pub conf: f32,
     pub iou: f32,
     pub min_area: f32,
+    /// UX（2026-11-21）：GPU 推理（DirectML——DX12 统一层，N/A/Intel 卡与核显
+    /// 全通吃）。默认 true；DML 初始化失败时 ls-infer 自动回落 CPU。
+    pub use_gpu: bool,
 }
 
 impl Default for DetectorConfig {
     fn default() -> Self {
         // 默认值与 sidecar env 口径一致（LS_IMGSZ/LS_CONF_THRES/LS_IOU_THRES/LS_MIN_BOX_AREA）
+        // GPU 默认开启（用户决策 2026-11-21：新设备默认 GPU，失败自动回落 CPU）
         DetectorConfig {
             model_path: None,
             imgsz: 640,
             conf: 0.40,
             iou: 0.50,
             min_area: 1200.0,
+            use_gpu: true,
         }
     }
 }
@@ -43,6 +48,10 @@ impl DetectorConfig {
             conf: env_f32("LS_CONF_THRES", 0.40),
             iou: env_f32("LS_IOU_THRES", 0.50),
             min_area: env_f32("LS_MIN_BOX_AREA", 1200.0),
+            // env LS_GPU=0 可强制 CPU（默认 GPU）
+            use_gpu: std::env::var("LS_GPU")
+                .map(|v| v.trim() != "0")
+                .unwrap_or(true),
         }
     }
 }
@@ -112,7 +121,15 @@ pub fn make_detector(cfg: &DetectorConfig) -> Box<dyn Detector> {
         );
         return Box::new(NullDetector);
     };
-    match YoloModel::load(&path, cfg.imgsz, cfg.conf, cfg.iou, cfg.min_area, None) {
+    match YoloModel::load(
+        &path,
+        cfg.imgsz,
+        cfg.conf,
+        cfg.iou,
+        cfg.min_area,
+        None,
+        cfg.use_gpu,
+    ) {
         Ok(model) => {
             println!(
                 "[ls-analyzer] 模型已加载 {}（imgsz={} conf={} iou={}）",
