@@ -8,7 +8,7 @@
 ; - 双安装模式（PrivilegesRequiredOverridesAllowed=dialog commandline）：
 ;   · 仅为我安装（默认，lowest，无需管理员）——目录 {localappdata}\Programs\LabSentinel
 ;   · 为所有用户安装（提权）——目录 {autopf}\LabSentinel
-; - 完成页双复选框：开始菜单 + 桌面快捷方式（默认全勾）
+; - 快捷方式选项：「选择附加任务」页（开始菜单 + 桌面，默认全勾）
 ; - 升级：同 AppId 覆盖安装；升级前由安装器调 labsentinel-server --archive 归档旧版
 ;
 ; 与 Python 版差异：无 runtime\python.exe——归档/回滚直接用 labsentinel-server.exe
@@ -60,6 +60,7 @@ chinese.ServiceMissing=未随包携带 winsw.exe：服务模式需手工安装�
 chinese.ServiceFailed=服务安装失败（WinSW 执行失败）。可在安装目录手工运行 winsw install。
 chinese.StartMenu=创建开始菜单快捷方式
 chinese.Desktop=创建桌面快捷方式
+chinese.ShortcutOptGroup=快捷方式
 chinese.Verify=正在校验新版本…
 chinese.Archive=正在归档旧版本…
 chinese.Launch=启动 LabSentinel
@@ -69,11 +70,18 @@ english.ServiceMissing=winsw.exe is not bundled: install the service manually (s
 english.ServiceFailed=Service installation failed (WinSW error). Run "winsw install" manually in the install directory.
 english.StartMenu=Create a Start Menu shortcut
 english.Desktop=Create a desktop shortcut
+english.ShortcutOptGroup=Shortcuts
 english.Verify=Verifying the new version…
 english.Archive=Archiving the previous version…
 english.Launch=Launch LabSentinel
 
 [Tasks]
+; 快捷方式选项放在标准「选择附加任务」页（Inno 原生控件，随 DPI 自适应）；
+; 不再在完成页手工注入复选框（会被绘制在 ReadyMemo/RunList 之上，文字重叠）。
+Name: "createshortcut"; Description: "{cm:StartMenu}"; \
+  GroupDescription: "{cm:ShortcutOptGroup}"
+Name: "createdesktop"; Description: "{cm:Desktop}"; \
+  GroupDescription: "{cm:ShortcutOptGroup}"
 Name: "installservice"; Description: "{cm:ServiceTask}"; \
   GroupDescription: "{cm:ServiceOptGroup}"; Flags: unchecked;
 
@@ -112,10 +120,6 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM labsentinel-server.exe"; \
   Flags: runhidden; RunOnceId: "StopLabSentinel"
 
 [Code]
-var
-  StartMenuCb: TNewCheckBox;
-  DesktopCb: TNewCheckBox;
-
 // 双模式默认目录：管理员（为所有用户）→ {autopf}\LabSentinel；仅为我 → {localappdata}\Programs
 function GetDefaultDirName(Param: String): String;
 begin
@@ -125,35 +129,8 @@ begin
     Result := ExpandConstant('{localappdata}\Programs\LabSentinel');
 end;
 
-// ---- 完成页注入双复选框（默认全勾）----
-procedure CurPageChanged(CurPageID: Integer);
-begin
-  if CurPageID = wpFinished then
-  begin
-    if StartMenuCb = nil then
-    begin
-      StartMenuCb := TNewCheckBox.Create(WizardForm);
-      StartMenuCb.Parent := WizardForm;
-      StartMenuCb.Left := WizardForm.RunList.Left;
-      StartMenuCb.Width := WizardForm.RunList.Width;
-      StartMenuCb.Caption := CustomMessage('StartMenu');
-      StartMenuCb.Checked := True;
-
-      DesktopCb := TNewCheckBox.Create(WizardForm);
-      DesktopCb.Parent := WizardForm;
-      DesktopCb.Left := WizardForm.RunList.Left;
-      DesktopCb.Width := WizardForm.RunList.Width;
-      DesktopCb.Caption := CustomMessage('Desktop');
-      DesktopCb.Checked := True;
-    end;
-    StartMenuCb.Top := WizardForm.RunList.Top - StartMenuCb.Height - ScaleY(28);
-    DesktopCb.Top := StartMenuCb.Top + StartMenuCb.Height + ScaleY(6);
-    StartMenuCb.Visible := True;
-    DesktopCb.Visible := True;
-  end;
-end;
-
-// ---- 快捷方式生成：按完成页勾选；卸载项始终生成 ----
+// ---- 快捷方式生成：按「选择附加任务」页勾选；卸载项始终生成 ----
+// 静默安装（/VERYSILENT）时任务按默认选中处理（[Tasks] 未标 unchecked）。
 procedure CreateShortcuts;
 var
   GroupDir, DesktopDir: String;
@@ -169,8 +146,8 @@ begin
     GroupDir := ExpandConstant('{userprograms}\LabSentinel');
     DesktopDir := ExpandConstant('{userdesktop}');
   end;
-  WantMenu := (StartMenuCb = nil) or StartMenuCb.Checked;
-  WantDesktop := (DesktopCb = nil) or DesktopCb.Checked;
+  WantMenu := WizardIsTaskSelected('createshortcut');
+  WantDesktop := WizardIsTaskSelected('createdesktop');
   ForceDirectories(GroupDir);
   CreateShellLink(GroupDir + '\Uninstall LabSentinel.lnk',
     'Uninstall LabSentinel', ExpandConstant('{uninstallexe}'), '', '', '', 0, SW_SHOWNORMAL);
