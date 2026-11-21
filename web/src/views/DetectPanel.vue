@@ -83,7 +83,7 @@ async function save(payload, okText = '已保存') {
 function pickMode(id) {
   if (id === mode.value) return
   if (id !== 'local' && (!url.value || (isRemoteUrl.value && !allowRemote.value))) {
-    msg.value = '启用外部 API 前请先在下方「API 服务」填写地址并完成授权确认'
+    msg.value = '先在下方「API 服务」卡填写地址并点「保存 API 配置」（远程地址需勾选合规确认），然后再点模式卡片切换'
     return
   }
   save({ mode: id }, id === 'cascade' ? '已切换为本地+API 协作' : '已切换检测模式')
@@ -147,9 +147,11 @@ onMounted(load)
           <span class="muted">{{ m.desc }}</span>
         </button>
       </div>
-      <p v-if="usage" class="muted usage-line">
-        今日 API 复核：<b>{{ usage.count }}</b>{{ usage.budget ? ` / 预算 ${usage.budget}` : '（不限）' }}
-        <span v-if="usage.exhausted" class="lv3"> · 预算已用尽——已自动降级为仅本地（明日恢复）</span>
+      <p v-if="usage" class="muted usage-line"
+         title="「API 复核」= 本地+API 协作模式下，可疑画面发给外部联网模型精判的次数（仅本地模式恒为 0）。预算 = 每日上限，耗尽自动降级仅本地，次日恢复。">
+        今日 API 复核：<b>{{ usage.count }}</b> 次{{ usage.budget ? ` / 每日上限 ${usage.budget}` : '（不限次数）' }}
+        <span v-if="mode === 'local'" class="muted">（仅本地模式不调 API，计数恒为 0）</span>
+        <span v-if="usage.exhausted" class="lv3"> · 今日上限已用尽——已自动降级为仅本地，次日自动恢复</span>
       </p>
       <p v-if="msg" class="muted">{{ msg }}</p>
 
@@ -159,9 +161,12 @@ onMounted(load)
         <Models />
       </div>
 
-      <!-- API 服务（mode != local 时展示） -->
-      <div v-show="mode !== 'local'" class="card">
-        <h3>API 服务</h3>
+      <!-- API 服务（常显——首次配置 API 时必须先填这里，模式切换才有前提） -->
+      <div class="card">
+        <h3>API 服务
+          <span v-if="mode === 'local'" class="muted" style="font-size:12px; font-weight:400">
+            （当前仅本地模式；此处保存后，点上方「仅 API」或「本地 + API 协作」卡片即生效）</span>
+        </h3>
         <div class="row" style="align-items:center; flex-wrap:wrap">
           <select v-model="provider" aria-label="服务协议" style="max-width:170px">
             <option value="openai_compat">OpenAI 兼容（通用）</option>

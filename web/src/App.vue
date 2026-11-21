@@ -71,7 +71,12 @@ window.addEventListener('hashchange', () => {
       <div class="muted" style="padding:10px 12px;font-size:12px">实验室哨兵 · M1</div>
     </nav>
     <main>
-      <component :is="tabs.find(t => t.key === active).comp" />
+      <!-- 显式分支渲染（生产构建动态组件切换空渲染规避，2026-11-21） -->
+      <Insights v-if="active === 'dash'" />
+      <Sources v-else-if="active === 'sources'" />
+      <Events v-else-if="active === 'events'" />
+      <AlertSettings v-else-if="active === 'alerts'" />
+      <Settings v-else />
     </main>
     <Welcome v-if="showWelcome" @done="() => (showWelcome = false)" />
   </div>

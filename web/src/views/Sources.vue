@@ -2,7 +2,7 @@
 // UX1（2026-11-20）：监控源——摄像头 / 图片文件夹 / 安全区与规则 三合一。
 // 三个子页零逻辑搬移（原视图组件原样嵌入），仅加一层分段切换；
 // 旧一级 tab（摄像头/图片识别/安全区配置）由 App.vue 的 hash 重定向进入对应分段。
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import Cameras from './Cameras.vue'
 import FolderImages from './FolderImages.vue'
 import Zones from './Zones.vue'
@@ -20,7 +20,14 @@ const segs = [
 onMounted(() => {
   const sub = window.location.hash.split('/')[2]
   if (segs.some((s) => s.id === sub)) seg.value = sub
+  // 分段跟随浏览器 hash（同 Insights：SPA 内 hash 直进同步）
+  window.addEventListener('hashchange', syncFromHash)
 })
+function syncFromHash() {
+  const sub = window.location.hash.split('/')[2]
+  if (segs.some((s) => s.id === sub)) seg.value = sub
+}
+onBeforeUnmount(() => window.removeEventListener('hashchange', syncFromHash))
 function pick(id) {
   seg.value = id
   // 分段同步进 hash（刷新/分享保留），不触发 App 层重定向
@@ -39,7 +46,10 @@ function pick(id) {
         <span>{{ s.label }}</span>
       </button>
     </div>
-    <component :is="segs.find((s) => s.id === seg).comp" />
+    <!-- 显式分支渲染（同 Insights：规避生产动态组件切换空渲染） -->
+    <Cameras v-if="seg === 'cams'" />
+    <FolderImages v-else-if="seg === 'images'" />
+    <Zones v-else />
   </div>
 </template>
 

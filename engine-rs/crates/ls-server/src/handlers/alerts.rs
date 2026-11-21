@@ -29,19 +29,85 @@ pub(crate) async fn alerts_status(State(st): State<Shared>) -> Response {
     })
 }
 
-pub(crate) async fn alert_template_get() -> Json<Value> {
-    // 与 Python settings 默认模板 + placeholders 说明一致（任务85）
-    Json(json!({
-        "title": "LabSentinel 级别{level}告警",
-        "text": "{icon} L{level} {type_text} · {ts}\n摄像头 #{camera_id}{track_part}\n{detail}",
-        "placeholders": {
-            "icon": "级别图标（ℹ️/⚠️/🔴）", "level": "级别数字 1-3",
-            "type": "事件类型标识", "type_text": "事件类型中文名",
-            "ts": "事件时间", "camera_id": "摄像头 ID",
-            "track_id": "跟踪 ID（occupancy 为 0）", "detail": "事件详情",
-            "track_part": "「 · track N」或空串（occupancy 时为空）",
-        },
-    }))
+pub(crate) async fn alert_template_get(State(st): State<Shared>) -> Response {
+    // 与 Python settings 默认模板 + placeholders 说明一致（任务85）。
+    // UX（2026-11-21）：app_settings（alert.template.*）覆盖默认——网页端可编辑。
+    with_store(&st, |s| {
+        let title = s
+            .setting_get("alert.template.title")
+            .ok()
+            .flatten()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "LabSentinel 级别{level}告警".into());
+        let text = s
+            .setting_get("alert.template.text")
+            .ok()
+            .flatten()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_ALERT_TEMPLATE.into());
+        Ok(Json(json!({
+            "title": title,
+            "text": text,
+            "placeholders": {
+                "icon": "级别图标（ℹ️/⚠️/🔴）", "level": "级别数字 1-3",
+                "type": "事件类型标识", "type_text": "事件类型中文名",
+                "ts": "事件时间", "camera_id": "摄像头 ID",
+                "track_id": "跟踪 ID（occupancy 为 0）", "detail": "事件详情",
+                "track_part": "「 · track N」或空串（occupancy 时为空）",
+            },
+        }))
+        .into_response())
+    })
+}
+
+/// PUT /api/alert-template——网页端保存告警文案（UX 2026-11-21）。
+/// body {title, text}；空串=回默认（不落 override）；立即生效
+/// （ls-jobs 渲染 override 同步 + 持久化 app_settings 跨重启）。
+pub(crate) async fn alert_template_put(
+    State(st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
+    let title = body
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let text = body
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !text.is_empty() && !text.contains("{detail}") && !text.contains("{type_text}") {
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "文案需至少包含 {detail} 或 {type_text} 占位符（否则告警内容无法区分事件）",
+        )
+        .into_response();
+    }
+    with_store(&st, |s| {
+        if title.is_empty() {
+            s.settings_delete(&["alert.template.title".to_string()])?;
+        } else {
+            s.setting_set("alert.template.title", &title)?;
+        }
+        if text.is_empty() {
+            s.settings_delete(&["alert.template.text".to_string()])?;
+        } else {
+            s.setting_set("alert.template.text", &text)?;
+        }
+        // 运行时立即生效（升级提醒渲染）；重启后由 main.rs 从 app_settings 注入
+        if !text.is_empty() {
+            st.jobs.set_alert_template(text.clone());
+        }
+        let effective = s
+            .setting_get("alert.template.text")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| DEFAULT_ALERT_TEMPLATE.into());
+        Ok(Json(json!({"ok": true, "effective": effective})).into_response())
+    })
 }
 
 /// 与 Python `alert_config.FIELDS/SECRET/URL/BOOL/INT` 同口径的字段元数据。
@@ -491,11 +557,22 @@ pub(crate) fn render_alert_row(
     out
 }
 
+/// 默认告警文案（与 ls-jobs escalation::DEFAULT_TEMPLATE 同串；单一来源归 jobs，
+/// 此处为渲染/回退副本——改动须两处同步）。
+pub(crate) const DEFAULT_ALERT_TEMPLATE: &str =
+    "{icon} L{level} {type_text} · {ts}\n摄像头 #{camera_id}{track_part}\n{detail}";
+
 pub(crate) async fn alert_template_preview(
     State(st): State<Shared>,
     Json(body): Json<Value>,
 ) -> Response {
-    let _ = &st; // 模板文本取默认值（settings 单一来源在 Python 侧；rust 用同默认串）
+    // UX（2026-11-21）：用当前生效模板渲染（app_settings override > 默认），
+    // 保证「预览」所见 = 升级提醒实际收到。
+    let effective = ls_store::Store::open(&st.db_path)
+        .ok()
+        .and_then(|s| s.setting_get("alert.template.text").ok().flatten())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_ALERT_TEMPLATE.into());
     let ts = body
         .get("ts")
         .and_then(|v| v.as_str())
@@ -514,8 +591,15 @@ pub(crate) async fn alert_template_preview(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // UX（2026-11-21）：body 带 text（前端「用当前内容预览」未保存的编辑稿）
+    // 时直渲编辑稿，否则用已保存的生效模板
+    let body_text = body
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let text = render_alert_row(
-        "{icon} L{level} {type_text} · {ts}\n摄像头 #{camera_id}{track_part}\n{detail}",
+        body_text.as_deref().unwrap_or(&effective),
         &ts,
         camera_id,
         &type_,
@@ -523,7 +607,12 @@ pub(crate) async fn alert_template_preview(
         track_id,
         &detail,
     );
-    let title = format!("LabSentinel 级别{level}告警");
+    let title = body
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("LabSentinel 级别{level}告警"));
     Json(json!({"title": title, "text": text})).into_response()
 }
 

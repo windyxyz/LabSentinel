@@ -54,7 +54,7 @@ onMounted(load)
         <p class="muted" style="white-space:pre-wrap">{{ status.license_notice }}</p>
         <p class="muted">
           校验 SHA256：<code>{{ status.sha256 }}</code><br />
-          大小：{{ (status.size_bytes / 1048576).toFixed(1) }} MB；来源见 assets.lock.json
+          大小：<template v-if="status.size_bytes">{{ (status.size_bytes / 1048576).toFixed(1) }} MB</template><template v-else>—</template>；来源见 assets.lock.json
         </p>
         <template v-if="!status.installed">
           <label style="display:block;margin:10px 0">

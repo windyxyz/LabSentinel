@@ -119,6 +119,7 @@ export const api = {
   addAlertSilence: (d) => req('POST', '/api/alert-silences', d),
   deleteAlertSilence: (id) => req('DELETE', `/api/alert-silences/${id}`),
   alertTemplate: () => req('GET', '/api/alert-template'),
+  saveAlertTemplate: (d) => req('PUT', '/api/alert-template', d),
   audit: (params = {}) => req('GET', '/api/audit?' + new URLSearchParams(params)),
   alertTemplatePreview: (d) => req('POST', '/api/alert-template/preview', d),
   // Q-08 / T-406：实验服模型按需下载（许可确认 + SHA256 校验）

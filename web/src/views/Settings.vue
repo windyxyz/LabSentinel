@@ -158,10 +158,13 @@ async function importConfig() {
 }
 
 
-// 任务85：告警文案模板（只读展示 + 预览）
+// 任务85/UX（2026-11-21）：告警文案模板——网页直接编辑保存（不再改配置文件）
 const tpl = ref({ text: '', title: '', placeholders: {} })
 const tplPreview = ref('')
 const tplBusy = ref(false)
+const tplEditTitle = ref('')
+const tplEditText = ref('')
+const tplMsg = ref('')
 const tplSample = ref({ level: 3, type: 'enter_no_ppe', camera_id: 1, track_id: 7,
                         detail: '示例：有人未穿实验服进入试剂区' })
 
@@ -169,7 +172,30 @@ async function loadTemplate() {
   tplBusy.value = true
   try {
     tpl.value = await api.alertTemplate()
+    tplEditTitle.value = tpl.value.title || ''
+    tplEditText.value = tpl.value.text || ''
     tplPreview.value = ''
+  } catch (e) { tplPreview.value = String(e.message || e) }
+  tplBusy.value = false
+}
+
+async function saveTemplate() {
+  tplBusy.value = true
+  try {
+    const r = await api.saveAlertTemplate({ title: tplEditTitle.value, text: tplEditText.value })
+    tpl.value.text = r.effective || tplEditText.value
+    tplPreview.value = ''
+    tplMsg.value = '告警文案已保存并即时生效'
+  } catch (e) { tplPreview.value = String(e.message || e) }
+  tplBusy.value = false
+}
+
+async function resetTemplate() {
+  tplBusy.value = true
+  try {
+    await api.saveAlertTemplate({ title: '', text: '' })
+    await loadTemplate()
+    tplMsg.value = '已恢复默认文案'
   } catch (e) { tplPreview.value = String(e.message || e) }
   tplBusy.value = false
 }
@@ -177,7 +203,12 @@ async function loadTemplate() {
 async function previewTemplate() {
   tplBusy.value = true
   try {
-    const r = await api.alertTemplatePreview(tplSample.value)
+    // 预览用「当前输入框内容」——后端以文本里传的 title/text 直接渲染
+    const r = await api.alertTemplatePreview({
+      ...tplSample.value,
+      title: tplEditTitle.value,
+      text: tplEditText.value,
+    })
     tplPreview.value = `标题：${r.title}\n正文：${r.text}`
   } catch (e) { tplPreview.value = String(e.message || e) }
   tplBusy.value = false
@@ -292,7 +323,7 @@ async function loadCams() {
   try { cams.value = await api.cameras() } catch { /* 服务未就绪时静默 */ }
 }
 onMounted(() => {
-  loadAlerts(); loadPlugins(); loadCams()
+  loadAlerts(); loadPlugins(); loadCams(); loadTemplate()
   // UX1：hash 深链分区（#/settings/face 等，App.vue 旧路由重定向后落到这里）
   const sub = window.location.hash.split('/')[2]
   if (sections.some((s) => s.id === sub)) active.value = sub
@@ -324,7 +355,10 @@ onMounted(() => {
       <button @click="saveToken">保存令牌</button>
       <span v-if="tokenMsg" class="muted">{{ tokenMsg }}</span>
     </div>
-    <p class="muted" style="margin-top:4px">令牌仅保存在本浏览器；服务端未启用鉴权时无需填写。</p>
+    <p class="muted" style="margin-top:4px">
+      令牌只保存在本浏览器（localStorage），不上传到任何地方。它是「管理员密码」性质：
+      仅当服务端以局域网/外网模式启动且设置了 LS_ADMIN_TOKEN 时才需要填写——
+      本机访问（127.0.0.1）默认无需令牌。</p>
       </section>
       <section v-show="show('notify')" class="panel">
     <h3 style="margin:14px 0 10px">告警渠道状态</h3>
@@ -429,17 +463,23 @@ onMounted(() => {
       导出的配置不含摄像头密码（已脱敏）；导入后不会自动启动摄像头。</p>
       </section>
       <section v-show="show('template')" class="panel">
-    <h3 style="margin:14px 0 10px">告警文案模板</h3>
-    <div class="row" style="align-items:center">
-      <button class="ghost" :disabled="tplBusy" @click="loadTemplate">
-        {{ tplBusy ? '加载中…' : '加载当前模板' }}</button>
-      <button class="ghost" :disabled="tplBusy || !tpl.text" @click="previewTemplate">预览</button>
-      <span class="muted">模板通过配置文件修改，重启后生效</span>
+    <h3 style="margin:14px 0 10px">告警文案模板 <span class="muted" style="font-size:12px">（网页编辑，保存即生效）</span></h3>
+    <div class="row" style="align-items:center; margin-bottom:8px">
+      <span class="muted" style="flex-shrink:0">标题：</span>
+      <input v-model="tplEditTitle" aria-label="告警标题模板" style="flex:1" placeholder="LabSentinel 级别{level}告警" />
     </div>
-    <textarea v-if="tpl.text" readonly class="muted"
-              style="width:100%; height:80px; margin-top:6px; font-size:12px">{{ tpl.text }}</textarea>
-    <p v-if="tpl.text" class="muted" style="font-size:12px">
-      占位符：{{ Object.keys(tpl.placeholders || {}).join(' / ') }}</p>
+    <textarea v-model="tplEditText" aria-label="告警正文模板"
+              style="width:100%; height:96px; font-size:12.5px; line-height:1.5"
+              placeholder="{icon} L{level} {type_text} · {ts}&#10;摄像头 #{camera_id}{track_part}&#10;{detail}"></textarea>
+    <p class="muted" style="font-size:12px; margin:6px 0">
+      可用占位符：{{ Object.keys(tpl.placeholders || {}).join(' / ') }}（正文需含 {detail} 或 {type_text}）</p>
+    <div class="row" style="align-items:center">
+      <button :disabled="tplBusy" @click="saveTemplate">{{ tplBusy ? '保存中…' : '保存并生效' }}</button>
+      <button class="ghost" :disabled="tplBusy" @click="previewTemplate">用当前内容预览</button>
+      <button class="ghost" :disabled="tplBusy" @click="resetTemplate">恢复默认</button>
+      <button class="ghost" :disabled="tplBusy" @click="loadTemplate">放弃修改</button>
+    </div>
+    <p v-if="tplMsg" class="muted" style="margin-top:6px">{{ tplMsg }}</p>
     <div v-if="tplPreview" class="muted" style="white-space:pre-wrap; border:1px solid var(--divider); border-radius:6px; padding:8px; margin-top:6px">
       {{ tplPreview }}</div>
       </section>

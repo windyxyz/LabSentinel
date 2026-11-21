@@ -7,6 +7,10 @@
 /// T-326：图片文件夹源的候选扫描器（纯函数，与 Python `folders._candidates` 同口径）。
 pub mod folder;
 
+// 2026-11-21（用户实测故障根治）：ffmpeg 孤儿治理——Job Object kill-on-close，
+// server 以任何方式死亡时内核自动杀掉全部 ffmpeg（不再残留占摄像头）。
+mod winjob;
+
 use std::io::Read;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -58,6 +62,10 @@ pub struct Ingest {
     stdout: Option<ChildStdout>,
     frame_index: u64,
     frame_bytes: usize,
+    /// 孤儿治理（2026-11-21）：所有 ffmpeg 子进程 assign 进此 job——server 进程
+    /// 以任何方式死亡（崩溃/taskkill/任务管理器）时句柄关闭，内核杀掉 job 内
+    /// 全部 ffmpeg。None = job 创建失败（降级为旧行为）。
+    job: Option<crate::winjob::JobHandle>,
 }
 
 impl Ingest {
@@ -69,6 +77,7 @@ impl Ingest {
             stdout: None,
             frame_index: 0,
             frame_bytes,
+            job: crate::winjob::JobHandle::new(),
         }
     }
 
@@ -122,6 +131,11 @@ impl Ingest {
     pub fn spawn_with_slot(&mut self, slot: ChildSlot) -> std::io::Result<()> {
         Ingest::kill_slot(&slot); // 清理上次退出的进程
         let mut c = self.build_cmd().spawn()?;
+        // 孤儿治理：子进程挂进 server 生命期的 job（kill-on-close）——assign
+        // 失败（进程秒退等）无害，正常 kill_slot 路径不受影响
+        if let Some(job) = &self.job {
+            let _ = job.assign_child(&c);
+        }
         self.stdout = c.stdout.take();
         if let Ok(mut guard) = slot.lock() {
             *guard = Some(c);

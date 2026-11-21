@@ -1,19 +1,27 @@
 <script setup>
 // UX1（2026-11-20）：仪表盘——「今日概览 / 报表」双视图（原报表一级 tab 并入）。
 // Dashboard.vue 与 Reports.vue 零逻辑搬移，原样嵌入。
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import Dashboard from './Dashboard.vue'
-import Reports from './Reports.vue'
+import ReportsView from './ReportsView.vue'
 
 const seg = ref('dash')
 const segs = [
-  { id: 'dash', label: '今日概览', comp: Dashboard },
-  { id: 'reports', label: '报表', comp: Reports },
+  { id: 'dash', label: '今日概览',  },
+  { id: 'reports', label: '报表',  },
 ]
 onMounted(() => {
   const sub = window.location.hash.split('/')[2]
   if (segs.some((s) => s.id === sub)) seg.value = sub
+  // 分段跟随浏览器 hash（SPA 内 hash 直进/前进后退同步——此前只读一次，
+  // goto 同页换 hash 不重挂载，报表/概览无法切换：用户实测 bug）
+  window.addEventListener('hashchange', syncFromHash)
 })
+function syncFromHash() {
+  const sub = window.location.hash.split('/')[2]
+  if (segs.some((s) => s.id === sub)) seg.value = sub
+}
+onBeforeUnmount(() => window.removeEventListener('hashchange', syncFromHash))
 function pick(id) {
   seg.value = id
   const tab = window.location.hash.split('/')[1] || 'dash'
@@ -29,7 +37,10 @@ function pick(id) {
         {{ s.label }}
       </button>
     </div>
-    <component :is="segs.find((s) => s.id === seg).comp" />
+    <!-- 显式分支渲染（生产构建下多根视图经动态 component 切换会渲染成空——
+         2026-11-21 用户实测「报表/安全区闪黑」，Vue 3.5.44 生产 patch 规避） -->
+    <Dashboard v-if="seg === 'dash'" />
+    <ReportsView v-else />
   </div>
 </template>
 

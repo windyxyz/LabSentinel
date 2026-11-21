@@ -124,7 +124,7 @@ describe('DetectPanel.vue（UX2）', () => {
     })
     const w = mount(DetectPanel)
     await flushPromises()
-    expect(w.text()).toContain('预算已用尽')
+    expect(w.text()).toContain('今日上限已用尽')
     expect(w.text()).toContain('仅本地')
   })
 })

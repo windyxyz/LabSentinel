@@ -97,6 +97,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/update/check"),
     ("GET", "/api/alerts/status"),
     ("GET", "/api/alert-template"),
+    ("PUT", "/api/alert-template"), // UX：网页端编辑告警文案
     ("GET", "/api/folder-images"),
     ("GET", "/api/folder-images/summary"),
     ("POST", "/api/folders/:cid/scan"), // RA1.3：最后一条摘牌（folder worker 扫描登记）
@@ -216,7 +217,10 @@ pub fn build_router(state: Shared) -> Router {
         .route("/plugins", get(plugins_list))
         .route("/update/check", get(update_check_status))
         .route("/alerts/status", get(alerts_status))
-        .route("/alert-template", get(alert_template_get))
+        .route(
+            "/alert-template",
+            get(alert_template_get).put(alert_template_put),
+        )
         .route("/folder-images", get(folder_images_list))
         .route("/folder-images/summary", get(folder_images_summary))
         .route("/folders/:cid/scan", post(folder_scan)) // RA1.3：摘最后一条 503

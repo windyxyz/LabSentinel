@@ -132,6 +132,9 @@ pub struct Jobs {
     handles: Mutex<Vec<JoinHandle<()>>>,
     /// R2-305：ApplyConfig/控制面注入的渠道快照（网页配置优先于 env；None=回退 env）
     alert_channels: Mutex<Option<Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)>>>,
+    /// UX（2026-11-21）：告警文案网页编辑的运行时覆盖（PUT /api/alert-template
+    /// 写 app_settings 并同步此处；None=用 cfg.escalation.template_text）
+    alert_template_override: Mutex<Option<String>>,
 }
 
 impl Jobs {
@@ -147,6 +150,7 @@ impl Jobs {
             rate: Mutex::new(ls_dispatch::RateLimiter::new()),
             handles: Mutex::new(Vec::new()),
             alert_channels: Mutex::new(None),
+            alert_template_override: Mutex::new(None),
         }
     }
 
@@ -159,6 +163,20 @@ impl Jobs {
         if let Ok(mut guard) = self.alert_channels.lock() {
             *guard = Some(channels);
         }
+    }
+
+    /// UX（2026-11-21）：网页端保存的告警文案即时生效（升级提醒渲染用）。
+    pub fn set_alert_template(&self, text: String) {
+        if let Ok(mut guard) = self.alert_template_override.lock() {
+            *guard = Some(text);
+        }
+    }
+
+    /// 当前生效的告警文案（override > env 注入的 cfg 值）。
+    pub fn alert_template(&self) -> String {
+        lock(&self.alert_template_override)
+            .clone()
+            .unwrap_or_else(|| self.cfg.escalation.template_text.clone())
     }
 
     pub fn config(&self) -> &JobsConfig {
@@ -374,7 +392,10 @@ impl Jobs {
             }
             submitted > 0
         };
-        let outcome = escalation::run_once(&store, &self.cfg.escalation, None, Some(&sender))?;
+        // UX：告警文案 override（网页端保存）即时生效
+        let mut esc_cfg = self.cfg.escalation.clone();
+        esc_cfg.template_text = self.alert_template();
+        let outcome = escalation::run_once(&store, &esc_cfg, None, Some(&sender))?;
         if outcome.disabled != Some(true) {
             *lock(&self.escalation_last) = Some(outcome.clone());
         }

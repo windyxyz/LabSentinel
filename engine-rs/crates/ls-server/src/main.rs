@@ -380,6 +380,14 @@ async fn main() {
     // RA5：独立部署自举——全新库（零 Python 部署）由 Rust 建全量 schema（幂等；
     // 已有库走 migrate 增量列迁移——Python 退役后迁移链归 Rust）
     if let Ok(s) = ls_store::Store::open(&st.db_path) {
+        // UX（2026-11-21）：网页端保存的告警文案（alert.template.text）注入
+        // 运行时 override——升级提醒/预览渲染即时生效、跨重启持久
+        if let Ok(Some(t)) = s.setting_get("alert.template.text") {
+            if !t.trim().is_empty() {
+                st.jobs.set_alert_template(t);
+                println!("[ls-server] 告警文案已从设置载入（网页端自定义）");
+            }
+        }
         match s.ensure_schema() {
             Ok(true) => println!(
                 "[ls-server] 全新库——已自举 v{} schema（Rust 形态独立部署）",

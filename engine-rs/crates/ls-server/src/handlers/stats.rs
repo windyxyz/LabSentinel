@@ -18,7 +18,27 @@ pub(crate) async fn stats_summary(State(st): State<Shared>) -> Json<Value> {
     let by_level = json!({"1": rows.iter().filter(|e| e.level == 1).count(),
                           "2": rows.iter().filter(|e| e.level == 2).count(),
                           "3": rows.iter().filter(|e| e.level == 3).count()});
-    Json(json!({"total": total, "by_level": by_level, "days": 30}))
+    // UX（2026-11-21）：补 top_days（前端报表「最高事件日」卡消费；对齐 Python
+    // 契约——此前缺字段 → 前端 `top_days[0]` TypeError → Vue 生产卸载整树成空
+    // （用户实测「报表闪黑」；dev 有报错覆盖能看见，prod 静默）。
+    let mut by_day: std::collections::BTreeMap<String, i64> = Default::default();
+    for e in &rows {
+        if let Some(d) = e.ts.split('T').next() {
+            *by_day.entry(d.to_string()).or_insert(0) += 1;
+        }
+    }
+    let mut top_days: Vec<Value> = by_day
+        .into_iter()
+        .map(|(date, n)| json!({"date": date, "total": n}))
+        .collect();
+    top_days.sort_by(|a, b| {
+        b["total"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["total"].as_i64().unwrap_or(0))
+    });
+    top_days.truncate(5);
+    Json(json!({"total": total, "by_level": by_level, "days": 30, "top_days": top_days}))
 }
 
 pub(crate) fn agg_json(row: &ls_store::AggRow) -> Value {
