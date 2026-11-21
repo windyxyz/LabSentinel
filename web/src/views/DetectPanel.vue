@@ -169,8 +169,11 @@ onMounted(load)
         </button>
       </div>
       <p v-if="usage" class="muted usage-line"
-         title="「API 复核」= 本地+API 协作模式下，可疑画面发给外部联网模型精判的次数（仅本地模式恒为 0）。预算 = 每日上限，耗尽自动降级仅本地，次日恢复。">
-        今日 API 复核：<b>{{ usage.count }}</b> 次{{ usage.budget ? ` / 每日上限 ${usage.budget}` : '（不限次数）' }}
+         title="「API 复核」= 本地+API 协作模式下，可疑画面发给外部联网模型精判的次数（仅本地模式恒为 0）。每日上限可自定义：改完即存，耗尽自动降级仅本地，次日恢复。">
+        今日 API 复核：<b>{{ usage.count }}</b> 次 / 每日上限
+        <input v-model.number="dailyBudget" type="number" min="0" step="10" aria-label="每日 API 复核上限"
+               style="width:76px; margin:0 4px" @change="saveCascade" />
+        次（0 = 不限，改完即存）
         <span v-if="mode === 'local'" class="muted">（仅本地模式不调 API，计数恒为 0）</span>
         <span v-if="usage.exhausted" class="lv3"> · 今日上限已用尽——已自动降级为仅本地，次日自动恢复</span>
       </p>
