@@ -84,9 +84,11 @@ pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>
         "file" => [".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv"]
             .iter()
             .any(|e| source.to_ascii_lowercase().ends_with(e)),
-        "usb" => (source.starts_with("video=") && source.len() > 6)
-            || source.starts_with("/dev/video")
-            || (!source.is_empty() && source.chars().all(|c| c.is_ascii_digit())),
+        "usb" => {
+            (source.starts_with("video=") && source.len() > 6)
+                || source.starts_with("/dev/video")
+                || (!source.is_empty() && source.chars().all(|c| c.is_ascii_digit()))
+        }
         "folder" => !source.is_empty(),
         _ => false,
     };
