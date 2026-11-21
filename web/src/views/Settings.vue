@@ -111,6 +111,24 @@ async function runAlertTest() {
   alertTesting.value = false
 }
 
+// UX（2026-11-21）：推送策略——告警随消息带截图 + 同人推送冷却
+const pushPolicy = ref({ send_image: true, cooldown_s: 60 })
+const pushBusy = ref(false)
+async function loadPushPolicy() {
+  try { pushPolicy.value = await api.pushPolicy() } catch { /* 静默 */ }
+}
+async function savePushPolicy() {
+  pushBusy.value = true
+  try {
+    pushPolicy.value = await api.savePushPolicy({
+      send_image: pushPolicy.value.send_image,
+      cooldown_s: pushPolicy.value.cooldown_s,
+    })
+    alertTestMsg.value = '推送策略已保存（立即生效）'
+  } catch (e) { alertTestMsg.value = String(e.message || e) }
+  pushBusy.value = false
+}
+
 async function retryDelivery(d) {
   try { await api.alertDeliveryRetry(d.id); loadAlerts() }
   catch (e) { alert(String(e.message || e)) }
@@ -330,7 +348,7 @@ async function loadCams() {
   try { cams.value = await api.cameras() } catch { /* 服务未就绪时静默 */ }
 }
 onMounted(() => {
-  loadAlerts(); loadPlugins(); loadCams(); loadTemplate()
+  loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadPushPolicy()
   // UX1：hash 深链分区（#/settings/face 等，App.vue 旧路由重定向后落到这里）
   const sub = window.location.hash.split('/')[2]
   if (sections.some((s) => s.id === sub)) active.value = sub
