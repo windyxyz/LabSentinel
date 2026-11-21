@@ -53,13 +53,15 @@ const CHANNELS = [
             '发件邮箱与 SMTP 用户名通常相同；授权码不是邮箱登录密码。'],
   },
   {
-    key: 'webhook', name: '通用 Webhook', desc: '推送到自建服务/n8n/机器人',
+    key: 'webhook', name: '通用 Webhook', desc: '推送到自建服务/bot——OpenClaw(微信 AI bot)、n8n、Bark、Telegram bot 等',
     fields: [
-      { k: 'url', label: 'Webhook URL', kind: 'url', ph: 'https://your-server/hook' },
+      { k: 'url', label: 'Webhook URL', kind: 'url', ph: 'https://your-server/hook（openclaw 的 webhook 触发端点）' },
       { k: 'secret', label: 'HMAC 密钥（可选）', kind: 'secret', ph: '留空=不签名' },
       { k: 'allow_http', label: '允许 HTTP（仅内网）', kind: 'bool' },
     ],
-    guide: ['服务端会 POST JSON（version/title/text/level/ts/event_id 等）。',
+    guide: ['服务端会 POST JSON（version/title/text/level/ts/event_id 等）——text 已按「告警文案」模板渲染。',
+            'OpenClaw（微信 AI bot）：把 openclaw 里配置的 webhook 触发端点填到 URL，告警即转发微信；收到后可在微信里继续问它详情。',
+            '微信推送的更简单替代：Server酱 / PushPlus 渠道（扫码即用，无需自建 bot）。',
             '配置密钥后每个请求带 X-LS-Signature: sha256=<hex>；接收端用同一密钥验签。',
             'HTTP 只建议在可信内网使用，公网请用 HTTPS。'],
   },
