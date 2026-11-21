@@ -521,13 +521,13 @@ pub fn restart_camera_if_running(st: &Shared, store: &ls_store::Store, cid: i64)
         Ok(Some(cfg)) => match start_worker(st, cfg) {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("[ls-worker] cam-{cid} 软重启失败: {e}");
+                crate::logger::error(&format!("[ls-worker] cam-{cid} 软重启失败: {e}"));
                 let _ = store.set_camera_status(cid, "error");
                 false
             }
         },
         _ => {
-            eprintln!("[ls-worker] cam-{cid} 软重启配置载入失败");
+            crate::logger::error(&format!("[ls-worker] cam-{cid} 软重启配置载入失败"));
             let _ = store.set_camera_status(cid, "error");
             false
         }
@@ -601,16 +601,16 @@ fn on_restart(
         *restarts = 0;
     }
     *restarts += 1;
-    eprintln!(
+    crate::logger::warn(&format!(
         "[ls-worker] cam-{} 重连失败（第 {restarts}/{} 次）: {last_error}",
         cfg.camera_id, cfg.max_restarts
-    );
+    ));
     if *restarts > cfg.max_restarts {
         let _ = store.set_camera_status(cfg.camera_id, "error");
-        eprintln!(
+        crate::logger::error(&format!(
             "[ls-worker] cam-{} 超过重启上限，放弃（given_up → error）",
             cfg.camera_id
-        );
+        ));
         return false;
     }
     true
@@ -745,9 +745,10 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                     ev_round.push((eid, cand));
                                 }
                                 Ok(None) => {} // 去重命中
-                                Err(e) => {
-                                    eprintln!("[ls-worker] cam-{} 事件落地失败: {e}", cfg.camera_id)
-                                }
+                                Err(e) => crate::logger::error(&format!(
+                                    "[ls-worker] cam-{} 事件落地失败: {e}",
+                                    cfg.camera_id
+                                )),
                             }
                         }
                     }
@@ -857,10 +858,10 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!(
+                                    crate::logger::error(&format!(
                                         "[ls-worker] cam-{} VLM 判定失败（降级跳过）: {e}",
                                         cfg.camera_id
-                                    );
+                                    ));
                                 }
                             }
                         }
@@ -868,7 +869,10 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 }
                 Ok(None) => break, // 流结束（文件源 EOF）
                 Err(e) => {
-                    eprintln!("[ls-worker] cam-{} 读帧失败: {e}", cfg.camera_id);
+                    crate::logger::error(&format!(
+                        "[ls-worker] cam-{} 读帧失败: {e}",
+                        cfg.camera_id
+                    ));
                     break;
                 }
             }
@@ -917,7 +921,7 @@ fn spawn_finalize(st: &Shared, evidence: &Arc<ls_analyzer::evidence::Evidence>, 
         let rec = Arc::new(ls_analyzer::evidence::ActiveRec::new(pre));
         let mut recs = evidence.recs.lock().unwrap_or_else(|e| e.into_inner());
         if recs.len() >= ls_analyzer::evidence::MAX_CONCURRENT_RECORDINGS {
-            eprintln!("[ls-worker] event#{eid} 并发录像超限，跳过视频回填");
+            crate::logger::warn("[ls-worker] 并发录像超限，跳过视频回填");
             return;
         }
         recs.push(Arc::clone(&rec));
@@ -941,7 +945,9 @@ fn spawn_finalize(st: &Shared, evidence: &Arc<ls_analyzer::evidence::Evidence>, 
             match sink.finalize(eid, &frames, out_fps) {
                 Ok(Some(p)) => println!("[ls-worker] event#{eid} 视频已回填: {p}"),
                 Ok(None) => {}
-                Err(e) => eprintln!("[ls-worker] event#{eid} 视频回填失败: {e}"),
+                Err(e) => {
+                    crate::logger::error(&format!("[ls-worker] event#{eid} 视频回填失败: {e}"))
+                }
             }
             // 从活动列表移除（防长跑泄漏）
             if let Ok(mut recs) = evidence.recs.lock() {
@@ -949,7 +955,7 @@ fn spawn_finalize(st: &Shared, evidence: &Arc<ls_analyzer::evidence::Evidence>, 
             }
         });
     if let Err(e) = spawned {
-        eprintln!("[ls-worker] event#{eid} 收尾线程创建失败: {e}");
+        crate::logger::error(&format!("[ls-worker] event#{eid} 收尾线程创建失败: {e}"));
     }
 }
 
@@ -979,7 +985,7 @@ pub(crate) fn spawn_cascade_review(r: CascadeReview) {
         .name(format!("ls-cascade-{}", r.camera_id))
         .spawn(move || cascade_review_run(r));
     if let Err(e) = spawned {
-        eprintln!("[ls-cascade] 复核线程创建失败: {e}");
+        crate::logger::error(&format!("[ls-cascade] 复核线程创建失败: {e}"));
     }
 }
 
@@ -993,7 +999,10 @@ fn cascade_review_run(r: CascadeReview) {
     let store = match ls_store::Store::open(&r.st.db_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[ls-cascade] cam-{} DB 打不开，复核中止: {e}", r.camera_id);
+            crate::logger::error(&format!(
+                "[ls-cascade] cam-{} DB 打不开，复核中止: {e}",
+                r.camera_id
+            ));
             return;
         }
     };
@@ -1111,7 +1120,10 @@ fn cascade_review_run(r: CascadeReview) {
                     sink.deliver_deferred_pub(*eid, cand, false);
                 }
             }
-            eprintln!("[ls-cascade] cam-{} 复核失败（降级跳过）: {e}", r.camera_id);
+            crate::logger::error(&format!(
+                "[ls-cascade] cam-{} 复核失败（降级跳过）: {e}",
+                r.camera_id
+            ));
         }
     }
 }
@@ -1249,11 +1261,11 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             ) {
                 Ok(id) => id,
                 Err(e) => {
-                    eprintln!(
+                    crate::logger::error(&format!(
                         "[ls-folder] cam-{} 登记失败 {}: {e}",
                         cfg.camera_id,
                         c.path.display()
-                    );
+                    ));
                     continue;
                 }
             };
