@@ -236,18 +236,38 @@ impl EventSink {
             });
     }
 
-    /// cascade 复核线程的放行入口（cam_name 现查；has_snapshot 只进 MQTT 字段）。
+    /// cascade 复核线程的放行入口（cam_name 与 snapshot 现查，确保延迟派发保留事件截图）。
     pub(crate) fn deliver_deferred_pub(
         &self,
         eid: i64,
         cand: &ls_analyzer::pipeline::Candidate,
         has_snapshot: bool,
     ) {
-        let cam_name = ls_store::Store::open(&self.st.db_path)
+        let (cam_name, snap_path) = ls_store::Store::open(&self.st.db_path)
             .ok()
-            .and_then(|s| s.camera(cand.camera_id).ok().flatten().map(|c| c.name))
+            .map(|s| {
+                let cn = s
+                    .camera(cand.camera_id)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.name)
+                    .unwrap_or_default();
+                let sp = s
+                    .event_by_id(eid)
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.snapshot)
+                    .filter(|p| !p.trim().is_empty());
+                (cn, sp)
+            })
             .unwrap_or_default();
-        self.deliver_deferred(eid, cand, &cam_name, has_snapshot, None);
+        self.deliver_deferred(
+            eid,
+            cand,
+            &cam_name,
+            has_snapshot || snap_path.is_some(),
+            snap_path.as_deref(),
+        );
     }
 
     /// 存证收尾：帧序列 → MP4 → video 回填（先入库后写视频，与 Python worker
@@ -451,12 +471,17 @@ impl WorkerConfig {
             .flatten()
             .map(|v| v.trim().eq_ignore_ascii_case("dml") || v.trim().is_empty())
             .unwrap_or(true);
-        // RA2-S1：PPE 级联（env LS_PPE_MODEL 若配，过锚点校验；类名/阈值走
-        // PpeConfig 默认——与 sidecar 默认口径一致）
-        // 0.3.0 修复：未设 env 时按安装根兜底包内 models/yolo11n_ppe.onnx。
+        // RA2-S1 / LS-041：PPE 级联优先级与 ppe_status 对齐：
+        // LS_PPE_MODEL 环境变量 → app_settings["ppe_model"]（网页上传/下载）→ 随包 models/yolo11n_ppe.onnx。
         let ppe_raw = std::env::var("LS_PPE_MODEL")
             .ok()
             .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                s.setting_get("ppe_model")
+                    .ok()
+                    .flatten()
+                    .filter(|v| !v.trim().is_empty())
+            })
             .or_else(|| {
                 let p = crate::deploy::default_install_root().join("models/yolo11n_ppe.onnx");
                 p.is_file().then(|| p.to_string_lossy().into_owned())
@@ -775,8 +800,12 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         }
                     }
                     let dets = detector.detect(&frame);
-                    let ts =
-                        ls_analyzer::pipeline::frame_ts_for(frame.index, cfg.spec.analysis_fps);
+                    // LS-041：实时流（rtsp/usb）使用真实本地时间，仅离线 file 回放沿用确定性时钟
+                    let ts = if cfg.spec.type_ == "file" {
+                        ls_analyzer::pipeline::frame_ts_for(frame.index, cfg.spec.analysis_fps)
+                    } else {
+                        ls_core::time::local_now_iso()
+                    };
                     let cands = pipe.process_with_frame(
                         &dets,
                         &ts,
@@ -821,6 +850,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     if mode == "cascade" {
                         let persons = dets.len() as i64;
                         let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
+                        let mut dispatched_to_review = false;
                         if crate::detect::cascade_should_review(&dcfg, persons, max_conf, rules_hit)
                             && last_vlm.elapsed() >= vlm_interval
                         {
@@ -837,18 +867,14 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 let usage = crate::detect::usage_today(&store, &dcfg);
                                 if usage.exhausted() {
                                     // 预算耗尽 → 自动降级 local-only：事件标 unreviewed，
-                                    // suppress 策略下暂扣的派发按 keep 放行（丢告警比多花
-                                    // API 更糟——降级语义只停调用，不吞通知）
+                                    // 下方统一放行暂扣的派发（丢告警比多花 API 更糟）
                                     let ts = crate::util::iso_now();
-                                    for (eid, cand) in &ev_round {
+                                    for (eid, _) in &ev_round {
                                         let _ = store.set_event_vlm(
                                             *eid,
                                             r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
                                             &ts,
                                         );
-                                        if cascade_suppress {
-                                            sink.deliver_deferred_pub(*eid, cand, false);
-                                        }
                                     }
                                 } else {
                                     spawn_cascade_review(CascadeReview {
@@ -861,7 +887,15 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                         evidence: Some(Arc::clone(&evidence)),
                                         evidence_key_prefix: format!("vlmc:{}", frame.index),
                                     });
+                                    dispatched_to_review = true;
                                 }
+                            }
+                        }
+                        // LS-041：suppress 模式下若本帧未进入复核（冷却限流/未命中复核门/预算耗尽），
+                        // 必须立即放行暂扣事件，严禁静默吞告警。
+                        if cascade_suppress && !dispatched_to_review {
+                            for (eid, cand) in &ev_round {
+                                sink.deliver_deferred_pub(*eid, cand, true);
                             }
                         }
                         ev_round.clear();
@@ -1067,32 +1101,12 @@ fn cascade_review_run(r: CascadeReview) {
         }
     };
     let sink = EventSink::new(Arc::clone(&r.st));
-    // 预算复核（usage_bump 先到先得；超预算 → unreviewed + suppress 放行）
-    let (exhausted, _n) = crate::detect::usage_bump(&store, &r.cfg);
-    if exhausted {
-        println!(
-            "[ls-cascade] cam-{} 今日预算耗尽——降级 local-only（{} 事件标 unreviewed）",
-            r.camera_id,
-            r.ev_round.len()
-        );
-        for (eid, cand) in &r.ev_round {
-            let _ = store.set_event_vlm(
-                *eid,
-                r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
-                &ts,
-            );
-            if r.suppress {
-                sink.deliver_deferred_pub(*eid, cand, false);
-            }
-        }
-        return;
-    }
-    // 合规红线再确认（回环免确认；远程需 DB/env 确认位——未授权绝不外发截图）
+    // LS-041：合规红线前置到扣减预算之前（未授权绝不白耗额度，也不外发截图）
     if !r.cfg.compliance_ok() {
-        println!(
+        crate::logger::warn(&format!(
             "[ls-cascade] cam-{} 外部服务未授权（远程未确认），本轮复核跳过",
             r.camera_id
-        );
+        ));
         for (eid, _) in &r.ev_round {
             let _ = store.set_event_vlm(
                 *eid,
@@ -1102,7 +1116,27 @@ fn cascade_review_run(r: CascadeReview) {
         }
         if r.suppress {
             for (eid, cand) in &r.ev_round {
-                sink.deliver_deferred_pub(*eid, cand, false);
+                sink.deliver_deferred_pub(*eid, cand, true);
+            }
+        }
+        return;
+    }
+    // 原子扣减预算（LS-041 修复 off-by-one：先判超限再自增；超预算 → unreviewed + suppress 放行）
+    let (blocked, _n) = crate::detect::usage_try_consume(&store, &r.cfg, true);
+    if blocked {
+        crate::logger::warn(&format!(
+            "[ls-cascade] cam-{} 今日预算耗尽——降级 local-only（{} 事件标 unreviewed）",
+            r.camera_id,
+            r.ev_round.len()
+        ));
+        for (eid, cand) in &r.ev_round {
+            let _ = store.set_event_vlm(
+                *eid,
+                r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
+                &ts,
+            );
+            if r.suppress {
+                sink.deliver_deferred_pub(*eid, cand, true);
             }
         }
         return;
@@ -1634,6 +1668,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             // 空场景 0 调用 = 省钱第一验收指标
             if mode == "cascade" {
                 let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
+                let mut dispatched_to_review = false;
                 if crate::detect::cascade_should_review(&dcfg, persons, max_conf, violation)
                     && last_review.elapsed() >= review_interval
                 {
@@ -1644,15 +1679,12 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         let usage = crate::detect::usage_today(&store, &dcfg);
                         if usage.exhausted() {
                             let ts = crate::util::iso_now();
-                            for (eid, cand) in &ev_round {
+                            for (eid, _) in &ev_round {
                                 let _ = store.set_event_vlm(
                                     *eid,
                                     r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
                                     &ts,
                                 );
-                                if cascade_suppress {
-                                    sink.deliver_deferred_pub(*eid, cand, false);
-                                }
                             }
                         } else {
                             spawn_cascade_review(CascadeReview {
@@ -1660,12 +1692,18 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 camera_id: cfg.camera_id,
                                 cfg: dcfg.clone(),
                                 frames: vec![review_jpeg],
-                                ev_round,
+                                ev_round: ev_round.clone(),
                                 suppress: cascade_suppress,
                                 evidence: None,
                                 evidence_key_prefix: format!("vlmc-f:{iid}"),
                             });
+                            dispatched_to_review = true;
                         }
+                    }
+                }
+                if cascade_suppress && !dispatched_to_review {
+                    for (eid, cand) in &ev_round {
+                        sink.deliver_deferred_pub(*eid, cand, true);
                     }
                 }
             }

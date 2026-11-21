@@ -370,9 +370,7 @@ fn backup_restore_is_conservative() {
 fn escalation_only_unhandled_high_level_once() {
     let dir = tempfile::tempdir().unwrap();
     let db = make_db(dir.path());
-    let old = (chrono::Local::now() - chrono::TimeDelta::hours(2))
-        .format("%Y-%m-%dT%H:%M:%S")
-        .to_string();
+    let old = ls_core::time::local_hours_ago_iso(2);
     let target = insert_event(&db, &old, "enter", 3, None, None, "new");
     insert_event(&db, &old, "enter", 1, None, None, "new"); // 级别不足
     insert_event(&db, &old, "enter", 3, None, None, "acked"); // 已处置

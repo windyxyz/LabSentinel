@@ -392,13 +392,10 @@ fn next_profile_id(list: &[Profile]) -> String {
 // ---- 用量计数（跨重启持久化 app_settings）----
 
 fn today_local() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let (y, m, d) = crate::util::civil_from_days(secs.div_euclid(86400));
-    format!("{y:04}-{m:02}-{d:02}")
+    ls_core::time::local_today_iso()
 }
+
+static USAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct Usage {
     pub date: String,
@@ -429,13 +426,33 @@ pub fn usage_today(s: &ls_store::Store, cfg: &DetectCfg) -> Usage {
     }
 }
 
-/// 调用计数 +1（跨天自动归零）。返回 {是否已超预算, 计后计数}。
+/// 调用计数 +1（跨天自动归零，进程级加锁防并发丢更新）。返回 {计后是否已达预算, 计后计数}。
+#[cfg(test)]
 pub fn usage_bump(s: &ls_store::Store, cfg: &DetectCfg) -> (bool, u64) {
+    let _g = USAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut u = usage_today(s, cfg);
     u.count += 1;
     let _ = s.setting_set("detect.usage.date", &u.date);
     let _ = s.setting_set("detect.usage.count", &u.count.to_string());
     (u.exhausted(), u.count)
+}
+
+/// 原子扣减今日额度（LS-041 修复 off-by-one：先判超限再自增，预算 N 精确允许 N 次调用；
+/// 超限时不再自增）。返回 `(blocked, count)`：`blocked == true` 表示已超限拒绝本次调用。
+pub fn usage_try_consume(
+    s: &ls_store::Store,
+    cfg: &DetectCfg,
+    enforce_budget: bool,
+) -> (bool, u64) {
+    let _g = USAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut u = usage_today(s, cfg);
+    if enforce_budget && u.exhausted() {
+        return (true, u.count);
+    }
+    u.count += 1;
+    let _ = s.setting_set("detect.usage.date", &u.date);
+    let _ = s.setting_set("detect.usage.count", &u.count.to_string());
+    (false, u.count)
 }
 
 // ---- HTTP handlers（新增三条，不改既有契约）----
@@ -585,7 +602,7 @@ pub(crate) async fn detect_config_put(
                 }
             }
             if let Some(t) = v.get("timeout_s").and_then(|x| x.as_u64()) {
-                writes.push(("detect.vlm.timeout_s".into(), t.max(1).to_string()));
+                writes.push(("detect.vlm.timeout_s".into(), t.clamp(1, 120).to_string()));
             }
             if let Some(a) = v.get("allow_remote").and_then(|x| x.as_bool()) {
                 writes.push((
@@ -594,9 +611,8 @@ pub(crate) async fn detect_config_put(
                 ));
             }
         }
-        // runtime.ep：推理设备切换（dml|cpu）——写入后重启全部运行中相机
-        //（EP 变化影响所有模型加载，不限 analyzer）
-        let mut ep_changed = false;
+        // runtime.ep：推理设备切换（dml|cpu）——先校验再落盘，避免半写入
+        let mut ep_write: Option<(String, bool)> = None;
         if let Some(rt) = body.get("runtime") {
             if let Some(ep) = rt.get("ep").and_then(|x| x.as_str()) {
                 let ep_l = ep.trim().to_ascii_lowercase();
@@ -608,18 +624,32 @@ pub(crate) async fn detect_config_put(
                     .into_response());
                 }
                 let cur = runtime_ep_pref(s);
-                s.setting_set("runtime.ep", &ep_l)?;
-                ep_changed = cur != ep_l;
+                ep_write = Some((ep_l.clone(), cur != ep_l));
             }
         }
         if let Some(c) = cascade {
+            let cur_cfg = DetectCfg::load(s, data_dir);
+            let lo_in = c.get("conf_lo").and_then(|x| x.as_f64());
+            let hi_in = c.get("conf_hi").and_then(|x| x.as_f64());
+            let next_lo = lo_in.unwrap_or(cur_cfg.conf_lo);
+            let next_hi = hi_in.unwrap_or(cur_cfg.conf_hi);
+            if !(0.0..=1.0).contains(&next_lo)
+                || !(0.0..=1.0).contains(&next_hi)
+                || next_lo > next_hi
+            {
+                return Ok(detail_err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "conf_lo / conf_hi 必须在 0.0~1.0 且 conf_lo <= conf_hi",
+                )
+                .into_response());
+            }
             if let Some(t) = c.get("trigger").and_then(|x| x.as_str()) {
                 writes.push(("detect.cascade.trigger".into(), t.into()));
             }
-            if let Some(lo) = c.get("conf_lo").and_then(|x| x.as_f64()) {
+            if let Some(lo) = lo_in {
                 writes.push(("detect.cascade.conf_lo".into(), lo.to_string()));
             }
-            if let Some(hi) = c.get("conf_hi").and_then(|x| x.as_f64()) {
+            if let Some(hi) = hi_in {
                 writes.push(("detect.cascade.conf_hi".into(), hi.to_string()));
             }
             if let Some(b) = c.get("daily_budget").and_then(|x| x.as_u64()) {
@@ -629,19 +659,61 @@ pub(crate) async fn detect_config_put(
                 writes.push(("detect.cascade.on_negative".into(), o.into()));
             }
         }
-        for (k, v) in &writes {
-            s.setting_set(k, v)?;
-        }
+        // 先检查错误再落库，避免 api_key 加密失败时出现半套配置写入
         if !errs.is_empty() {
             return Ok(
                 detail_err(StatusCode::INTERNAL_SERVER_ERROR, &errs.join("；")).into_response(),
             );
         }
-        // 即时生效：运行中相机软重启（analyzer 跟随全局者；EP 变化时全部重启）
-        let mut restarted = crate::worker::restart_following_global(&st, s);
-        if ep_changed {
-            restarted += crate::worker::restart_all_running(&st, s);
+        // 若存在 detect.profiles 且本次修改了 vlm 字段，同步更新当前启用档案消除影子覆盖
+        if let Some(v) = vlm {
+            let mut list = profiles_load(s, data_dir);
+            if !list.is_empty() {
+                let act = active_profile_id(s);
+                let target_idx = act
+                    .as_deref()
+                    .and_then(|id| list.iter().position(|p| p.id == id))
+                    .unwrap_or(0);
+                let p = &mut list[target_idx];
+                if let Some(pr) = v.get("provider").and_then(|x| x.as_str()) {
+                    p.provider = pr.to_string();
+                }
+                if let Some(u) = &url_in {
+                    p.url = u.trim_end_matches('/').to_string();
+                }
+                if let Some(m) = v.get("model").and_then(|x| x.as_str()) {
+                    p.model = m.to_string();
+                }
+                if let Some(k) = v.get("api_key").and_then(|x| x.as_str()) {
+                    if k != "***" {
+                        p.api_key = k.to_string();
+                    }
+                }
+                if let Some(t) = v.get("timeout_s").and_then(|x| x.as_u64()) {
+                    p.timeout_s = t.clamp(1, 120);
+                }
+                if let Some(a) = v.get("allow_remote").and_then(|x| x.as_bool()) {
+                    p.allow_remote = a;
+                }
+                if let Err(e) = profiles_store(s, data_dir, &list) {
+                    return Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response());
+                }
+            }
         }
+        let mut ep_changed = false;
+        if let Some((ep_l, changed)) = ep_write {
+            s.setting_set("runtime.ep", &ep_l)?;
+            ep_changed = changed;
+        }
+        for (k, v) in &writes {
+            s.setting_set(k, v)?;
+        }
+        // 即时生效：EP 变化时全部重启（避免先 restart_following_global 再 restart_all_running 双重重启）
+        let restarted = if ep_changed {
+            crate::worker::restart_all_running(&st, s)
+        } else {
+            crate::worker::restart_following_global(&st, s)
+        };
         let cfg = DetectCfg::load(s, data_dir);
         let usage = usage_today(s, &cfg);
         Ok(Json(json!({
@@ -724,11 +796,37 @@ pub(crate) async fn detect_profile_upsert(
             .and_then(|id| list.iter().position(|p| &p.id == id));
         let id = match (idx, id_in) {
             (Some(i), _) => list[i].id.clone(),
-            (None, Some(id)) => id,
+            (None, Some(id)) => {
+                if !id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "档案 id 只能包含字母、数字、- 和 _",
+                    )
+                    .into_response());
+                }
+                id
+            }
             (None, None) => next_profile_id(&list),
         };
         let mut p = match idx {
             Some(i) => list[i].clone(),
+            None if list.is_empty() && id == "default" => {
+                // LS-041：虚拟旧档案首次保存时继承旧 detect.vlm.* 基线，防止丢失原加密密钥
+                let legacy = DetectCfg::load_legacy(s, data_dir);
+                Profile {
+                    id: id.clone(),
+                    name: "默认服务".into(),
+                    provider: legacy.provider,
+                    url: legacy.url,
+                    model: legacy.model,
+                    api_key: legacy.api_key,
+                    timeout_s: legacy.timeout_s,
+                    allow_remote: legacy.allow_remote,
+                }
+            }
             None => Profile {
                 id: id.clone(),
                 name: "API 服务".into(),
@@ -945,7 +1043,7 @@ pub(crate) async fn detect_test(State(st): State<Shared>, Json(body): Json<Value
         )
         .into_response();
     }
-    if !cfg.vlm_enabled() {
+    if !cfg.compliance_ok() {
         return detail_err(
             StatusCode::FORBIDDEN,
             "外部服务未授权：URL 非回环时需勾选「允许将截图发送到该外部服务」",
@@ -968,11 +1066,11 @@ pub(crate) async fn detect_test(State(st): State<Shared>, Json(body): Json<Value
     if jpeg.is_empty() {
         return detail_err(StatusCode::INTERNAL_SERVER_ERROR, "测试图编码失败").into_response();
     }
-    // 用量计数：测试调用与真实复核同口径计入预算（仅 cascade 模式受限——
-    // api 模式用户显式选择全量判定，预算只提示不阻断）
-    let (exhausted, count) = usage_bump(&s, &cfg);
+    // 用量计数：先判超限再自增（LS-041 修复 off-by-one；仅 cascade 模式硬阻断）
+    let (blocked, count) = usage_try_consume(&s, &cfg, cfg.mode == "cascade");
+    let exhausted = cfg.daily_budget > 0 && count >= cfg.daily_budget;
     let usage_json = json!({"count": count, "exhausted": exhausted});
-    if exhausted && cfg.mode == "cascade" {
+    if blocked {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(

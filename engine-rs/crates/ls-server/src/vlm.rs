@@ -34,24 +34,60 @@ pub struct VlmCfg {
 // DetectCfg::load（DB → env → 默认统一链；VlmCfg 由 DetectCfg::to_vlm_cfg 组装）。
 
 /// URL 是否回环（UX2 合规判定复用：detect.rs 远程放行检查）。
+/// LS-041/LS-044 安全加固：拒绝 authority 中包含 `@`（防 `http://127.0.0.1:80@evil.com` 绕过）。
 pub(crate) fn is_loopback(url: &str) -> bool {
     let rest = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .unwrap_or(url);
     let hostport = rest.split('/').next().unwrap_or("");
-    // host:port 取冒号前；IPv6 [::1]:8000 取中括号内（UX2 修复：原 rsplit(':')
-    // 取到的是端口，带端口的回环地址恒判 false）
+    if hostport.contains('@') {
+        return false;
+    }
     let host = if let Some(rest6) = hostport.strip_prefix('[') {
         rest6.split(']').next().unwrap_or("")
     } else {
         hostport.split(':').next().unwrap_or("")
     };
-    matches!(
-        host.to_ascii_lowercase().as_str(),
-        "127.0.0.1" | "localhost" | "::1"
-    )
+    let h = host.to_ascii_lowercase();
+    matches!(h.as_str(), "127.0.0.1" | "localhost" | "::1") || h.starts_with("127.")
 }
+
+fn redact_secret(msg: String, secret: &str) -> String {
+    let s = secret.trim();
+    if s.is_empty() {
+        msg
+    } else {
+        msg.replace(s, "***")
+    }
+}
+
+fn openai_endpoint(base: &str, suffix: &str) -> String {
+    let b = base.trim().trim_end_matches('/');
+    if b.ends_with("/v1") {
+        format!("{b}/{suffix}")
+    } else {
+        format!("{b}/v1/{suffix}")
+    }
+}
+
+fn gemini_endpoint(base: &str, suffix: &str) -> String {
+    let b = base.trim().trim_end_matches('/');
+    if b.contains("/v1beta") || b.contains("/v1") {
+        format!("{b}/{suffix}")
+    } else {
+        format!("{b}/v1beta/{suffix}")
+    }
+}
+
+struct TempFileGuard(std::path::PathBuf);
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// 多帧判定：frames = JPEG 字节序列（按时间序）。返回判定 JSON（宽松）；
 /// HTTP/解析失败 → Err（调用方降级跳过，绝不阻塞主检测链）。
@@ -61,6 +97,7 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(cfg.timeout_s)))
+        .http_status_as_error(false)
         .build()
         .into();
     let imgs: Vec<String> = frames
@@ -77,9 +114,12 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                     "image_url": {"url": format!("data:image/jpeg;base64,{b64}")}
                 }));
             }
-            let mut resp = agent
-                .post(&format!("{}/v1/chat/completions", cfg.url))
-                .header("Content-Type", "application/json")
+            let ep = openai_endpoint(&cfg.url, "chat/completions");
+            let mut req = agent.post(&ep).header("Content-Type", "application/json");
+            if !cfg.api_key.trim().is_empty() {
+                req = req.header("Authorization", &format!("Bearer {}", cfg.api_key.trim()));
+            }
+            let mut resp = req
                 .send(
                     json!({
                         "model": cfg.model, "temperature": 0, "max_tokens": 400,
@@ -87,14 +127,18 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                     })
                     .to_string(),
                 )
-                .map_err(|e| format!("VLM 请求失败: {e}"))?;
+                .map_err(|e| redact_secret(format!("VLM 请求失败: {e}"), &cfg.api_key))?;
             let status = resp.status().as_u16();
             let text = resp
                 .body_mut()
                 .read_to_string()
                 .map_err(|e| format!("响应读取失败: {e}"))?;
             if status >= 300 {
-                return Err(format!("VLM HTTP {status}"));
+                let brief: String = text.chars().take(240).collect();
+                return Err(redact_secret(
+                    format!("VLM HTTP {status}: {brief}"),
+                    &cfg.api_key,
+                ));
             }
             let data: Value =
                 serde_json::from_str(&text).map_err(|_| "VLM 响应非 JSON".to_string())?;
@@ -106,7 +150,7 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
         // ollama 本地：images 数组多元素
         "ollama" => {
             let mut resp = agent
-                .post(&format!("{}/api/generate", cfg.url))
+                .post(&format!("{}/api/generate", cfg.url.trim_end_matches('/')))
                 .header("Content-Type", "application/json")
                 .send(
                     json!({
@@ -116,14 +160,18 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                     })
                     .to_string(),
                 )
-                .map_err(|e| format!("VLM 请求失败: {e}"))?;
+                .map_err(|e| redact_secret(format!("VLM 请求失败: {e}"), &cfg.api_key))?;
             let status = resp.status().as_u16();
             let text = resp
                 .body_mut()
                 .read_to_string()
                 .map_err(|e| format!("响应读取失败: {e}"))?;
             if status >= 300 {
-                return Err(format!("VLM HTTP {status}"));
+                let brief: String = text.chars().take(240).collect();
+                return Err(redact_secret(
+                    format!("VLM HTTP {status}: {brief}"),
+                    &cfg.api_key,
+                ));
             }
             let data: Value =
                 serde_json::from_str(&text).map_err(|_| "VLM 响应非 JSON".to_string())?;
@@ -133,30 +181,28 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                 .to_string()
         }
         // Gemini 原生视频输入（"连续观看视频"通路）：JPEG 帧序列 → ffmpeg 临时
-        // mp4 → inline_data base64 → generateContent。inline 限制 <20MB（base64
-        // 膨胀 33%），超限如实报错；更大视频走 Files API（RA 后续）。
-        // 请求格式（官方 video-understanding 文档）：
-        //   POST {url}/models/{model}:generateContent?key=<KEY>
-        //   contents[0].parts = [{text}, {inline_data:{mime_type:"video/mp4",data}}]
+        // mp4 → inline_data base64 → generateContent。使用官方 `x-goog-api-key` 头，
+        // 严禁将密钥拼入 URL query 防止日志/报错明文泄漏。
         "gemini" => {
-            let tmp = std::env::temp_dir().join(format!("ls-vlm-{}.mp4", std::process::id()));
-            ls_analyzer::evidence::encode_mp4(frames, 5.0, &tmp)
+            let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp_guard = TempFileGuard(
+                std::env::temp_dir().join(format!("ls-vlm-{}-{seq}.mp4", std::process::id())),
+            );
+            ls_analyzer::evidence::encode_mp4(frames, 5.0, &tmp_guard.0)
                 .map_err(|e| format!("帧序列转视频失败: {e}"))?;
-            let video = std::fs::read(&tmp).map_err(|e| format!("临时视频读取失败: {e}"))?;
-            let _ = std::fs::remove_file(&tmp);
+            let video =
+                std::fs::read(&tmp_guard.0).map_err(|e| format!("临时视频读取失败: {e}"))?;
+            drop(tmp_guard);
             if video.len() > 20_000_000 {
                 return Err("视频超过 20MB（Gemini inline 限制）".into());
             }
             let b64 = base64::engine::general_purpose::STANDARD.encode(&video);
-            let url = format!(
-                "{}/models/{}:generateContent?key={}",
-                cfg.url.trim_end_matches('/'),
-                cfg.model,
-                cfg.api_key
-            );
-            let mut resp = agent
-                .post(&url)
-                .header("Content-Type", "application/json")
+            let url = gemini_endpoint(&cfg.url, &format!("models/{}:generateContent", cfg.model));
+            let mut req = agent.post(&url).header("Content-Type", "application/json");
+            if !cfg.api_key.trim().is_empty() {
+                req = req.header("x-goog-api-key", cfg.api_key.trim());
+            }
+            let mut resp = req
                 .send(
                     json!({
                         "contents": [{"parts": [
@@ -167,14 +213,18 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
                     })
                     .to_string(),
                 )
-                .map_err(|e| format!("VLM 请求失败: {e}"))?;
+                .map_err(|e| redact_secret(format!("VLM 请求失败: {e}"), &cfg.api_key))?;
             let status = resp.status().as_u16();
             let text = resp
                 .body_mut()
                 .read_to_string()
                 .map_err(|e| format!("响应读取失败: {e}"))?;
             if status >= 300 {
-                return Err(format!("VLM HTTP {status}"));
+                let brief: String = text.chars().take(240).collect();
+                return Err(redact_secret(
+                    format!("VLM HTTP {status}: {brief}"),
+                    &cfg.api_key,
+                ));
             }
             let data: Value =
                 serde_json::from_str(&text).map_err(|_| "VLM 响应非 JSON".to_string())?;
@@ -212,42 +262,33 @@ pub fn list_models(
         .timeout_global(Some(std::time::Duration::from_secs(
             timeout_s.clamp(3, 120),
         )))
+        .http_status_as_error(false)
         .build()
         .into();
-    let (endpoint, auth) = match provider {
-        "openai_compat" => {
-            let ep = if base.ends_with("/v1") {
-                format!("{base}/models")
-            } else {
-                format!("{base}/v1/models")
-            };
-            (ep, true)
-        }
-        "ollama" => (format!("{base}/api/tags"), false),
-        "gemini" => {
-            let ep = if base.contains("/v1beta") || base.contains("/v1") {
-                format!("{base}/models?key={}", pct_encode(api_key))
-            } else {
-                format!("{base}/v1beta/models?key={}", pct_encode(api_key))
-            };
-            (ep, false)
-        }
+    let (endpoint, auth_mode) = match provider {
+        "openai_compat" => (openai_endpoint(base, "models"), "bearer"),
+        "ollama" => (format!("{base}/api/tags"), "none"),
+        "gemini" => (gemini_endpoint(base, "models"), "gemini"),
         p => return Err(format!("未知 provider: {p}")),
     };
     let mut req = agent.get(&endpoint);
-    if auth && !api_key.is_empty() {
-        req = req.header("Authorization", &format!("Bearer {api_key}"));
+    if auth_mode == "bearer" && !api_key.trim().is_empty() {
+        req = req.header("Authorization", &format!("Bearer {}", api_key.trim()));
+    } else if auth_mode == "gemini" && !api_key.trim().is_empty() {
+        req = req.header("x-goog-api-key", api_key.trim());
     }
-    let mut resp = req.call().map_err(|e| format!("连接失败: {e}"))?;
+    let mut resp = req
+        .call()
+        .map_err(|e| redact_secret(format!("连接失败: {e}"), api_key))?;
     let status = resp.status().as_u16();
     let text = resp
         .body_mut()
         .read_to_string()
         .map_err(|e| format!("响应读取失败: {e}"))?;
     if status >= 300 {
-        // 失败时回显截断的响应体，便于识别 401/404 与错误原因
+        // 失败时回显截断的响应体，便于识别 401/404 与错误原因（脱敏密钥）
         let brief: String = text.chars().take(240).collect();
-        return Err(format!("HTTP {status}: {brief}"));
+        return Err(redact_secret(format!("HTTP {status}: {brief}"), api_key));
     }
     let data: Value = serde_json::from_str(&text).map_err(|_| "响应非 JSON".to_string())?;
     let mut out: Vec<String> = match provider {
@@ -295,20 +336,7 @@ pub fn list_models(
     Ok(out)
 }
 
-/// 最小百分号编码（API Key 进 query；保留 RFC3986 unreserved）。
-fn pct_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
-/// 宽松判定解析：剥围栏 → JSON → persons/violations 规整（未知 violation 丢弃）。
+/// 宽松判定解析：剥围栏 → JSON（失败则回退提取首尾 `{...}`）→ persons/violations 规整。
 pub fn parse_verdict(text: &str) -> Result<Value, String> {
     let t = text.trim();
     let t = if t.starts_with("```") {
@@ -318,7 +346,17 @@ pub fn parse_verdict(text: &str) -> Result<Value, String> {
     } else {
         t
     };
-    let v: Value = serde_json::from_str(t).map_err(|_| "VLM 输出不是 JSON".to_string())?;
+    let v: Value = serde_json::from_str(t)
+        .or_else(|_| {
+            let start = t.find('{').ok_or(())?;
+            let end = t.rfind('}').ok_or(())?;
+            if end > start {
+                serde_json::from_str(&t[start..=end]).map_err(|_| ())
+            } else {
+                Err(())
+            }
+        })
+        .map_err(|_| "VLM 输出不是 JSON".to_string())?;
     const ALLOWED: [&str; 2] = ["no_ppe", "zone_intrusion"];
     let violations: Vec<String> = v
         .get("violations")

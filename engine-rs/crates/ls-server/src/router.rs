@@ -241,7 +241,10 @@ pub fn build_router(state: Shared) -> Router {
         .route("/models/active", put(models_active)) // RA5：检测模型切换
         .route("/fs/list", get(fs_list)) // RA5-UX：目录浏览
         .route("/setup/status", get(setup_status)) // RA5-UX：Welcome 向导状态
-        .route("/plugins/upload", post(plugins_upload)) // RA5-UX：插件 zip 上传
+        .route(
+            "/plugins/upload",
+            post(plugins_upload).layer(axum::extract::DefaultBodyLimit::max(52 * 1024 * 1024)),
+        ) // RA5-UX：插件 zip 上传（50MB 上限 + multipart 开销）
         // ---- R2-309 批次 3 ----
         .route("/config/import", post(config_import))
         .route("/events/:eid/evidence.zip", get(event_evidence_zip))
@@ -252,14 +255,22 @@ pub fn build_router(state: Shared) -> Router {
         .route("/plugins/:pid/start", post(plugin_action))
         .route("/plugins/:pid/stop", post(plugin_action))
         .route("/face/status", get(face_status))
-        .route("/face/persons", get(face_persons_list).post(face_register))
+        .route(
+            "/face/persons",
+            get(face_persons_list)
+                .post(face_register)
+                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
         .route("/face/persons/all", delete(face_clear_all))
         .route("/face/persons/:subject", delete(face_delete))
         .route("/alert-test", post(alert_test))
         .route("/models/ppe/download", post(ppe_download))
         // ---- 0.4.0：模型管理 + API 多接入档案 ----
         .route("/models/ppe/config", put(ppe_config))
-        .route("/models/ppe/upload", post(ppe_upload))
+        .route(
+            "/models/ppe/upload",
+            post(ppe_upload).layer(axum::extract::DefaultBodyLimit::max(205 * 1024 * 1024)),
+        )
         .route("/models/ppe/reset", post(ppe_reset))
         .route(
             "/detect/profiles",

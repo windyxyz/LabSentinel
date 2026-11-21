@@ -97,8 +97,10 @@ pub(crate) async fn alert_template_put(
         } else {
             s.setting_set("alert.template.text", &text)?;
         }
-        // 运行时立即生效（升级提醒渲染）；重启后由 main.rs 从 app_settings 注入
-        if !text.is_empty() {
+        // 运行时立即生效（清空时同步清除内存 override，不再滞留旧文案）
+        if text.is_empty() {
+            st.jobs.clear_alert_template();
+        } else {
             st.jobs.set_alert_template(text.clone());
         }
         let effective = s
@@ -192,6 +194,7 @@ pub(crate) fn channels_from_settings(
         channels.push((
             ls_dispatch::Channel::Pushplus,
             ls_dispatch::ChannelConfig {
+                url: "https://www.pushplus.plus/send".into(),
                 token: token.clone(),
                 ..Default::default()
             },
@@ -203,6 +206,7 @@ pub(crate) fn channels_from_settings(
         channels.push((
             ls_dispatch::Channel::Qmsg,
             ls_dispatch::ChannelConfig {
+                url: format!("https://qmsg.zendee.cn/send/{}", key.trim()),
                 key: key.clone(),
                 qq: qq.clone(),
                 ..Default::default()
@@ -276,6 +280,7 @@ pub(crate) mod alert_cfg {
             &[
                 ("smtp_host", "smtp_host"),
                 ("smtp_port", "smtp_port"),
+                ("smtp_security", "smtp_security"),
                 ("smtp_user", "smtp_user"),
                 ("smtp_pass", "smtp_pass"),
                 ("to", "alert_email_to"),
@@ -550,11 +555,21 @@ pub(crate) async fn alerts_config_put(
                 pending.push((field.to_string(), if b { "1".into() } else { "0".into() }));
                 continue;
             }
-            let Some(text) = text.filter(|s| !s.is_empty()) else {
-                continue;
-            };
+            // LS-041：同时兼容 JSON Number（如前端 `smtp_port: 587`）与字符串形式，避免被静默丢弃
             if alert_cfg::is_int(field) {
-                let Ok(n) = text.parse::<i64>() else {
+                let parsed = match raw {
+                    Value::Number(num) => num.as_i64(),
+                    Value::String(s) => {
+                        let t = s.trim();
+                        if t.is_empty() {
+                            continue;
+                        }
+                        t.parse::<i64>().ok()
+                    }
+                    Value::Null => continue,
+                    _ => None,
+                };
+                let Some(n) = parsed else {
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(json!({"detail": format!("{api_name} 必须是整数")})),
@@ -571,6 +586,9 @@ pub(crate) async fn alerts_config_put(
                 pending.push((field.to_string(), n.to_string()));
                 continue;
             }
+            let Some(text) = text.filter(|s| !s.is_empty()) else {
+                continue;
+            };
             if alert_cfg::is_url(field) {
                 if let Err(e) = validate_alert_url(field, &text) {
                     return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response();
@@ -832,11 +850,9 @@ pub(crate) async fn alert_test(
             results.push(json!({"channel": w, "ok": false, "error": "未知渠道"}));
         }
     }
-    Json(
-        json!({"ok": want.is_none() || results.iter().any(|r| r["ok"] == true),
+    Json(json!({"ok": sent > 0,
                 "sent": sent, "results": results,
-                "note": "渠道凭据与实际派发同源：网页保存（app_settings）优先，其次环境变量"}),
-    )
+                "note": "渠道凭据与实际派发同源：网页保存（app_settings）优先，其次环境变量"}))
     .into_response()
 }
 

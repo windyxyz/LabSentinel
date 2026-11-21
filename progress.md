@@ -2,23 +2,20 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID**: `LS-041`（已锁定 `ACTIVE`；`LS-040` 已完成入库）
-- **Task-Name**: P0 止血批：DirectML 并发锁(A1) + WAL + 规则 `days_of_week` + 本地时区/`chrono` 替换 + VLM 鉴权/脱敏 + 自定义 PPE 上传 + PushPlus/Qmsg
+- **Task-ID**: `LS-042`（已锁定 `ACTIVE`；`LS-041` 已验证完成并入库）
+- **Task-Name**: 前后端契约全面对齐 + 前端 11 处 P0 修复 + `/ws/webrtc/:cid` 代理与快照降级 + 8 组回归测试
 - **Files Changed**:
-  - `AGENTS.md`、`CLAUDE.md`、`task_registry.md`、`task_plan.md`、`findings.md`、`progress.md`、`修改记录_会话备忘.md`（`LS-040` 已入库）
+  - `LS-041`：`ls-infer`（`DML_LOCK`+配置+`EP_USED` RwLock）、`ls-core::time`（`jiff` 本地时区替 `chrono`）、`ls-store`（WAL + v15 `days_of_week` 修复）、`ls-analyzer` & `ls-jobs`（去 `chrono` + `clear_alert_template` + env 合并）、`ls-server`（`vlm`/`detect`/`worker`/`router`/`misc_status`/`alerts`/`util`/`logger`/`genai`）、`scripts/build_rust.py`、`engine-rs/deny.toml`、`engine-rs/Cargo.lock`
 - **Completed This Session**:
-  - `LS-040` 完成：四线全仓代码审阅完毕，所有发现已同步至接力文件并形成完整实施计划；用户批准全部推荐方案（方案 A）并启动 `/goal` 持续推进。
+  - `LS-040` 完成并入库（`17da1fb`）。
+  - `LS-041` 完成并过全量门禁：`cargo fmt --check` PASS、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 0 警告、`cargo test --workspace --all-features` **141 passed / 0 failed**（+5 新单测：DML 串行锁、`EP_USED` 动态更新、`ls-core::time`×2、v15 迁移与 WAL 验证）。
 - **Open TODO**:
-  1. 执行 `LS-041` P0 止血批改动并过 Rust 三连门禁；
-  2. 依次推进 `LS-042`（前后端契约对齐 + 11 处前端 P0 修复 + 8 组回归测试）→ `LS-043` → `LS-044` → `LS-045` → `LS-046`。
+  1. 执行 `LS-042`（前后端契约对齐 + 11 处前端 P0 修复 + `/ws/webrtc/:cid` 代理与降级 + 8 组回归测试）；
+  2. 依次推进 `LS-043` → `LS-044` → `LS-045` → `LS-046`。
 - **Risks/Blockers**:
-  - 本机在 `LS-041` 落地 `DML_LOCK` 前禁止并发多路 GPU DirectML 压测。
-  - 本机 `gh` 受 S302/代理影响偶发 504，正式 Release 资产走 CI。
+  - DirectML 事故 A1 风险已在 `LS-041` 经 `DML_LOCK` + `with_memory_pattern(false)` + `with_parallel_execution(false)` 闭环。
 - **Next First Command**:
-  ```powershell
-  # 在 engine-rs/ 目录跑基线测试
-  $env:PATH = "C:\Users\User\devtools\w64devkit\bin;C:\Users\User\.cargo\bin;$env:PATH"; $env:CARGO_TARGET_DIR = "C:\Users\User\devtools\ls-target"; $env:RUSTFLAGS = "-L C:/Users/User/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/lib/self-contained -L C:/Users/User/devtools/w64devkit/lib -C link-arg=-lucrt"; cargo +stable-x86_64-pc-windows-gnu test --workspace --all-features
-  ```
+  - 推进 `LS-042` 后端响应契约对齐与前端视图修复，并跑 Rust 三连 + `npx vitest run` + `npm run build`。
 
 ---
 

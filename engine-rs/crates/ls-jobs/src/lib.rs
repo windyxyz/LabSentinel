@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use chrono::Local;
+use ls_core::time as ls_time;
 use ls_store::Store;
 use serde_json::{json, Value};
 
@@ -175,17 +175,32 @@ impl Jobs {
     pub fn alert_channels_snapshot(
         &self,
     ) -> Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> {
-        self.alert_channels
+        let mut out = self
+            .alert_channels
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // 合并环境变量兜底渠道（网页保存的 DB 渠道优先，未在 DB 配置的渠道回退 env）
+        for (ch, cfg) in ls_dispatch::channels_from_env() {
+            if !out.iter().any(|(c, _)| *c == ch) {
+                out.push((ch, cfg));
+            }
+        }
+        out
     }
 
     /// UX（2026-11-21）：网页端保存的告警文案即时生效（升级提醒渲染用）。
     pub fn set_alert_template(&self, text: String) {
         if let Ok(mut guard) = self.alert_template_override.lock() {
             *guard = Some(text);
+        }
+    }
+
+    /// 清空自定义告警文案覆盖，回落默认模板。
+    pub fn clear_alert_template(&self) {
+        if let Ok(mut guard) = self.alert_template_override.lock() {
+            *guard = None;
         }
     }
 
@@ -302,7 +317,7 @@ impl Jobs {
             };
         let filters = parse_alert_filters();
         let silences = active_silences(store);
-        let now_iso = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now_iso = ls_time::local_now_iso();
         if let Some(idx) = ls_dispatch::match_silence(&silences, ev, &now_iso) {
             println!(
                 "[alert] event#{} 首发命中静默 #{}——外部渠道不推送",
@@ -411,7 +426,7 @@ impl Jobs {
             };
         let filters = parse_alert_filters();
         let silences = active_silences(&store);
-        let now_iso = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now_iso = ls_time::local_now_iso();
         let sender = |row: &EscalationRow, text: &str| -> bool {
             let ev = ls_dispatch::DispatchEvent {
                 id: row.id,
@@ -632,7 +647,7 @@ pub fn parse_alert_filters() -> HashMap<String, Value> {
 
 /// 活跃静默（alert_silences 表，until_ts > now）。
 fn active_silences(store: &Store) -> Vec<ls_dispatch::Silence> {
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now = ls_time::local_now_iso();
     let Ok(mut stmt) = store.conn().prepare(
         "SELECT COALESCE(scope,'global'), COALESCE(target,''), until_ts FROM alert_silences \
          WHERE until_ts > ?",

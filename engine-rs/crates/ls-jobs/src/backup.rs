@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use chrono::Local;
+use ls_core::time as ls_time;
 use ls_store::Store;
 use serde::Serialize;
 use serde_json::json;
@@ -214,7 +214,7 @@ pub fn run_backup(cfg: &BackupConfig, out: &Path) -> JobResult<BackupOutcome> {
             }
         }
         let manifest = json!({
-            "created_at": Local::now().format("%Y-%m-%dT%H:%M:%S%z").to_string(),
+            "created_at": ls_time::local_now_iso_offset(),
             "source_data_dir": cfg.data_dir.to_string_lossy(),
             "db_bytes": db_bytes.len(),
             "db_sha256": db_sha,
@@ -267,7 +267,7 @@ pub fn run_backup(cfg: &BackupConfig, out: &Path) -> JobResult<BackupOutcome> {
 
 /// 自动备份入口：生成 auto-<时间戳>.zip，成功后按 keep 清理旧 auto 备份。
 pub fn run_auto_backup(cfg: &BackupConfig) -> JobResult<BackupOutcome> {
-    let name = format!("auto-{}.zip", Local::now().format("%Y%m%d-%H%M%S"));
+    let name = format!("auto-{}.zip", ls_time::local_now_compact());
     let out = backup_dir(cfg).join(name);
     let outcome = run_backup(cfg, &out)?;
     prune(&auto_files(cfg), cfg.keep);
@@ -408,7 +408,7 @@ pub fn restore_zip(
         checkpoint(&db)?;
         let bak = data_dir.join(format!(
             "labsentinel.db.bak-{}",
-            Local::now().format("%Y%m%d-%H%M%S")
+            ls_time::local_now_compact()
         ));
         fs::rename(&db, &bak).map_err(|e| format!("现有 db 转存失败（被占用/只读）: {e}"))?;
         prune_baks(&db, 3);
@@ -517,7 +517,7 @@ pub fn status_json(cfg: &BackupConfig, running: bool) -> serde_json::Value {
         Some(json!({
             "name": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             "size": md.len(),
-            "mtime": chrono::DateTime::<Local>::from(mtime).format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "mtime": ls_time::format_system_time_local_iso(mtime),
             "age_h": age_h,
         }))
     });

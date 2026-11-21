@@ -65,8 +65,10 @@ impl Store {
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        // RA4.2（性能审计）：synchronous=NORMAL 对齐 Python store.py——WAL 模式下
-        // FULL 每次提交 fsync 两遍是写放大；NORMAL 崩溃安全（WAL 保证一致性）
+        // LS-041（存储安全）：必须真正开启 WAL 模式才能与 synchronous=NORMAL 配对
+        // （DELETE 模式下 synchronous=NORMAL 断电不安全且并发读写互锁 SQLITE_BUSY）。
+        // 内存库 (:memory:) 不支持 WAL，忽略返回值不报错。
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(Store { conn })
     }
@@ -97,7 +99,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(14, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(15, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -183,7 +185,16 @@ impl Store {
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(14, 'rust-ux2-cascade')",
             [],
         )?;
-        Ok(14)
+        // v15（LS-041）：修复历史 add_rule 硬编码写入 days_of_week='0' 导致规则永不触发的存量坏数据
+        let _ = self.conn.execute(
+            "UPDATE rules SET days_of_week='1,2,3,4,5,6,7' WHERE days_of_week='0' OR days_of_week IS NULL",
+            [],
+        );
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(15, 'rust-ls041-days-of-week')",
+            [],
+        )?;
+        Ok(15)
     }
 
     /// UX3/UX4 优雅关停：WAL checkpoint 回主库（托盘退出/shutdown 语义——
@@ -668,10 +679,56 @@ impl Store {
         threshold: i64,
         enabled: bool,
     ) -> rusqlite::Result<i64> {
+        self.add_rule_with_schedule(
+            camera_id,
+            zone_id,
+            behavior,
+            level,
+            cooldown_s,
+            time_start,
+            time_end,
+            threshold,
+            enabled,
+            Some("1,2,3,4,5,6,7"),
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_rule_with_schedule(
+        &self,
+        camera_id: i64,
+        zone_id: Option<i64>,
+        behavior: &str,
+        level: i64,
+        cooldown_s: i64,
+        time_start: Option<&str>,
+        time_end: Option<&str>,
+        threshold: i64,
+        enabled: bool,
+        days_of_week: Option<&str>,
+        holiday_only: bool,
+    ) -> rusqlite::Result<i64> {
+        let dow = days_of_week
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "0")
+            .unwrap_or("1,2,3,4,5,6,7");
         self.conn.execute(
             "INSERT INTO rules(camera_id,zone_id,behavior,level,cooldown_s,time_start,time_end,threshold,enabled,days_of_week,holiday_only) \
-             VALUES(?,?,?,?,?,?,?,?,?,0,0)",
-            params![camera_id, zone_id, behavior, level, cooldown_s, time_start, time_end, threshold, enabled as i64],
+             VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            params![
+                camera_id,
+                zone_id,
+                behavior,
+                level,
+                cooldown_s,
+                time_start,
+                time_end,
+                threshold,
+                enabled as i64,
+                dow,
+                holiday_only as i64
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -1691,29 +1748,17 @@ pub struct FolderImageSummary {
     pub last_processed_ts: Option<String>,
 }
 
-/// ISO 日期（本地时间近似：UTC 即可，控制面统计与 Python 同基准即可对齐）
+/// 本地 ISO 日期（days 天前）
 fn iso_days_ago(days: i64) -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let (y, m, d) = civil_from_days(secs.div_euclid(86400) - days);
-    format!("{y:04}-{m:02}-{d:02}")
+    ls_core::time::local_days_ago_date(days)
 }
 
-/// N 周前的周一（ISO 周，Python `date - timedelta(days=weekday()) - timedelta(weeks=n)` 同口径）
+/// N 周前的周一（ISO 周，本地时区，与 Python `date - timedelta(days=weekday()) - timedelta(weeks=n)` 同口径）
 fn iso_weeks_ago_monday(weeks: i64) -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let days = secs.div_euclid(86400) - weeks * 7;
-    let (y, m, d) = civil_from_days(days);
-    // weekday：1970-01-01 是周四 → (days + 3) % 7 == 0 表示周一
-    let weekday = (days + 3).rem_euclid(7); // 0=周一
-    let (y2, m2, d2) = civil_from_days(days - weekday);
-    let _ = (y, m, d);
-    format!("{y2:04}-{m2:02}-{d2:02}")
+    let dt = ls_core::time::local_offset_secs(-weeks.saturating_mul(7 * 86_400));
+    let wd0 = (ls_core::time::weekday_iso(dt) as i64) - 1; // 0=周一..6=周日
+    let mon = ls_core::time::add_millis(dt, -wd0.saturating_mul(86_400_000));
+    ls_core::time::format_date(mon)
 }
 
 fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
@@ -1734,28 +1779,13 @@ fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
     })
 }
 
-/// 本地 ISO 秒时间戳（无外部 chrono 依赖；格式与 Python datetime.now().isoformat 一致）
+/// 本地 ISO 秒时间戳（统一走 `ls_core::time` 本地时区，消除 UTC 8 小时偏移）
 fn chrono_now() -> String {
-    // Windows/Linux 通用：SystemTime → 秒 → 手写 civil-from-days（1970 起）
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let days = secs.div_euclid(86400);
-    let rem = secs.rem_euclid(86400);
-    let (y, m, d) = civil_from_days(days);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        y,
-        m,
-        d,
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
+    ls_core::time::local_now_iso()
 }
 
 /// Howard Hinnant 的 civil_from_days（公历，days since 1970-01-01）
+#[cfg(test)]
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -1881,9 +1911,9 @@ mod tests {
         let s = Store::open(p.to_str().unwrap()).unwrap();
         // UX2：v12 存量库先迁移到 v14（events cascade 列；幂等复跑安全），
         // 之后的读写 SELECT 都含新列
-        assert_eq!(s.migrate().unwrap(), 14);
-        assert_eq!(s.migrate().unwrap(), 14); // 二次调用不炸
-        assert_eq!(s.schema_version().unwrap(), 14);
+        assert_eq!(s.migrate().unwrap(), 15);
+        assert_eq!(s.migrate().unwrap(), 15); // 二次调用不炸
+        assert_eq!(s.schema_version().unwrap(), 15);
         let eid = s
             .add_event(&NewEvent {
                 camera_id: 1,
@@ -1919,7 +1949,7 @@ mod tests {
         assert!(cols.contains(&"vlm_verdict".to_string()));
         assert!(cols.contains(&"vlm_ts".to_string()));
         assert!(cols.contains(&"vlm_suppressed".to_string()));
-        assert_eq!(s.schema_version().unwrap(), 14);
+        assert_eq!(s.schema_version().unwrap(), 15);
     }
 
     #[test]
@@ -1937,6 +1967,35 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         assert!(cols.iter().any(|c| c == "vlm_verdict"));
-        assert_eq!(s.schema_version().unwrap(), 14);
+        assert_eq!(s.schema_version().unwrap(), 15);
+        // 验证 WAL 模式已开启
+        let jm: String = s
+            .conn()
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(jm.to_ascii_lowercase(), "wal");
+        // 验证 add_rule 默认写入全周有效 days_of_week
+        let _rid = s
+            .add_rule(1, None, "enter", 2, 10, None, None, 0, true)
+            .unwrap();
+        let rules = s.rules_all().unwrap();
+        assert_eq!(rules[0].10.as_deref(), Some("1,2,3,4,5,6,7"));
+    }
+
+    #[test]
+    fn migrate_v15_repairs_broken_days_of_week_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("mig15.db");
+        let s = Store::open(p.to_str().unwrap()).unwrap();
+        s.ensure_schema().unwrap();
+        s.conn()
+            .execute(
+                "INSERT INTO rules(camera_id,zone_id,behavior,level,cooldown_s,threshold,enabled,days_of_week,holiday_only) VALUES(1,NULL,'enter',2,10,0,1,'0',0)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(s.migrate().unwrap(), 15);
+        let rules = s.rules_all().unwrap();
+        assert_eq!(rules[0].10.as_deref(), Some("1,2,3,4,5,6,7"));
     }
 }

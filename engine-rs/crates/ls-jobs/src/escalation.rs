@@ -4,7 +4,7 @@
 //! 提醒后写 escalated_ts（发送失败也标记，防每分钟重试风暴）；每轮最多 batch 条。
 //! 发送本身可注入（测试用），生产由 ls-dispatch 渠道完成（见 `Jobs::escalate_once`）。
 
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
+use ls_core::time::{self as ls_time, DateTime};
 use ls_store::Store;
 use serde::Serialize;
 
@@ -52,20 +52,20 @@ pub struct EscalationOutcome {
     pub disabled: Option<bool>,
 }
 
-fn parse_ts(ts: &str) -> Option<DateTime<Local>> {
-    let naive = NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S").ok()?;
-    Local.from_local_datetime(&naive).single()
+fn parse_ts(ts: &str) -> Option<DateTime> {
+    ls_time::parse_local_datetime(ts)
 }
 
 /// 超时未处置且未提醒过的事件（旧→新排序，限 batch 条）。
 pub fn find_unhandled(
     store: &Store,
-    now: &DateTime<Local>,
+    now: &DateTime,
     cfg: &EscalationConfig,
 ) -> JobResult<Vec<EscalationRow>> {
-    let cutoff = (*now - chrono::TimeDelta::minutes(cfg.after_min.max(0)))
-        .format("%Y-%m-%dT%H:%M:%S")
-        .to_string();
+    let cutoff = ls_time::format_iso(ls_time::add_millis(
+        *now,
+        -cfg.after_min.max(0).saturating_mul(60_000),
+    ));
     let mut stmt = store
         .conn()
         .prepare(
@@ -187,11 +187,11 @@ pub type ReminderSender<'a> = &'a dyn Fn(&EscalationRow, &str) -> bool;
 pub fn run_once(
     store: &Store,
     cfg: &EscalationConfig,
-    now: Option<DateTime<Local>>,
+    now: Option<DateTime>,
     send: Option<ReminderSender<'_>>,
 ) -> JobResult<EscalationOutcome> {
-    let now = now.unwrap_or_else(Local::now);
-    let ts = now.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now = now.unwrap_or_else(ls_time::local_now_civil);
+    let ts = ls_time::format_iso(now);
     if cfg.after_min <= 0 {
         return Ok(EscalationOutcome {
             checked: 0,
@@ -204,7 +204,7 @@ pub fn run_once(
     let mut escalated = 0;
     for r in &rows {
         let waited = parse_ts(&r.ts)
-            .map(|t| (now - t).num_minutes().max(0))
+            .map(|t| ls_time::diff_minutes(now, t).max(0))
             .unwrap_or(0);
         let text = format!(
             "⏰ 未处置提醒（已 {waited} 分钟）\n{}",
@@ -242,7 +242,7 @@ pub fn status_json(
             |r| r.get(0),
         )
         .unwrap_or(0);
-    let today = Local::now().format("%Y-%m-%d").to_string();
+    let today = ls_time::local_today_iso();
     let escalated_today: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM events WHERE escalated_ts LIKE ?",

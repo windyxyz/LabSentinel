@@ -12,8 +12,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use chrono::NaiveDateTime;
-
 use crate::pipeline;
 use crate::pipeline::{CameraPipeline, CameraSpec, PersonDetection, PpeStatus, RuleSpec, ZoneSpec};
 
@@ -79,17 +77,12 @@ fn frame_ts(index: u64, step: u64, vfps: f64) -> String {
     // Python 的 POS_MSEC 实测 = (index-1)*step/vfps 秒（0, 0.2, 0.4...），等价复现。
     // （VFR 视频的精确对齐走 frame_ts_pts / 逐帧 PTS 表；此函数为无 PTS 表时的回退。）
     let secs = ((index.saturating_sub(1)) as f64) * step as f64 / vfps.max(0.001);
-    let base = NaiveDateTime::parse_from_str("2026-01-01T00:00:00", "%Y-%m-%dT%H:%M:%S")
-        .expect("固定基准合法");
-    let dt = base + chrono::TimeDelta::milliseconds((secs * 1000.0).round() as i64);
-    dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+    ts_from_secs(secs)
 }
 
 fn ts_from_secs(secs: f64) -> String {
-    let base = NaiveDateTime::parse_from_str("2026-01-01T00:00:00", "%Y-%m-%dT%H:%M:%S")
-        .expect("固定基准合法");
-    let dt = base + chrono::TimeDelta::milliseconds((secs * 1000.0).round() as i64);
-    dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+    ls_core::time::add_ms_iso("2026-01-01T00:00:00", (secs * 1000.0).round() as i64)
+        .expect("固定基准合法")
 }
 
 /// ffprobe 逐帧 PTS（秒）：与 cv2 POS_MSEC 同源（容器 PTS，VFR 准确）。

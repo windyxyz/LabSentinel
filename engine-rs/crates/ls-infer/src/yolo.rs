@@ -120,6 +120,8 @@ pub struct YoloModel {
     tract_model: Option<std::sync::Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>>,
     #[cfg(feature = "ort")]
     ort_session: Option<Session>,
+    /// 当前会话是否运行在 DirectML(GPU)——用于触发进程级串行锁（防事故 A1 整机死机）。
+    ep_is_dml: bool,
     imgsz: u32,
     person_class: usize,
     conf: f32,
@@ -127,9 +129,39 @@ pub struct YoloModel {
     min_box_area: f32,
 }
 
-/// 实际生效的推理设备（"DirectML(GPU)" / "CPU"）——load 成功后写入，
-/// /api/system 如实上报（设置偏好 ≠ 实际生效；DML 失败回落后前端可见）。
-pub static EP_USED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+#[cfg(feature = "ort")]
+impl Drop for YoloModel {
+    fn drop(&mut self) {
+        if self.ep_is_dml && self.ort_session.is_some() {
+            // 事故 A1 防护：DirectML 会话析构也纳入进程级串行锁，避免软重启时与另一线程 run 并发
+            let _guard = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
+            self.ort_session.take();
+        }
+    }
+}
+
+/// 进程级 DirectML 串行锁（事故 A1 防护：AMD/DX12 驱动下 ORT DirectML
+/// `Session::run` / 建会话 / 释放严禁跨线程并发，否则导致 Windows 整机冻结）。
+/// CPU 与 tract 路径不加此锁。
+#[cfg(feature = "ort")]
+pub fn dml_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
+
+/// 实际生效的推理设备（"DirectML(GPU)" / "CPU" / "CPU(tract)"）——每次 load
+/// 成功后覆盖更新，网页切换 GPU/CPU 并软重启相机后 `/api/system` 实时反映最新设备。
+static EP_USED: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+pub fn ep_used() -> Option<String> {
+    EP_USED.read().ok().and_then(|g| g.clone())
+}
+
+pub fn set_ep_used(val: impl Into<String>) {
+    if let Ok(mut g) = EP_USED.write() {
+        *g = Some(val.into());
+    }
+}
 
 impl YoloModel {
     /// 加载模型。`backend=None` 时按 `LS_INFER_BACKEND` 解析（缺省 tract）。
@@ -153,6 +185,7 @@ impl YoloModel {
             tract_model: None,
             #[cfg(feature = "ort")]
             ort_session: None,
+            ep_is_dml: false,
             imgsz,
             // T-334/Q-14：模型角色声明（同目录 model.json 的 roles.person_class）。
             // 缺省 0 = COCO person 通道，旧模型无声明时行为不变。
@@ -175,6 +208,7 @@ impl YoloModel {
                     .map_err(|e| format!("模型优化失败: {e}"))?
                     .into_runnable()
                     .map_err(|e| format!("模型编译失败: {e}"))?;
+                set_ep_used("CPU(tract)");
                 model.tract_model = Some(m);
             }
             #[cfg(not(feature = "tract"))]
@@ -190,27 +224,37 @@ impl YoloModel {
                     let mut b = Session::builder(&environment)
                         .map_err(|e| format!("ORT builder 失败: {e}"))?;
                     if with_dml {
+                        // ORT-DirectML 官方必填配置：禁用 memory_pattern 与并行图执行，
+                        // 避免 DX12 command allocator 复用在并发/多算子下触发驱动死锁（事故 A1）
                         b = b
+                            .with_memory_pattern(false)
+                            .map_err(|e| format!("DirectML memory_pattern 配置失败: {e}"))?
+                            .with_parallel_execution(false)
+                            .map_err(|e| format!("DirectML parallel_execution 配置失败: {e}"))?
                             .with_execution_providers([ort::ep::DirectML::default().build()])
                             .map_err(|e| format!("DirectML EP 注册失败: {e}"))?;
                     }
                     b.commit_from_memory(&bytes)
                         .map_err(|e| format!("ORT 加载模型失败: {e}"))
                 };
-                // GPU 优先 + 自动回落：驱动太老/无 DX12/虚拟机等场景对任意设备鲁棒
-                let (session, ep_used) = if use_gpu {
+                // GPU 优先 + 自动回落：驱动太老/无 DX12/虚拟机等场景对任意设备鲁棒；
+                // DirectML 建会话必须在进程级 DML_LOCK 串行保护下执行。
+                let (session, ep_used, is_dml) = if use_gpu {
+                    let _guard = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
                     match build(true) {
-                        Ok(s) => (s, "DirectML(GPU)"),
+                        Ok(s) => (s, "DirectML(GPU)", true),
                         Err(e) => {
                             eprintln!("[ls-infer] GPU(DirectML) 初始化失败，自动回落 CPU: {e}");
-                            (build(false)?, "CPU")
+                            drop(_guard);
+                            (build(false)?, "CPU", false)
                         }
                     }
                 } else {
-                    (build(false)?, "CPU")
+                    (build(false)?, "CPU", false)
                 };
                 println!("[ls-infer] ORT 推理设备: {ep_used}");
-                let _ = EP_USED.set(ep_used.to_string());
+                set_ep_used(ep_used);
+                model.ep_is_dml = is_dml;
                 model.ort_session = Some(session);
             }
             #[cfg(not(feature = "ort"))]
@@ -273,6 +317,12 @@ impl YoloModel {
                     data,
                 ))
                 .map_err(|e| format!("输入张量创建失败: {e}"))?;
+                // 事故 A1 防护：DirectML 推理必须跨线程串行；CPU 推理不加锁。
+                let _dml_guard = if self.ep_is_dml {
+                    Some(dml_lock().lock().unwrap_or_else(|e| e.into_inner()))
+                } else {
+                    None
+                };
                 let outputs = session
                     .run(ort::inputs![tensor])
                     .map_err(|e| format!("推理失败: {e}"))?;
@@ -283,6 +333,7 @@ impl YoloModel {
                     .map_err(|e| format!("输出类型错误: {e}"))?;
                 let shape: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
                 let rows = rows_from_flat(&shape, flat)?;
+                drop(_dml_guard);
                 Self::decode_static(&rows, &geom, class_id, conf, self.iou, min_area)
             }
             #[cfg(not(feature = "ort"))]
@@ -525,5 +576,40 @@ mod tests {
         let frame = vec![114u8; 640 * 640 * 3];
         let dets = m.detect(&frame, 640, 640).expect("推理可执行");
         assert!(dets.is_empty(), "纯灰图不应检出目标，实得 {dets:?}");
+    }
+
+    #[test]
+    fn ep_used_updates_dynamically() {
+        set_ep_used("DirectML(GPU)");
+        assert_eq!(ep_used().as_deref(), Some("DirectML(GPU)"));
+        set_ep_used("CPU");
+        assert_eq!(ep_used().as_deref(), Some("CPU"));
+    }
+
+    #[cfg(feature = "ort")]
+    #[test]
+    fn dml_lock_serializes_concurrent_callers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let a = Arc::clone(&active);
+            let m = Arc::clone(&max_seen);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..10 {
+                    let _g = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
+                    let cur = a.fetch_add(1, Ordering::SeqCst) + 1;
+                    m.fetch_max(cur, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    a.fetch_sub(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(max_seen.load(Ordering::SeqCst), 1, "DML_LOCK 必须保证串行");
     }
 }

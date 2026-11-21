@@ -32,28 +32,9 @@ fn today_file(dir: &Path) -> PathBuf {
     dir.join(format!("server-{}.log", today_local()))
 }
 
-/// 本地日期（无 chrono；civil_from_days 与 ls-store/util 同口径算法）。
+/// 本地日期（统一走 `ls_core::time` 本地时区，00:00 滚动而非 UTC 08:00）。
 fn today_local() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let (y, m, d) = civil_from_days(secs.div_euclid(86400));
-    format!("{y:04}{m:02}{d:02}")
-}
-
-/// 天数 → (年, 月, 日)（Howard Hinnant civil_from_days 算法）。
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m as i64, d as i64)
+    ls_core::time::local_today_compact()
 }
 
 /// 清理超期日志（>RETENTION_DAYS 天的 server-*.log）。
@@ -141,9 +122,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn civil_dates_roundtrip() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20454), (2026, 1, 1)); // 复核点（与 ls-store 同）
+    fn today_local_format_is_yyyymmdd() {
+        let s = today_local();
+        assert_eq!(s.len(), 8);
+        assert!(s.bytes().all(|b| b.is_ascii_digit()));
     }
 
     #[test]

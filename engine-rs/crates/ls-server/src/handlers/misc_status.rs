@@ -64,8 +64,8 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
         } else {
             json!(["CPUExecutionProvider"])
         };
-        // 实际生效（模型加载后回填；None=尚无相机启动过）
-        let active = ls_infer::yolo::EP_USED.get().cloned();
+        // 实际生效（模型加载后实时覆盖更新；None=尚无相机启动过）
+        let active = ls_infer::yolo::ep_used();
         (arr, ep, active)
     };
     // UX2：检测模式与 cascade 用量（仪表盘卡片/设置横幅共用数据源）
@@ -489,15 +489,7 @@ pub(crate) async fn logs_tail(
     // rust 控制面日志：UX3 起落盘 data/logs/server-YYYYMMDD.log（按天滚动），
     // 回退旧 server.log（Python 时代历史文件）
     let log_dir = std::path::Path::new(&st.data_dir).join("logs");
-    let today = {
-        // 本地日期 YYYYMMDD（与 logger::today_local 同口径；util 的 civil_from_days）
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let (y, m, d) = crate::util::civil_from_days(secs.div_euclid(86400));
-        format!("{y:04}{m:02}{d:02}")
-    };
+    let today = ls_core::time::local_today_compact();
     let candidates = [
         log_dir.join(format!("server-{today}.log")),
         log_dir.join("server.log"),
@@ -593,19 +585,36 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
         } else {
             "none"
         };
-        // 展示实际文件的大小与 SHA256（随包文件与锁文件同源，可核验）
+        // 展示实际文件的大小与 SHA256（按 path+len+mtime 缓存，避免高频轮询反复读盘阻塞）
         let (size_bytes, sha256) = model_path
             .as_ref()
-            .and_then(|p| std::fs::read(p).ok())
-            .map(|d| (d.len() as i64, sha256_hex(&d)))
+            .and_then(|p| cached_file_sha256(std::path::Path::new(p)))
             .unwrap_or((-1, String::new()));
+        let classes: Vec<String> = model_path
+            .as_ref()
+            .map(|p| ls_analyzer::ppe::load_class_names(std::path::Path::new(p)))
+            .unwrap_or_default();
+        let warning: Option<String> = if source == "env"
+            && s.setting_get("ppe_model")
+                .ok()
+                .flatten()
+                .is_some_and(|p| !p.trim().is_empty())
+        {
+            Some("当前由环境变量 LS_PPE_MODEL 覆盖，网页上传的自定义模型暂未生效".into())
+        } else if installed && enabled && classes.is_empty() {
+            Some("模型缺少配套 .classes.txt 类名表，已自动退化为仅人员检测".into())
+        } else {
+            None
+        };
         Ok(Json(json!({
             "installed": installed,
             "enabled": enabled,
             "source": source,
             "bundled": bundled.is_some(),
-            "mode": if installed && enabled { "ppe" } else { "person_only" },
-            "active": installed && enabled,
+            "mode": if installed && enabled && !classes.is_empty() { "ppe" } else { "person_only" },
+            "active": installed && enabled && !classes.is_empty(),
+            "classes": classes,
+            "warning": warning,
             "license_confirmed_required": !installed,
             "license_notice": if bundled.is_some() {
                 "实验服模型已随安装包提供（权重由 Roboflow 训练数据集派生，数据集许可 CC BY 4.0，署名见 NOTICE）。已默认启用，可随时关闭或替换。"
@@ -643,36 +652,88 @@ pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>
     })
 }
 
-/// POST /api/models/ppe/upload——上传自定义实验服 ONNX（multipart 字段 file）。
-/// 落 `<data_dir>/models/ppe-custom.onnx`，校验后写入 ppe_model 并启用。
+/// 按 (path, len, mtime_ns) 缓存大文件 SHA256，避免 `/api/models/ppe/status` 轮询反复整文件读盘。
+fn cached_file_sha256(path: &std::path::Path) -> Option<(i64, String)> {
+    type CacheEntry = (String, u64, u128, String);
+    static CACHE: std::sync::Mutex<Option<CacheEntry>> = std::sync::Mutex::new(None);
+    let md = std::fs::metadata(path).ok()?;
+    let len = md.len();
+    let mtime_ns = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let key = path.to_string_lossy().into_owned();
+    if let Ok(g) = CACHE.lock() {
+        if let Some((k, l, m, h)) = g.as_ref() {
+            if k == &key && *l == len && *m == mtime_ns {
+                return Some((len as i64, h.clone()));
+            }
+        }
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let hash = sha256_hex(&bytes);
+    if let Ok(mut g) = CACHE.lock() {
+        *g = Some((key, len, mtime_ns, hash.clone()));
+    }
+    Some((len as i64, hash))
+}
+
+/// POST /api/models/ppe/upload——上传自定义实验服 ONNX（multipart 字段 file，可选 classes）。
+/// 落 `<data_dir>/models/ppe-custom.onnx`（并同步落盘 `ppe-custom.classes.txt`），写入 ppe_model 并启用。
 pub(crate) async fn ppe_upload(
     State(st): State<Shared>,
     mut mp: axum::extract::Multipart,
 ) -> Response {
     const MAX: usize = 200 * 1024 * 1024;
     let mut data: Option<Vec<u8>> = None;
+    let mut classes_raw: Option<String> = None;
     let mut filename = String::new();
     loop {
         match mp.next_field().await {
-            Ok(Some(field)) => {
-                if field.name() != Some("file") {
+            Ok(Some(mut field)) => {
+                let name = field.name().unwrap_or("").to_string();
+                if name == "classes" {
+                    if let Ok(b) = field.bytes().await {
+                        if b.len() <= 256 * 1024 {
+                            if let Ok(s) = String::from_utf8(b.to_vec()) {
+                                if !s.trim().is_empty() {
+                                    classes_raw = Some(s);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if name != "file" {
                     continue;
                 }
                 filename = field.file_name().unwrap_or("").to_string();
-                match field.bytes().await {
-                    Ok(b) if b.len() <= MAX => data = Some(b.to_vec()),
-                    Ok(_) => {
-                        return detail_err(StatusCode::PAYLOAD_TOO_LARGE, "模型文件超过 200MB")
-                            .into_response()
-                    }
-                    Err(e) => {
-                        return detail_err(
-                            StatusCode::BAD_REQUEST,
-                            &format!("读取上传内容失败: {e}"),
-                        )
-                        .into_response()
+                let mut buf = Vec::new();
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if buf.len().saturating_add(chunk.len()) > MAX {
+                                return detail_err(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    "模型文件超过 200MB",
+                                )
+                                .into_response();
+                            }
+                            buf.extend_from_slice(&chunk);
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            return detail_err(
+                                StatusCode::BAD_REQUEST,
+                                &format!("读取上传内容失败: {e}"),
+                            )
+                            .into_response();
+                        }
                     }
                 }
+                data = Some(buf);
             }
             Ok(None) => break,
             Err(e) => {
@@ -718,6 +779,34 @@ pub(crate) async fn ppe_upload(
             .into_response();
         }
     }
+    // LS-041：同步落盘 ppe-custom.classes.txt（优先用上传的 classes 字段；否则继承随包类表，
+    // 防止 make_ppe_runner 因找不到类表而静默退化为仅人员检测）
+    let classes_dest = dir.join("ppe-custom.classes.txt");
+    if let Some(txt) = classes_raw {
+        let _ = std::fs::write(&classes_dest, txt);
+    } else if !classes_dest.is_file() {
+        let bundled_cls =
+            crate::deploy::default_install_root().join("models/yolo11n_ppe.classes.txt");
+        if bundled_cls.is_file() {
+            let _ = std::fs::copy(&bundled_cls, &classes_dest);
+        } else {
+            let repo_cls = std::path::Path::new("m0-spike/yolo11n_ppe.classes.txt");
+            if repo_cls.is_file() {
+                let _ = std::fs::copy(repo_cls, &classes_dest);
+            }
+        }
+    }
+    let loaded_classes = ls_analyzer::ppe::load_class_names(&dest);
+    let env_override = std::env::var("LS_PPE_MODEL")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty());
+    let warning: Option<&str> = if env_override {
+        Some("已保存，但当前设置了 LS_PPE_MODEL 环境变量，需移除该环境变量后自定义模型才会生效")
+    } else if loaded_classes.is_empty() {
+        Some("模型已保存，但未找到类名文件 ppe-custom.classes.txt，请随模型补充类名表")
+    } else {
+        None
+    };
     with_store(&st, |s| {
         s.setting_set("ppe_model", &dest.to_string_lossy())?;
         s.setting_set("ppe.enabled", "1")?;
@@ -727,6 +816,8 @@ pub(crate) async fn ppe_upload(
             "enabled": true,
             "size_bytes": bytes.len(),
             "restarted": restarted,
+            "classes": loaded_classes,
+            "warning": warning,
         }))
         .into_response())
     })

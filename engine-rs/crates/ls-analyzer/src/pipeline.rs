@@ -13,9 +13,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone};
-
 use ls_core::state::ZoneState;
+use ls_core::time::{self as ls_time, DateTime};
 use ls_core::{point_in_polygon, ZoneChange};
 use ls_track::{ByteTrack, ByteTrackConfig, Detection as TrackDetection};
 
@@ -188,7 +187,7 @@ impl CameraPipeline {
         frame: Option<(&[u8], u32, u32)>,
     ) -> Vec<Candidate> {
         self.frame_index += 1;
-        let now = parse_ts(frame_ts).unwrap_or_else(Local::now);
+        let now = parse_ts(frame_ts).unwrap_or_else(ls_time::local_now_civil);
         let mut out = Vec::new();
 
         // 与 Python `_analyze` 对齐：空检测帧**不调 ByteTrack**（track 状态冻结，
@@ -432,7 +431,7 @@ impl CameraPipeline {
         track_id: i64,
         detail: &str,
         level_hint: i64,
-        now: &DateTime<Local>,
+        now: &DateTime,
         frame_ts: &str,
         out: &mut Vec<Candidate>,
     ) -> bool {
@@ -475,11 +474,11 @@ impl CameraPipeline {
         true
     }
 
-    fn holiday_allowed(&self, rule: &RuleSpec, now: &DateTime<Local>) -> bool {
+    fn holiday_allowed(&self, rule: &RuleSpec, now: &DateTime) -> bool {
         if !rule.holiday_only {
             return true;
         }
-        let day = now.format("%Y-%m-%d").to_string();
+        let day = ls_time::format_date(*now);
         self.calendar
             .get(&day)
             .map(|v| v == "holiday")
@@ -517,12 +516,12 @@ fn rule_zone_ok(rule: &RuleSpec, behavior: &str, zone_id: Option<i64>) -> bool {
 }
 
 /// "1-5" / "1,2,3" / 空=全部；非法串按不匹配（fail-closed，与 Python 口径一致）。
-fn weekday_allowed(raw: &str, now: &DateTime<Local>) -> bool {
+fn weekday_allowed(raw: &str, now: &DateTime) -> bool {
     let raw = raw.trim();
     if raw.is_empty() {
         return true;
     }
-    let today = now.weekday().number_from_monday() as i64;
+    let today = ls_time::weekday_iso(*now) as i64;
     for part in raw.split(',') {
         let p = part.trim();
         if p.is_empty() {
@@ -541,8 +540,8 @@ fn weekday_allowed(raw: &str, now: &DateTime<Local>) -> bool {
     false
 }
 
-fn hour_in_window(start: &str, end: &str, now: &DateTime<Local>) -> bool {
-    let hhmm = now.format("%H:%M").to_string();
+fn hour_in_window(start: &str, end: &str, now: &DateTime) -> bool {
+    let hhmm = ls_time::format_hm(*now);
     let start = start.trim();
     let end = end.trim();
     if start.is_empty() || end.is_empty() {
@@ -555,30 +554,23 @@ fn hour_in_window(start: &str, end: &str, now: &DateTime<Local>) -> bool {
     }
 }
 
-fn parse_ts(ts: &str) -> Option<DateTime<Local>> {
-    for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"] {
-        if let Ok(n) = NaiveDateTime::parse_from_str(ts, fmt) {
-            if let Some(dt) = Local.from_local_datetime(&n).single() {
-                return Some(dt);
-            }
-        }
-    }
-    None
+fn parse_ts(ts: &str) -> Option<DateTime> {
+    ls_time::parse_local_datetime(ts)
 }
 
 /// 确定性帧时间（与 Python `_det_dt` 同基准 2026-01-01 + 帧序号换算的毫秒）。
-/// 注：ffmpeg rawvideo 管道不携带 PTS，Rust 侧按分析帧率等间隔近似（L1 灰度对比已足够；
-/// 逐帧 PTS 对齐在 T-325 接入解码层时补齐）。
+/// 注：仅用于离线文件/黄金语料对齐，实时 RTSP/USB 流严禁使用此函数。
 pub fn frame_ts_for(index: u64, analysis_fps: f32) -> String {
     let fps = if analysis_fps > 0.0 {
         analysis_fps as f64
     } else {
         5.0
     };
-    let base = NaiveDateTime::parse_from_str("2026-01-01T00:00:00", "%Y-%m-%dT%H:%M:%S")
-        .expect("固定基准时间合法");
-    let dt = base + chrono::TimeDelta::milliseconds(((index as f64 / fps) * 1000.0) as i64);
-    dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+    ls_time::add_ms_iso(
+        "2026-01-01T00:00:00",
+        ((index as f64 / fps) * 1000.0) as i64,
+    )
+    .expect("固定基准时间合法")
 }
 
 #[cfg(test)]

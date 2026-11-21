@@ -7,5 +7,5 @@
 
 pub mod post;
 
-#[cfg(feature = "tract")]
+#[cfg(any(feature = "tract", feature = "ort"))]
 pub mod yolo;

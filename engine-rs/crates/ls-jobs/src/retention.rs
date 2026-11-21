@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use chrono::Local;
+use ls_core::time as ls_time;
 use ls_store::Store;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -72,13 +72,11 @@ pub struct CleanupStats {
 }
 
 fn now_iso() -> String {
-    Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+    ls_time::local_now_iso()
 }
 
 fn cutoff_iso(days: i64) -> String {
-    (Local::now() - chrono::TimeDelta::days(days.max(0)))
-        .format("%Y-%m-%dT%H:%M:%S")
-        .to_string()
+    ls_time::local_days_ago_iso(days.max(0))
 }
 
 fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
@@ -565,9 +563,7 @@ pub fn maintenance_status(
     let free = disk_free_gb(&cfg.data_dir);
     let total = disk_total_gb(&cfg.data_dir);
     let free_pct = total.filter(|t| *t > 0.0).map(|t| round1(free / t * 100.0));
-    let week_cutoff = (Local::now() - chrono::TimeDelta::days(7))
-        .format("%Y-%m-%dT%H:%M:%S")
-        .to_string();
+    let week_cutoff = ls_time::local_days_ago_iso(7);
     let mut week_bytes = 0u64;
     if let Ok(mut stmt) =
         conn.prepare("SELECT snapshot, video FROM events WHERE ts >= ? LIMIT 5000")

@@ -10,6 +10,7 @@
 
 pub mod bin;
 pub mod state;
+pub mod time;
 pub mod zones;
 
 pub use zones::point_in_polygon;
