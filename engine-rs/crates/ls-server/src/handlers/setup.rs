@@ -98,14 +98,20 @@ fn urldecode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    out.push(b);
-                    i += 3;
-                } else {
-                    out.push(b'%');
-                    i += 1;
+            b'%' if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit() =>
+            {
+                let hex = [bytes[i + 1], bytes[i + 2]];
+                if let Ok(s2) = std::str::from_utf8(&hex) {
+                    if let Ok(b) = u8::from_str_radix(s2, 16) {
+                        out.push(b);
+                        i += 3;
+                        continue;
+                    }
                 }
+                out.push(b'%');
+                i += 1;
             }
             b'+' => {
                 out.push(b' ');
@@ -263,9 +269,12 @@ pub(crate) async fn models_active(
     }
     if let Ok(s) = ls_store::Store::open(&st.db_path) {
         match s.setting_set("model.active", &path) {
-            Ok(_) => Json(json!({"ok": true,
-                    "note": "已切换检测模型；重启摄像头后生效"}))
-            .into_response(),
+            Ok(_) => {
+                let restarted = crate::worker::restart_all_running(&st, &s);
+                Json(json!({"ok": true, "restarted": restarted,
+                        "note": "已切换检测模型并即时生效"}))
+                .into_response()
+            }
             Err(e) => detail_err(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("写入失败: {e}"),

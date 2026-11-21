@@ -223,7 +223,9 @@ pub fn run_backup(cfg: &BackupConfig, out: &Path) -> JobResult<BackupOutcome> {
             "integrity_check": integrity,
             "tool_version": TOOL_VERSION,
         });
-        let file = File::create(out).map_err(|e| e.to_string())?;
+        // LS-044：先写 .tmp 完成后原子 rename，防止进程中途退出留下损坏 zip
+        let tmp_out = out.with_extension("zip.tmp");
+        let file = File::create(&tmp_out).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipWriter::new(file);
         let opts = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
@@ -246,6 +248,13 @@ pub fn run_backup(cfg: &BackupConfig, out: &Path) -> JobResult<BackupOutcome> {
             std::io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
         }
         zip.finish().map_err(|e| e.to_string())?;
+        if fs::rename(&tmp_out, out).is_err() {
+            let _ = fs::remove_file(out);
+            fs::rename(&tmp_out, out).map_err(|e| {
+                let _ = fs::remove_file(&tmp_out);
+                e.to_string()
+            })?;
+        }
         let zip_bytes = fs::metadata(out).map(|m| m.len()).unwrap_or(0);
         Ok(BackupOutcome {
             path: out.to_string_lossy().to_string(),

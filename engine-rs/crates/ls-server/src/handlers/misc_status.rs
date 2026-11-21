@@ -361,7 +361,7 @@ pub(crate) async fn plugins_list(State(st): State<Shared>) -> Response {
     Json(json!({"plugins": st.plugins.scan(&st)})).into_response()
 }
 
-/// 版本比较（只升不降，T-110）：点分段数字逐段比较，短段补 0。
+/// 版本比较（只升不降，T-110 / LS-044 修复字典序：`"0.3.9" > "0.4.0"` 必须为 false）。
 fn version_gt(a: &str, b: &str) -> bool {
     let pa: Vec<u64> = a
         .split('.')
@@ -372,7 +372,14 @@ fn version_gt(a: &str, b: &str) -> bool {
         .map(|s| s.trim().parse().unwrap_or(0))
         .collect();
     let n = pa.len().max(pb.len());
-    (0..n).any(|i| pa.get(i).copied().unwrap_or(0) > pb.get(i).copied().unwrap_or(0))
+    for i in 0..n {
+        let va = pa.get(i).copied().unwrap_or(0);
+        let vb = pb.get(i).copied().unwrap_or(0);
+        if va != vb {
+            return va > vb;
+        }
+    }
+    false
 }
 
 fn url_allowed(url: &str, hosts_csv: &str) -> bool {

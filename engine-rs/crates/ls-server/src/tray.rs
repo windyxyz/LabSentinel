@@ -17,15 +17,24 @@
 
 use crate::state::Shared;
 
-/// UX4：优雅关停——停 workers → WAL checkpoint → 日志留痕 → exit(0)。
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// UX4 / LS-044：优雅关停——防重入 → 停 workers → 停后台 jobs → 停 MQTT → WAL checkpoint → exit(0)。
 /// 网页「停止服务」与托盘「退出」共用（同一函数，不走 HTTP 自环）。
 pub fn graceful_shutdown(st: &Shared, source: &str) {
+    if SHUTTING_DOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let stopped = crate::worker::stop_all_workers(st);
+    st.jobs.stop();
+    if let Some(bus) = &st.mqtt {
+        bus.stop();
+    }
     if let Ok(s) = ls_store::Store::open(&st.db_path) {
         let _ = s.checkpoint_wal();
     }
     crate::logger::info(&format!(
-        "[shutdown] {source}：已停 {stopped} 路分析 worker，WAL 已合并——进程退出"
+        "[shutdown] {source}：已停 {stopped} 路分析 worker 与后台任务，WAL 已合并——进程退出"
     ));
     std::process::exit(0);
 }

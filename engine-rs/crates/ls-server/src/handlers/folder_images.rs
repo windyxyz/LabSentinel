@@ -186,17 +186,22 @@ pub(crate) async fn folder_image_file(
                 None => vec![st.data_dir.clone()],
             };
             let norm = |p: &str| {
-                std::path::Path::new(p)
-                    .canonicalize()
-                    .map(|c| c.to_string_lossy().to_ascii_lowercase())
-                    .unwrap_or_default()
+                std::path::Path::new(p).canonicalize().ok().map(|c| {
+                    // Windows 大小写不敏感路径按分量比对：先统一 ASCII 小写再转 PathBuf，
+                    // 避免字符串 starts_with 把 `D:\data_evil` 误判在 `D:\data` 内。
+                    if cfg!(windows) {
+                        std::path::PathBuf::from(c.to_string_lossy().to_ascii_lowercase())
+                    } else {
+                        c
+                    }
+                })
             };
-            let rp = norm(&r.path);
-            let contained = !rp.is_empty()
-                && allowed.iter().any(|base| {
-                    let b = norm(base);
-                    !b.is_empty() && rp.starts_with(&b)
-                });
+            let contained = norm(&r.path).is_some_and(|rp| {
+                allowed
+                    .iter()
+                    .filter_map(|base| norm(base))
+                    .any(|b| rp.starts_with(&b))
+            });
             if !contained {
                 return Ok(detail_err(
                     StatusCode::FORBIDDEN,

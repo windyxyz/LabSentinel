@@ -88,12 +88,23 @@ fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
     .is_ok()
 }
 
+/// 将 DB 中存储的媒体路径解析为绝对路径：相对路径按 `data_dir` 拼接，避免安装版 CWD 漂移误判孤儿。
+fn resolve_under_data_dir(path: &str, data_dir: &Path) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        data_dir.join(p)
+    }
+}
+
 /// 删除一个证据文件（真实路径必须在 data_dir 内；缺失/越界静默跳过）。
 fn remove_file_counted(path: &str, cfg: &RetentionConfig, stats: &mut CleanupStats) {
     if path.is_empty() {
         return;
     }
-    let p = Path::new(path);
+    let resolved = resolve_under_data_dir(path, &cfg.data_dir);
+    let p = resolved.as_path();
     if !safe_within(p, &cfg.data_dir) {
         return;
     }
@@ -107,7 +118,10 @@ fn remove_file_counted(path: &str, cfg: &RetentionConfig, stats: &mut CleanupSta
     }
 }
 
-fn referenced_media_paths(conn: &rusqlite::Connection) -> JobResult<HashSet<String>> {
+fn referenced_media_paths(
+    conn: &rusqlite::Connection,
+    data_dir: &Path,
+) -> JobResult<HashSet<String>> {
     let mut stmt = conn
         .prepare(
             "SELECT snapshot FROM events WHERE snapshot IS NOT NULL \
@@ -122,7 +136,8 @@ fn referenced_media_paths(conn: &rusqlite::Connection) -> JobResult<HashSet<Stri
     for row in rows {
         let p = row.map_err(|e| e.to_string())?;
         if !p.is_empty() {
-            out.insert(norm_key(Path::new(&p)));
+            let resolved = resolve_under_data_dir(&p, data_dir);
+            out.insert(norm_key(&resolved));
         }
     }
     Ok(out)
@@ -276,7 +291,7 @@ pub fn preview_cleanup_with(
     } else {
         0
     };
-    let (orph_files, orph_bytes) = match referenced_media_paths(conn) {
+    let (orph_files, orph_bytes) = match referenced_media_paths(conn, &cfg.data_dir) {
         Ok(refs) => {
             let items = iter_orphan_media(cfg, &refs);
             (items.len(), items.iter().map(|(_, s)| *s).sum::<u64>())
@@ -433,7 +448,7 @@ pub fn run_cleanup_with(
     }
 
     // 3.7) 孤儿媒体
-    if let Ok(refs) = referenced_media_paths(conn) {
+    if let Ok(refs) = referenced_media_paths(conn, &cfg.data_dir) {
         for (p, size) in iter_orphan_media(cfg, &refs) {
             if stats.deleted_orphans >= ORPHAN_MAX_PER_RUN {
                 stats.orphans_limited = true;

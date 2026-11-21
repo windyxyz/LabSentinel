@@ -42,11 +42,11 @@ pub(crate) async fn guard_middleware(
         .and_then(|v| v.to_str().unwrap_or("").split(':').next())
         .unwrap_or("")
         .to_string();
-    if !path.starts_with("/ws")
-        && !st
-            .trusted_hosts
-            .iter()
-            .any(|h| h.eq_ignore_ascii_case(&host))
+    // LS-044：/ws/events 同样校验 Host 白名单（防 DNS Rebinding / CSWSH）
+    if !st
+        .trusted_hosts
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(&host))
         && !(st.testing && host == "testserver")
     {
         return detail_err(StatusCode::BAD_REQUEST, "host not allowed").into_response();
@@ -67,7 +67,18 @@ pub(crate) async fn guard_middleware(
                 match origin {
                     None => true,
                     Some(o) => {
-                        o.split_once("://").map(|(_, h)| h == host).unwrap_or(false)
+                        let o_host = o
+                            .split_once("://")
+                            .map(|(_, hp)| hp.split('/').next().unwrap_or(""))
+                            .map(|hp| {
+                                if let Some(r6) = hp.strip_prefix('[') {
+                                    r6.split(']').next().unwrap_or("")
+                                } else {
+                                    hp.split(':').next().unwrap_or("")
+                                }
+                            })
+                            .unwrap_or("");
+                        o_host.eq_ignore_ascii_case(&host)
                             || st.allowed_origins.iter().any(|a| a == o)
                     }
                 }
@@ -80,25 +91,29 @@ pub(crate) async fn guard_middleware(
             )
                 .into_response();
         }
-        // P2-1（安全审计）：写限流（对齐 Python main.py 写 120/min 滑动窗口）
-        // + pairing/claim 每 IP 10/min（防反复作废待配对码/爆破配对码）。
-        // testing 态豁免（集成测试的写请求会撞全局窗口；对齐 testserver 模式）
         static RATE: std::sync::Mutex<
             Option<std::collections::HashMap<String, Vec<std::time::Instant>>>,
         > = std::sync::Mutex::new(None);
-        let ip = headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| host.clone());
+        // LS-044：仅在显式 LS_TRUST_PROXY=1 时读取 X-Forwarded-For，防伪造头绕过配对码限流
+        let trust_proxy = std::env::var("LS_TRUST_PROXY")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        let ip = if trust_proxy {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| host.clone())
+        } else {
+            host.clone()
+        };
         let (limit, window) = if path == "/api/pairing/claim" {
             (10usize, 60u64)
         } else {
             (120, 60)
         };
-        // 2026-11-14 验收实证：claim 与普通写共用 IP 桶时，运行中写满 10 次后
-        // claim 必然 429（配对链断）。两类窗口独立计数（与 Python 分通道语义一致）。
         let bucket = if path == "/api/pairing/claim" {
             format!("{ip}|claim")
         } else {
@@ -109,6 +124,13 @@ pub(crate) async fn guard_middleware(
         if !st.testing {
             if let Ok(mut m) = RATE.lock() {
                 let m = m.get_or_insert_with(std::collections::HashMap::new);
+                // LS-044：桶数上限清理，防止内存无界增长
+                if m.len() > 2048 {
+                    m.retain(|_, v| {
+                        v.retain(|t| now.duration_since(*t).as_secs() < 60);
+                        !v.is_empty()
+                    });
+                }
                 let e = m.entry(bucket).or_default();
                 e.retain(|t| now.duration_since(*t).as_secs() < window);
                 if e.len() >= limit {
@@ -152,11 +174,18 @@ pub(crate) async fn guard_middleware(
             )
             .into_response();
         }
-        // P2-4（安全审计）：管理级 GET 端点（Python require_admin）——read 令牌不够
+        // P2-4 / LS-044：管理级 GET 端点（含配置导出/密钥配置/日志/备份/维护）——read 令牌不够
         const ADMIN_GETS: &[&str] = &[
             "/api/audit",
             "/api/devices",
             "/api/config/summary",
+            "/api/config/export",
+            "/api/alerts/config",
+            "/api/detect/config",
+            "/api/detect/profiles",
+            "/api/logs",
+            "/api/backups/status",
+            "/api/maintenance",
             "/api/plugins",
             "/api/face/persons",
         ];

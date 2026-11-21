@@ -171,18 +171,25 @@ impl MqttBus {
         std::thread::Builder::new()
             .name("mqtt-eventloop".into())
             .spawn(move || {
+                let mut err_backoff_ms = 100u64;
                 for ev in connection.iter() {
                     if ev_stop.load(Ordering::Relaxed) {
                         return;
                     }
                     match ev {
                         Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(_))) => {
+                            err_backoff_ms = 100;
                             st.connected.store(true, Ordering::Relaxed);
-                            let _ = ev_client.publish(&status_topic, qos, true, "online");
+                            let _ = ev_client.try_publish(&status_topic, qos, true, "online");
                         }
-                        Ok(_) => {}
+                        Ok(_) => {
+                            err_backoff_ms = 100;
+                        }
                         Err(_) => {
                             st.connected.store(false, Ordering::Relaxed);
+                            // LS-044：Broker 离线时指数退避（100ms → 5s），消除 100% 单核 CPU 空转
+                            std::thread::sleep(std::time::Duration::from_millis(err_backoff_ms));
+                            err_backoff_ms = (err_backoff_ms * 2).min(5_000);
                         }
                     }
                 }
@@ -228,7 +235,8 @@ impl MqttBus {
         self.stop.store(true, Ordering::Relaxed);
         if let Ok(mut c) = self.client.lock() {
             if let Some(client) = c.take() {
-                let _ = client.publish(
+                // LS-044：改 try_publish 防止事件循环已退出队列满时死锁
+                let _ = client.try_publish(
                     format!("{}/status", self.config.topic_prefix),
                     self.config.qos(),
                     true,

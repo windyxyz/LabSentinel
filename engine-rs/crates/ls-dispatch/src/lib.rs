@@ -165,6 +165,9 @@ pub fn check_url(ch: Channel, url: &str, allow_http: bool) -> Result<(), String>
     if scheme != "https" && !(allow_http && scheme == "http") {
         return Err(format!("{}: 仅允许 https", ch.name()));
     }
+    if host.is_empty() || host.contains('@') {
+        return Err(format!("{}: URL host 非法或含 userinfo", ch.name()));
+    }
     let hosts = ch.allowed_hosts();
     if !hosts.is_empty() && !hosts.iter().any(|h| host.eq_ignore_ascii_case(h)) {
         return Err(format!("{}: host {} 不在白名单", ch.name(), host));
@@ -174,13 +177,11 @@ pub fn check_url(ch: Channel, url: &str, allow_http: bool) -> Result<(), String>
 
 fn split_url(url: &str) -> (&str, &str) {
     let s = url.split_once("://").unwrap_or(("", url));
-    let host =
-        s.1.split('/')
-            .next()
-            .unwrap_or("")
-            .split(':')
-            .next()
-            .unwrap_or("");
+    let authority = s.1.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return (s.0, authority);
+    }
+    let host = authority.split(':').next().unwrap_or("");
     (s.0, host)
 }
 
@@ -342,6 +343,7 @@ pub fn deliver_with_backoff(
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(5)))
         .http_status_as_error(false)
+        .max_redirects(0)
         .build()
         .into();
     for attempt in 0..4u32 {
