@@ -381,9 +381,9 @@ async function mark(e, status) {
 
   <!-- 事件详情抽屉（任务17A：WinUI ContentDialog 风格） -->
   <Teleport to="body">
+    <Transition name="drawer">
     <div v-if="drawer" class="drawer-mask" @click.self="closeDrawer">
-      <aside class="drawer" ref="drawerEl" tabindex="-1" role="dialog" aria-modal="true"
-             :style="{ viewTransitionName: drawer ? `evi-${drawer.id}` : '' }">
+      <aside class="drawer" ref="drawerEl" tabindex="-1" role="dialog" aria-modal="true">
         <header class="drawer-head">
           <b>#{{ drawer.id }} {{ TYPE_TEXT[drawer.type] || drawer.type }}</b>
           <span v-if="aiBadge(drawer)" :class="aiBadge(drawer).cls" :title="aiTitle(drawer)"
@@ -415,6 +415,7 @@ async function mark(e, status) {
         </div>
       </aside>
     </div>
+    </Transition>
   </Teleport>
 
   <div v-if="zoom" style="position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="zoom = null">
@@ -458,6 +459,14 @@ button { min-height: 40px; }
   background: rgba(0, 0, 0, 0.4);
   display: flex; justify-content: flex-end;
 }
+/* 2026-11-21：模态过渡改纯 CSS（遮罩淡入 + 抽屉右滑入），替代 View
+   Transitions（其旧页面快照在动画禁用配置下残留，用户实测「过渡有问题」） */
+.drawer-enter-active, .drawer-leave-active { transition: opacity 0.18s ease; }
+.drawer-enter-active .drawer, .drawer-leave-active .drawer {
+  transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+.drawer-enter-from, .drawer-leave-to { opacity: 0; }
+.drawer-enter-from .drawer, .drawer-leave-to .drawer { transform: translateX(60px); }
 .drawer {
   width: min(440px, 100vw);
   height: 100%;
