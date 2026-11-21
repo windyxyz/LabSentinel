@@ -537,11 +537,22 @@ pub(crate) async fn alerts_config_put(
                     .into_response();
             };
             // 留空 = 保持原值
-            let text = raw
-                .as_str()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let Some(text) = text else { continue };
+            let text = raw.as_str().map(|s| s.trim().to_string());
+            // UX 修复（2026-11-21 用户实测）：bool 字段以 JSON bool 提交（UI
+            // checkbox v-model）——此前只处理字符串形式，bool 被 continue 静默
+            // 丢弃 → allow_http=false → webhook「仅允许 https」全拒
+            if alert_cfg::is_bool(field) {
+                let b = match raw {
+                    Value::Bool(v) => *v,
+                    Value::String(v) => matches!(v.trim(), "1" | "true" | "True" | "yes" | "on"),
+                    _ => false,
+                };
+                pending.push((field.to_string(), if b { "1".into() } else { "0".into() }));
+                continue;
+            }
+            let Some(text) = text.filter(|s| !s.is_empty()) else {
+                continue;
+            };
             if alert_cfg::is_int(field) {
                 let Ok(n) = text.parse::<i64>() else {
                     return (
@@ -558,11 +569,6 @@ pub(crate) async fn alerts_config_put(
                         .into_response();
                 }
                 pending.push((field.to_string(), n.to_string()));
-                continue;
-            }
-            if alert_cfg::is_bool(field) {
-                let b = matches!(text.as_str(), "1" | "true" | "True" | "yes" | "on");
-                pending.push((field.to_string(), if b { "1".into() } else { "0".into() }));
                 continue;
             }
             if alert_cfg::is_url(field) {

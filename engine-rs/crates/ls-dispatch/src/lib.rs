@@ -338,45 +338,63 @@ pub fn deliver_with_backoff(
             Channel::Qmsg => resp_body(req.send_form([("qq", cfg.qq.as_str()), ("msg", text)])),
             _ => {
                 let mut body = build_body(ch, level, text, cfg);
-                // UX（2026-11-21）：异常截图随消息（wecom image 消息 / webhook 附 base64）
-                if let Some(d) = image {
-                    match ch {
-                        Channel::Wecom => {
-                            use base64::Engine;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(d);
-                            let md5_hex = format!("{:x}", md5::compute(d));
-                            body = json!({"msgtype": "image",
-                                          "image": {"base64": b64, "md5": md5_hex}});
+                // UX（2026-11-21）：异常截图随消息。wecom 单条消息不支持图文混排
+                // → 发两条：先 text（告警详情）后 image（现场画面）；webhook 单条
+                // JSON 同带 text + image_base64。
+                let extra_image_body: Option<String> = image.and_then(|d| match ch {
+                    Channel::Wecom => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(d);
+                        let md5_hex = format!("{:x}", md5::compute(d));
+                        Some(
+                            json!({"msgtype": "image",
+                                   "image": {"base64": b64, "md5": md5_hex}})
+                            .to_string(),
+                        )
+                    }
+                    Channel::Webhook => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(d);
+                        if let Value::Object(m) = &mut body {
+                            m.insert("image_base64".into(), json!(b64));
+                            m.insert("image_bytes".into(), json!(d.len()));
                         }
-                        Channel::Webhook => {
-                            use base64::Engine;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(d);
-                            if let Value::Object(m) = &mut body {
-                                m.insert("image_base64".into(), json!(b64));
-                                m.insert("image_bytes".into(), json!(d.len()));
-                            }
+                        None
+                    }
+                    _ => None,
+                });
+                let mut bodies = vec![body.to_string()];
+                if let Some(eb) = extra_image_body {
+                    bodies.push(eb);
+                }
+                // 多 body：任一失败即返回失败状态（外层 attempt 重试整组——
+                // text 会重复一条，好于丢图）
+                let mut last: (u16, String) = (200, String::new());
+                for body in &bodies {
+                    let req = agent
+                        .post(&cfg.url)
+                        .header("Content-Type", "application/json");
+                    let req = if ch == Channel::Webhook {
+                        let ts = unix_secs().to_string();
+                        let r = req
+                            .header("X-LS-Event", "alert")
+                            .header("X-LS-Timestamp", &ts);
+                        if !cfg.secret.is_empty() {
+                            let sig =
+                                format!("sha256={}", hmac_sha256_hex(&cfg.secret, body.as_bytes()));
+                            r.header("X-LS-Signature", &sig)
+                        } else {
+                            r
                         }
-                        _ => {}
+                    } else {
+                        req
+                    };
+                    last = resp_body(req.send(body.as_str()));
+                    if !is_ok(ch, last.0, &last.1) {
+                        break;
                     }
                 }
-                let body = body.to_string();
-                let req = req.header("Content-Type", "application/json");
-                let req = if ch == Channel::Webhook {
-                    let ts = unix_secs().to_string();
-                    let r = req
-                        .header("X-LS-Event", "alert")
-                        .header("X-LS-Timestamp", &ts);
-                    if !cfg.secret.is_empty() {
-                        let sig =
-                            format!("sha256={}", hmac_sha256_hex(&cfg.secret, body.as_bytes()));
-                        r.header("X-LS-Signature", &sig)
-                    } else {
-                        r
-                    }
-                } else {
-                    req
-                };
-                resp_body(req.send(body.as_str()))
+                last
             }
         };
         if is_ok(ch, status, &resp_body) {

@@ -126,8 +126,23 @@ impl PpeRunner for YoloPpeRunner {
                 0.0,
             ),
         ) else {
+            println!(
+                "[ppe] detect_class 失败（violation_class={}/wearing={}）——全 Unknown",
+                self.violation_class,
+                self.wearing_classes.first().copied().unwrap_or(0)
+            );
             return vec![PpeStatus::Unknown; person_boxes.len()];
         };
+        // UX 排障（2026-11-21）：PPE 级联判定透明化（置信度低于阈值时静默是排障盲区）
+        println!(
+            "[ppe] no_dets={} wear_dets={} persons={}",
+            no_boxes_raw.len(),
+            wear_raw.len(),
+            person_boxes.len()
+        );
+        for d in &no_boxes_raw {
+            println!("[ppe] NoLabCoat box={:?} conf={:.2}", d.box_, d.score);
+        }
         let no_boxes: Vec<[f32; 4]> = no_boxes_raw.iter().map(|d| d.box_).collect();
         let mut wear_boxes: Vec<[f32; 4]> = wear_raw.iter().map(|d| d.box_).collect();
         // 多个穿戴类：额外每类一次推理（当前配置通常 1 类；合并模型 Q-14 后降为 1 次）
