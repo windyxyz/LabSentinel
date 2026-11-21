@@ -2,17 +2,24 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID**: `LS-046`（已锁定 `ACTIVE`；`LS-045` 已验证完成并入库）
+- **Task-ID**: `LS-046`（全部计划批次 `LS-040`～`LS-046` 已验证完成并入库 `main`）
 - **Task-Name**: 本机打包与安装/卸载冒烟实证；真机 24h RTSP & 外部真实 VLM 验收准备
 - **Files Changed**:
-  - `LS-045`：`.github/workflows/{release,tests,rust}.yml`、`engine-rs/deny.toml`、`engine-rs/crates/*/Cargo.toml`（10 处启用 `[lints] workspace = true`）、`engine-rs/crates/ls-server/src/{deploy,main}.rs`、`deploy/windows/installer.iss`（UTF-8 BOM + `PrepareToInstall` + `{win}\Prefetch` + `--selftest-http` 退出码校验）、`scripts/{contract_audit,build_rust,build_setup_exe,smoke_rust,bump_version}.py`（删除 `dispatch_tick.py`）、`一键启动.bat`、`NOTICE`、`docs/plan/status.md`、`README.md`、`docs/guide/安装与卸载.md`
+  - `LS-046`：本机打包产出 `Resources/dist/labsentinel-rust-0.4.0-20261122.zip`（100.2MB）与 `Resources/dist/LabSentinel-setup-0.4.0.exe`（75.0MB，已 gitignore），`smoke_rust.py` 5/5 项全绿 PASS；同步更新接力 3 件套。
 - **Completed This Session**:
-  - `LS-040`（`17da1fb`）、`LS-041`（`da1dbd1`）、`LS-042`（`4722d8c`）、`LS-043`（`035e29e`）、`LS-044`（`068c5f3`）、`LS-045` 全部验证通过并入库（Rust 141 passed / clippy 0 / fmt OK；Web 66 passed + build 绿；`contract_audit.py` PASS）。
+  - `LS-040`（`17da1fb`）：全仓四线审阅与接力 7 件套入库
+  - `LS-041`（`da1dbd1`）：P0 止血批（DirectML 全局锁、`jiff` 替换 `chrono`、SQLite WAL、VLM/PPE/告警修复）
+  - `LS-042`（`4722d8c`）：前后端契约对齐 + 前端 11 处 P0 修复 + `/ws/webrtc/:cid` 代理与快照降级 + 6 例回归测试
+  - `LS-043`（`035e29e`）：PPE 单次前向 2× 提速 + 灰度 ROI 精检 + `CREATE_NO_WINDOW` + Worker/ffmpeg/规则加固
+  - `LS-044`（`068c5f3`）：安全加固 + `retention` 相对路径防误删 + `backup` 原子写 + `mqtt` 指数退避 + 完整 `graceful_shutdown`
+  - `LS-045`（`28e5701`）：CI 门禁 + `contract_audit.py` + 安装器 BOM/停服/Prefetch/`--rollback` + `.env`/`LS_HOST` + 10 crate `[lints]` + `NOTICE`/文档收口
+  - `LS-046`：本机 `--release`（LTO）打包 `zip` + Inno Setup 7 `setup.exe` + `smoke_rust.py` 全绿 PASS
 - **Open TODO**:
-  1. 执行 `LS-046` 本机打包（`build_rust.py --strict --zip` + `build_setup_exe.py`）与 `smoke_rust.py --zip` 实证。
-- **Risks/Blockers**: 真实 24h RTSP 压测与真实外部 VLM API Key 需现场环境与用户密钥，作为现场人工验收项标注。
+  1. 人工/现场项：真机 24h RTSP 稳定性压测、外部真实 VLM API Key 连通性实测；
+  2. 待用户确认发布时机后，运行 `python scripts/bump_version.py 0.5.0`、更新 `CHANGELOG.md` 并推送 `v0.5.0` tag 触发 CI 发布。
+- **Risks/Blockers**: 代码签名证书（`LS-900`）与本地直传 GitHub Release（S302）仍为已知外部约束，正式发布走 CI `release.yml`。
 - **Next First Command**:
-  - `LS_W64DEVKIT=C:/Users/User/devtools/w64devkit CARGO_TARGET_DIR=C:/Users/User/devtools/ls-target python -X utf8 scripts/build_rust.py --strict --zip`
+  - `git log --oneline -n 8`（确认本地提交后由用户决定是否 `git push` 或准备 `v0.5.0` 发版）
 
 ---
 
