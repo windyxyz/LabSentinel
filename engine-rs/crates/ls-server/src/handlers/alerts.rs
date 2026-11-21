@@ -110,6 +110,156 @@ pub(crate) async fn alert_template_put(
     })
 }
 
+/// R2-305/UX（2026-11-21）：从 app_settings（alert.*，Fernet 解密）组装渠道快照。
+/// 启动注入与「网页保存后即时重建」共用同一构造——派发/测试/保存三处同源。
+pub(crate) fn channels_from_settings(
+    s: &ls_store::Store,
+    data_dir: &std::path::Path,
+) -> Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> {
+    let rows = s.settings_by_prefix("alert.").unwrap_or_default();
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let get = |field: &str| -> String {
+        for (k, v) in &rows {
+            if *k == format!("alert.{field}") {
+                let f = &k["alert.".len()..];
+                if alert_cfg::is_secret(f) {
+                    return fernet::unprotect(v, data_dir);
+                }
+                return v.clone();
+            }
+        }
+        String::new()
+    };
+    let mut channels: Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> = Vec::new();
+    let push = |name: &str,
+                ch: ls_dispatch::Channel,
+                cfg: ls_dispatch::ChannelConfig,
+                configured: bool,
+                out: &mut Vec<_>| {
+        if configured {
+            out.push((ch, cfg));
+        } else {
+            println!("[ls-server] 渠道 {name} 配置不完整，跳过");
+        }
+    };
+    let wecom = get("wecom_webhook");
+    push(
+        "wecom",
+        ls_dispatch::Channel::Wecom,
+        ls_dispatch::ChannelConfig {
+            url: wecom.clone(),
+            ..Default::default()
+        },
+        !wecom.trim().is_empty(),
+        &mut channels,
+    );
+    let dingtalk = get("dingtalk_webhook");
+    push(
+        "dingtalk",
+        ls_dispatch::Channel::Dingtalk,
+        ls_dispatch::ChannelConfig {
+            url: dingtalk.clone(),
+            ..Default::default()
+        },
+        !dingtalk.trim().is_empty(),
+        &mut channels,
+    );
+    let feishu = get("feishu_webhook");
+    push(
+        "feishu",
+        ls_dispatch::Channel::Feishu,
+        ls_dispatch::ChannelConfig {
+            url: feishu.clone(),
+            ..Default::default()
+        },
+        !feishu.trim().is_empty(),
+        &mut channels,
+    );
+    let sendkey = get("serverchan_sendkey");
+    if !sendkey.trim().is_empty() {
+        channels.push((
+            ls_dispatch::Channel::Serverchan,
+            ls_dispatch::ChannelConfig {
+                url: format!("https://sctapi.ftqq.com/{}.send", sendkey.trim()),
+                ..Default::default()
+            },
+        ));
+    }
+    let token = get("pushplus_token");
+    if !token.trim().is_empty() {
+        channels.push((
+            ls_dispatch::Channel::Pushplus,
+            ls_dispatch::ChannelConfig {
+                token: token.clone(),
+                ..Default::default()
+            },
+        ));
+    }
+    let key = get("qmsg_key");
+    let qq = get("qmsg_qq");
+    if !key.trim().is_empty() && !qq.trim().is_empty() {
+        channels.push((
+            ls_dispatch::Channel::Qmsg,
+            ls_dispatch::ChannelConfig {
+                key: key.clone(),
+                qq: qq.clone(),
+                ..Default::default()
+            },
+        ));
+    }
+    let wh = get("webhook_url");
+    if !wh.trim().is_empty() {
+        channels.push((
+            ls_dispatch::Channel::Webhook,
+            ls_dispatch::ChannelConfig {
+                url: wh.clone(),
+                secret: get("webhook_secret"),
+                allow_http: get("webhook_allow_http") == "1",
+                ..Default::default()
+            },
+        ));
+    }
+    let (sh, sp, su, spt, sto) = (
+        get("smtp_host"),
+        get("smtp_port"),
+        get("smtp_user"),
+        get("smtp_pass"),
+        get("alert_email_to"),
+    );
+    if !sh.trim().is_empty() && !sto.trim().is_empty() {
+        channels.push((
+            ls_dispatch::Channel::Email,
+            ls_dispatch::ChannelConfig {
+                email: ls_dispatch::EmailConfig {
+                    host: sh,
+                    port: sp.parse().unwrap_or(465),
+                    user: su,
+                    pass: spt,
+                    to: sto,
+                    security: {
+                        let s = get("smtp_security");
+                        if s.is_empty() {
+                            "ssl".to_string()
+                        } else {
+                            s
+                        }
+                    },
+                },
+                ..Default::default()
+            },
+        ));
+    }
+    if !channels.is_empty() {
+        println!(
+            "[ls-server] alert channels injected from app_settings: {} 渠道",
+            channels.len()
+        );
+    }
+    channels
+}
+
 /// 与 Python `alert_config.FIELDS/SECRET/URL/BOOL/INT` 同口径的字段元数据。
 pub(crate) mod alert_cfg {
     pub const PREFIX: &str = "alert.";
@@ -464,6 +614,11 @@ pub(crate) async fn alerts_config_put(
         for (field, val) in &pending {
             s.setting_set(&format!("{}{field}", alert_cfg::PREFIX), val)?;
         }
+        // UX（2026-11-21）：保存即生效——重建渠道快照注入派发（此前要重启服务）
+        st.jobs.set_alert_channels(channels_from_settings(
+            s,
+            std::path::Path::new(&st.data_dir),
+        ));
         Ok(Json(alerts_config_status(s, &st)).into_response())
     })
 }
@@ -496,6 +651,11 @@ pub(crate) async fn alerts_config_reset(
             .map(|f| format!("{}{f}", alert_cfg::PREFIX))
             .collect();
         s.settings_delete(&keys)?;
+        // UX（2026-11-21）：清除同样即时重建快照（回退到 env/默认）
+        st.jobs.set_alert_channels(channels_from_settings(
+            s,
+            std::path::Path::new(&st.data_dir),
+        ));
         Ok(Json(alerts_config_status(s, &st)).into_response())
     })
 }
