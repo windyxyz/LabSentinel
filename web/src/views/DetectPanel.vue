@@ -88,9 +88,12 @@ function pickMode(id) {
   if (id === mode.value) return
   if (id !== 'local' && (!url.value || (isRemoteUrl.value && !allowRemote.value))) {
     msg.value = '先在下方「API 服务」卡填写地址并点「保存 API 配置」（远程地址需勾选合规确认），然后再点模式卡片切换'
-    // 交互引导：滚到 API 卡并聚焦地址框（点击必须有可见反应）
-    apiCardEl.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    setTimeout(() => urlInputEl.value?.focus(), 350)
+    // 交互引导：滚到 API 卡并聚焦地址框（点击必须有可见反应）；
+    // jsdom 无 scrollIntoView——?.() + try 防测试环境未捕获异常
+    try {
+      apiCardEl.value?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+      setTimeout(() => urlInputEl.value?.focus(), 350)
+    } catch { /* 非浏览器环境忽略 */ }
     return
   }
   save({ mode: id }, id === 'cascade' ? '已切换为本地+API 协作' : '已切换检测模式')
