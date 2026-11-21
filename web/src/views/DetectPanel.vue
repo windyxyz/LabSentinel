@@ -1,7 +1,8 @@
 <script setup>
 // UX2（2026-11-20）：设置 → 模型与检测——三模式卡片（仅本地 / 仅 API /
-// 本地+API 协作）+ API 服务配置 + 协作策略与用量。后端契约：GET/PUT
-// /api/detect/config、POST /api/detect/test、GET /api/detect/usage。
+// 本地+API 协作）+ API 服务配置 + 协作策略与用量。
+// 0.4.0：API 服务支持多接入档案（保存多个上游随时切换）+ 连通性测试 +
+// 自动拉取上游模型列表。
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import Models from './Models.vue'
@@ -13,14 +14,21 @@ const usage = ref(null)
 const msg = ref('')
 const busy = ref(false)
 
-// ---- API 服务卡 ----
+// ---- API 接入档案 ----
+const profiles = ref([])
+const activeId = ref('')
+const editId = ref('') // '' = 新建
+const pName = ref('')
 const provider = ref('openai_compat')
 const url = ref('')
 const model = ref('')
-const apiKey = ref('') // 输入框：留空=不变更；掩码后端固定 ***
+const apiKey = ref('') // 输入框：留空=不变更；掩码 ***
 const apiKeySet = ref(false)
 const timeoutS = ref(30)
 const allowRemote = ref(false)
+const modelOptions = ref([])
+const fetchBusy = ref(false)
+const profileBusy = ref(false)
 
 // ---- 协作策略卡 ----
 const trigger = ref('both')
@@ -39,6 +47,7 @@ const MODES = [
   { id: 'cascade', title: '本地 + API 协作 ⭐', desc: '省费用推荐——本地先扫人，可疑帧才交 API 精判', icon: '<path d="M2.5 4h4v8h-4zM9.5 4h4v8h-4z"/><path d="M6.5 8h3"/>' },
 ]
 
+const activeProfile = computed(() => profiles.value.find((p) => p.id === activeId.value) || null)
 const isRemoteUrl = computed(() => {
   const m = /^https?:\/\/([^/:]+)/.exec(url.value.trim())
   if (!m) return false
@@ -46,23 +55,75 @@ const isRemoteUrl = computed(() => {
   return !['127.0.0.1', 'localhost', '::1', '[::1]'].includes(h)
 })
 
+function fillForm(p) {
+  if (!p) {
+    pName.value = ''
+    provider.value = 'openai_compat'
+    url.value = ''
+    model.value = ''
+    apiKey.value = ''
+    apiKeySet.value = false
+    timeoutS.value = 30
+    allowRemote.value = false
+    modelOptions.value = []
+    return
+  }
+  pName.value = p.name || ''
+  provider.value = p.provider || 'openai_compat'
+  url.value = p.url || ''
+  model.value = p.model || ''
+  apiKey.value = ''
+  apiKeySet.value = !!p.api_key_set
+  timeoutS.value = p.timeout_s || 30
+  allowRemote.value = !!p.allow_remote
+  modelOptions.value = []
+}
+
+function selectProfile(id) {
+  editId.value = id
+  const p = profiles.value.find((x) => x.id === id)
+  fillForm(p)
+  msg.value = ''
+}
+
+function newProfile() {
+  editId.value = ''
+  fillForm(null)
+  msg.value = ''
+}
+
 async function load() {
   loading.value = true
   try {
     const d = await api.detectConfig()
     mode.value = d.mode
     cfg.value = d
-    provider.value = d.vlm.provider
-    url.value = d.vlm.url
-    model.value = d.vlm.model
-    apiKeySet.value = d.vlm.api_key_set
-    timeoutS.value = d.vlm.timeout_s
-    allowRemote.value = d.vlm.allow_remote
     trigger.value = d.cascade.trigger
     dailyBudget.value = d.cascade.daily_budget
     onNegative.value = d.cascade.on_negative
     usage.value = d.usage
     runtimeEp.value = d.runtime?.ep || 'dml'
+    // 档案接口失败（旧服务端/网络抖动）时回退旧单配置，页面仍可用
+    let pf = { profiles: [], active: '' }
+    try {
+      pf = await api.detectProfiles()
+    } catch { /* 回退到旧配置视图 */ }
+    profiles.value = pf.profiles || []
+    activeId.value = pf.active || ''
+    if (profiles.value.length) {
+      // 编辑当前启用档案；若之前正在编辑另一个则保持选择
+      const keep = profiles.value.find((p) => p.id === editId.value)
+      selectProfile((keep || activeProfile.value || profiles.value[0]).id)
+    } else {
+      editId.value = ''
+      fillForm(null)
+      url.value = d.vlm?.url || ''
+      provider.value = d.vlm?.provider || 'openai_compat'
+      model.value = d.vlm?.model || ''
+      apiKeySet.value = !!d.vlm?.api_key_set
+      timeoutS.value = d.vlm?.timeout_s || 30
+      allowRemote.value = !!d.vlm?.allow_remote
+    }
     msg.value = ''
   } catch (e) {
     msg.value = String(e.message || e)
@@ -75,7 +136,7 @@ async function save(payload, okText = '已保存') {
   msg.value = ''
   try {
     const r = await api.saveDetectConfig(payload)
-    await load() // 回读最新配置（usage/mode 同步）；消息在回读后写，避免被 load 清空
+    await load()
     if (r.restarted > 0) okText += `（${r.restarted} 路跟随全局的相机已重启生效）`
     msg.value = okText
   } catch (e) {
@@ -87,9 +148,7 @@ async function save(payload, okText = '已保存') {
 function pickMode(id) {
   if (id === mode.value) return
   if (id !== 'local' && (!url.value || (isRemoteUrl.value && !allowRemote.value))) {
-    msg.value = '先在下方「API 服务」卡填写地址并点「保存 API 配置」（远程地址需勾选合规确认），然后再点模式卡片切换'
-    // 交互引导：滚到 API 卡并聚焦地址框（点击必须有可见反应）；
-    // jsdom 无 scrollIntoView——?.() + try 防测试环境未捕获异常
+    msg.value = '先在下方「API 服务」填写地址并保存（远程地址需勾选合规确认），然后再点模式卡片切换'
     try {
       apiCardEl.value?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
       setTimeout(() => urlInputEl.value?.focus(), 350)
@@ -99,19 +158,116 @@ function pickMode(id) {
   save({ mode: id }, id === 'cascade' ? '已切换为本地+API 协作' : '已切换检测模式')
 }
 
-function saveApi() {
-  const body = {
-    vlm: {
+async function saveProfile(activate = true) {
+  if (!url.value.trim()) {
+    msg.value = '请填写 API 地址'
+    return
+  }
+  profileBusy.value = true
+  msg.value = ''
+  try {
+    const body = {
+      name: pName.value.trim() || 'API 服务',
       provider: provider.value,
       url: url.value.trim(),
       model: model.value.trim(),
       timeout_s: timeoutS.value,
       allow_remote: allowRemote.value,
-    },
+      activate,
+    }
+    if (editId.value) body.id = editId.value
+    if (apiKey.value.trim()) body.api_key = apiKey.value.trim()
+    const r = await api.saveDetectProfile(body)
+    await load()
+    selectProfile(r.profile?.id || editId.value)
+    msg.value = activate
+      ? `已保存并启用${r.restarted ? `（${r.restarted} 路相机已重启）` : ''}`
+      : '档案已保存'
+  } catch (e) {
+    msg.value = String(e.message || e)
+  } finally {
+    profileBusy.value = false
   }
-  // api_key：输入了新值才提交（空串/掩码=不变更；清除需显式点「清除密钥」）
-  if (apiKey.value.trim()) body.vlm.api_key = apiKey.value.trim()
-  save(body, 'API 服务配置已保存')
+}
+
+async function useProfile() {
+  if (!editId.value) {
+    msg.value = '先保存该档案'
+    return
+  }
+  profileBusy.value = true
+  try {
+    const r = await api.activateDetectProfile(editId.value)
+    activeId.value = r.active
+    await load()
+    msg.value = `已切换为「${pName.value || r.active}」${r.restarted ? `（${r.restarted} 路相机已重启）` : ''}`
+  } catch (e) {
+    msg.value = String(e.message || e)
+  } finally {
+    profileBusy.value = false
+  }
+}
+
+async function removeProfile() {
+  if (!editId.value) return
+  if (!confirm(`删除接入「${pName.value || editId.value}」？`)) return
+  profileBusy.value = true
+  try {
+    await api.deleteDetectProfile(editId.value)
+    editId.value = ''
+    await load()
+    msg.value = '档案已删除'
+  } catch (e) {
+    msg.value = String(e.message || e)
+  } finally {
+    profileBusy.value = false
+  }
+}
+
+async function fetchModels() {
+  if (!url.value.trim()) {
+    msg.value = '请先填写 API 地址'
+    return
+  }
+  fetchBusy.value = true
+  testResult.value = null
+  msg.value = ''
+  try {
+    const r = await api.detectModels({
+      id: editId.value || undefined,
+      provider: provider.value,
+      url: url.value.trim(),
+      api_key: apiKey.value.trim() || undefined,
+      timeout_s: timeoutS.value,
+    })
+    modelOptions.value = r.models || []
+    testResult.value = { ok: true, elapsed_ms: r.elapsed_ms, count: r.count }
+    if (!model.value && modelOptions.value.length) model.value = modelOptions.value[0]
+    msg.value = `连接成功：拉到 ${r.count} 个模型（${r.elapsed_ms}ms）`
+  } catch (e) {
+    testResult.value = { ok: false, detail: String(e.message || e) }
+    msg.value = `连接失败：${e.message || e}`
+  } finally {
+    fetchBusy.value = false
+  }
+}
+
+async function clearKey() {
+  if (!editId.value) {
+    msg.value = '先保存档案后再清除密钥'
+    return
+  }
+  profileBusy.value = true
+  try {
+    await api.saveDetectProfile({ id: editId.value, api_key: '', activate: false })
+    apiKey.value = ''
+    await load()
+    msg.value = '密钥已清除'
+  } catch (e) {
+    msg.value = String(e.message || e)
+  } finally {
+    profileBusy.value = false
+  }
 }
 
 function saveCascade() {
@@ -146,11 +302,6 @@ async function saveRuntimeEp(ep) {
       : `已切换仅 CPU 推理——${r.restarted || 0} 路相机已重启生效`
   } catch (e) { msg.value = String(e.message || e) }
   busy.value = false
-}
-
-function clearKey() {
-  apiKey.value = ''
-  save({ vlm: { api_key: '' } }, 'API 密钥已清除')
 }
 
 onMounted(load)
@@ -197,39 +348,74 @@ onMounted(load)
         <Models />
       </div>
 
-      <!-- API 服务（常显——首次配置 API 时必须先填这里，模式切换才有前提） -->
+      <!-- API 服务（多接入档案） -->
       <div class="card" ref="apiCardEl">
         <h3>API 服务
           <span v-if="mode === 'local'" class="muted" style="font-size:12px; font-weight:400">
-            （当前仅本地模式；此处保存后，点上方「仅 API」或「本地 + API 协作」卡片即生效）</span>
+            （当前仅本地模式；保存并启用后，点上方「仅 API」或「本地 + API 协作」卡片即生效）</span>
         </h3>
+        <p class="muted" style="margin-top:0; font-size:12.5px">
+          可保存多个 API 服务，随时切换；填写地址和密钥后点「获取模型」自动列出上游模型。
+        </p>
+        <div class="row" style="align-items:center; flex-wrap:wrap; margin-bottom:8px">
+          <select :value="editId" aria-label="已保存的 API 服务" style="max-width:240px"
+                  @change="selectProfile($event.target.value)">
+            <option value="">＋ 新增服务…</option>
+            <option v-for="p in profiles" :key="p.id" :value="p.id">
+              {{ p.name }}{{ p.id === activeId ? '（使用中）' : '' }}
+            </option>
+          </select>
+          <button class="ghost" @click="newProfile">新增</button>
+          <button v-if="editId" class="ghost" :disabled="profileBusy || editId === activeId"
+                  @click="useProfile">设为当前</button>
+          <button v-if="editId" class="ghost" :disabled="profileBusy" @click="removeProfile">删除</button>
+          <span class="muted" style="font-size:12px">
+            当前启用：<b>{{ activeProfile?.name || '未配置' }}</b></span>
+        </div>
         <div class="row" style="align-items:center; flex-wrap:wrap">
+          <input v-model="pName" placeholder="名称，如 公司 GPT / 本机 Ollama" aria-label="服务名称"
+                 style="width:190px" />
           <select v-model="provider" aria-label="服务协议" style="max-width:170px">
             <option value="openai_compat">OpenAI 兼容（通用）</option>
             <option value="ollama">Ollama（本机）</option>
             <option value="gemini">Gemini（原生视频）</option>
           </select>
-          <input v-model="url" ref="urlInputEl" placeholder="API 地址，如 https://api.example.com/v1" aria-label="API 地址" style="flex:1; min-width:220px" />
-          <input v-model="model" placeholder="模型名" aria-label="模型名" style="width:170px" />
+          <input v-model="url" ref="urlInputEl"
+                 placeholder="API 地址，如 https://api.example.com（OpenAI 兼容填根地址）"
+                 aria-label="API 地址" style="flex:1; min-width:240px" />
         </div>
         <div class="row" style="align-items:center; margin-top:8px; flex-wrap:wrap">
+          <input v-model="model" list="upstream-models" placeholder="模型名（可点右侧自动获取）"
+                 aria-label="模型名" style="width:240px" />
+          <datalist id="upstream-models">
+            <option v-for="m in modelOptions" :key="m" :value="m" />
+          </datalist>
+          <button class="ghost" :disabled="fetchBusy" @click="fetchModels">
+            {{ fetchBusy ? '获取中…' : '获取模型' }}</button>
           <input v-model="apiKey" type="password" :placeholder="apiKeySet ? '已保存密钥（留空不变更）' : 'API Key'"
-                 aria-label="API Key" style="width:230px" autocomplete="new-password" />
-          <input v-model.number="timeoutS" type="number" min="1" max="120" aria-label="超时秒数" style="width:110px" title="超时秒数" />
+                 aria-label="API Key" style="width:220px" autocomplete="new-password" />
+          <input v-model.number="timeoutS" type="number" min="1" max="120" aria-label="超时秒数"
+                 style="width:80px" title="超时秒数" />
           <span class="muted">秒</span>
-          <button v-if="apiKeySet" class="ghost" @click="clearKey">清除密钥</button>
+          <button v-if="apiKeySet && editId" class="ghost" @click="clearKey">清除密钥</button>
         </div>
         <label v-if="isRemoteUrl" class="remote-confirm" style="display:block; margin-top:8px">
           <input type="checkbox" v-model="allowRemote" />
-          我确认允许将监控截图发送到该外部服务（合规确认；回环地址无需勾选）
+          我确认允许将监控截图发送到该外部服务（合规确认；回环地址无需确认）
         </label>
-        <div class="row" style="margin-top:10px; align-items:center">
-          <button :disabled="busy" @click="saveApi">保存 API 配置</button>
-          <button class="ghost" :disabled="testBusy" @click="runTest">
-            {{ testBusy ? '测试中…' : '测试连接' }}</button>
+        <div class="row" style="margin-top:10px; align-items:center; flex-wrap:wrap">
+          <button :disabled="profileBusy" @click="saveProfile(true)">保存并启用</button>
+          <button class="ghost" :disabled="profileBusy" @click="saveProfile(false)">仅保存</button>
+          <button class="ghost" :disabled="fetchBusy" @click="fetchModels">
+            {{ fetchBusy ? '测试中…' : '测试连通性' }}</button>
+          <button class="ghost" :disabled="testBusy" title="用一张测试图走完整判定流程（需先保存并启用，且模式为仅 API/协作）"
+                  @click="runTest">{{ testBusy ? '判定中…' : '测试判定' }}</button>
           <span v-if="testResult && testResult.ok" class="st-ok">
-            连接成功（{{ testResult.elapsed_ms }}ms）—— 判定：{{ JSON.stringify(testResult.verdict) }}</span>
-          <span v-else-if="testResult" class="lv3">连接失败：{{ testResult.detail }}</span>
+            连接成功（{{ testResult.elapsed_ms }}ms）
+            <template v-if="testResult.count != null">，可用模型 {{ testResult.count }} 个</template>
+            <template v-if="testResult.verdict"> —— 判定：{{ JSON.stringify(testResult.verdict) }}</template>
+          </span>
+          <span v-else-if="testResult" class="lv3">失败：{{ testResult.detail }}</span>
         </div>
       </div>
 

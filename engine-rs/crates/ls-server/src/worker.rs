@@ -461,7 +461,18 @@ impl WorkerConfig {
                 let p = crate::deploy::default_install_root().join("models/yolo11n_ppe.onnx");
                 p.is_file().then(|| p.to_string_lossy().into_owned())
             });
+        // 0.4.0：实验服检测开关（网页「模型管理」；默认开）。关闭时即便模型存在
+        // 也不装配 PPE 级联——仅人员检测。
+        let ppe_enabled = s
+            .setting_get("ppe.enabled")
+            .ok()
+            .flatten()
+            .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
+            .unwrap_or(true);
         let ppe = ppe_raw.and_then(|raw| {
+            if !ppe_enabled {
+                return None;
+            }
             let p = PathBuf::from(raw.trim());
             ls_analyzer::detector::anchor_model_file(&p).map(|model_path| {
                 ls_analyzer::ppe::PpeConfig {

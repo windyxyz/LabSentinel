@@ -96,23 +96,79 @@ describe('DetectPanel.vue（UX2）', () => {
     expect(w.text()).toContain('合规') // 引导文案
   })
 
-  it('API 配置保存：api_key 留空不上送（不变更语义）', async () => {
+  it('API 档案保存：api_key 留空不上送（不变更语义）', async () => {
     const fn = mockFetch({
       'GET /api/detect/config': {
         ...CONFIG, mode: 'api',
         vlm: { ...CONFIG.vlm, url: 'http://127.0.0.1:8899', api_key_set: true },
       },
-      'PUT /api/detect/config': { ok: true },
+      'GET /api/detect/profiles': { active: '', legacy_fallback: true, profiles: [] },
+      'POST /api/detect/profiles': { ok: true, active: 'p1', restarted: 0,
+        profile: { id: 'p1', name: 'API 服务', provider: 'openai_compat',
+                   url: 'http://127.0.0.1:8899', model: '', api_key: '***',
+                   api_key_set: true, timeout_s: 30, allow_remote: false } },
     })
     const w = mount(DetectPanel)
     await flushPromises()
-    const saveBtn = w.findAll('button').find((b) => b.text() === '保存 API 配置')
+    const saveBtn = w.findAll('button').find((b) => b.text() === '保存并启用')
     await saveBtn.trigger('click')
     await flushPromises()
-    const put = fn.mock.calls.find((c) => c[1]?.method === 'PUT')
-    const body = JSON.parse(put[1].body)
-    expect(body.vlm.url).toBe('http://127.0.0.1:8899')
-    expect(body.vlm.api_key).toBeUndefined() // 未输入新值=不变更
+    const post = fn.mock.calls.find((c) => c[1]?.method === 'POST' && c[0].includes('/api/detect/profiles'))
+    const body = JSON.parse(post[1].body)
+    expect(body.url).toBe('http://127.0.0.1:8899')
+    expect(body.api_key).toBeUndefined() // 未输入新值=不变更
+    expect(body.activate).toBe(true)
+  })
+
+  it('获取模型：POST /api/detect/models 并回填上游模型清单', async () => {
+    const fn = mockFetch({
+      'GET /api/detect/config': {
+        ...CONFIG,
+        vlm: { ...CONFIG.vlm, url: 'http://127.0.0.1:8899' },
+      },
+      'GET /api/detect/profiles': { active: '', legacy_fallback: true, profiles: [] },
+      'POST /api/detect/models': { ok: true, elapsed_ms: 12, count: 2,
+        models: ['gpt-4o-mini', 'gpt-4o'] },
+    })
+    const w = mount(DetectPanel)
+    await flushPromises()
+    const btn = w.findAll('button').find((b) => b.text() === '获取模型')
+    await btn.trigger('click')
+    await flushPromises()
+    const post = fn.mock.calls.find((c) => c[1]?.method === 'POST' && c[0].includes('/api/detect/models'))
+    expect(post).toBeTruthy()
+    expect(JSON.parse(post[1].body).url).toBe('http://127.0.0.1:8899')
+    expect(w.findAll('#upstream-models option').length).toBe(2)
+    expect(w.text()).toContain('拉到 2 个模型')
+  })
+
+  it('切换已保存档案：POST /profiles/{id}/activate', async () => {
+    const fn = mockFetch({
+      'GET /api/detect/config': { ...CONFIG, mode: 'api' },
+      'GET /api/detect/profiles': {
+        active: 'p1', legacy_fallback: false,
+        profiles: [
+          { id: 'p1', name: '公司 GPT', provider: 'openai_compat', url: 'https://a.example.com',
+            model: 'gpt-4o-mini', api_key: '***', api_key_set: true,
+            timeout_s: 30, allow_remote: true },
+          { id: 'p2', name: '本机 Ollama', provider: 'ollama', url: 'http://127.0.0.1:11434',
+            model: 'llava', api_key: '***', api_key_set: false,
+            timeout_s: 30, allow_remote: false },
+        ],
+      },
+      'POST /api/detect/profiles/p2/activate': { ok: true, active: 'p2', restarted: 1 },
+    })
+    const w = mount(DetectPanel)
+    await flushPromises()
+    const sel = w.find('select[aria-label="已保存的 API 服务"]')
+    await sel.setValue('p2')
+    await flushPromises()
+    const act = w.findAll('button').find((b) => b.text() === '设为当前')
+    await act.trigger('click')
+    await flushPromises()
+    const post = fn.mock.calls.find((c) => c[1]?.method === 'POST' && c[0].includes('/activate'))
+    expect(post[0]).toContain('/api/detect/profiles/p2/activate')
+    expect(w.text()).toContain('已切换为')
   })
 
   it('预算耗尽展示降级横幅', async () => {

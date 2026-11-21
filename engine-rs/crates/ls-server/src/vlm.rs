@@ -196,6 +196,118 @@ pub fn analyze_frames(cfg: &VlmCfg, prompt: &str, frames: &[Vec<u8>]) -> Result<
     parse_verdict(&text)
 }
 
+/// 上游模型清单（0.4.0：网页端「自动获取模型」）——仅 GET 元数据端点，
+/// 不发送监控画面；openai_compat / ollama / gemini 三协议。
+pub fn list_models(
+    provider: &str,
+    url: &str,
+    api_key: &str,
+    timeout_s: u64,
+) -> Result<Vec<String>, String> {
+    let base = url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("API 地址为空".into());
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(
+            timeout_s.clamp(3, 120),
+        )))
+        .build()
+        .into();
+    let (endpoint, auth) = match provider {
+        "openai_compat" => {
+            let ep = if base.ends_with("/v1") {
+                format!("{base}/models")
+            } else {
+                format!("{base}/v1/models")
+            };
+            (ep, true)
+        }
+        "ollama" => (format!("{base}/api/tags"), false),
+        "gemini" => {
+            let ep = if base.contains("/v1beta") || base.contains("/v1") {
+                format!("{base}/models?key={}", pct_encode(api_key))
+            } else {
+                format!("{base}/v1beta/models?key={}", pct_encode(api_key))
+            };
+            (ep, false)
+        }
+        p => return Err(format!("未知 provider: {p}")),
+    };
+    let mut req = agent.get(&endpoint);
+    if auth && !api_key.is_empty() {
+        req = req.header("Authorization", &format!("Bearer {api_key}"));
+    }
+    let mut resp = req.call().map_err(|e| format!("连接失败: {e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("响应读取失败: {e}"))?;
+    if status >= 300 {
+        // 失败时回显截断的响应体，便于识别 401/404 与错误原因
+        let brief: String = text.chars().take(240).collect();
+        return Err(format!("HTTP {status}: {brief}"));
+    }
+    let data: Value = serde_json::from_str(&text).map_err(|_| "响应非 JSON".to_string())?;
+    let mut out: Vec<String> = match provider {
+        "openai_compat" => data["data"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "ollama" => data["models"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => data["models"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| {
+                        let name = m.get("name").and_then(|v| v.as_str())?;
+                        // Gemini 同时列出 embedding 等；只保留可 generateContent 的
+                        let ok = m
+                            .get("supportedGenerationMethods")
+                            .and_then(|v| v.as_array())
+                            .map(|ms| ms.iter().any(|x| x.as_str() == Some("generateContent")))
+                            .unwrap_or(true);
+                        ok.then(|| name.trim_start_matches("models/").to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return Err("服务可连通，但未返回任何模型（检查地址/密钥/账号权限）".into());
+    }
+    Ok(out)
+}
+
+/// 最小百分号编码（API Key 进 query；保留 RFC3986 unreserved）。
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// 宽松判定解析：剥围栏 → JSON → persons/violations 规整（未知 violation 丢弃）。
 pub fn parse_verdict(text: &str) -> Result<Value, String> {
     let t = text.trim();

@@ -124,6 +124,15 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("DELETE", "/api/face/persons/:subject"),
     ("POST", "/api/alert-test"),
     ("POST", "/api/models/ppe/download"),
+    // ---- 0.4.0：模型管理（启停/替换）+ API 多接入档案 ----
+    ("PUT", "/api/models/ppe/config"),
+    ("POST", "/api/models/ppe/upload"),
+    ("POST", "/api/models/ppe/reset"),
+    ("GET", "/api/detect/profiles"),
+    ("POST", "/api/detect/profiles"),
+    ("POST", "/api/detect/profiles/:id/activate"),
+    ("DELETE", "/api/detect/profiles/:id"),
+    ("POST", "/api/detect/models"),
     // ---- R2-309 批次 3b（收尾批） ----
     ("GET", "/api/folder-images/export.csv"),
     ("GET", "/api/folder-images/:iid"),
@@ -248,6 +257,20 @@ pub fn build_router(state: Shared) -> Router {
         .route("/face/persons/:subject", delete(face_delete))
         .route("/alert-test", post(alert_test))
         .route("/models/ppe/download", post(ppe_download))
+        // ---- 0.4.0：模型管理 + API 多接入档案 ----
+        .route("/models/ppe/config", put(ppe_config))
+        .route("/models/ppe/upload", post(ppe_upload))
+        .route("/models/ppe/reset", post(ppe_reset))
+        .route(
+            "/detect/profiles",
+            get(detect_profiles_get).post(detect_profile_upsert),
+        )
+        .route(
+            "/detect/profiles/:id/activate",
+            post(detect_profile_activate),
+        )
+        .route("/detect/profiles/:id", delete(detect_profile_delete))
+        .route("/detect/models", post(detect_models))
         // ---- R2-309 批次 3b ----
         .route("/folder-images/export.csv", get(folder_images_csv))
         .route("/folder-images/:iid", get(folder_image_detail))

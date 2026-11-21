@@ -22,7 +22,7 @@ use std::path::Path;
 use crate::fernet;
 use crate::state::Shared;
 use crate::util::*;
-use axum::extract::State;
+use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
@@ -88,8 +88,8 @@ fn parse_f64(v: &str) -> Option<f64> {
 }
 
 impl DetectCfg {
-    /// DB → env → 默认（见模块注释）。`data_dir` 供 fernet 解密 api_key。
-    pub fn load(s: &ls_store::Store, data_dir: &Path) -> DetectCfg {
+    /// 未启用多接入档案时的旧链：DB → env → 默认。`data_dir` 供 fernet 解密 api_key。
+    fn load_legacy(s: &ls_store::Store, data_dir: &Path) -> DetectCfg {
         let d = DetectCfg::default();
         let mode = db_get(s, "detect.mode")
             .or_else(|| env_get("LS_DETECT_MODE"))
@@ -145,6 +145,28 @@ impl DetectCfg {
             daily_budget,
             on_negative,
         }
+    }
+
+    /// 生效配置：多接入档案（detect.profiles）有存量时以「当前启用档案」覆盖
+    /// API 字段；否则沿用旧链（DB → env → 默认）。
+    pub fn load(s: &ls_store::Store, data_dir: &Path) -> DetectCfg {
+        let mut cfg = Self::load_legacy(s, data_dir);
+        let profiles = profiles_load(s, data_dir);
+        if profiles.is_empty() {
+            return cfg;
+        }
+        let id = active_profile_id(s)
+            .filter(|id| profiles.iter().any(|p| &p.id == id))
+            .unwrap_or_else(|| profiles[0].id.clone());
+        if let Some(p) = profiles.iter().find(|p| p.id == id) {
+            cfg.provider = p.provider.clone();
+            cfg.url = p.url.clone();
+            cfg.model = p.model.clone();
+            cfg.api_key = p.api_key.clone();
+            cfg.timeout_s = p.timeout_s;
+            cfg.allow_remote = p.allow_remote;
+        }
+        cfg
     }
 
     /// 合规红线（与模式无关）：URL 非空且（回环免确认 / DB 或 env 确认位任一）。
@@ -208,6 +230,163 @@ fn persons_triggered(persons: i64, max_conf: f32, cfg: &DetectCfg) -> bool {
     }
     let c = max_conf as f64;
     c >= cfg.conf_lo && (cfg.conf_hi <= 0.0 || c < cfg.conf_hi)
+}
+
+// ---- 多接入档案（0.4.0：用户可保存多个 API 服务并随时切换）----
+//
+// 存储：app_settings `detect.profiles` = JSON 数组；每项 api_key 以 fernet
+// `enc:v1:` 落盘（与旧 detect.vlm.api_key 同口径），内存中为明文。
+// `detect.active_profile` = 当前启用 id。无存量时回退旧单配置（detect.vlm.*）。
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub url: String,
+    pub model: String,
+    pub api_key: String, // 内存明文；落盘加密
+    pub timeout_s: u64,
+    pub allow_remote: bool,
+}
+
+/// 读取档案（解密 api_key）；JSON 损坏时返回空表（按旧配置回退，不阻塞服务）。
+pub fn profiles_load(s: &ls_store::Store, data_dir: &Path) -> Vec<Profile> {
+    let Some(raw) = db_get(s, "detect.profiles") else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(items) = v.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|it| {
+            let id = it.get("id")?.as_str()?.trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let raw_key = it.get("api_key").and_then(|x| x.as_str()).unwrap_or("");
+            let api_key = if raw_key.is_empty() {
+                String::new()
+            } else if raw_key.starts_with("enc:v1:") {
+                fernet::unprotect(raw_key, data_dir)
+            } else {
+                // 兼容手工写入的明文（不主动回写，保存时即加密）
+                raw_key.to_string()
+            };
+            Some(Profile {
+                id,
+                name: it
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("API 服务")
+                    .to_string(),
+                provider: it
+                    .get("provider")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("openai_compat")
+                    .to_string(),
+                url: it
+                    .get("url")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim_end_matches('/')
+                    .to_string(),
+                model: it
+                    .get("model")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                api_key,
+                timeout_s: it
+                    .get("timeout_s")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(30)
+                    .clamp(1, 120),
+                allow_remote: it
+                    .get("allow_remote")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// 写回档案；任一 api_key 加密失败则整体拒绝（拒绝明文落盘语义）。
+pub fn profiles_store(
+    s: &ls_store::Store,
+    data_dir: &Path,
+    profiles: &[Profile],
+) -> Result<(), String> {
+    let mut arr = Vec::with_capacity(profiles.len());
+    for p in profiles {
+        let key = if p.api_key.is_empty() {
+            String::new()
+        } else {
+            fernet::protect(&p.api_key, data_dir)
+                .ok_or_else(|| "api_key 加密失败（密钥存储不可用），已拒绝保存".to_string())?
+        };
+        arr.push(json!({
+            "id": p.id,
+            "name": p.name,
+            "provider": p.provider,
+            "url": p.url.trim_end_matches('/'),
+            "model": p.model,
+            "api_key": key,
+            "timeout_s": p.timeout_s,
+            "allow_remote": p.allow_remote,
+        }));
+    }
+    s.setting_set("detect.profiles", &Value::Array(arr).to_string())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+pub fn active_profile_id(s: &ls_store::Store) -> Option<String> {
+    db_get(s, "detect.active_profile").map(|v| v.trim().to_string())
+}
+
+/// 对外 JSON：api_key 一律掩码，仅回 api_key_set。
+pub fn profile_json(p: &Profile) -> Value {
+    json!({
+        "id": p.id,
+        "name": p.name,
+        "provider": p.provider,
+        "url": p.url,
+        "model": p.model,
+        "api_key": "***",
+        "api_key_set": !p.api_key.is_empty(),
+        "timeout_s": p.timeout_s,
+        "allow_remote": p.allow_remote,
+    })
+}
+
+/// 旧单配置 → 虚拟档案（仅展示/迁移用，不落库）。
+fn legacy_profile(cfg: &DetectCfg) -> Profile {
+    Profile {
+        id: "default".into(),
+        name: "默认服务".into(),
+        provider: cfg.provider.clone(),
+        url: cfg.url.clone(),
+        model: cfg.model.clone(),
+        api_key: cfg.api_key.clone(),
+        timeout_s: cfg.timeout_s,
+        allow_remote: cfg.allow_remote,
+    }
+}
+
+fn next_profile_id(list: &[Profile]) -> String {
+    let mut n = 1u32;
+    loop {
+        let id = format!("p{n}");
+        if !list.iter().any(|p| p.id == id) {
+            return id;
+        }
+        n += 1;
+    }
 }
 
 // ---- 用量计数（跨重启持久化 app_settings）----
@@ -473,6 +652,282 @@ pub(crate) async fn detect_config_put(
         .into_response())
     });
     out
+}
+
+// ---- 多接入档案 handlers（0.4.0）----
+
+/// GET /api/detect/profiles——档案列表 + 当前启用；无存量时把旧单配置作为
+/// 虚拟「默认服务」返回（legacy_fallback=true，首次保存即落库迁移）。
+pub(crate) async fn detect_profiles_get(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        let data_dir = Path::new(&st.data_dir);
+        let stored = profiles_load(s, data_dir);
+        let (list, legacy) = if stored.is_empty() {
+            let cfg = DetectCfg::load_legacy(s, data_dir);
+            let list = if cfg.url.is_empty() {
+                Vec::new()
+            } else {
+                vec![legacy_profile(&cfg)]
+            };
+            (list, true)
+        } else {
+            (stored, false)
+        };
+        let active = active_profile_id(s)
+            .filter(|id| list.iter().any(|p| &p.id == id))
+            .unwrap_or_else(|| list.first().map(|p| p.id.clone()).unwrap_or_default());
+        Ok(Json(json!({
+            "active": active,
+            "legacy_fallback": legacy,
+            "profiles": list.iter().map(profile_json).collect::<Vec<_>>(),
+        }))
+        .into_response())
+    })
+}
+
+/// POST /api/detect/profiles——新增或更新（按 id；无 id = 新增，自动分配 pN）。
+/// api_key 缺省/`***`=保持不变，空串=清除；保存后若是唯一/启用档案则软重启生效。
+pub(crate) async fn detect_profile_upsert(
+    State(st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
+    let provider_in = body.get("provider").and_then(|v| v.as_str());
+    if let Some(p) = provider_in {
+        if !PROVIDERS.contains(&p) {
+            return detail_err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "provider 必须是 openai_compat|ollama|gemini",
+            )
+            .into_response();
+        }
+    }
+    let url_in = body
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().trim_end_matches('/').to_string());
+    if let Some(u) = &url_in {
+        if !u.is_empty() && !u.starts_with("http://") && !u.starts_with("https://") {
+            return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "url 必须是 http(s) 地址")
+                .into_response();
+        }
+    }
+    with_store(&st, |s| {
+        let data_dir = Path::new(&st.data_dir);
+        let mut list = profiles_load(s, data_dir);
+        let id_in = body
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let idx = id_in
+            .as_ref()
+            .and_then(|id| list.iter().position(|p| &p.id == id));
+        let id = match (idx, id_in) {
+            (Some(i), _) => list[i].id.clone(),
+            (None, Some(id)) => id,
+            (None, None) => next_profile_id(&list),
+        };
+        let mut p = match idx {
+            Some(i) => list[i].clone(),
+            None => Profile {
+                id: id.clone(),
+                name: "API 服务".into(),
+                provider: "openai_compat".into(),
+                url: String::new(),
+                model: String::new(),
+                api_key: String::new(),
+                timeout_s: 30,
+                allow_remote: false,
+            },
+        };
+        if let Some(n) = body.get("name").and_then(|v| v.as_str()) {
+            let n = n.trim();
+            if !n.is_empty() {
+                p.name = n.to_string();
+            }
+        }
+        if let Some(v) = provider_in {
+            p.provider = v.to_string();
+        }
+        if let Some(u) = &url_in {
+            p.url = u.clone();
+        }
+        if let Some(m) = body.get("model").and_then(|v| v.as_str()) {
+            p.model = m.trim().to_string();
+        }
+        if let Some(t) = body.get("timeout_s").and_then(|v| v.as_u64()) {
+            p.timeout_s = t.clamp(1, 120);
+        }
+        if let Some(a) = body.get("allow_remote").and_then(|v| v.as_bool()) {
+            p.allow_remote = a;
+        }
+        if let Some(k) = body.get("api_key").and_then(|v| v.as_str()) {
+            if k != "***" {
+                p.api_key = k.trim().to_string();
+            }
+        }
+        match idx {
+            Some(i) => list[i] = p.clone(),
+            None => list.push(p.clone()),
+        }
+        if let Err(e) = profiles_store(s, data_dir, &list) {
+            return Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response());
+        }
+        // 首个档案默认启用；显式 activate=true 也切到该档案
+        let want_active = body
+            .get("activate")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let cur_active = active_profile_id(s).unwrap_or_default();
+        if cur_active.is_empty() || (want_active && cur_active != p.id) {
+            s.setting_set("detect.active_profile", &p.id)?;
+        }
+        let active_now = active_profile_id(s).unwrap_or_default();
+        let restarted = if active_now == p.id {
+            crate::worker::restart_following_global(&st, s)
+        } else {
+            0
+        };
+        Ok(Json(json!({
+            "ok": true,
+            "profile": profile_json(&p),
+            "active": active_now,
+            "restarted": restarted,
+        }))
+        .into_response())
+    })
+}
+
+/// POST /api/detect/profiles/{id}/activate——切换启用档案并软重启跟随全局的相机。
+pub(crate) async fn detect_profile_activate(
+    State(st): State<Shared>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    with_store(&st, |s| {
+        let data_dir = Path::new(&st.data_dir);
+        let list = profiles_load(s, data_dir);
+        let Some(p) = list.iter().find(|p| p.id == id) else {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "档案不存在").into_response());
+        };
+        s.setting_set("detect.active_profile", &p.id)?;
+        let restarted = crate::worker::restart_following_global(&st, s);
+        Ok(Json(json!({
+            "ok": true, "active": p.id, "restarted": restarted,
+            "profile": profile_json(p),
+        }))
+        .into_response())
+    })
+}
+
+/// DELETE /api/detect/profiles/{id}——删除档案；删当前启用项则回退到第一个。
+pub(crate) async fn detect_profile_delete(
+    State(st): State<Shared>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    with_store(&st, |s| {
+        let data_dir = Path::new(&st.data_dir);
+        let mut list = profiles_load(s, data_dir);
+        let before = list.len();
+        list.retain(|p| p.id != id);
+        if list.len() == before {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "档案不存在").into_response());
+        }
+        if let Err(e) = profiles_store(s, data_dir, &list) {
+            return Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response());
+        }
+        let cur = active_profile_id(s).unwrap_or_default();
+        if cur == id {
+            let next = list.first().map(|p| p.id.clone()).unwrap_or_default();
+            s.setting_set("detect.active_profile", &next)?;
+        }
+        let restarted = crate::worker::restart_following_global(&st, s);
+        Ok(Json(json!({
+            "ok": true, "active": active_profile_id(s).unwrap_or_default(),
+            "count": list.len(), "restarted": restarted,
+        }))
+        .into_response())
+    })
+}
+
+/// POST /api/detect/models——连通性检查 + 拉取上游模型清单（自动填充）。
+/// body: {id?, provider?, url?, api_key?, timeout_s?}；给 id 时缺省字段与密钥
+/// 取自该档案（免重复输入）。只发 GET /models（不发送监控画面）。
+pub(crate) async fn detect_models(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    let mut provider = body
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("openai_compat")
+        .to_string();
+    let mut url = body
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut key = body
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v != "***")
+        .unwrap_or_default();
+    let mut timeout_s = body
+        .get("timeout_s")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(15)
+        .clamp(3, 120);
+    if let Some(id) = body.get("id").and_then(|v| v.as_str()) {
+        if let Ok(s) = ls_store::Store::open(&st.db_path) {
+            let data_dir = Path::new(&st.data_dir);
+            if let Some(p) = profiles_load(&s, data_dir).into_iter().find(|p| p.id == id) {
+                if url.is_empty() {
+                    url = p.url.clone();
+                }
+                if key.is_empty() {
+                    key = p.api_key.clone();
+                }
+                if body.get("provider").is_none() {
+                    provider = p.provider.clone();
+                }
+                if body.get("timeout_s").is_none() {
+                    timeout_s = p.timeout_s.clamp(3, 120);
+                }
+            }
+        }
+    }
+    if url.is_empty() {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "未配置 API 地址").into_response();
+    }
+    if !PROVIDERS.contains(&provider.as_str()) {
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "provider 必须是 openai_compat|ollama|gemini",
+        )
+        .into_response();
+    }
+    let started = std::time::Instant::now();
+    match crate::vlm::list_models(&provider, &url, &key, timeout_s) {
+        Ok(models) => Json(json!({
+            "ok": true,
+            "provider": provider,
+            "url": url.trim_end_matches('/'),
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "models": models,
+            "count": models.len(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "ok": false,
+                "provider": provider,
+                "url": url.trim_end_matches('/'),
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "models": [],
+                "detail": e,
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// POST /api/detect/test——「测试连接」：用当前配置对一张测试图发一次真实判定。

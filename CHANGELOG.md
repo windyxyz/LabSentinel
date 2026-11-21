@@ -4,6 +4,27 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 SemVer
 （决策 77-Q-05：下一版 0.2.0；构建元数据 `+<YYYYMMDD>.<shortsha>`）。
 
+## [0.4.0] - 2026-11-21
+
+### 模型管理 & API 多接入
+- **实验服模型可关闭/替换**（用户指令）：模型管理新增「启用实验服检测」开关
+  （关闭后 worker 不装配 PPE，仅人员检测）；「上传替换模型」支持上传自定义
+  `.onnx`（落 `data/models/ppe-custom.onnx`，立即启用并软重启相机）；
+  「恢复随包模型」一键回到安装包自带权重。`/api/models/ppe/status` 新增
+  `enabled`/`source`（bundled/custom/env/none）。
+- **API 多接入档案**：可保存多个上游服务（名称/协议/地址/模型/密钥/超时/合规位），
+  在「模型与检测」里随时切换启用；首个档案自动启用，切换后跟随全局的相机即时
+  软重启。密钥逐个 fernet 加密落盘，列表接口一律返回 `***`。新增
+  `GET/POST /api/detect/profiles`、`POST /api/detect/profiles/:id/activate`、
+  `DELETE /api/detect/profiles/:id`。旧单配置（detect.vlm.*）自动作为「默认服务」
+  展示，首次保存即完成迁移。
+- **连通性测试 + 自动获取模型**：新增 `POST /api/detect/models`——OpenAI 兼容
+  `/v1/models`、Ollama `/api/tags`、Gemini `/v1beta/models` 三协议，返回耗时/
+  模型清单/错误原因；网页端「获取模型」自动填充下拉，免手抄模型名。「测试判定」
+  仍用一张真实图片走完整判定链。
+- **验证**：Web 57 tests（+5）；Rust 136 tests；clippy/fmt 全绿；本机桩服务实测
+  档案创建/切换/删除、模型拉取（2 个模型）、图片判定、PPE 启停/上传/恢复全通。
+
 ## [0.3.1] - 2026-11-21
 
 ### 实验服模型随包发布 + 版本号修复

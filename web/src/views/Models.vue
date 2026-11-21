@@ -1,19 +1,82 @@
 <script setup>
-/** Q-08 / T-406：实验服模型按需下载（许可确认 + SHA256 校验）。 */
+/** 实验服（PPE）模型：随包提供 + 启停开关 + 上传替换（0.4.0）。 */
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
 
 const status = ref(null)
 const busy = ref(false)
+const uploading = ref(false)
 const msg = ref('')
 const confirmed = ref(false)
+const fileEl = ref(null)
+
+const SOURCE_TEXT = {
+  bundled: '随安装包提供',
+  custom: '自定义上传',
+  env: '环境变量指定',
+  none: '未找到模型',
+}
 
 async function load() {
   try {
     status.value = await api.ppeStatus()
-    msg.value = ''
   } catch (e) {
     msg.value = String(e.message || e)
+  }
+}
+
+async function toggle(ev) {
+  const enabled = ev.target.checked
+  busy.value = true
+  msg.value = ''
+  try {
+    const r = await api.ppeConfig(enabled)
+    await load()
+    msg.value = enabled
+      ? `已开启实验服检测${r.restarted ? `（${r.restarted} 路相机已重启生效）` : ''}`
+      : `已关闭实验服检测（仅人员检测）${r.restarted ? `，${r.restarted} 路相机已重启` : ''}`
+  } catch (e) {
+    msg.value = String(e.message || e)
+    await load()
+  } finally {
+    busy.value = false
+  }
+}
+
+function pickFile() {
+  fileEl.value?.click()
+}
+
+async function onFile(ev) {
+  const f = ev.target.files?.[0]
+  ev.target.value = ''
+  if (!f) return
+  if (!confirm(`上传并启用「${f.name}」（${(f.size / 1048576).toFixed(1)} MB）？\n将替换当前实验服模型，可在之后点「恢复随包模型」。`)) return
+  uploading.value = true
+  msg.value = '上传中…'
+  try {
+    const r = await api.ppeUpload(f)
+    await load()
+    msg.value = `已上传并启用${r.restarted ? `（${r.restarted} 路相机已重启）` : ''}`
+  } catch (e) {
+    msg.value = `上传失败: ${e.message || e}`
+  } finally {
+    uploading.value = false
+  }
+}
+
+async function reset() {
+  if (!confirm('恢复为安装包自带的实验服模型？')) return
+  busy.value = true
+  msg.value = ''
+  try {
+    const r = await api.ppeReset()
+    await load()
+    msg.value = `已恢复随包模型${r.restarted ? `（${r.restarted} 路相机已重启）` : ''}`
+  } catch (e) {
+    msg.value = String(e.message || e)
+  } finally {
+    busy.value = false
   }
 }
 
@@ -49,15 +112,31 @@ onMounted(load)
           <b :class="status.mode === 'ppe' ? 'st-ok' : 'st-idle'">
             {{ status.mode === 'ppe' ? '人员 + 实验服检测' : '仅人员检测' }}
           </b>
-          <span v-if="status.bundled" class="muted">（随安装包提供，开箱即用）</span>
-          <span v-else-if="status.installed && !status.active" class="muted">（文件已就绪，重启服务后生效）</span>
+          <span class="muted">（模型来源：{{ SOURCE_TEXT[status.source] || status.source || '—' }}）</span>
+          <span v-if="status.installed && !status.enabled" class="muted">
+            ——已关闭，打开下方开关即启用
+          </span>
         </p>
+        <label v-if="status.installed" class="ppe-switch" style="display:flex;align-items:center;gap:10px;margin:10px 0">
+          <input type="checkbox" :checked="status.enabled" :disabled="busy"
+                 @change="toggle" />
+          <span>启用实验服检测</span>
+        </label>
         <p class="muted" style="white-space:pre-wrap">{{ status.license_notice }}</p>
         <p class="muted">
           校验 SHA256：<code>{{ status.sha256 || '—' }}</code><br />
           大小：<template v-if="status.size_bytes > 0">{{ (status.size_bytes / 1048576).toFixed(1) }} MB</template><template v-else>—</template>
           <template v-if="!status.bundled">；来源见 assets.lock.json</template>
         </p>
+        <div class="row" style="margin-top:10px;align-items:center;flex-wrap:wrap">
+          <button class="ghost" :disabled="uploading" @click="pickFile">
+            {{ uploading ? '上传中…' : '上传替换模型（.onnx）' }}</button>
+          <button class="ghost" :disabled="busy || status.source !== 'custom'" @click="reset">
+            恢复随包模型</button>
+          <input ref="fileEl" type="file" accept=".onnx" style="display:none" @change="onFile" />
+          <span class="muted" style="font-size:12px">
+            上传后立即启用；替换文件保存在数据目录 models\ppe-custom.onnx，卸载不删除用户数据。</span>
+        </div>
         <template v-if="!status.installed">
           <label style="display:block;margin:10px 0">
             <input type="checkbox" v-model="confirmed" />
@@ -67,8 +146,6 @@ onMounted(load)
             {{ busy ? '下载中…' : '确认许可并下载模型' }}
           </button>
         </template>
-        <p v-else-if="status.bundled" class="st-ok">实验服模型已随安装包就绪并默认启用，无需下载。</p>
-        <p v-else class="st-ok">模型已安装且哈希校验通过。</p>
       </template>
       <p v-if="msg" class="muted" style="margin-top:8px">{{ msg }}</p>
     </div>

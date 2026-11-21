@@ -45,7 +45,10 @@ mod worker;
 // + cascade 复核引擎的数据面
 mod detect;
 
-pub(crate) use detect::{detect_config_get, detect_config_put, detect_test, detect_usage};
+pub(crate) use detect::{
+    detect_config_get, detect_config_put, detect_models, detect_profile_activate,
+    detect_profile_delete, detect_profile_upsert, detect_profiles_get, detect_test, detect_usage,
+};
 
 // RA4.2（ADR-0011）：版本归档/回滚（install_portable 语义的 Rust 实现）
 mod deploy;

@@ -124,9 +124,23 @@ export const api = {
   saveAlertTemplate: (d) => req('PUT', '/api/alert-template', d),
   audit: (params = {}) => req('GET', '/api/audit?' + new URLSearchParams(params)),
   alertTemplatePreview: (d) => req('POST', '/api/alert-template/preview', d),
-  // Q-08 / T-406：实验服模型按需下载（许可确认 + SHA256 校验）
+  // Q-08 / T-406：实验服模型按需下载（许可确认 + SHA256 校验）；0.3.1 起随包
   ppeStatus: () => req('GET', '/api/models/ppe/status'),
   ppeDownload: (confirm_license) => req('POST', '/api/models/ppe/download', { confirm_license }),
+  // 0.4.0：实验服模型启停/替换
+  ppeConfig: (enabled) => req('PUT', '/api/models/ppe/config', { enabled }),
+  ppeUpload: (file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return req('POST', '/api/models/ppe/upload', fd)
+  },
+  ppeReset: () => req('POST', '/api/models/ppe/reset', {}),
+  // 0.4.0：API 多接入档案（保存多个上游，随时切换/测试/自动拉模型）
+  detectProfiles: () => req('GET', '/api/detect/profiles'),
+  saveDetectProfile: (p) => req('POST', '/api/detect/profiles', p),
+  activateDetectProfile: (id) => req('POST', `/api/detect/profiles/${id}/activate`, {}),
+  deleteDetectProfile: (id) => req('DELETE', `/api/detect/profiles/${id}`),
+  detectModels: (p) => req('POST', '/api/detect/models', p),
   // R2-203：设备配对与三级令牌
   createPairing: () => req('POST', '/api/pairing'),
   listDevices: () => req('GET', '/api/devices'),

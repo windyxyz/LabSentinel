@@ -568,6 +568,31 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
             .or_else(|| db_ppe.filter(|p| std::path::Path::new(p).is_file()))
             .or_else(|| bundled.clone());
         let installed = model_path.is_some();
+        // 0.4.0：启停开关（默认开）。关闭后 worker 不装配 PPE，仅人员检测。
+        let enabled = s
+            .setting_get("ppe.enabled")
+            .ok()
+            .flatten()
+            .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
+            .unwrap_or(true);
+        let source = if std::env::var("LS_PPE_MODEL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some_and(|p| std::path::Path::new(&p).is_file())
+        {
+            "env"
+        } else if s
+            .setting_get("ppe_model")
+            .ok()
+            .flatten()
+            .is_some_and(|p| std::path::Path::new(&p).is_file())
+        {
+            "custom"
+        } else if bundled.is_some() {
+            "bundled"
+        } else {
+            "none"
+        };
         // 展示实际文件的大小与 SHA256（随包文件与锁文件同源，可核验）
         let (size_bytes, sha256) = model_path
             .as_ref()
@@ -576,12 +601,14 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
             .unwrap_or((-1, String::new()));
         Ok(Json(json!({
             "installed": installed,
+            "enabled": enabled,
+            "source": source,
             "bundled": bundled.is_some(),
-            "mode": if installed { "ppe" } else { "person_only" },
-            "active": installed,
+            "mode": if installed && enabled { "ppe" } else { "person_only" },
+            "active": installed && enabled,
             "license_confirmed_required": !installed,
             "license_notice": if bundled.is_some() {
-                "实验服模型已随安装包提供（权重由 Roboflow 训练数据集派生，数据集许可 CC BY 4.0，署名见 NOTICE）。已默认启用，无需下载。"
+                "实验服模型已随安装包提供（权重由 Roboflow 训练数据集派生，数据集许可 CC BY 4.0，署名见 NOTICE）。已默认启用，可随时关闭或替换。"
             } else {
                 "实验服模型权重由 Roboflow 训练数据集派生，具体许可仍待确认（Q-08）。下载即表示你已阅读并接受该数据集的用途限制。"
             },
@@ -591,13 +618,127 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
                 // P2-6：只回显文件名（不泄露目录布局）
                 std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned())
             }),
-            "note": if installed {
-                "实验服模型已就绪"
+            "note": if !installed {
+                "安装包未内置实验服模型；可上传自定义 ONNX 或更新到随包版本"
+            } else if enabled {
+                "实验服模型已启用"
             } else {
-                "安装包未内置实验服模型；建议更新到随包版本"
+                "实验服检测已关闭（仅人员检测）"
             },
         }))
         .into_response())
+    })
+}
+
+/// PUT /api/models/ppe/config——启停实验服检测 {enabled: bool}；运行中相机软重启。
+pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) else {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "enabled 必须是布尔值")
+            .into_response();
+    };
+    with_store(&st, |s| {
+        s.setting_set("ppe.enabled", if enabled { "1" } else { "0" })?;
+        let restarted = crate::worker::restart_all_running(&st, s);
+        Ok(Json(json!({"ok": true, "enabled": enabled, "restarted": restarted})).into_response())
+    })
+}
+
+/// POST /api/models/ppe/upload——上传自定义实验服 ONNX（multipart 字段 file）。
+/// 落 `<data_dir>/models/ppe-custom.onnx`，校验后写入 ppe_model 并启用。
+pub(crate) async fn ppe_upload(
+    State(st): State<Shared>,
+    mut mp: axum::extract::Multipart,
+) -> Response {
+    const MAX: usize = 200 * 1024 * 1024;
+    let mut data: Option<Vec<u8>> = None;
+    let mut filename = String::new();
+    loop {
+        match mp.next_field().await {
+            Ok(Some(field)) => {
+                if field.name() != Some("file") {
+                    continue;
+                }
+                filename = field.file_name().unwrap_or("").to_string();
+                match field.bytes().await {
+                    Ok(b) if b.len() <= MAX => data = Some(b.to_vec()),
+                    Ok(_) => {
+                        return detail_err(StatusCode::PAYLOAD_TOO_LARGE, "模型文件超过 200MB")
+                            .into_response()
+                    }
+                    Err(e) => {
+                        return detail_err(
+                            StatusCode::BAD_REQUEST,
+                            &format!("读取上传内容失败: {e}"),
+                        )
+                        .into_response()
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return detail_err(StatusCode::BAD_REQUEST, &format!("解析上传失败: {e}"))
+                    .into_response()
+            }
+        }
+    }
+    let Some(bytes) = data.filter(|d| !d.is_empty()) else {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "缺少 file 字段或文件为空")
+            .into_response();
+    };
+    if !filename.is_empty() && !filename.to_ascii_lowercase().ends_with(".onnx") {
+        // 不强制拦截（浏览器/导出器命名差异），仅记录便于排障
+        crate::logger::warn(&format!("[ppe] 上传文件扩展名非 .onnx: {filename}"));
+    }
+    let dir = std::path::Path::new(&st.data_dir).join("models");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return detail_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("创建模型目录失败: {e}"),
+        )
+        .into_response();
+    }
+    let dest = dir.join("ppe-custom.onnx");
+    let tmp = dir.join("ppe-custom.onnx.tmp");
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        return detail_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("写入模型失败: {e}"),
+        )
+        .into_response();
+    }
+    if std::fs::rename(&tmp, &dest).is_err() {
+        // Windows 下目标被占用时先删再改名
+        let _ = std::fs::remove_file(&dest);
+        if let Err(e) = std::fs::rename(&tmp, &dest) {
+            let _ = std::fs::remove_file(&tmp);
+            return detail_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("保存模型失败: {e}"),
+            )
+            .into_response();
+        }
+    }
+    with_store(&st, |s| {
+        s.setting_set("ppe_model", &dest.to_string_lossy())?;
+        s.setting_set("ppe.enabled", "1")?;
+        let restarted = crate::worker::restart_all_running(&st, s);
+        Ok(Json(json!({
+            "ok": true,
+            "enabled": true,
+            "size_bytes": bytes.len(),
+            "restarted": restarted,
+        }))
+        .into_response())
+    })
+}
+
+/// POST /api/models/ppe/reset——恢复随包模型（清除自定义路径）并启用。
+pub(crate) async fn ppe_reset(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        s.setting_set("ppe_model", "")?;
+        s.setting_set("ppe.enabled", "1")?;
+        let restarted = crate::worker::restart_all_running(&st, s);
+        Ok(Json(json!({"ok": true, "enabled": true, "restarted": restarted})).into_response())
     })
 }
 
