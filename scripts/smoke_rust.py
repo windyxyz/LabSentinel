@@ -103,16 +103,22 @@ def main() -> int:
         print(f"[{'PASS' if ok3 else 'FAIL'}] 3 就绪 —— {last or 'ready'}")
         ok_all &= ok3
 
-        # [4] /api/system：backend=rust + version 非空
+        # [4] /api/system：backend=rust + version 精确匹配包内 VERSION + PPE 状态可达
         ok4, detail = False, ""
+        want_ver = (pkg / "VERSION").read_text("ascii").strip() if (pkg / "VERSION").is_file() else ""
         try:
             st, body = http_get(f"{base}/api/system", timeout=3)
             j = json.loads(body)
-            ok4 = st == 200 and j.get("backend") == "rust" and bool(j.get("version"))
-            detail = f"backend={j.get('backend')} version={j.get('version')}"
+            got_ver = j.get("version") or ""
+            ver_ok = (got_ver == want_ver) if want_ver else bool(got_ver)
+            st_ppe, body_ppe = http_get(f"{base}/api/models/ppe/status", timeout=3)
+            j_ppe = json.loads(body_ppe) if st_ppe == 200 else {}
+            ppe_ok = st_ppe == 200 and isinstance(j_ppe.get("enabled"), bool)
+            ok4 = st == 200 and j.get("backend") == "rust" and ver_ok and ppe_ok
+            detail = f"backend={j.get('backend')} version={got_ver} (want={want_ver}) ppe_enabled={j_ppe.get('enabled')}"
         except (OSError, ValueError) as e:
             detail = repr(e)
-        print(f"[{'PASS' if ok4 else 'FAIL'}] 4 /api/system —— {detail}")
+        print(f"[{'PASS' if ok4 else 'FAIL'}] 4 /api/system + PPE —— {detail}")
         ok_all &= ok4
 
         # [5] 前端 SPA（index + immutable 资产头抽验）

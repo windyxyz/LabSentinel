@@ -5,6 +5,25 @@
 > 每批任务完成后更新对应行，附实际运行证据。
 > 口径：✅ 完成并验证 · 🟡 部分/有条件 · ⬜ 未开始 · ⏸ 明确暂缓（用户 2026-11-08 决定）。
 
+## 第八轮：v0.4.0 后全仓深度审计与系统性加固（2026-11-22，LS-040 ~ LS-045）
+
+| 批次 | 内容与证据 |
+|---|---|
+| `LS-040` | ✅ 接手 `v0.4.0`（`10e7006`），完成 Rust 管线 / Rust 控制面与安全 / Vue 前端与契约 / CI 与打包四线审计；初始化并入库接力 7 件套 |
+| `LS-041` | ✅ **P0 止血批**：DirectML 全局互斥锁（`DML_LOCK` + 关闭 `memory_pattern`/`parallel_execution`，防事故 A1）；SQLite WAL + `add_rule` `days_of_week='1,2,3,4,5,6,7'` + v15 迁移；新建 `ls-core::time`（`jiff 0.2`）全面替换 `chrono` 并清除 `RUSTSEC-2026-0543`；VLM 补 `Authorization: Bearer`/Gemini 改 `x-goog-api-key`/原子用量计数；自定义 PPE 上传放开 `DefaultBodyLimit`/补读 DB/类表继承；修 PushPlus/Qmsg/SMTP 告警。验证：Rust 141 passed / clippy 0 / fmt OK |
+| `LS-042` | ✅ **前后端契约对齐与前端 11 处 P0 修复**：对齐 `stats/hourly`、`stats/summary`、`folder-images`、`events/bulk-status`、`alert-silences`、`alerts/status`、`camera-groups`、`rule-templates`、`config_export/import`；注册 `/ws/webrtc/:cid` 代理并降级快照轮播；修 11 个 Vue 视图 P0 缺陷并新增 6 例回归测试。验证：Web 66 passed + build PASS；Rust 141 passed |
+| `LS-043` | ✅ **PPE 2× 提速与管线加固**：`YoloModel::detect_classes` 单次多类推理；灰度/远景人框 ROI 二次精检与可配阈值；`Unknown` 不误报 `enter_no_ppe`；`folder_loop` 去饥饿；`ls-ingest`/`evidence` 补 `CREATE_NO_WINDOW`、RTSP `-rw_timeout`、USB 15s 超时；修 `cooldown_s` 秒→帧单位与 `zones.rs` `i128`。验证：Rust 141 passed |
+| `LS-044` | ✅ **安全与后台可靠性加固**：`/ws` 强制 `trusted_hosts`、`Origin` 去端口、`LS_TRUST_PROXY` 门控与限流桶上限、路径分量比对、`ureq` 禁重定向与禁 `@` userinfo；`urldecode` UTF-8 安全、`version_gt` SemVer 修复；`retention` 相对路径防误删、`backup` 原子写、`mqtt` 指数退避、`graceful_shutdown` 全链路关停。验证：Rust 141 passed |
+| `LS-045` | ✅ **CI/安装器/部署与文档收口**：`release.yml` 挂 `rust.yml`/Node 22/全量资产冒烟；`tests.yml` 加 `--all-features` 与 `contract_audit.py`；`rust.yml` 去 `RUSTSEC-2026-0543` 与加 `--fail-under 95`；`deny.toml` `all-features=true`；10 个 crate 启用 `[lints] workspace = true`；`installer.iss` UTF-8 BOM + `PrepareToInstall` 停服 + `{win}\Prefetch` + `--selftest-http` 退出码检查；`deploy.rs` SemVer 回滚 + `.old` 自替换；`main.rs` 实现 `.env` 加载与 `LS_HOST` 非回环令牌强门禁；重写 `NOTICE` 与同步文档 |
+
+## 第七轮续：v0.3.0 ~ v0.4.0 正式发布（2026-11-21）
+
+| 版本 | 结果与证据 |
+|---|---|
+| `v0.4.0`（`10e7006`） | ✅ PPE 模型启停/上传替换/恢复随包；API 多接入档案（OpenAI 兼容 / Ollama / Gemini）与自动拉模型/连通性测试；修安全区闪黑与配对码对比度 |
+| `v0.3.1`（`1282326`） | ✅ 实验服 PPE 模型随包发布；修版本号恒显 `0.2.0`；卸载清理 `versions/` 与旧目录；主导航吸顶 |
+| `v0.3.0`（`980f7f6`） | ✅ UX1~UX4 落地（导航简化 / 三模式+级联复核 / 无黑框 / 托盘）；GPU 默认 DirectML；USB dshow 枚举；企业微信图文双发 + 冷却 + 中文文案 |
+
 ## 第六轮：CI 门禁重构收口 + RustSec 漏洞清零（2026-11-14）
 
 | 项 | 结果与证据 |

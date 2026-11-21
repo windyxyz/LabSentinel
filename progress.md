@@ -2,18 +2,17 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID**: `LS-045`（已锁定 `ACTIVE`；`LS-044` 已验证完成并入库）
-- **Task-Name**: CI 门禁加固（`rust.yml`/Node 22/契约审计）+ 安装器 BOM/停服/Prefetch/`--rollback` + `LS_HOST`/`.env` + 依赖与 `NOTICE`/文档收口
+- **Task-ID**: `LS-046`（已锁定 `ACTIVE`；`LS-045` 已验证完成并入库）
+- **Task-Name**: 本机打包与安装/卸载冒烟实证；真机 24h RTSP & 外部真实 VLM 验收准备
 - **Files Changed**:
-  - `LS-044`：`ls-server/src/{middleware,tray,handlers/setup,handlers/misc_status,handlers/folder_images}.rs`、`ls-dispatch/src/{lib,mqtt}.rs`、`ls-jobs/src/{retention,backup}.rs`
+  - `LS-045`：`.github/workflows/{release,tests,rust}.yml`、`engine-rs/deny.toml`、`engine-rs/crates/*/Cargo.toml`（10 处启用 `[lints] workspace = true`）、`engine-rs/crates/ls-server/src/{deploy,main}.rs`、`deploy/windows/installer.iss`（UTF-8 BOM + `PrepareToInstall` + `{win}\Prefetch` + `--selftest-http` 退出码校验）、`scripts/{contract_audit,build_rust,build_setup_exe,smoke_rust,bump_version}.py`（删除 `dispatch_tick.py`）、`一键启动.bat`、`NOTICE`、`docs/plan/status.md`、`README.md`、`docs/guide/安装与卸载.md`
 - **Completed This Session**:
-  - `LS-040`（`17da1fb`）、`LS-041`（`da1dbd1`）、`LS-042`（`4722d8c`）、`LS-043`（`035e29e`）、`LS-044` 全部验证通过并入库（Rust 141 passed / clippy 0 / fmt OK；Web 66 passed + build 绿）。
+  - `LS-040`（`17da1fb`）、`LS-041`（`da1dbd1`）、`LS-042`（`4722d8c`）、`LS-043`（`035e29e`）、`LS-044`（`068c5f3`）、`LS-045` 全部验证通过并入库（Rust 141 passed / clippy 0 / fmt OK；Web 66 passed + build 绿；`contract_audit.py` PASS）。
 - **Open TODO**:
-  1. 执行 `LS-045`（CI 门禁 + `contract_audit.py` + 安装器 BOM/停服/Prefetch/`--rollback` + `LS_HOST`/`.env` + `[lints] workspace = true` + `NOTICE`/文档收口）；
-  2. 执行 `LS-046`（本机打包与安装/卸载冒烟实证）。
-- **Risks/Blockers**: 无阻断项。
+  1. 执行 `LS-046` 本机打包（`build_rust.py --strict --zip` + `build_setup_exe.py`）与 `smoke_rust.py --zip` 实证。
+- **Risks/Blockers**: 真实 24h RTSP 压测与真实外部 VLM API Key 需现场环境与用户密钥，作为现场人工验收项标注。
 - **Next First Command**:
-  - 落地 `LS-045` CI/打包/安装器/`LS_HOST`/文档改造并执行全量门禁验证。
+  - `LS_W64DEVKIT=C:/Users/User/devtools/w64devkit CARGO_TARGET_DIR=C:/Users/User/devtools/ls-target python -X utf8 scripts/build_rust.py --strict --zip`
 
 ---
 

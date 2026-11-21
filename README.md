@@ -4,7 +4,7 @@
 
 **开源实验室安全行为智能监控系统**：接入现有摄像头（RTSP）、USB/视频文件，或外部软件持续截图的图片文件夹，自动识别进入安全区未穿实验服、统计人数，异常实时多渠道告警。全本地部署，隐私可控。
 
-![Release](https://img.shields.io/badge/Release-0.2.0-blue) ![Rust](https://img.shields.io/badge/Rust-单二进制-dea584) ![Vue](https://img.shields.io/badge/Vue-3-42b883) ![License](https://img.shields.io/badge/License-AGPL--3.0-red) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
+![Release](https://img.shields.io/badge/Release-0.4.0-blue) ![Rust](https://img.shields.io/badge/Rust-单二进制-dea584) ![Vue](https://img.shields.io/badge/Vue-3-42b883) ![License](https://img.shields.io/badge/License-AGPL--3.0-red) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
 
 </div>
 
@@ -131,6 +131,6 @@ AGPL-3.0（与 Ultralytics 生态联动决策见 [docs/adr/0001](docs/adr/0001-a
 ## 🛡️ 已知限制
 
 - 未签名预览版：SmartScreen 可能提示「未知发布者」，请先校验 `SHA256SUMS-rust.txt`
-- USB 设备自动枚举暂未实现（可手动填写设备索引；RTSP/视频文件/图片文件夹不受影响）
+- Windows USB 摄像头已支持 `dshow` 自动枚举（Linux 仍需手动填写设备路径；RTSP/视频文件/图片文件夹全平台可用）
 - 外部联网模型的质量取决于所选服务商；离线环境请使用包内/自带的 ONNX 模型
 - Linux 以源码构建运行（systemd 示例见 `deploy/systemd/`），发布包目前面向 Windows

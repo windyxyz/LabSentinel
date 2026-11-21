@@ -1,6 +1,6 @@
 [graph]
 # workspace 内 dev/build 目标也纳入许可证检查（CI 与发布一致性）
-all-features = false
+all-features = true
 # UX4（2026-11-20）：产品仅出 Windows 产物（tray-icon 为 Windows-only 目标依赖），
 # deny 图限定 Windows 三元组——tray-icon 的 Linux gtk 传递栈（glib/gtk/atk，
 # 经 proc-macro-error 报 RUSTSEC-2024-0370）从不参与编译，不入图。

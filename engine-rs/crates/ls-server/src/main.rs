@@ -84,6 +84,51 @@ pub(crate) use middleware::{guard_middleware, static_cache_policy};
 pub use router::{build_router, dump_routes, ROUTE_INVENTORY};
 pub(crate) use state::{AppState, PairState, Shared};
 
+/// LS-045：启动前读取 `.env`（安装根优先，其次当前目录），仅填充未设置的环境变量
+/// （绝不覆盖已有的系统/命令行环境变量）。
+fn load_dotenv(install_root: &std::path::Path) {
+    let mut candidates = vec![install_root.join(".env")];
+    if let Ok(cwd) = std::env::current_dir() {
+        let p = cwd.join(".env");
+        if p != candidates[0] {
+            candidates.push(p);
+        }
+    }
+    for path in candidates {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for raw in content.lines() {
+            let line = raw.trim().trim_start_matches('\u{feff}');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let key = k.trim();
+            if key.is_empty() || std::env::var_os(key).is_some() {
+                continue;
+            }
+            let mut val = v.trim();
+            if val.len() >= 2
+                && ((val.starts_with('"') && val.ends_with('"'))
+                    || (val.starts_with('\'') && val.ends_with('\'')))
+            {
+                val = &val[1..val.len() - 1];
+            }
+            std::env::set_var(key, val);
+        }
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "" | "127.0.0.1" | "localhost" | "::1" | "[::1]"
+    )
+}
+
 #[tokio::main]
 async fn main() {
     // UX3：--console 必须早于任何 println!（GUI release 下附着父控制台重指
@@ -91,6 +136,8 @@ async fn main() {
     if std::env::args().any(|x| x == "--console") {
         crate::wincon::attach_parent_console();
     }
+    // LS-045：读取安装根或当前目录下的 .env（不覆盖显式环境变量）
+    load_dotenv(&deploy::default_install_root());
     // 健康自检（原为容器 HEALTHCHECK 设计，Docker 路线已终止——保留作通用探活）：
     // `labsentinel-server --healthcheck <db>` 只读探活即退出
     let launch_mode = std::env::args().any(|x| x == "--launch");
@@ -209,10 +256,36 @@ async fn main() {
             "web/dist".into()
         }
     });
+    let host = std::env::var("LS_HOST")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".into());
     let port: u16 = std::env::var("LS_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8000);
+    // LS-045：非回环监听（如 LS_HOST=0.0.0.0）强制要求设置 LS_ADMIN_TOKEN，拒绝无令牌暴露局域网
+    if !is_loopback_host(&host) && token.trim().is_empty() {
+        let msg = format!(
+            "拒绝启动：LS_HOST={host} 为非回环地址，但未配置 LS_ADMIN_TOKEN。\n\
+             局域网/远程暴露必须设置足够长的管理令牌（LS_ADMIN_TOKEN），可在 .env 或环境变量中配置。"
+        );
+        eprintln!("[ls-server] {msg}");
+        crate::wincon::fatal_error_box("LabSentinel 安全拦截", &msg);
+        std::process::exit(2);
+    }
+    let mut trusted_hosts = vec!["127.0.0.1".into(), "localhost".into(), "::1".into()];
+    if !is_loopback_host(&host) && host != "0.0.0.0" && host != "::" {
+        trusted_hosts.push(host.clone());
+    }
+    if let Ok(extra) = std::env::var("LS_TRUSTED_HOSTS") {
+        for item in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !trusted_hosts.iter().any(|h| h.eq_ignore_ascii_case(item)) {
+                trusted_hosts.push(item.to_string());
+            }
+        }
+    }
     let jobs = Arc::new(ls_jobs::Jobs::new(
         std::path::PathBuf::from(&db_path),
         ls_jobs::JobsConfig::from_env(std::path::Path::new(&db_path)),
@@ -222,7 +295,7 @@ async fn main() {
         admin_token: token,
         read_token,
         read_protected,
-        trusted_hosts: vec!["127.0.0.1".into(), "localhost".into(), "::1".into()],
+        trusted_hosts,
         allowed_origins: vec![],
         // 2026-11-21：web_dist 已按发行/源码布局解析（LS_WEB_DIST 仍可覆盖）
         web_dist,
@@ -260,7 +333,7 @@ async fn main() {
     let log_file = crate::logger::init(std::path::Path::new(&st.data_dir));
     crate::logger::install_panic_hook();
     crate::logger::info(&format!(
-        "[start] LabSentinel {} · http://127.0.0.1:{port}/ · 日志 {:?}",
+        "[start] LabSentinel {} · http://{host}:{port}/ · 日志 {:?}",
         st.version,
         log_file.unwrap_or_else(|| "<不可写，仅控制台>".into())
     ));
@@ -295,7 +368,7 @@ async fn main() {
     st.jobs.start();
     // RA2 反思修正：launch 模式下端口试探与 bind 之间存在 TOCTOU 窗口——
     // bind 失败不再 unwrap panic（会崩进程），优雅提示后退出
-    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+    let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
         Ok(l) => l,
         Err(e) => {
             crate::logger::error(&format!(

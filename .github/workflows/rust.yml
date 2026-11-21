@@ -71,7 +71,7 @@ jobs:
       - name: route coverage report (R2-307)
         run: |
           python -I scripts/rust_route_coverage.py \
-            --exe engine-rs/target/debug/labsentinel-server | tee route-coverage.txt
+            --exe engine-rs/target/debug/labsentinel-server --fail-under 95 | tee route-coverage.txt
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/engine-rs/target
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
@@ -111,4 +111,3 @@ jobs:
           --ignore RUSTSEC-2026-0099
           --ignore RUSTSEC-2026-0104
           --ignore RUSTSEC-2026-0382
-          --ignore RUSTSEC-2026-0543

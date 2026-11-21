@@ -15,3 +15,6 @@ tempfile = "3"
 [target.'cfg(windows)'.dependencies]
 # UX 追加：Job Object 孤儿 ffmpeg 治理（winjob.rs FFI 收口）
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+
+[lints]
+workspace = true

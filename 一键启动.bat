@@ -1,20 +1,24 @@
 @echo off
-rem LabSentinel Ò»¼üÆô¶¯£¨Rust µ¥¶ş½øÖÆ ¡¤ Ô´Âë/¿ª·¢Ä£Ê½£©
-rem ·¢²¼°üÓÃ»§ÇëÖ±½ÓË«»÷½âÑ¹Ä¿Â¼ÀïµÄ LabSentinel.bat£¨ÎŞĞè±¾½Å±¾£©
+rem LabSentinel ä¸€é”®å¯åŠ¨ï¼ˆRust å•äºŒè¿›åˆ¶ Â· æºç /å¼€å‘æ¨¡å¼ï¼‰
+rem å‘å¸ƒåŒ…ç”¨æˆ·è¯·ç›´æ¥åŒå‡»è§£å‹ç›®å½•é‡Œçš„ LabSentinel.batï¼ˆæ— éœ€æœ¬è„šæœ¬ï¼‰
 setlocal
 cd /d "%~dp0"
 
-set "EXE=engine-rs\target\release\labsentinel-server.exe"
+set "TARGET_DIR=engine-rs\target"
+if defined CARGO_TARGET_DIR set "TARGET_DIR=%CARGO_TARGET_DIR%"
+set "EXE=%TARGET_DIR%\release\labsentinel-server.exe"
+if not exist "%EXE%" set "EXE=%TARGET_DIR%\debug\labsentinel-server.exe"
+if not exist "%EXE%" set "EXE=engine-rs\target\release\labsentinel-server.exe"
 if not exist "%EXE%" set "EXE=engine-rs\target\debug\labsentinel-server.exe"
 if not exist "%EXE%" (
-    echo [È±ÉÙ] Î´ÕÒµ½ Rust ·şÎñ¶Ë²úÎï£¬ÇëÏÈ¹¹½¨£º
+    echo [ç¼ºå°‘] æœªæ‰¾åˆ° Rust æœåŠ¡ç«¯äº§ç‰©ï¼Œè¯·å…ˆæ„å»ºï¼š
     echo     cd engine-rs ^&^& cargo build --release -p ls-server
-    echo   »òÖ±½ÓÊ¹ÓÃ·¢²¼°üÀïµÄ LabSentinel.bat
+    echo   æˆ–ç›´æ¥ä½¿ç”¨å‘å¸ƒåŒ…é‡Œçš„ LabSentinel.bat
     pause
     exit /b 1
 )
 if not exist "web\dist\index.html" (
-    echo [ÌáÊ¾] web\dist ²»´æÔÚ£¬ÇëÏÈÖ´ĞĞ£º
+    echo [æç¤º] web\dist ä¸å­˜åœ¨ï¼Œè¯·å…ˆæ‰§è¡Œï¼š
     echo     cd web ^&^& npm ci ^&^& npm run build
     pause
     exit /b 1
@@ -25,7 +29,7 @@ set "LS_DATA_DIR=%~dp0.data"
 set "LS_DB_PATH=%~dp0.data\labsentinel.db"
 if not exist "%~dp0.data" mkdir "%~dp0.data"
 
-rem ±¾µØÄ£ĞÍ£¨´æÔÚÔò×¢Èë£»²»´æÔÚÊ±ÓÉÍøÒ³¡¸Ä£ĞÍ¹ÜÀí¡¹Ñ¡Ôñ£©
+rem æœ¬åœ°æ¨¡å‹ï¼ˆå­˜åœ¨åˆ™æ³¨å…¥ï¼›ä¸å­˜åœ¨æ—¶ç”±ç½‘é¡µã€Œæ¨¡å‹ç®¡ç†ã€é€‰æ‹©ï¼‰
 if not defined LS_MODEL_PATH if exist "%~dp0models\yolo11n.onnx" set "LS_MODEL_PATH=%~dp0models\yolo11n.onnx"
 if not defined LS_MODEL_PATH if exist "%~dp0m0-spike\yolo11n.onnx" set "LS_MODEL_PATH=%~dp0m0-spike\yolo11n.onnx"
 if not defined LS_PPE_MODEL if exist "%~dp0models\yolo11n_ppe.onnx" set "LS_PPE_MODEL=%~dp0models\yolo11n_ppe.onnx"

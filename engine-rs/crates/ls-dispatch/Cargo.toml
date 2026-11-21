@@ -32,3 +32,6 @@ rustls-native-certs = "0.8"
 tempfile = "3"
 hmac = "0.12"
 sha2 = "0.10"
+
+[lints]
+workspace = true

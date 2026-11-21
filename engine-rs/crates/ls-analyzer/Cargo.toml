@@ -29,3 +29,6 @@ jpeg-encoder = "0.7"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

@@ -62,3 +62,6 @@ winresource = "0.1"
 tower = { version = "0.4", features = ["util"] }
 tempfile = "3"
 rusqlite = { version = "0.41", features = ["bundled"] }
+
+[lints]
+workspace = true

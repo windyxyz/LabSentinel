@@ -80,6 +80,21 @@ fn safe_component(v: &str) -> Option<&str> {
     Some(v)
 }
 
+/// SemVer 数值排序键（`0.10.0` > `0.9.0`；非数字段回落 0 并附原串保确定性）。
+fn semver_sort_key(v: &str) -> (u64, u64, u64, String) {
+    let clean = v
+        .trim()
+        .trim_start_matches('v')
+        .split('-')
+        .next()
+        .unwrap_or("");
+    let mut it = clean.split('.').map(|s| s.parse::<u64>().unwrap_or(0));
+    let maj = it.next().unwrap_or(0);
+    let min = it.next().unwrap_or(0);
+    let pat = it.next().unwrap_or(0);
+    (maj, min, pat, v.to_string())
+}
+
 /// 把当前安装树归档到 `<install>/versions/<version>/`；返回归档目录。
 /// 失败不删除任何东西（调用方按「仅失去回滚点」处理，不阻断升级）。
 pub fn archive(install: &Path) -> Result<PathBuf, String> {
@@ -99,6 +114,8 @@ pub fn archive(install: &Path) -> Result<PathBuf, String> {
         fs::remove_dir_all(&dest).map_err(|e| format!("清理旧归档失败: {e}"))?;
     }
     copy_tree(install, &dest, false).map_err(|e| format!("归档复制失败: {e}"))?;
+    // LS-045：写 current.txt 记录当前版本（供后续 rollback 准确排除当前版本）
+    let _ = fs::write(install.join(CURRENT_MARK), name);
     Ok(dest)
 }
 
@@ -122,7 +139,8 @@ pub fn rollback(install: &Path) -> Result<PathBuf, String> {
         .filter_map(|e| e.file_name().to_str().map(String::from))
         .filter(|n| safe_component(n).is_some() && n != &current)
         .collect();
-    cands.sort();
+    // LS-045：按 SemVer 数值排序（避免字典序 "0.9.0" > "0.10.0"）
+    cands.sort_by_key(|v| semver_sort_key(v));
     let target_name = cands
         .pop()
         .ok_or_else(|| "没有可回滚的旧版本".to_string())?;
@@ -134,13 +152,14 @@ pub fn rollback(install: &Path) -> Result<PathBuf, String> {
 }
 
 /// 递归复制；`overwrite=true` 时允许目标已存在（回滚覆盖安装根）。
-/// 跳过归档排除目录、`*.pyc` 与符号链接（不跟随，防逃逸）。
+/// 跳过归档排除目录、`*.pyc`、`unins*`（Inno 卸载器）、`*.old` 与符号链接（不跟随，防逃逸）。
 fn copy_tree(src: &Path, dst: &Path, overwrite: bool) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
+        let name_lower = name_str.to_ascii_lowercase();
         let from = entry.path();
         let to = dst.join(&name);
         let meta = entry.metadata()?;
@@ -153,13 +172,29 @@ fn copy_tree(src: &Path, dst: &Path, overwrite: bool) -> io::Result<()> {
             }
             copy_tree(&from, &to, overwrite)?;
         } else if meta.is_file() {
-            if name_str.ends_with(".pyc") {
+            if name_lower.ends_with(".pyc")
+                || name_lower.ends_with(".old")
+                || name_lower.starts_with("unins")
+            {
                 continue;
             }
             if !overwrite && to.exists() {
                 continue;
             }
-            fs::copy(&from, &to)?;
+            if let Err(e) = fs::copy(&from, &to) {
+                if overwrite && to.exists() {
+                    // Windows 下回滚自身 exe 会因文件被占用失败，先重命名为 .old 再复制
+                    let backup = to.with_extension(format!(
+                        "{}.old",
+                        to.extension().and_then(|s| s.to_str()).unwrap_or("bak")
+                    ));
+                    let _ = fs::remove_file(&backup);
+                    fs::rename(&to, &backup)?;
+                    fs::copy(&from, &to)?;
+                } else {
+                    return Err(e);
+                }
+            }
         }
     }
     Ok(())

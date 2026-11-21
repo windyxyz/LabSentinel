@@ -31,3 +31,6 @@ name = "resize_dump"
 # yolo 模块（含 cv2 复刻缩放）只在 tract feature 下导出；example 需显式声明，
 # 否则单独 `cargo test -p ls-infer`（默认 feature）会编译失败。
 required-features = ["tract"]
+
+[lints]
+workspace = true

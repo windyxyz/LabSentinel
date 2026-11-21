@@ -1,4 +1,4 @@
-; LabSentinel Windows 安装器（RA4.2 Rust 形态版，2026-11-14）
+﻿; LabSentinel Windows 安装器（RA4.2 Rust 形态版，2026-11-14）
 ; 包装「Rust 单二进制 zip」为 setup.exe：解压安装 + 快捷方式 + 卸载项 + 可选服务。
 ; 由 ISCC.exe 编译（本地 Inno Setup 7；CI 由 release.yml 安装 Inno 7.1.1 后
 ; scripts/build_setup_exe.py 调用）；版本由 /DLsAppVersion= 传入。
@@ -15,7 +15,7 @@
 ;   --archive / --rollback；健康检查用 --selftest-http。
 
 #ifndef LsAppVersion
-  #define LsAppVersion "0.3.1"
+  #define LsAppVersion "0.4.0"
 #endif
 #ifndef LsSourceDir
   ; 指向解压后的 Rust 发行包目录（labsentinel-rust-<ver>-<date>.zip 解包结果）
@@ -62,6 +62,7 @@ chinese.StartMenu=创建开始菜单快捷方式
 chinese.Desktop=创建桌面快捷方式
 chinese.ShortcutOptGroup=快捷方式
 chinese.Verify=正在校验新版本…
+chinese.VerifyFailed=安装已完成，但新版本健康自检（--selftest-http）未通过（退出码 %1）。如属升级覆盖，可在安装目录执行 labsentinel-server.exe --rollback 回滚旧版。
 chinese.Archive=正在归档旧版本…
 chinese.Launch=启动 LabSentinel
 chinese.RemoveUserData=是否同时删除 LabSentinel 的用户数据？%1 包含数据库、事件截图/录像、备份与密钥。选择「否」保留数据，重新安装后可继续使用。
@@ -73,6 +74,7 @@ english.StartMenu=Create a Start Menu shortcut
 english.Desktop=Create a desktop shortcut
 english.ShortcutOptGroup=Shortcuts
 english.Verify=Verifying the new version…
+english.VerifyFailed=Installation finished, but --selftest-http failed (exit code %1). If upgrading, you may run "labsentinel-server.exe --rollback" in the install directory.
 english.Archive=Archiving the previous version…
 english.Launch=Launch LabSentinel
 english.RemoveUserData=Also delete LabSentinel user data? %1 contains the database, event snapshots/videos, backups and keys. Choose No to keep data for a future reinstall.
@@ -104,18 +106,16 @@ Type: files; Name: "{commondesktop}\LabSentinel.lnk"
 Type: filesandordirs; Name: "{app}\versions"
 Type: filesandordirs; Name: "{app}\server"
 Type: filesandordirs; Name: "{app}\data"
+Type: files; Name: "{app}\current.txt"
 ; 用户数据（%LOCALAPPDATA%\LabSentinel）默认保留；卸载时可选择一并删除，
 ; 见 [Code] InitializeUninstall（静默卸载用 /REMOVEDATA=1 显式删除）。
 
 [Run]
 ; 升级链路：
-;   1) [Code] ssInstall → labsentinel-server --archive（归档旧版，见 CurStepChanged）
-;   2) 文件复制（[Files]）
-;   3) 此处 --selftest-http：真实启动新版本 → /api/health/ready → 停止；
-;      失败可用 --rollback 恢复（安装器不自动回滚，提示用户手工执行）。
-Filename: "{app}\labsentinel-server.exe"; \
-  Parameters: "--selftest-http"; WorkingDir: "{app}"; Flags: runhidden; \
-  StatusMsg: "{cm:Verify}"
+;   1) [Code] PrepareToInstall → 结束正在运行的 labsentinel-server.exe / go2rtc.exe
+;   2) [Code] ssInstall → labsentinel-server --archive（归档旧版，见 CurStepChanged）
+;   3) 文件复制（[Files]）
+;   4) [Code] ssPostInstall → --selftest-http 校验退出码（失败在交互模式下弹窗提示 --rollback）
 Filename: "{app}\labsentinel-server.exe"; \
   Parameters: "--launch --tray"; WorkingDir: "{app}"; \
   Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent
@@ -136,7 +136,19 @@ begin
     Result := ExpandConstant('{localappdata}\Programs\LabSentinel');
 end;
 
-// ---- 快捷方式生成：按「选择附加任务」页勾选；卸载项始终生成 ----
+// ---- 升级/覆盖安装前自动停服（防止 labsentinel-server.exe / go2rtc.exe 占用文件）----
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM labsentinel-server.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM go2rtc.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// ---- 快捷方式生成：严格按「选择附加任务」页勾选 ----
 // 静默安装（/VERYSILENT）时任务按默认选中处理（[Tasks] 未标 unchecked）。
 procedure CreateShortcuts;
 var
@@ -155,14 +167,16 @@ begin
   end;
   WantMenu := WizardIsTaskSelected('createshortcut');
   WantDesktop := WizardIsTaskSelected('createdesktop');
-  ForceDirectories(GroupDir);
-  CreateShellLink(GroupDir + '\Uninstall LabSentinel.lnk',
-    'Uninstall LabSentinel', ExpandConstant('{uninstallexe}'), '', '', '', 0, SW_SHOWNORMAL);
   // UX3：快捷方式直指 exe（--launch --tray）——无黑框；bat 保留一个版本周期兼容
   if WantMenu then
+  begin
+    ForceDirectories(GroupDir);
+    CreateShellLink(GroupDir + '\Uninstall LabSentinel.lnk',
+      'Uninstall LabSentinel', ExpandConstant('{uninstallexe}'), '', '', '', 0, SW_SHOWNORMAL);
     CreateShellLink(GroupDir + '\LabSentinel.lnk',
       CustomMessage('Launch'), ExpandConstant('{app}\labsentinel-server.exe'),
       '--launch --tray', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
+  end;
   if WantDesktop then
     CreateShellLink(DesktopDir + '\LabSentinel.lnk',
       CustomMessage('Launch'), ExpandConstant('{app}\labsentinel-server.exe'),
@@ -189,6 +203,19 @@ begin
   if CurStep = ssPostInstall then
   begin
     CreateShortcuts;
+
+    // LS-045：真实启动新版本自检（--selftest-http），校验退出码并在交互模式下明确提示
+    if FileExists(ExpandConstant('{app}\labsentinel-server.exe')) then
+    begin
+      if (not Exec(ExpandConstant('{app}\labsentinel-server.exe'),
+                   '--selftest-http', ExpandConstant('{app}'), SW_HIDE,
+                   ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+      begin
+        if not WizardSilent then
+          MsgBox(FmtMessage(CustomMessage('VerifyFailed'), [IntToStr(ResultCode)]),
+                 mbError, MB_OK);
+      end;
+    end;
 
     // 可选服务（Tasks 勾选后；仅 ALLUSERS 模式有意义）
     if WizardIsTaskSelected('installservice') then
@@ -238,7 +265,7 @@ var
   FindRec: TFindRec;
   Dir: String;
 begin
-  Dir := ExpandConstant('{sys}\prefetch');
+  Dir := ExpandConstant('{win}\Prefetch');
   try
     if FindFirst(Dir + '\' + Mask, FindRec) then
     begin

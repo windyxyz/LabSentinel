@@ -20,9 +20,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable
         with:
           toolchain: stable
-      - name: cargo test --workspace
+      - name: cargo test --workspace --all-features
         working-directory: engine-rs
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
 
   web:
     runs-on: ubuntu-latest
@@ -31,15 +31,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: npm ci + test + build
         working-directory: web
         run: |
-          npm ci --registry=https://registry.npmmirror.com
+          npm ci
           npm test
           npm run build
+      - name: frontend-backend contract audit
+        run: python3 scripts/contract_audit.py
       - name: npm audit (production deps)
         working-directory: web
         run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org

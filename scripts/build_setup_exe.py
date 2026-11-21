@@ -52,6 +52,11 @@ def main() -> int:
         print(f"[失败] staging 缺 labsentinel-server.exe：{src}（先跑 scripts/build_rust.py）")
         return 2
 
+    iss = ROOT / "deploy" / "windows" / "installer.iss"
+    if not iss.read_bytes().startswith(b"\xef\xbb\xbf"):
+        print(f"[失败] {iss} 缺少 UTF-8 BOM（Inno Setup 7 中文页面将乱码）")
+        return 2
+
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -59,7 +64,7 @@ def main() -> int:
         f"/DLsAppVersion={a.version}",
         f"/DLsSourceDir={src}",
         f"/DLsOutputDir={out}",
-        str(ROOT / "deploy" / "windows" / "installer.iss"),
+        str(iss),
     ]
     print("ISCC:", cmd, flush=True)
     r = subprocess.run(cmd, timeout=900)

@@ -66,6 +66,9 @@ def build_binary() -> Path:
 
 
 def assemble(strict: bool = False) -> None:
+    # LS-045：先清空 staging 目录再组装，防止历史版本废弃资产残留进新发行包
+    if DIST.exists():
+        shutil.rmtree(DIST)
     DIST.mkdir(parents=True, exist_ok=True)
     missing: list[str] = []
     exe = build_binary()
@@ -96,12 +99,13 @@ def assemble(strict: bool = False) -> None:
         print(f"[警告] 缺少 {ff_src}/ffmpeg.exe（RTSP/视频源将不可用）")
     ort_src = ROOT / "tools" / "onnxruntime"
     if ort_src.is_dir() and (ort_src / "onnxruntime.dll").is_file():
-        shutil.copytree(ort_src, DIST / "tools" / "onnxruntime", dirs_exist_ok=True)
-        # exe 同目录兜底：Windows DLL 搜索优先应用目录，双击 exe 也能加载
+        # LS-045：仅复制到 exe 同目录（Windows DLL 搜索优先应用目录，LabSentinel.bat
+        # 与 ls-infer 均优先读同目录 onnxruntime.dll），避免在 tools/onnxruntime 重复
+        # 存一份导致安装包虚增 ~18MB。
         for dll in ort_src.glob("*.dll"):
             shutil.copy2(dll, DIST / dll.name)
     else:
-        missing.append("tools/onnxruntime/onnxruntime.dll（pip install onnxruntime 后重跑）")
+        missing.append("tools/onnxruntime/onnxruntime.dll（运行 scripts/prepare_rust_assets.py）")
         print(f"[警告] 缺少 {ort_src}/onnxruntime.dll（推理将无法加载）")
     g2 = ROOT / "tools" / "go2rtc.exe"
     if g2.exists():
