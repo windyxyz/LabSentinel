@@ -82,6 +82,12 @@ impl Ingest {
         if self.cfg.file_loop {
             c.arg("-stream_loop").arg("-1");
         }
+        // USB(dshow)：source 形如 `video=<设备名>`（list_usb_devices 产出的标准
+        // dshow 语法；前端手填由 usb_devices handler/前端归一化）。裸 `/dev/video*`
+        // (linux v4l2) 与 RTSP/文件路径不受影响。
+        if self.cfg.source.starts_with("video=") {
+            c.arg("-f").arg("dshow");
+        }
         c.arg("-i")
             .arg(&self.cfg.source)
             .args(["-an", "-sn", "-dn"]);
@@ -228,6 +234,91 @@ pub fn decode_image(
     Ok((out, width, height))
 }
 
+/// USB(dshow) 摄像头（2026-11-21，用户实测反馈"手动填索引太麻烦"）：
+/// `ffmpeg -list_devices true -f dshow -i dummy` 枚举本机摄像头（发行包自带
+/// ffmpeg，零新依赖）。返回 `(索引, 设备名, source)`——source 为 ffmpeg dshow
+/// 原生语法 `video=<设备名>`（取流直通 build_cmd 的 `-f dshow` 分支）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsbDevice {
+    pub index: usize,
+    pub name: String,
+    pub source: String,
+}
+
+/// 解析 ffmpeg dshow 枚举输出（stderr）：
+/// `[dshow @ 0000...] "HD Webcam" (video)`——只取 video 段（audio 行以 `(audio)`
+/// 结尾；Alternative name 行无引号包裹形态）。UTF-8 解码（ffmpeg 5.x 起
+/// Windows 控制台输出 UTF-8；非法字节 lossy 兜底，不崩）。
+pub fn parse_dshow_devices(stderr: &str) -> Vec<UsbDevice> {
+    let mut out = Vec::new();
+    for line in stderr.lines() {
+        // 形态：[dshow @ xxx] "name" (video)——引号开头 + 行尾 (video)
+        let Some(quoted_start) = line.find('"') else {
+            continue;
+        };
+        let rest = &line[quoted_start + 1..];
+        let Some(quoted_end) = rest.find('"') else {
+            continue;
+        };
+        let name = &rest[..quoted_end];
+        let tail = rest[quoted_end + 1..].trim();
+        if tail != "(video)" || name.is_empty() {
+            continue;
+        }
+        let index = out.len();
+        out.push(UsbDevice {
+            index,
+            name: name.to_string(),
+            source: format!("video={name}"),
+        });
+    }
+    out
+}
+
+/// 枚举本机 USB 摄像头（Windows dshow；非 Windows 返回 Err——v4l2 场景手填
+/// `/dev/video0` 直通）。失败文案保留前端回退手输的可用性。
+pub fn list_usb_devices() -> Result<Vec<UsbDevice>, String> {
+    #[cfg(not(windows))]
+    {
+        Err("USB 设备枚举仅支持 Windows（dshow）；Linux 请手填 /dev/video*".into())
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Read;
+        let mut c = Command::new(ls_core::bin::find("ffmpeg"));
+        c.args([
+            "-hide_banner",
+            "-list_devices",
+            "true",
+            "-f",
+            "dshow",
+            "-i",
+            "dummy",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+        // CREATE_NO_WINDOW：GUI 子系统服务进程调用时不闪控制台框
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000);
+        }
+        let mut child = c.spawn().map_err(|e| format!("ffmpeg 启动失败: {e}"))?;
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_end(&mut stderr);
+        }
+        // -list_devices 必然"失败退出"（dummy 输入不存在）——退出码不判定，
+        // 以 stderr 内容为准；兜底 15s 等待防挂死
+        let _ = child.wait();
+        let devices = parse_dshow_devices(&String::from_utf8_lossy(&stderr));
+        if devices.is_empty() {
+            return Err("未检测到 USB 摄像头（dshow 枚举为空）".into());
+        }
+        Ok(devices)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +326,35 @@ mod tests {
     /// 本机 ffmpeg 可用时才跑（CI 干净环境 skip）。
     fn ffmpeg_available() -> bool {
         ls_core::bin::available("ffmpeg")
+    }
+
+    #[test]
+    fn dshow_parse_video_only_and_index_order() {
+        // 实测输出形态（ffmpeg 7.x，中文 Windows UTF-8）：video/audio 混排 +
+        // Alternative name 行 + 多设备
+        let sample = "[dshow @ 0001] DirectShow video devices (some may be both):
+[dshow @ 0001] \"HD Webcam\" (video)
+[dshow @ 0001]   Alternative name \"@device_pnp_\\?\\usb#vid_2b7e&pid_b663#global\"
+[dshow @ 0001] \"虚拟摄像机\" (video)
+[dshow @ 0001] DirectShow audio devices:
+[dshow @ 0001] \"麦克风阵列 (Senary Audio)\" (audio)
+";
+        let d = parse_dshow_devices(sample);
+        assert_eq!(d.len(), 2, "只取 video 段：{d:?}");
+        assert_eq!(d[0].name, "HD Webcam");
+        assert_eq!(d[0].source, "video=HD Webcam");
+        assert_eq!(d[0].index, 0);
+        assert_eq!(d[1].name, "虚拟摄像机", "中文设备名 UTF-8");
+        assert_eq!(d[1].source, "video=虚拟摄像机");
+        assert_eq!(d[1].index, 1);
+    }
+
+    #[test]
+    fn dshow_parse_empty_and_malformed() {
+        assert!(parse_dshow_devices("").is_empty());
+        assert!(parse_dshow_devices("Error opening input file dummy.").is_empty());
+        // 无 (video) 标记的引号行不算设备
+        assert!(parse_dshow_devices("[dshow @ x] \"weird\" (unknown)").is_empty());
     }
 
     #[test]

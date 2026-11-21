@@ -183,6 +183,12 @@ async function probeIp(ip) {
 
 async function add() {
   if (!form.value.name || !form.value.source || adding.value) return
+  // USB 摄像头（2026-11-21）：枚举下拉直接给 `video=设备名`；手填场景（枚举
+  // 不可用）自动补前缀——ffmpeg dshow 按设备名取流，裸数字索引 ffmpeg 不认
+  if (form.value.type === 'usb' && !form.value.source.startsWith('video=')
+      && !form.value.source.startsWith('/dev/')) {
+    form.value.source = 'video=' + form.value.source.trim()
+  }
   adding.value = true
   try {
     await api.addCamera(form.value)
@@ -231,11 +237,11 @@ async function watchLive(cam) {
         <select v-if="usbDevices.length" v-model="form.source" style="flex:1" aria-label="USB 设备选择">
           <option v-for="d in usbDevices" :key="d.index" :value="d.source">{{ d.name }}（索引 {{ d.index }}）</option>
         </select>
-        <input v-else v-model="form.source" placeholder="USB 设备索引，如 0 / 1" aria-label="USB 设备索引" style="flex:1" />
+        <input v-else v-model="form.source" placeholder="USB 设备名（如 HD Webcam），或点「刷新设备」自动枚举" aria-label="USB 设备名" style="flex:1" />
         <button class="ghost" :disabled="usbLoading" @click="loadUsb(true)">{{ usbLoading ? '刷新中…' : '刷新设备' }}</button>
       </template>
       <input v-else v-model="form.source"
-             :placeholder="form.type === 'folder' ? '截图文件夹路径，如 D:\\screenshots（支持中文/网络盘）' : 'RTSP 地址 / 视频文件路径 / 0 (USB)'"
+             :placeholder="form.type === 'folder' ? '截图文件夹路径，如 D:\\screenshots（支持中文/网络盘）' : 'RTSP 地址 / 视频文件路径 / video=设备名 (USB)'"
              :aria-label="form.type === 'folder' ? '图片文件夹路径' : '摄像头地址'" style="flex:1" />
       <button v-if="form.type === 'folder'" class="ghost" @click="pickSource">浏览…</button>
       <select v-model="form.type">

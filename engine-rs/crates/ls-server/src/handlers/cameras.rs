@@ -45,13 +45,48 @@ pub(crate) async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i
 pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
     // T-103 等价：source 白名单（白名单外拒绝；file 源不强制存在，worker 报 error）
     let type_ = body.get("type").and_then(|v| v.as_str()).unwrap_or("file");
-    let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
+    let mut source = body
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // USB（2026-11-21 dshow 化）：入库前归一化为 ffmpeg 可用形态——
+    // ① 裸数字（历史索引/手填）→ 按枚举表映射为 `video=<设备名>`（枚举失败
+    //    如实 400，不收不可取流的 source）；
+    // ② 枚举下拉/手填设备名由前端补 `video=` 前缀；`/dev/video*`（linux v4l2）直通。
+    if type_ == "usb" {
+        let is_digits = !source.is_empty() && source.chars().all(|c| c.is_ascii_digit());
+        if is_digits {
+            let idx: usize = source.parse().unwrap_or(usize::MAX);
+            match ls_ingest::list_usb_devices() {
+                Ok(ds) => match ds.get(idx) {
+                    Some(d) => source = d.source.clone(),
+                    None => {
+                        return detail_err(
+                            StatusCode::BAD_REQUEST,
+                            &format!("USB 设备索引 {idx} 不存在（本机枚举到 {} 台）", ds.len()),
+                        )
+                        .into_response()
+                    }
+                },
+                Err(e) => {
+                    return detail_err(
+                        StatusCode::BAD_REQUEST,
+                        &format!("无法枚举 USB 设备：{e}；请改填设备名（video=<名称>）"),
+                    )
+                    .into_response()
+                }
+            }
+        }
+    }
     let valid = match type_ {
         "rtsp" => source.starts_with("rtsp://") || source.starts_with("rtsps://"),
         "file" => [".mp4", ".mkv", ".avi", ".mov", ".ts", ".flv"]
             .iter()
             .any(|e| source.to_ascii_lowercase().ends_with(e)),
-        "usb" => source.chars().all(|c| c.is_ascii_digit()) && !source.is_empty(),
+        "usb" => (source.starts_with("video=") && source.len() > 6)
+            || source.starts_with("/dev/video")
+            || (!source.is_empty() && source.chars().all(|c| c.is_ascii_digit())),
         "folder" => !source.is_empty(),
         _ => false,
     };
@@ -60,7 +95,7 @@ pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>
     }
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("cam");
     match ls_store::Store::open(&st.db_path) {
-        Ok(s) => match s.conn_add_camera(name, source, type_) {
+        Ok(s) => match s.conn_add_camera(name, &source, type_) {
             Ok(id) => Json(json!({"id": id, "name": name, "source": source,
                                   "type": type_, "status": "stopped"}))
             .into_response(),
@@ -230,10 +265,24 @@ pub(crate) async fn cameras_bulk(State(st): State<Shared>, Json(body): Json<Valu
 }
 
 pub(crate) async fn usb_devices() -> Response {
-    // 不做 DirectShow 枚举（前端回退手输索引）；保留端点形状以兼容前端
-    Json(json!({"devices": [],
-                "error": "无法自动枚举 USB 设备，请手动填写设备索引（如 0 / 1）"}))
-    .into_response()
+    // 2026-11-21（用户实测反馈）：ffmpeg dshow 枚举真实现（发行包自带 ffmpeg，
+    // 零新依赖）——本机摄像头自动列出，不再要求手填索引。
+    // source = `video=<设备名>`（ffmpeg dshow 原生语法），worker build_cmd 识别
+    // 该前缀自动加 `-f dshow` 取流；枚举失败保留原错误文案（前端回退手填）。
+    match ls_ingest::list_usb_devices() {
+        Ok(devices) => Json(json!({
+            "devices": devices.iter().map(|d| json!({
+                "index": d.index, "name": d.name, "source": d.source,
+            })).collect::<Vec<_>>(),
+            "error": serde_json::Value::Null,
+        }))
+        .into_response(),
+        Err(e) => Json(json!({
+            "devices": [],
+            "error": e,
+        }))
+        .into_response(),
+    }
 }
 
 pub(crate) async fn copy_camera_config(
