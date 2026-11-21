@@ -52,6 +52,10 @@ windows-sys = { version = "0.61", features = [
 # UX4：托盘图标（web/icons/icon-192.png 内嵌）PNG→RGBA 解码
 png = "0.18"
 
+[build-dependencies]
+# UX（2026-11-21）：exe 图标嵌入（build.rs；仅 Windows host 生效）
+winresource = "0.1"
+
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
 tempfile = "3"

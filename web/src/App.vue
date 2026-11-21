@@ -60,7 +60,7 @@ window.addEventListener('hashchange', () => {
   <Wall v-if="isWall" />
   <div v-else class="layout">
     <nav>
-      <h1>LabSentinel</h1>
+      <h1><img class="logo" src="/icons/icon-512-app.png" alt="LabSentinel 图标" />LabSentinel</h1>
       <a v-for="t in tabs" :key="t.key" :class="{ active: active === t.key }"
          :href="`#/${t.key}`" @click.prevent="go(t.key)">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
@@ -81,3 +81,12 @@ window.addEventListener('hashchange', () => {
     <Welcome v-if="showWelcome" @done="() => (showWelcome = false)" />
   </div>
 </template>
+
+<style scoped>
+nav a { cursor: pointer; }
+nav .logo {
+  width: 26px; height: 26px;
+  border-radius: 6px; object-fit: contain;
+  flex-shrink: 0;
+}
+</style>
