@@ -22,7 +22,11 @@ const newCal = ref({ date: '', mode: 'holiday', note: '' })
 const calMsg = ref('')
 
 async function loadCal() {
-  try { calExceptions.value = (await api.calendar()).exceptions } catch { /* 旧服务端无此端点：静默 */ }
+  try {
+    // 契约：/api/calendar 返回数组；兼容旧 {exceptions:[]} 包裹（2026-11-21 闪黑根因）
+    const r = await api.calendar()
+    calExceptions.value = Array.isArray(r) ? r : (r?.exceptions || [])
+  } catch { /* 旧服务端无此端点：静默 */ }
 }
 async function addCal() {
   if (!newCal.value.date) { calMsg.value = '先选日期'; return }
@@ -52,7 +56,8 @@ const copyBusy = ref(false)
 
 onMounted(async () => {
   try {
-    cams.value = await api.cameras()
+    const cs = await api.cameras()
+    cams.value = Array.isArray(cs) ? cs : []
   } catch { /* 服务未就绪时留空，可刷新重试 */ }
   if (cams.value.length) camId.value = cams.value[0].id
 })
@@ -84,8 +89,15 @@ const tplSel = ref(null)
 const tplZone = ref('')      // '' = 全局规则
 const tplMsg = ref('')
 
+// 后端模板清单不返回 rules_count（配置里有 rules 数组）——前端兜底计算
+const tplRulesCount = (t) => Array.isArray(t?.config?.rules) ? t.config.rules.length : (t?.rules_count ?? 0)
+
 async function loadTpls() {
-  try { tplList.value = (await api.ruleTemplates()).templates } catch { /* 旧服务端无端点 */ }
+  try {
+    // 契约：/api/rule-templates 返回数组；兼容旧 {templates:[]} 包裹（2026-11-21 闪黑根因）
+    const r = await api.ruleTemplates()
+    tplList.value = Array.isArray(r) ? r : (r?.templates || [])
+  } catch { /* 旧服务端无端点 */ }
 }
 async function saveAsTemplate() {
   if (!tplName.value.trim()) { tplMsg.value = '先填模板名'; return }
@@ -99,7 +111,7 @@ async function saveAsTemplate() {
 async function applyTemplate() {
   if (!tplSel.value || !camId.value) return
   const t = tplList.value.find(x => x.id === tplSel.value)
-  if (!t || !confirm(`把模板「${t.name}」（${t.rules_count} 条规则）套用到当前摄像头？`)) return
+  if (!t || !confirm(`把模板「${t.name}」（${tplRulesCount(t)} 条规则）套用到当前摄像头？`)) return
   try {
     const body = { camera_ids: [camId.value] }
     if (tplZone.value) body.zone_id = Number(tplZone.value)
@@ -114,8 +126,11 @@ async function delTemplate(id) {
 }
 async function load() {
   if (!camId.value) return
-  zones.value = await api.zones(camId.value)
-  rules.value = await api.rules(camId.value)
+  // 防御：接口异常形状不得让整页渲染崩溃（历史 bug：undefined.length → 闪黑/空白）
+  const zs = await api.zones(camId.value)
+  zones.value = Array.isArray(zs) ? zs : []
+  const rs = await api.rules(camId.value)
+  rules.value = Array.isArray(rs) ? rs : []
   drawing.value = []
   await nextTick()
   draw()
@@ -145,7 +160,11 @@ function draw() {
     if (fill) { ctx.closePath(); ctx.fillStyle = color + '33'; ctx.fill() }
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke()
   }
-  zones.value.forEach(z => paint(z.polygon.map(([x, y]) => [x * SCALE, y * SCALE]), '#4da3ff', true))
+  zones.value.forEach(z => {
+    if (Array.isArray(z.polygon)) {
+      paint(z.polygon.map(([x, y]) => [x * SCALE, y * SCALE]), '#4da3ff', true)
+    }
+  })
   paint(drawing.value, '#f5c518', drawing.value.length >= 3)
 }
 
@@ -183,7 +202,7 @@ async function addRule(zoneId) {
     <table>
       <tr><th>ID</th><th>名称</th><th>顶点数</th><th></th></tr>
       <tr v-for="z in zones" :key="z.id">
-        <td>{{ z.id }}</td><td>{{ z.name }}</td><td>{{ z.polygon.length }}</td>
+        <td>{{ z.id }}</td><td>{{ z.name }}</td><td>{{ Array.isArray(z.polygon) ? z.polygon.length : 0 }}</td>
         <td><button class="ghost" @click="api.delZone(z.id).then(load)">删除</button></td>
       </tr>
     </table>
@@ -252,7 +271,7 @@ async function addRule(zoneId) {
     <div class="row">
       <select v-model="tplSel" aria-label="选择模板">
         <option :value="null">选择模板…</option>
-        <option v-for="t in tplList" :key="t.id" :value="t.id">{{ t.name }}（{{ t.rules_count }} 条）</option>
+        <option v-for="t in tplList" :key="t.id" :value="t.id">{{ t.name }}（{{ tplRulesCount(t) }} 条）</option>
       </select>
       <select v-model="tplZone" aria-label="套用目标">
         <option value="">套为全局规则</option>
@@ -268,7 +287,7 @@ async function addRule(zoneId) {
       <table style="margin-top:6px">
         <tr><th>ID</th><th>名称</th><th>规则数</th><th>更新时间</th><th></th></tr>
         <tr v-for="t in tplList" :key="t.id">
-          <td>{{ t.id }}</td><td>{{ t.name }}</td><td>{{ t.rules_count }}</td>
+          <td>{{ t.id }}</td><td>{{ t.name }}</td><td>{{ tplRulesCount(t) }}</td>
           <td class="muted">{{ t.updated_ts }}</td>
           <td><button class="ghost" @click="delTemplate(t.id)">删除</button></td>
         </tr>

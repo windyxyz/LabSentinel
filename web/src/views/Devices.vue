@@ -99,7 +99,9 @@ onMounted(load)
 .pairing-box { margin-top: 12px; text-align: center; }
 .pairing-box .code {
   font-size: 40px; letter-spacing: 12px; font-weight: 700;
-  padding: 10px 20px; background: var(--bg-soft, #1a2230);
+  font-variant-numeric: tabular-nums;
+  /* 2026-11-21 修复：此前只有深色底未设文字色 → 浅色主题下深字深底不可读 */
+  padding: 10px 20px; background: var(--accent); color: var(--on-accent);
   border-radius: 8px; display: inline-block; user-select: all;
 }
 .tbl { width: 100%; border-collapse: collapse; margin-top: 8px; }
