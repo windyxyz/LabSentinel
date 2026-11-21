@@ -364,9 +364,23 @@ impl Jobs {
             if !allowed {
                 continue; // 超限：计数留待下一窗口摘要
             }
+            // UX（2026-11-21 用户实测反馈）：告警文字人话化——类型中文化、
+            // 摄像头用名称（不带内部 ID）、去掉裸时间戳行（客户端消息自带时间）
+            let level_cn = match ev.level {
+                3 => "严重",
+                2 => "警告",
+                _ => "提示",
+            };
             let mut text = format!(
-                "[L{}] {}（cam-{} {}）\n{}\n{}",
-                ev.level, ev.type_, ev.camera_id, ev.camera_name, ev.detail, ev.ts
+                "【LabSentinel·{}】{}\n摄像头：{}\n{}",
+                level_cn,
+                ls_dispatch::type_text(&ev.type_),
+                if ev.camera_name.is_empty() {
+                    format!("#{}", ev.camera_id)
+                } else {
+                    ev.camera_name.clone()
+                },
+                ev.detail
             );
             if pending > 0 {
                 text.push_str(&format!("\n（上一窗口合并 {pending} 条）"));

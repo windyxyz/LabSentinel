@@ -203,6 +203,20 @@ pub fn is_ok(_ch: Channel, status: u16, body: &str) -> bool {
     true // 无业务码：HTTP 2xx 即成功
 }
 
+/// UX（2026-11-21 用户实测反馈）：事件类型中文名——告警文案不再出现内部
+/// 标识符（occupancy_over 等）。与前端 TYPE_TEXT 同口径，未知类型回退原值。
+pub fn type_text(type_: &str) -> String {
+    match type_ {
+        "occupancy_over" => "在场人数超限".to_string(),
+        "enter_no_ppe" => "有人未穿实验服进入监控区".to_string(),
+        "enter" => "有人进入监控区".to_string(),
+        "exit" => "有人离开监控区".to_string(),
+        "stranger" => "陌生人进入".to_string(),
+        "no_gloves" => "未戴手套".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// 告警标题（Python alert_title 等价：LS_ALERT_TEMPLATE_TITLE 模板，{level} 替换；
 /// 未知占位符按 Python SafeDict 语义原样保留）
 pub fn alert_title(level: i64) -> String {

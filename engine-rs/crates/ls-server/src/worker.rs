@@ -878,7 +878,8 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                             level: 2,
                                             track_id: 0,
                                             detail: format!(
-                                                "VLM 视频判定：{behavior}（{persons}人）— {summary}"
+                                                "AI 精判（视频）：{}，画面中约 {persons} 人 — {summary}",
+                                                ls_dispatch::type_text(behavior)
                                             ),
                                             ts_iso: ts.clone(),
                                             evidence_key: format!("vlm:{}:{behavior}", frame.index),
@@ -1120,7 +1121,9 @@ fn cascade_review_run(r: CascadeReview) {
                     level: 2,
                     track_id: 0,
                     detail: format!(
-                        "VLM 复核判定：{behavior}（{persons}人）— {}",
+                        "AI 精判：{}（画面中约 {} 人）— {}",
+                        ls_dispatch::type_text(behavior),
+                        persons,
                         v["summary"].as_str().unwrap_or("")
                     ),
                     ts_iso: ts.clone(),
@@ -1398,9 +1401,8 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                     level: 2,
                                     track_id: 0,
                                     detail: format!(
-                                        "VLM 判定：图片 {} 命中 {}（{}人/未穿服 {}）— {}",
-                                        name.as_deref().unwrap_or(""),
-                                        behavior,
+                                        "AI 精判：图片检出 {}（{} 人，未穿服 {}）— {}",
+                                        ls_dispatch::type_text(behavior),
                                         persons,
                                         no_ppe,
                                         v["summary"].as_str().unwrap_or("")
@@ -1572,12 +1574,22 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         behavior: behavior.clone(),
                         level: 2,
                         track_id: 0,
+                        // UX（2026-11-21 用户实测反馈）：detail 人话化——
+                        // 文件名截短（原始名含长哈希后缀），行为名中文化
                         detail: format!(
-                            "文件夹图片 {} 命中 {}（{}人/{}区内）",
-                            name.as_deref().unwrap_or(""),
-                            behavior,
+                            "图片 {} 检测到 {} 人{}（{}）",
+                            name.as_deref()
+                                .unwrap_or("")
+                                .split("_-_")
+                                .next()
+                                .unwrap_or(""),
                             persons,
-                            in_zone
+                            if in_zone > 0 {
+                                "，位于监控区内"
+                            } else {
+                                ""
+                            },
+                            ls_dispatch::type_text(behavior)
                         ),
                         ts_iso: processed_ts.clone(),
                         evidence_key: format!("folder:{iid}:{behavior}"),
