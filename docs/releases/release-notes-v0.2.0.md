@@ -1,7 +1,8 @@
 # Release Notes · LabSentinel v0.2.0
 
 > **历史文档**：本文件记录 0.2.0 初版（2026-11-12，嵌入式 Python 双形态）。
-> 2026-11-14 该版本号以 **Rust 单二进制形态重发布**（zip + Inno Setup 7 setup.exe，
+> 2026-11-14 该版本号以 **Rust 单二进制形态重发布**（后续 0.3.0 起
+> 全新 UX 桌面体验，见 CHANGELOG）（zip + Inno Setup 7 setup.exe，
 > 无 Python 运行时），以 `CHANGELOG.md` 的 [`[0.2.0] - 2026-11-14（Rust 形态重发布）`
 > 段落与 GitHub Release 说明为准。
 
