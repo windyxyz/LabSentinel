@@ -49,12 +49,14 @@ onMounted(load)
           <b :class="status.mode === 'ppe' ? 'st-ok' : 'st-idle'">
             {{ status.mode === 'ppe' ? '人员 + 实验服检测' : '仅人员检测' }}
           </b>
-          <span v-if="status.installed && !status.active" class="muted">（文件已就绪，重启服务后生效）</span>
+          <span v-if="status.bundled" class="muted">（随安装包提供，开箱即用）</span>
+          <span v-else-if="status.installed && !status.active" class="muted">（文件已就绪，重启服务后生效）</span>
         </p>
         <p class="muted" style="white-space:pre-wrap">{{ status.license_notice }}</p>
         <p class="muted">
-          校验 SHA256：<code>{{ status.sha256 }}</code><br />
-          大小：<template v-if="status.size_bytes">{{ (status.size_bytes / 1048576).toFixed(1) }} MB</template><template v-else>—</template>；来源见 assets.lock.json
+          校验 SHA256：<code>{{ status.sha256 || '—' }}</code><br />
+          大小：<template v-if="status.size_bytes > 0">{{ (status.size_bytes / 1048576).toFixed(1) }} MB</template><template v-else>—</template>
+          <template v-if="!status.bundled">；来源见 assets.lock.json</template>
         </p>
         <template v-if="!status.installed">
           <label style="display:block;margin:10px 0">
@@ -65,6 +67,7 @@ onMounted(load)
             {{ busy ? '下载中…' : '确认许可并下载模型' }}
           </button>
         </template>
+        <p v-else-if="status.bundled" class="st-ok">实验服模型已随安装包就绪并默认启用，无需下载。</p>
         <p v-else class="st-ok">模型已安装且哈希校验通过。</p>
       </template>
       <p v-if="msg" class="muted" style="margin-top:8px">{{ msg }}</p>

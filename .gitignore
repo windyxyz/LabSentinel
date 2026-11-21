@@ -9,6 +9,10 @@
 m0-spike/*.onnx
 m0-spike/*.pt
 m0-spike/*.classes.txt
+# 2026-11-21：实验服模型随发行包分发（用户决策；CC BY 4.0 署名见 NOTICE）——
+# 只有这两份入库存档，CI 才能构建出「开箱即带实验服检测」的发行包。
+!m0-spike/yolo11n_ppe.onnx
+!m0-spike/yolo11n_ppe.classes.txt
 m0-spike/calib/
 m0-spike/out_s*/
 m0-spike/data/

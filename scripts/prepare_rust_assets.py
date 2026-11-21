@@ -30,8 +30,9 @@ def log(msg: str) -> None:
 
 
 def ensure_models(force: bool) -> None:
-    """基础模型（yolo11n.onnx）失败即退出；PPE 模型按 Q-08 口径降级为警告
-    （许可待确认不随包分发，资产源仓库尚未就绪——CI 不因它阻塞）。"""
+    """模型准备：基础模型失败即退出。PPE 模型自 0.3.1 起随仓库/发行包分发
+    （m0-spike 已入库），此处仅在文件缺失时尝试锁文件下载，失败仍降级警告；
+    发行构建由 build_rust.py --strict 强制校验 PPE 是否存在。"""
     MODELS.mkdir(parents=True, exist_ok=True)
     for name in MODEL_ASSETS:
         out = MODELS / name

@@ -15,7 +15,7 @@
 ;   --archive / --rollback；健康检查用 --selftest-http。
 
 #ifndef LsAppVersion
-  #define LsAppVersion "0.2.0"
+  #define LsAppVersion "0.3.1"
 #endif
 #ifndef LsSourceDir
   ; 指向解压后的 Rust 发行包目录（labsentinel-rust-<ver>-<date>.zip 解包结果）
@@ -64,6 +64,7 @@ chinese.ShortcutOptGroup=快捷方式
 chinese.Verify=正在校验新版本…
 chinese.Archive=正在归档旧版本…
 chinese.Launch=启动 LabSentinel
+chinese.RemoveUserData=是否同时删除 LabSentinel 的用户数据？%1 包含数据库、事件截图/录像、备份与密钥。选择「否」保留数据，重新安装后可继续使用。
 english.ServiceTask=Install as a Windows service (RTSP/folder sources only; requires admin)
 english.ServiceOptGroup=Optional components
 english.ServiceMissing=winsw.exe is not bundled: install the service manually (see deploy/windows/labsentinel-service.xml).
@@ -74,6 +75,7 @@ english.ShortcutOptGroup=Shortcuts
 english.Verify=Verifying the new version…
 english.Archive=Archiving the previous version…
 english.Launch=Launch LabSentinel
+english.RemoveUserData=Also delete LabSentinel user data? %1 contains the database, event snapshots/videos, backups and keys. Choose No to keep data for a future reinstall.
 
 [Tasks]
 ; 快捷方式选项放在标准「选择附加任务」页（Inno 原生控件，随 DPI 自适应）；
@@ -97,8 +99,13 @@ Type: files; Name: "{group}\Uninstall LabSentinel.lnk"
 Type: dirifempty; Name: "{group}"
 Type: files; Name: "{userdesktop}\LabSentinel.lnk"
 Type: files; Name: "{commondesktop}\LabSentinel.lnk"
-; 用户数据（%LOCALAPPDATA%\LabSentinel）与 versions/ 归档不随卸载删除；
-; 需清理时手工删除：数据 %LOCALAPPDATA%\LabSentinel\，归档 {app}\versions\
+; 0.3.1：卸载清理升级归档与旧布局遗留目录（此前 versions\<ver> 整树残留，
+; 第三方卸载检查工具会报大量文件；server/data 是修复前的相对路径残留）。
+Type: filesandordirs; Name: "{app}\versions"
+Type: filesandordirs; Name: "{app}\server"
+Type: filesandordirs; Name: "{app}\data"
+; 用户数据（%LOCALAPPDATA%\LabSentinel）默认保留；卸载时可选择一并删除，
+; 见 [Code] InitializeUninstall（静默卸载用 /REMOVEDATA=1 显式删除）。
 
 [Run]
 ; 升级链路：
@@ -201,5 +208,63 @@ begin
           MsgBox(CustomMessage('ServiceMissing'), mbInformation, MB_OK);
       end;
     end;
+  end;
+end;
+
+// ---- 卸载优化（0.3.1）----
+// 1) versions/ 升级归档、旧布局 server/、data/ 由 [UninstallDelete] 清理；
+// 2) 用户数据（%LOCALAPPDATA%\LabSentinel）默认保留，交互卸载时询问是否一并删除
+//    （静默卸载用 /REMOVEDATA=1 显式删除）；
+// 3) 尽力清理 Prefetch 缓存（系统托管；仅管理员卸载时可删，失败不阻断）。
+var
+  RemoveUserData: Boolean;
+
+function InitializeUninstall(): Boolean;
+var
+  DataDir: String;
+begin
+  Result := True;
+  DataDir := ExpandConstant('{localappdata}\LabSentinel');
+  if UninstallSilent then
+    RemoveUserData := ExpandConstant('{param:REMOVEDATA|0}') = '1'
+  else
+    RemoveUserData := MsgBox(
+      FmtMessage(CustomMessage('RemoveUserData'), [DataDir]),
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
+procedure DeletePrefetchMask(const Mask: String);
+var
+  FindRec: TFindRec;
+  Dir: String;
+begin
+  Dir := ExpandConstant('{sys}\prefetch');
+  try
+    if FindFirst(Dir + '\' + Mask, FindRec) then
+    begin
+      try
+        repeat
+          DeleteFile(Dir + '\' + FindRec.Name);
+        until not FindNext(FindRec);
+      finally
+        FindClose(FindRec);
+      end;
+    end;
+  except
+    // Prefetch 由系统维护，清理失败忽略
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    // 旧布局启动器锁文件（数据目录上一级 logs/）
+    DeleteFile(ExpandConstant('{localappdata}\LabSentinel\logs\launcher.lock'));
+    if RemoveUserData then
+      DelTree(ExpandConstant('{localappdata}\LabSentinel'), True, True, True);
+    DeletePrefetchMask('LABSENTINEL-SERVER.EXE-*.pf');
+    DeletePrefetchMask('GO2RTC.EXE-*.pf');
+    DeletePrefetchMask('FFMPEG.EXE-*.pf');
   end;
 end;

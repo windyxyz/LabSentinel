@@ -4,6 +4,25 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 SemVer
 （决策 77-Q-05：下一版 0.2.0；构建元数据 `+<YYYYMMDD>.<shortsha>`）。
 
+## [0.3.1] - 2026-11-21
+
+### 实验服模型随包发布 + 版本号修复
+- **实验服（PPE）模型随发行包分发**（用户指令）：`yolo11n_ppe.onnx` +
+  `yolo11n_ppe.classes.txt` 入库存档并随 zip/setup.exe 分发——安装即有
+  「人员 + 实验服检测」，不再要求网页端确认许可后下载（原下载源 404、
+  安装包又无 assets.lock.json → 用户侧只能看到「仅人员检测」+「下载失败」）。
+  `ppe_status` 增加随包模型探测与真实文件 SHA256/大小；`build_rust.py --strict`
+  缺 PPE 模型即构建失败；`--launch --tray` 与源码形态行为一致。
+  许可：LAB PPE 数据集 CC BY 4.0，署名与哈希见 `NOTICE` / `assets.lock.json`。
+- **网页版本号修复**：仪表盘「版本」卡此前恒显示 `0.2.0`（`st_version()` 兜底
+  写死）；改为使用启动时解析的 `AppState.version`（包内 VERSION 文件）。
+- **下载失败提示**：找不到 `assets.lock.json` 时明确提示「本安装包可能未内置
+  实验服模型，请更新到随包版本」，并新增按安装根查找锁文件。
+- **卸载清理优化**（用户用第三方卸载检查工具发现的残留）：卸载时删除
+  `versions\` 升级归档整树、旧布局 `server\`/`data\`、旧启动器锁文件，并尽力
+  清理 `Prefetch`（LABSENTINEL-SERVER/GO2RTC/FFMPEG）；用户数据默认保留，
+  交互卸载新增「是否同时删除用户数据」询问（静默卸载 `/REMOVEDATA=1` 显式删除）。
+
 ## [0.3.0] - 2026-11-21（UX 轮：桌面体验与界面简化）
 
 ### 桌面体验与界面简化（docs/plan/ux-roadmap-2026-11-20.md 全项落地）

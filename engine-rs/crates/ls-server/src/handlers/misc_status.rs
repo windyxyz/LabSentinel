@@ -397,13 +397,15 @@ static UPDATE_CACHE: std::sync::Mutex<Option<(std::time::Instant, Value)>> =
     std::sync::Mutex::new(None);
 
 pub(crate) async fn update_check_status(
-    State(_st): State<Shared>,
+    State(st): State<Shared>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     // RA2-S8：清单拉取真实现（1h 缓存 + https 强制 + url 白名单）。
     // minisign 签名验证未实现（分水岭决策：不引新 crate）——error 字段如实标注。
     let manifest = std::env::var("LS_UPDATE_MANIFEST_URL").unwrap_or_default();
-    let current = st_version();
+    // 2026-11-21 修复：此前 st_version() 兜底写死 "0.2.0"，网页「版本」卡恒显示
+    // 0.2.0（用户实测反馈）。改用启动时解析的 AppState.version（VERSION 文件）。
+    let current = st.version.clone();
     let mut result = json!({
         "enabled": !manifest.is_empty(), "current": current,
         "update_available": false, "latest": null, "url": null,
@@ -473,10 +475,6 @@ pub(crate) async fn update_check_status(
         }
     }
     Json(result).into_response()
-}
-
-pub(crate) fn st_version() -> String {
-    std::env::var("LS_VERSION").unwrap_or_else(|_| "0.2.0".into())
 }
 
 pub(crate) async fn logs_tail(
@@ -556,25 +554,48 @@ fn redact_line(line: &str) -> String {
 
 pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
     with_store(&st, |s| {
-        // ppe_model 优先级：env > app_settings（Q-08 按需下载写入）
+        // ppe_model 优先级：env > app_settings（下载写入）> 随包 models/
+        // 2026-11-21（用户指令「随包发布」）：发行包内置 yolo11n_ppe.onnx，
+        // 安装即有实验服检测，不再要求网页端确认许可后下载。
         let env_ppe = std::env::var("LS_PPE_MODEL").ok().filter(|v| !v.is_empty());
         let db_ppe = s.setting_get("ppe_model").ok().flatten();
-        let model_path = env_ppe.or(db_ppe);
-        let installed = model_path
+        let bundled = crate::deploy::default_install_root().join("models/yolo11n_ppe.onnx");
+        let bundled = bundled
+            .is_file()
+            .then(|| bundled.to_string_lossy().into_owned());
+        let model_path = env_ppe
+            .filter(|p| std::path::Path::new(p).is_file())
+            .or_else(|| db_ppe.filter(|p| std::path::Path::new(p).is_file()))
+            .or_else(|| bundled.clone());
+        let installed = model_path.is_some();
+        // 展示实际文件的大小与 SHA256（随包文件与锁文件同源，可核验）
+        let (size_bytes, sha256) = model_path
             .as_ref()
-            .map(|p| std::path::Path::new(p).is_file())
-            .unwrap_or(false);
+            .and_then(|p| std::fs::read(p).ok())
+            .map(|d| (d.len() as i64, sha256_hex(&d)))
+            .unwrap_or((-1, String::new()));
         Ok(Json(json!({
             "installed": installed,
+            "bundled": bundled.is_some(),
             "mode": if installed { "ppe" } else { "person_only" },
             "active": installed,
             "license_confirmed_required": !installed,
-            "license_notice": "实验服模型权重由 Roboflow 训练数据集派生，具体许可仍待确认（Q-08）。下载即表示你已阅读并接受该数据集的用途限制。",
+            "license_notice": if bundled.is_some() {
+                "实验服模型已随安装包提供（权重由 Roboflow 训练数据集派生，数据集许可 CC BY 4.0，署名见 NOTICE）。已默认启用，无需下载。"
+            } else {
+                "实验服模型权重由 Roboflow 训练数据集派生，具体许可仍待确认（Q-08）。下载即表示你已阅读并接受该数据集的用途限制。"
+            },
+            "sha256": sha256,
+            "size_bytes": size_bytes,
             "model_path": model_path.as_ref().map(|p| {
                 // P2-6：只回显文件名（不泄露目录布局）
                 std::path::Path::new(p).file_name().map(|f| f.to_string_lossy().into_owned())
             }),
-            "note": "按需下载实验服模型（SHA256 校验，写入数据目录 models/）",
+            "note": if installed {
+                "实验服模型已就绪"
+            } else {
+                "安装包未内置实验服模型；建议更新到随包版本"
+            },
         }))
         .into_response())
     })
@@ -877,9 +898,12 @@ pub(crate) async fn face_delete(AxPath(subject): AxPath<String>) -> Response {
 // ---- 告警自检（真实发送：复用 ls-dispatch，渠道 URL 读 env） ----
 
 pub(crate) fn asset_lock_path(st: &Shared) -> std::path::PathBuf {
-    // 便携布局 <包>/scripts/assets.lock.json → 开发布局 <repo>/scripts/assets.lock.json
+    // 查找顺序：数据目录祖先 → 安装根（发行包）→ 仓库相对（开发布局）
+    let install_root = crate::deploy::default_install_root();
     std::path::Path::new(&st.data_dir)
         .ancestors()
+        .map(std::path::Path::to_path_buf)
+        .chain(std::iter::once(install_root))
         .find_map(|p| {
             p.join("scripts/assets.lock.json")
                 .is_file()
@@ -905,7 +929,7 @@ pub(crate) async fn ppe_download(State(st): State<Shared>, Json(body): Json<Valu
         return (
             StatusCode::NOT_FOUND,
             // P2-6（安全审计）：错误体不回显内部绝对路径
-            Json(json!({"detail": "assets.lock.json 不存在（检查 data_dir/scripts 布局）"})),
+            Json(json!({"detail": "未找到 assets.lock.json：本安装包可能未内置实验服模型，请更新到随包版本（0.3.1+）"})),
         )
             .into_response();
     };

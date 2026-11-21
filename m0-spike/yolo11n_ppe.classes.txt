@@ -1,0 +1,11 @@
+Glasses
+Gloves
+Lab Coat
+Mask
+No Glasses
+No Gloves
+No Lab Coat
+No Mask
+Person
+Shoes
+HairNet

@@ -77,17 +77,16 @@ def assemble(strict: bool = False) -> None:
         missing.append("web/dist（先执行 npm run build）")
     models = DIST / "models"
     models.mkdir(exist_ok=True)
-    # RA4.2：基础检测 + PPE 模型（含类别名）随包分发（缺失时提示，不阻断——仅检测功能降级）
+    # RA4.2：基础检测 + PPE 模型（含类别名）随包分发（--strict 缺任一即失败）
+    # 2026-11-21（用户指令）：实验服模型改为随包发布——此前 Q-08 只警告，
+    # 安装版用户看到「仅人员检测」且下载源 404。
     for name in ("yolo11n.onnx", "yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt"):
         src = ROOT / "m0-spike" / name
         if src.exists():
             shutil.copy2(src, models / name)
-        elif name == "yolo11n.onnx":
-            missing.append(f"模型 {src}（scripts/prepare_rust_assets.py）")
-            print(f"[警告] 缺少基础模型 {src}（scripts/fetch_assets.py --name yolo11n.onnx）")
         else:
-            # Q-08：PPE 许可待确认不随包分发——缺失仅警告（CI 无该资产）
-            print(f"[警告] 缺少 {name}（Q-08：实验服模型按需在网页端确认许可后下载）")
+            missing.append(f"模型 {src}（scripts/prepare_rust_assets.py）")
+            print(f"[警告] 缺少模型 {src}（scripts/prepare_rust_assets.py）")
     # RA4.2：ffmpeg/ffprobe（RTSP/视频取流与存证）与 onnxruntime（ORT_DYLIB_PATH）
     ff_src = ROOT / "tools" / "ffmpeg"
     if ff_src.is_dir() and (ff_src / "ffmpeg.exe").is_file():

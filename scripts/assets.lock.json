@@ -21,7 +21,7 @@
     },
     "yolo11n_ppe.onnx": {
       "version": "v1",
-      "license": "权重由 Roboflow 训练数据集派生，具体许可待维护者确认（Q-08）；不随包分发，用户确认许可后按需下载",
+      "license": "权重由 LAB PPE 数据集（Roboflow Universe，CC BY 4.0）训练派生；自 0.3.1 起随发行包分发，署名见 NOTICE",
       "urls": [
         "https://github.com/Windy-LabSentinel/assets/releases/download/ppe-v1/yolo11n_ppe.onnx"
       ],
