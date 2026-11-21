@@ -152,6 +152,25 @@ async function reset(ch) {
   } catch (e) { msg[ch.key] = String(e.message || e) }
 }
 
+// UX（2026-11-21）：推送策略——告警随消息带截图 + 同人推送冷却
+const pushPolicy = ref({ send_image: true, cooldown_s: 60 })
+const pushBusy = ref(false)
+const policyMsg = ref('')
+async function loadPushPolicy() {
+  try { pushPolicy.value = await api.pushPolicy() } catch { /* 静默 */ }
+}
+async function savePushPolicy() {
+  pushBusy.value = true
+  try {
+    pushPolicy.value = await api.savePushPolicy({
+      send_image: pushPolicy.value.send_image,
+      cooldown_s: pushPolicy.value.cooldown_s,
+    })
+    policyMsg.value = '推送策略已保存（立即生效）'
+  } catch (e) { policyMsg.value = String(e.message || e) }
+  pushBusy.value = false
+}
+
 async function test(ch) {
   testing[ch.key] = true
   testMsg[ch.key] = '发送中…'
@@ -173,7 +192,7 @@ function sourceText(s) {
   return '未配置'
 }
 
-onMounted(load)
+onMounted(() => { load(); loadPushPolicy() })
 </script>
 
 <template>
@@ -235,6 +254,29 @@ onMounted(load)
         </div>
       </div>
     </AsyncState>
+
+    <div class="panel" style="margin-top:14px">
+      <h3 style="margin:0 0 8px">推送策略（防刷屏）</h3>
+      <div class="row" style="align-items:center; flex-wrap:wrap">
+        <label style="cursor:pointer">
+          <input type="checkbox" v-model="pushPolicy.send_image" />
+          告警随消息附带异常截图（企业微信发图 / Webhook 带 base64；邮件除外）
+        </label>
+      </div>
+      <div class="row" style="align-items:center; margin-top:6px; flex-wrap:wrap">
+        <span class="muted" style="flex-shrink:0">同一摄像头同一行为同一人的推送冷却：</span>
+        <input v-model.number="pushPolicy.cooldown_s" type="number" min="0" max="3600"
+               aria-label="推送冷却秒数" style="width:90px; margin:0 4px" />
+        <span class="muted">秒（0 = 关闭；默认 60。窗口内重复触发只记事件不重复推送）</span>
+      </div>
+      <p class="muted" style="font-size:12px; margin-top:4px">
+        说明：冷却窗口内的事件照常入库并在事件页可见，只是不重复向外部渠道推送。
+        同人判定用本地跟踪 ID（ByteTrack）；API(vlm) 判定模式按摄像头+行为合并兜底。改完点保存立即生效。</p>
+      <div class="row" style="margin-top:6px">
+        <button :disabled="pushBusy" @click="savePushPolicy">{{ pushBusy ? '保存中…' : '保存推送策略' }}</button>
+        <span v-if="policyMsg" class="muted" style="font-size:12px">{{ policyMsg }}</span>
+      </div>
+    </div>
   </div>
 </template>
 
