@@ -23,6 +23,8 @@ ls-infer = { version = "0.1.0", path = "../ls-infer" }
 ls-ingest = { version = "0.1.0", path = "../ls-ingest" }
 axum = { version = "0.7", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

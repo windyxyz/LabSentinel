@@ -2,20 +2,19 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID**: `LS-042`（已锁定 `ACTIVE`；`LS-041` 已验证完成并入库）
-- **Task-Name**: 前后端契约全面对齐 + 前端 11 处 P0 修复 + `/ws/webrtc/:cid` 代理与快照降级 + 8 组回归测试
+- **Task-ID**: `LS-043`（已锁定 `ACTIVE`；`LS-042` 已验证完成并入库）
+- **Task-Name**: PPE 单次多类推理 2× 提速 + 灰度图 0 检出调优/诊断 + GUI 日志落盘 + Worker/ffmpeg/规则/跟踪器加固
 - **Files Changed**:
-  - `LS-041`：`ls-infer`（`DML_LOCK`+配置+`EP_USED` RwLock）、`ls-core::time`（`jiff` 本地时区替 `chrono`）、`ls-store`（WAL + v15 `days_of_week` 修复）、`ls-analyzer` & `ls-jobs`（去 `chrono` + `clear_alert_template` + env 合并）、`ls-server`（`vlm`/`detect`/`worker`/`router`/`misc_status`/`alerts`/`util`/`logger`/`genai`）、`scripts/build_rust.py`、`engine-rs/deny.toml`、`engine-rs/Cargo.lock`
+  - `LS-042`：`handlers/{stats,folder_images,events,ops,alerts,cameras,zones_rules,config_io}.rs`、`router.rs`、`ls-server/Cargo.toml`、`web/src/{api.js,style.css}`、`web/src/views/{ReportsView,Events,FolderImages,Settings,Zones,Cameras,Wall,Devices,Models}.vue`、`web/src/components/{Welcome,FsPicker}.vue`、`web/tests/ls042_regressions.test.js`
 - **Completed This Session**:
-  - `LS-040` 完成并入库（`17da1fb`）。
-  - `LS-041` 完成并过全量门禁：`cargo fmt --check` PASS、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 0 警告、`cargo test --workspace --all-features` **141 passed / 0 failed**（+5 新单测：DML 串行锁、`EP_USED` 动态更新、`ls-core::time`×2、v15 迁移与 WAL 验证）。
+  - `LS-040` 入库（`17da1fb`）；`LS-041` 入库（`da1dbd1`，141/141 Rust tests）。
+  - `LS-042` 完成并全绿：`npx vitest run` **66 passed / 0 failed**、`npm run build` PASS、Rust `fmt`/`clippy`/`test` **141 passed / 0 failed**。
 - **Open TODO**:
-  1. 执行 `LS-042`（前后端契约对齐 + 11 处前端 P0 修复 + `/ws/webrtc/:cid` 代理与降级 + 8 组回归测试）；
-  2. 依次推进 `LS-043` → `LS-044` → `LS-045` → `LS-046`。
-- **Risks/Blockers**:
-  - DirectML 事故 A1 风险已在 `LS-041` 经 `DML_LOCK` + `with_memory_pattern(false)` + `with_parallel_execution(false)` 闭环。
+  1. 执行 `LS-043`（PPE 单次多类推理 + 灰度图阈值可调/ROI 精检 + `log` 落盘 + Worker/ffmpeg/规则/跟踪器加固）；
+  2. 依次推进 `LS-044` → `LS-045` → `LS-046`。
+- **Risks/Blockers**: 无阻断项。
 - **Next First Command**:
-  - 推进 `LS-042` 后端响应契约对齐与前端视图修复，并跑 Rust 三连 + `npx vitest run` + `npm run build`。
+  - 落地 `LS-043` 代码改动并跑 Rust 三连门禁。
 
 ---
 

@@ -43,6 +43,9 @@ pub(crate) async fn folder_images_list(
                 "height": r.height, "persons": r.persons, "in_zone": r.in_zone,
                 "ppe_no": r.ppe_no, "ppe_wearing": r.ppe_wearing, "key": r.key,
                 "violation": r.violation, "event_id": r.event_id,
+                "zones": [], "violations": if r.violation { json!(["violation"]) } else { json!([]) },
+                "thumb_url": format!("/api/folder-images/{}/thumb", r.id),
+                "file_url": format!("/api/folder-images/{}/file", r.id),
                 "snapshot": r.snapshot, "error": r.error}))
             .collect::<Vec<_>>(), "total": total, "limit": limit, "offset": offset,
             "camera_names": names}))
@@ -232,31 +235,21 @@ pub(crate) async fn folder_image_thumb(
     State(st): State<Shared>,
     AxPath(iid): AxPath<i64>,
 ) -> Response {
-    with_store(&st, |s| match s.folder_image(iid)? {
-        Some(_r) => {
-            // Python 侧缩略图缓存在 <data>/thumbs/img_{id}.jpg；rust 独立模式
-            // 不生成缩略图（无图像处理依赖），命中缓存则回，否则如实 415
-            let thumb = std::path::Path::new(&st.data_dir)
-                .join("thumbs")
-                .join(format!("img_{iid}.jpg"));
-            match std::fs::read(&thumb) {
-                Ok(data) => Ok((
-                    [
-                        (header::CONTENT_TYPE, "image/jpeg"),
-                        (header::CACHE_CONTROL, "private, max-age=3600"),
-                    ],
-                    data,
-                )
-                    .into_response()),
-                Err(_) => Ok(detail_err(
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "缩略图缓存不存在（rust 控制面不生成缩略图；原图走 /file）",
-                )
-                .into_response()),
-            }
-        }
-        None => Ok(detail_err(StatusCode::NOT_FOUND, "image record not found").into_response()),
-    })
+    let thumb = std::path::Path::new(&st.data_dir)
+        .join("thumbs")
+        .join(format!("img_{iid}.jpg"));
+    if let Ok(data) = std::fs::read(&thumb) {
+        return (
+            [
+                (header::CONTENT_TYPE, "image/jpeg"),
+                (header::CACHE_CONTROL, "private, max-age=3600"),
+            ],
+            data,
+        )
+            .into_response();
+    }
+    // LS-042：无缩略图缓存时优雅回退原图 /file（此前返 415 导致缩略图全破）
+    folder_image_file(State(st), AxPath(iid)).await
 }
 
 pub(crate) async fn folder_images_csv(

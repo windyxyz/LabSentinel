@@ -88,8 +88,9 @@ async function download() {
   busy.value = true
   msg.value = '下载中（含 SHA256 校验）…'
   try {
-    status.value = await api.ppeDownload(true)
-    msg.value = status.value.installed ? '下载完成并已启用实验服检测' : '下载未完成'
+    const r = await api.ppeDownload(true)
+    status.value = { ...(status.value || {}), ...(r || {}) }
+    msg.value = status.value?.installed ? '下载完成并已启用实验服检测' : '下载未完成'
   } catch (e) {
     msg.value = `下载失败: ${e.message || e}`
   } finally {

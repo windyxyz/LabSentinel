@@ -49,13 +49,18 @@ pub(crate) async fn config_export(
                        "name": z.2, "polygon": polygon})
             })
             .collect();
+        let zname: std::collections::HashMap<i64, String> =
+            zones.iter().map(|z| (z.0, z.2.clone())).collect();
         let rules_out: Vec<Value> = rules
             .iter()
             .map(|r| {
                 json!({"camera_name": cname.get(&r.1).cloned().unwrap_or(format!("#{}", r.1)),
-                       "zone_id": r.2, "behavior": r.3, "level": r.4, "cooldown_s": r.5,
+                       "zone_id": r.2,
+                       "zone_name": r.2.and_then(|zid| zname.get(&zid).cloned()),
+                       "behavior": r.3, "level": r.4, "cooldown_s": r.5,
                        "time_start": r.6, "time_end": r.7, "threshold": r.8,
-                       "enabled": r.9 != 0})
+                       "enabled": r.9 != 0,
+                       "days_of_week": r.10, "holiday_only": r.11})
             })
             .collect();
         Ok(Json(json!({"version": st.version, "cameras": cameras,
@@ -208,7 +213,7 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                 }
                 _ => None,
             };
-            s.add_rule(
+            s.add_rule_with_schedule(
                 cid,
                 zone_id,
                 behavior,
@@ -218,13 +223,18 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                 r.get("time_end").and_then(|v| v.as_str()),
                 r.get("threshold").and_then(|v| v.as_i64()).unwrap_or(0),
                 r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                r.get("days_of_week").and_then(|v| v.as_str()),
+                r.get("holiday_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             )?;
             created.2 += 1;
         }
         Ok(Json(json!({"ok": true, "mode": mode,
                        "created": {"cameras": created.0, "zones": created.1, "rules": created.2},
                        "skipped": {"cameras": skipped_cam, "zones": skipped_zone,
-                                    "rules": skipped_rule}}))
+                                    "rules": skipped_rule},
+                       "warnings": []}))
         .into_response())
     })
 }

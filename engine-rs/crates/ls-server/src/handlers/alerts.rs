@@ -14,13 +14,43 @@ pub(crate) async fn alerts_status(State(st): State<Shared>) -> Response {
     with_store(&st, |s| {
         let counts = s.deliveries(None, 10_000)?;
         let mut summary = std::collections::BTreeMap::new();
+        let mut per_ch: std::collections::BTreeMap<String, (usize, usize, usize)> =
+            Default::default();
         for d in &counts {
             *summary.entry(d.status.clone()).or_insert(0) += 1;
+            let e = per_ch.entry(d.channel.clone()).or_insert((0, 0, 0));
+            match d.status.as_str() {
+                "ok" => e.0 += 1,
+                "failed" => e.1 += 1,
+                _ => e.2 += 1,
+            }
+        }
+        let snapshot = st.jobs.alert_channels_snapshot();
+        let all: &[(&str, ls_dispatch::Channel)] = &[
+            ("wecom", ls_dispatch::Channel::Wecom),
+            ("dingtalk", ls_dispatch::Channel::Dingtalk),
+            ("feishu", ls_dispatch::Channel::Feishu),
+            ("serverchan", ls_dispatch::Channel::Serverchan),
+            ("pushplus", ls_dispatch::Channel::Pushplus),
+            ("qmsg", ls_dispatch::Channel::Qmsg),
+            ("email", ls_dispatch::Channel::Email),
+            ("webhook", ls_dispatch::Channel::Webhook),
+        ];
+        let mut configured = serde_json::Map::new();
+        let mut channels = Vec::new();
+        for (name, ch) in all {
+            let is_cfg = snapshot.iter().any(|(c, _)| c == ch);
+            configured.insert((*name).to_string(), json!(is_cfg));
+            let (ok, failed, pending) = per_ch.get(*name).copied().unwrap_or((0, 0, 0));
+            channels.push(json!({
+                "name": name,
+                "configured": is_cfg,
+                "deliveries": {"ok": ok, "failed": failed, "pending": pending},
+            }));
         }
         Ok(Json(json!({
-            "configured": {"wecom": false, "dingtalk": false, "feishu": false,
-                            "serverchan": false, "pushplus": false, "qmsg": false,
-                            "email": false, "webhook": false},
+            "configured": Value::Object(configured),
+            "channels": channels,
             "note": "渠道配置优先取网页端保存（app_settings，密钥加密），其次环境变量；此处汇总投递状态",
             "deliveries_summary": summary,
             "deliveries_total": counts.len(),

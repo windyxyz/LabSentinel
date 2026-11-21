@@ -103,18 +103,35 @@ pub(crate) async fn retry_delivery(State(st): State<Shared>, AxPath(did): AxPath
     })
 }
 
-pub(crate) async fn silences_list(State(st): State<Shared>) -> Response {
+pub(crate) async fn silences_list(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let active_only = q
+        .get("active")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let now_dt = ls_core::time::local_now_civil();
     with_store(&st, |s| {
         let rows = s.silences()?;
-        Ok(Json(
-            rows.iter()
-                .map(|x| {
-                    json!({"id": x.id, "scope": x.scope, "target": x.target,
-                            "reason": x.reason, "created_ts": x.created_ts,
-                            "until_ts": x.until_ts})
-                })
-                .collect::<Vec<_>>(),
-        ))
+        let out: Vec<Value> = rows
+            .iter()
+            .filter_map(|x| {
+                let rem_s = ls_core::time::parse_local_datetime(&x.until_ts)
+                    .map(|u| ls_core::time::diff_minutes(u, now_dt) * 60)
+                    .unwrap_or(0)
+                    .max(0);
+                if active_only && rem_s <= 0 {
+                    return None;
+                }
+                Some(json!({
+                    "id": x.id, "scope": x.scope, "target": x.target,
+                    "reason": x.reason, "created_ts": x.created_ts,
+                    "until_ts": x.until_ts, "remaining_s": rem_s,
+                }))
+            })
+            .collect();
+        Ok(Json(out))
     })
 }
 
@@ -132,14 +149,27 @@ pub(crate) async fn add_silence(State(st): State<Shared>, Json(body): Json<Value
     let until = body
         .get("until_ts")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            // LS-042：兼容前端传 duration_s（秒），自动换算本地 until_ts
+            body.get("duration_s")
+                .and_then(|v| v.as_i64())
+                .filter(|&d| d > 0)
+                .map(|d| ls_core::time::format_iso(ls_core::time::local_offset_secs(d)))
+        })
+        .unwrap_or_default();
     if until.is_empty() {
-        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "until_ts 必填").into_response();
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "until_ts 或 duration_s 必填",
+        )
+        .into_response();
     }
     with_store(&st, |s| {
         let sid = s.add_silence(&scope, target, reason, &until)?;
-        Ok(Json(json!({"id": sid})).into_response())
+        Ok(Json(json!({"id": sid, "until_ts": until})).into_response())
     })
 }
 

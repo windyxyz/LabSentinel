@@ -158,7 +158,7 @@ button.ghost:hover { background: var(--ctrl-fill-secondary); }
 button.ghost:active { background: var(--ctrl-fill-tertiary); }
 
 /* ---------- 输入控件（WinUI TextBox / ComboBox） ---------- */
-input, select {
+input, select, textarea {
   min-height: 32px;
   padding: 5px 10px;
   margin-right: 8px;
@@ -173,12 +173,17 @@ input, select {
   transition: border-color var(--fast-duration) var(--fast-out-slow-in),
               box-shadow var(--fast-duration) var(--fast-out-slow-in);
 }
-input:hover, select:hover { background: var(--ctrl-fill-secondary); }
-input:focus, select:focus {
+input:hover, select:hover, textarea:hover { background: var(--ctrl-fill-secondary); }
+input:focus, select:focus, textarea:focus {
   border-bottom: 2px solid var(--accent);
   padding-bottom: 4px;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
 }
+
+/* ---------- 全局状态色令牌（Models / DetectPanel / Devices / Settings / Reports 共用） ---------- */
+.st-ok { color: var(--sys-success, #16a34a); }
+.st-err { color: var(--sys-critical, #dc2626); }
+.st-idle { color: var(--text-secondary, #6b7280); }
 input[type="checkbox"] { min-height: auto; accent-color: var(--accent); }
 
 /* ---------- 图像 / 布局工具类 ---------- */

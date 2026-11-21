@@ -8,19 +8,38 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 
-pub(crate) async fn stats_summary(State(st): State<Shared>) -> Json<Value> {
+pub(crate) async fn stats_summary(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let days: i64 = q
+        .get("days")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30)
+        .clamp(1, 3650);
+    let cid: Option<i64> = q.get("camera_id").and_then(|v| v.parse().ok());
     let s = match ls_store::Store::open(&st.db_path) {
         Ok(s) => s,
-        Err(_) => return Json(json!({})),
+        Err(_) => {
+            return Json(json!({
+                "total": 0,
+                "by_level": {"1": 0, "2": 0, "3": 0},
+                "days": days,
+                "top_days": [],
+            }))
+        }
     };
-    let rows = s.events(100000, 0, None, None).unwrap_or_default();
+    let cutoff = ls_core::time::local_days_ago_iso(days);
+    let rows: Vec<_> = s
+        .events(100000, 0, cid, None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.ts >= cutoff)
+        .collect();
     let total = rows.len();
     let by_level = json!({"1": rows.iter().filter(|e| e.level == 1).count(),
                           "2": rows.iter().filter(|e| e.level == 2).count(),
                           "3": rows.iter().filter(|e| e.level == 3).count()});
-    // UX（2026-11-21）：补 top_days（前端报表「最高事件日」卡消费；对齐 Python
-    // 契约——此前缺字段 → 前端 `top_days[0]` TypeError → Vue 生产卸载整树成空
-    // （用户实测「报表闪黑」；dev 有报错覆盖能看见，prod 静默）。
     let mut by_day: std::collections::BTreeMap<String, i64> = Default::default();
     for e in &rows {
         if let Some(d) = e.ts.split('T').next() {
@@ -38,7 +57,7 @@ pub(crate) async fn stats_summary(State(st): State<Shared>) -> Json<Value> {
             .cmp(&a["total"].as_i64().unwrap_or(0))
     });
     top_days.truncate(5);
-    Json(json!({"total": total, "by_level": by_level, "days": 30, "top_days": top_days}))
+    Json(json!({"total": total, "by_level": by_level, "days": days, "top_days": top_days}))
 }
 
 pub(crate) fn agg_json(row: &ls_store::AggRow) -> Value {
@@ -94,11 +113,27 @@ pub(crate) async fn stats_hourly(
     let cid: Option<i64> = q.get("camera_id").and_then(|v| v.parse().ok());
     with_store(&st, |s| {
         let rows = s.stats_hourly(&date, cid)?;
-        let mut hours = serde_json::Map::new();
+        // LS-042 契约修复：返回 24 项有序数组 [{hour: 0..23, total, l1, l2, l3}]
+        // （此前返回 JSON Object 导致前端 ReportsView.vue `hourly.value.map(...)` 渲染崩溃闪黑）
+        let mut by_h: std::collections::HashMap<u32, Value> = Default::default();
         for (h, row) in rows {
-            hours.insert(h, agg_json(&row));
+            if let Ok(hn) = h.parse::<u32>() {
+                let mut v = json!({"hour": hn, "total": 0, "l1": 0, "l2": 0, "l3": 0});
+                if let Value::Object(m) = agg_json(&row) {
+                    for (k, val) in m {
+                        v[k] = val;
+                    }
+                }
+                by_h.insert(hn, v);
+            }
         }
-        Ok(Json(json!({"date": date, "hours": Value::Object(hours)})))
+        let hours: Vec<Value> = (0u32..24)
+            .map(|h| {
+                by_h.remove(&h)
+                    .unwrap_or_else(|| json!({"hour": h, "total": 0, "l1": 0, "l2": 0, "l3": 0}))
+            })
+            .collect();
+        Ok(Json(json!({"date": date, "hours": hours})))
     })
 }
 

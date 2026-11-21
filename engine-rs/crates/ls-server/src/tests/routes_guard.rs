@@ -444,7 +444,7 @@ async fn audit_and_bulk_and_stats() {
         None,
     )
     .await;
-    assert_eq!(body_json(r).await["hours"]["10"]["total"], 2);
+    assert_eq!(body_json(r).await["hours"][10]["total"], 2);
     let r = req(&app, "GET", "/api/events/timeline?days=2", None).await;
     assert_eq!(body_json(r).await["days_list"].as_array().unwrap().len(), 2);
     let r = req(&app, "GET", "/api/stats/quality?days=7", None).await;

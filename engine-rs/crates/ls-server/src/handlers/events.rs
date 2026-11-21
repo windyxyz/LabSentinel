@@ -109,7 +109,15 @@ pub(crate) async fn bulk_event_status(
     }
     with_store(&st, |s| {
         let n = s.bulk_status(&ids, &status, "admin")?;
-        Ok(Json(json!({"ok": true, "updated": n})).into_response())
+        let skipped = ids.len().saturating_sub(n);
+        Ok(Json(json!({
+            "ok": true,
+            "updated": n,
+            "skipped": skipped,
+            "missing": [],
+            "failed": [],
+        }))
+        .into_response())
     })
 }
 

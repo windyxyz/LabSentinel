@@ -119,7 +119,7 @@ pub(crate) async fn add_rule(State(st): State<Shared>, Json(body): Json<Value>) 
         if s.camera(cid)?.is_none() {
             return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
-        let rid = s.add_rule(
+        let rid = s.add_rule_with_schedule(
             cid,
             body.get("zone_id").and_then(|v| v.as_i64()),
             &behavior,
@@ -131,6 +131,10 @@ pub(crate) async fn add_rule(State(st): State<Shared>, Json(body): Json<Value>) 
             body.get("enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
+            body.get("days_of_week").and_then(|v| v.as_str()),
+            body.get("holiday_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         )?;
         Ok(Json(json!({"id": rid, "camera_id": cid, "behavior": behavior})).into_response())
     })
@@ -168,7 +172,11 @@ pub(crate) async fn add_template(State(st): State<Shared>, Json(body): Json<Valu
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let config = body.get("config").cloned();
+    // LS-042：兼容前端传 `{name, rules: [...]}` 与 `{name, config: [...]}` 两种形态
+    let config = body
+        .get("config")
+        .cloned()
+        .or_else(|| body.get("rules").cloned());
     if name.is_empty() || config.is_none() {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "name 与 config 必填").into_response();
     }
@@ -233,7 +241,11 @@ pub(crate) async fn apply_rule_template(
         };
         let parsed: Value =
             serde_json::from_str(&tpl.config_json).unwrap_or(Value::Array(Vec::new()));
-        let Some(rules) = parsed.as_array() else {
+        // LS-042：兼容数组形态 `[...]` 与包裹对象 `{rules: [...]}`
+        let Some(rules) = parsed
+            .as_array()
+            .or_else(|| parsed.get("rules").and_then(|v| v.as_array()))
+        else {
             return Ok(detail_err(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "模板 config_json 不是数组",

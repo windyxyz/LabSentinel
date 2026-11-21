@@ -313,6 +313,7 @@ pub fn build_router(state: Shared) -> Router {
         .with_state(state.clone());
     let ws = Router::new()
         .route("/ws/events", get(ws_events))
+        .route("/ws/webrtc/:cid", get(ws_webrtc))
         .with_state(state.clone());
     // 2026-11-11：接线 web_dist（此前字段有赋值但从未被路由使用——文件头注释声称
     // 的「静态 web/dist」一直未兑现）。ls-server 独立模式由此直接出 Web UI：

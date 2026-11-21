@@ -45,7 +45,7 @@ function toggleDay(n) {
 function dayLabel(r) {
   const s = String(r.days_of_week || '')
   if (!s || s === '1,2,3,4,5,6,7') return ''
-  return '周' + [...s].map(d => WEEKDAYS[Number(d) - 1] || '?').join('')
+  return '周' + s.split(',').map(x => x.trim()).filter(Boolean).map(d => WEEKDAYS[Number(d) - 1] || '?').join('')
 }
 // 任务80：复制区域/规则到其他摄像头
 const copyTargets = ref([])          // 选中的目标摄像头 id
@@ -89,8 +89,12 @@ const tplSel = ref(null)
 const tplZone = ref('')      // '' = 全局规则
 const tplMsg = ref('')
 
-// 后端模板清单不返回 rules_count（配置里有 rules 数组）——前端兜底计算
-const tplRulesCount = (t) => Array.isArray(t?.config?.rules) ? t.config.rules.length : (t?.rules_count ?? 0)
+// 后端模板清单不返回 rules_count（配置可能是数组或 {rules:[]}）——前端双形状兜底计算
+const tplRulesCount = (t) => {
+  if (Array.isArray(t?.config)) return t.config.length
+  if (Array.isArray(t?.config?.rules)) return t.config.rules.length
+  return t?.rules_count ?? 0
+}
 
 async function loadTpls() {
   try {

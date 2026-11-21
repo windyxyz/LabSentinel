@@ -228,9 +228,13 @@ async function watchLive(cam) {
   }
   try {
     const r = await api.cameraWebrtc(cam.id)
-    live.value = { id: cam.id, name: cam.name, wsUrl: r.ws_url }
+    if (r?.mode === 'snapshot') {
+      live.value = { id: cam.id, name: cam.name, poll: true }
+    } else {
+      live.value = { id: cam.id, name: cam.name, wsUrl: r.ws_url }
+    }
   } catch {
-    liveErr.value = '获取实时画面地址失败'
+    live.value = { id: cam.id, name: cam.name, poll: true }
   }
 }
 // USB 轮播定时器（弹窗关闭/组件卸载清理）

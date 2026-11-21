@@ -81,10 +81,12 @@ async function addCamera() {
 }
 
 async function pickModel(p) {
+  const path = typeof p === 'string' ? p : p?.path
+  if (!path) return
   busy.value = true
   try {
-    await api.setModelActive(p.path)
-    pickedModel.value = p.path
+    await api.setModelActive(path)
+    pickedModel.value = path
     busy.value = false
     next()
   } catch (e) {

@@ -62,9 +62,12 @@ const failedDeliveries = ref([])
 
 async function loadAlerts() {
   try {
-    alertChannels.value = (await api.alertsStatus()).channels
-    failedDeliveries.value = await api.alertDeliveries({ status: 'failed', limit: 10 })
-    silences.value = await api.alertSilences()  // 任务81
+    const st = await api.alertsStatus()
+    alertChannels.value = Array.isArray(st?.channels) ? st.channels : []
+    const fd = await api.alertDeliveries({ status: 'failed', limit: 10 })
+    failedDeliveries.value = Array.isArray(fd) ? fd : []
+    const sl = await api.alertSilences()
+    silences.value = Array.isArray(sl) ? sl : []
   } catch { /* 服务未就绪时静默 */ }
 }
 
@@ -155,10 +158,11 @@ async function importConfig() {
     cfgMsg.value = '导入中…'
     const r = await api.configImport({ mode: importMode.value,
                                        confirm_replace: confirmReplace.value, data })
-    cfgMsg.value = `导入完成：新建 ${r.created.cameras} 摄像头 / ${r.created.zones} 区域 / ` +
-      `${r.created.rules} 规则；跳过 ${r.skipped.cameras.length}/${r.skipped.zones.length}/` +
-      `${r.skipped.rules.length}` + (r.warnings.length ? `\n${r.warnings.join('\n')}` : '')
-    refresh()
+    const warnings = Array.isArray(r?.warnings) ? r.warnings : []
+    cfgMsg.value = `导入完成：新建 ${r?.created?.cameras ?? 0} 摄像头 / ${r?.created?.zones ?? 0} 区域 / ` +
+      `${r?.created?.rules ?? 0} 规则；跳过 ${(r?.skipped?.cameras || []).length}/${(r?.skipped?.zones || []).length}/` +
+      `${(r?.skipped?.rules || []).length}` + (warnings.length ? `\n${warnings.join('\n')}` : '')
+    loadCams()
   } catch (e) { cfgMsg.value = String(e.message || e) }
   cfgBusy.value = false
   importFile.value = null
@@ -427,13 +431,13 @@ onMounted(() => {
         <option :value="86400">24 小时</option><option :value="604800">7 天</option>
       </select>
       <input v-model="silenceReason" placeholder="原因（可选）" style="width:160px" />
-      <button class="ghost" @click="addSilence()">添加</button>
+      <button class="ghost" @click="addSilence(silenceScope)">添加</button>
     </div>
     <table v-if="silences.length" style="margin-top:8px">
       <tr><th>ID</th><th>范围</th><th>目标</th><th>剩余</th><th>原因</th><th></th></tr>
       <tr v-for="s in silences" :key="s.id">
         <td>#{{ s.id }}</td><td>{{ s.scope }}</td><td>{{ s.target ?? '—' }}</td>
-        <td class="muted">{{ Math.ceil(s.remaining_s / 60) }} 分钟</td>
+        <td class="muted">{{ Number.isFinite(Number(s.remaining_s)) ? Math.ceil(Number(s.remaining_s) / 60) + ' 分钟' : (s.until_ts || '—') }}</td>
         <td class="muted">{{ s.reason || '—' }}</td>
         <td><button class="ghost" @click="removeSilence(s.id)">解除</button></td>
       </tr>

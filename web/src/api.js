@@ -16,6 +16,7 @@ export const setupDone = {
   mark: () => localStorage.setItem('ls-welcome-done', '1'),
 }
 export function mediaUrl(path) {
+  if (!path || typeof path !== 'string') return ''
   const t = adminToken.get()
   if (!t) return path
   const base = path.split('?')[0]
@@ -51,7 +52,7 @@ async function req(method, path, body) {
   if (!r.ok) {
     let msg = `${method} ${path} -> ${r.status}`
     try { msg = (await r.json()).detail || msg } catch {}
-    if (r.status === 401) msg = '需要管理令牌：请在「摄像头」页顶部填写管理令牌后重试。' + msg
+    if (r.status === 401) msg = '需要管理令牌：请在「设置 → 管理令牌」填写管理令牌后重试。' + msg
     throw new Error(msg)
   }
   return r.json()
@@ -160,7 +161,7 @@ export const api = {
     if (!r.ok) {
       let msg = `GET /api/config/export -> ${r.status}`
       try { msg = (await r.json()).detail || msg } catch {}
-      if (r.status === 401) msg = '需要管理令牌：请在「摄像头」页顶部填写管理令牌后重试。' + msg
+      if (r.status === 401) msg = '需要管理令牌：请在「设置 → 管理令牌」填写管理令牌后重试。' + msg
       throw new Error(msg)
     }
     const blob = await r.blob()

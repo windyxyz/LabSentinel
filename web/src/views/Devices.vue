@@ -105,8 +105,13 @@ onMounted(load)
   border-radius: 8px; display: inline-block; user-select: all;
 }
 .tbl { width: 100%; border-collapse: collapse; margin-top: 8px; }
-.tbl th, .tbl td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border, #2a3547); }
+.tbl th, .tbl td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--divider); }
 .tbl tr.revoked { opacity: 0.55; }
-.btn-danger { color: #ff6b6b; }
+.btn-danger {
+  background: var(--sys-critical-bg);
+  color: var(--sys-critical);
+  border-color: var(--sys-critical);
+}
+.btn-danger:hover { filter: brightness(0.95); }
 .msg { margin-top: 8px; }
 </style>

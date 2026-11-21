@@ -79,7 +79,7 @@ let loadSeq = 0               // 2026-10-30 审阅：请求序号，防旧响应
 // 任务83：批量处置
 const selected = ref([])
 const bulkBusy = ref(false)
-const newRowsCount = 0  // 全选判定用（rows 中 new 事件数，computed 替代）
+const newRowsCount = computed(() => rows.value.filter(e => e.status === 'new').length)
 
 function toggleSel(id, on) {
   if (on && !selected.value.includes(id)) selected.value = [...selected.value, id]
@@ -96,9 +96,11 @@ async function bulk(status) {
   bulkBusy.value = true
   try {
     const r = await api.bulkStatus({ ids: selected.value, status })
-    alert(`批量处置完成：更新 ${r.updated}，跳过 ${r.skipped}` +
-          (r.missing.length ? `，不存在 ${r.missing.length}` : '') +
-          (r.failed.length ? `，失败 ${r.failed.length}` : ''))
+    const missing = Array.isArray(r?.missing) ? r.missing : []
+    const failed = Array.isArray(r?.failed) ? r.failed : []
+    alert(`批量处置完成：更新 ${r?.updated ?? 0}，跳过 ${r?.skipped ?? 0}` +
+          (missing.length ? `，不存在 ${missing.length}` : '') +
+          (failed.length ? `，失败 ${failed.length}` : ''))
     selected.value = []
     load()
   } catch (e) { alert(String(e.message || e)) }
@@ -125,10 +127,11 @@ async function load() {
     const newRows = await api.events(params)
     const newTotal = (await api.eventsCount(params)).count
     if (seq !== loadSeq) return  // 已有更新的请求在途，丢弃旧结果
-    rows.value = newRows
-    total.value = newTotal
+    rows.value = Array.isArray(newRows) ? newRows : []
+    total.value = Number(newTotal) || 0
     // 有旧数据时刷新失败只出提示（AsyncState 的 error 分支会隐藏内容）
     error.value = ''
+    stale.value = false
     loaded.value = true
   } catch (e) {
     if (seq !== loadSeq) return
@@ -275,14 +278,14 @@ async function mark(e, status) {
         <option value="7d">近 7 天</option>
         <option value="30d">近 30 天</option>
       </select>
-      <input type="date" v-model="startDate" @change="preset = ''; resetAndLoad" title="开始日期" aria-label="开始日期" />
-      <input type="date" v-model="endDate" @change="preset = ''; resetAndLoad" title="结束日期" aria-label="结束日期" />
+      <input type="date" v-model="startDate" @change="preset = ''; resetAndLoad()" title="开始日期" aria-label="开始日期" />
+      <input type="date" v-model="endDate" @change="preset = ''; resetAndLoad()" title="结束日期" aria-label="结束日期" />
       <button class="ghost" @click="load">刷新</button>
       <span v-if="hourFilter" class="muted" style="font-size:12px">
         时间线 {{ hourFilter.date }} {{ pad2(hourFilter.hour) }}:00–59
         <button class="ghost" style="min-height:28px; padding:0 6px" @click="resetAndLoad()">清除</button>
       </span>
-      <a :href="exportFilteredUrl" download>
+      <a :href="mediaUrl(exportFilteredUrl)" download>
         <button class="ghost">导出当前筛选</button>
       </a>
     </div>
@@ -320,9 +323,9 @@ async function mark(e, status) {
                 @retry="load">
       <table class="events-table">
       <tr><th class="col-time"><input type="checkbox" aria-label="全选当前页"
-             :checked="selected.length && selected.length === newRowsCount"
+             :checked="newRowsCount > 0 && selected.length === newRowsCount"
              @change="toggleAll($event.target.checked)" /></th>
-          <th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
+          <th>时间</th><th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
       <tr v-for="e in rows" :key="e.id"
           :style="{ cursor: 'pointer',
                     viewTransitionName: (drawer && drawer.id === e.id) ? 'none' : `evi-${e.id}` }"

@@ -2,6 +2,7 @@
 // RA5-UX：目录选择器对话框——盘符/目录两级浏览，替代手输路径。
 // 数据源 GET /api/fs/list?path=（后端 admin 门控）。
 import { ref } from 'vue'
+import { api } from '../api'
 
 const props = defineProps({
   title: { type: String, default: '选择文件夹' },
@@ -15,18 +16,14 @@ const loading = ref(false)
 const err = ref('')
 
 async function load(path) {
+  open.value = true
   loading.value = true
   err.value = ''
   try {
-    const op = window.fetch
-    const r = await op(`/api/fs/list?path=${encodeURIComponent(path)}`, {
-      headers: { 'X-Admin-Token': localStorage.getItem('token') || '' },
-    })
-    const j = await r.json()
-    cur.value = j.path || path
-    if (j.drives) drives.value = j.drives
-    entries.value = j.entries || []
-    open.value = true
+    const j = await api.fsList(path)
+    cur.value = j?.path || path
+    if (Array.isArray(j?.drives)) drives.value = j.drives
+    entries.value = Array.isArray(j?.entries) ? j.entries : []
   } catch (e) {
     err.value = String(e.message || e)
   } finally {

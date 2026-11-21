@@ -31,25 +31,43 @@ const stale = ref(false)  // 有旧图表时的刷新失败（只提示，不进
 const error = ref('')
 let loadSeq = 0           // 2026-10-30 审阅：请求序号（watch 六个值连续触发时防旧响应覆盖）
 
+function normalizeHourly(raw) {
+  if (Array.isArray(raw)) return raw
+  if (raw && typeof raw === 'object') {
+    return Array.from({ length: 24 }, (_, hour) => {
+      const k = String(hour).padStart(2, '0')
+      const row = raw[k] || raw[String(hour)] || {}
+      return { hour, total: Number(row.total) || 0, l1: Number(row.l1) || 0, l2: Number(row.l2) || 0, l3: Number(row.l3) || 0, ...row }
+    })
+  }
+  return []
+}
+
 async function load() {
   const seq = ++loadSeq
   const base = camId.value ? { camera_id: camId.value } : {}
   try {
     const s = await api.statsSummary({ days: 30, ...base })
-    const h = (await api.statsHourly({ date: hourDate.value, ...base })).hours
-    let d
+    const hr = await api.statsHourly({ date: hourDate.value, ...base })
+    const h = normalizeHourly(hr?.hours ?? hr)
+    let d = []
+    let w = []
     if (viewMode.value === 'week') {
-      d = (await api.statsWeekly({ weeks: weekCount.value, ...base })).weeks
+      const wr = await api.statsWeekly({ weeks: weekCount.value, ...base })
+      w = Array.isArray(wr?.weeks) ? wr.weeks : (Array.isArray(wr) ? wr : [])
     } else if (rangeStart.value && rangeEnd.value) {
-      d = (await api.statsDaily({
-        start_ts: rangeStart.value, end_ts: rangeEnd.value, ...base })).days
+      const dr = await api.statsDaily({
+        start_ts: rangeStart.value, end_ts: rangeEnd.value, ...base })
+      d = Array.isArray(dr?.days) ? dr.days : (Array.isArray(dr) ? dr : [])
     } else {
-      d = (await api.statsDaily({ days: days.value, ...base })).days
+      const dr = await api.statsDaily({ days: days.value, ...base })
+      d = Array.isArray(dr?.days) ? dr.days : (Array.isArray(dr) ? dr : [])
     }
     if (seq !== loadSeq) return  // 已有更新请求在途，丢弃旧结果
-    summary.value = s
+    summary.value = s || { total: 0, by_level: {}, top_days: [] }
     hourly.value = h
-    daily.value = d
+    if (viewMode.value === 'week') weekly.value = w
+    else daily.value = d
     // 任务102：处置质量（独立容错——旧服务端无此端点时只隐藏卡片，不影响图表）
     try {
       const q = await api.statsQuality({ days: days.value, ...base })
@@ -110,7 +128,7 @@ const typeKeys = computed(() => {
 const W = 720, H = 220, PAD = 34
 const trendRows = computed(() => viewMode.value === 'week' ? weekly.value : daily.value)
 const trendKey = computed(() => viewMode.value === 'week' ? 'week_start' : 'date')
-const maxTotal = computed(() => Math.max(1, ...trendRows.value.map(r => r.total)))
+const maxTotal = computed(() => Math.max(1, ...(Array.isArray(trendRows.value) ? trendRows.value : []).map(r => Number(r?.total) || 0)))
 function linePoints(key) {
   const n = trendRows.value.length
   if (n < 2) return ''
@@ -139,11 +157,11 @@ const evidenceZipUrl = computed(() => {
 })
 
 // ---- 柱状图几何 ----
-const maxHour = computed(() => Math.max(1, ...hourly.value.map(h => h.total)))
+const maxHour = computed(() => Math.max(1, ...(Array.isArray(hourly.value) ? hourly.value : []).map(h => Number(h?.total) || 0)))
 function barGeom(h) {
   const bw = (W - 2 * PAD) / 24
-  const bh = h.total / maxHour.value * (H - 2 * PAD)
-  return { x: PAD + h.hour * bw + bw * 0.15, y: H - PAD - bh, w: bw * 0.7, h: bh }
+  const bh = (Number(h?.total) || 0) / maxHour.value * (H - 2 * PAD)
+  return { x: PAD + (Number(h?.hour) || 0) * bw + bw * 0.15, y: H - PAD - bh, w: bw * 0.7, h: bh }
 }
 </script>
 

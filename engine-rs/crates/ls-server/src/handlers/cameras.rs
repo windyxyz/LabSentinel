@@ -96,11 +96,33 @@ pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>
         return detail_err(StatusCode::BAD_REQUEST, "source 非法").into_response();
     }
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("cam");
+    let group_name = body
+        .get("group_name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let autostart = body
+        .get("autostart")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     match ls_store::Store::open(&st.db_path) {
         Ok(s) => match s.conn_add_camera(name, &source, type_) {
-            Ok(id) => Json(json!({"id": id, "name": name, "source": source,
-                                  "type": type_, "status": "stopped"}))
-            .into_response(),
+            Ok(id) => {
+                if !group_name.is_empty() {
+                    let _ = s.set_camera_group(id, group_name);
+                }
+                let mut status = "stopped";
+                if autostart {
+                    if let Ok(Some(cfg)) = crate::worker::WorkerConfig::from_db(&s, id) {
+                        if crate::worker::start_worker(&st, cfg).is_ok() {
+                            status = "starting";
+                        }
+                    }
+                }
+                Json(json!({"id": id, "name": name, "source": source,
+                            "type": type_, "group_name": group_name, "status": status}))
+                .into_response()
+            }
             Err(_) => server_err(),
         },
         Err(_) => server_err(),
@@ -202,15 +224,130 @@ pub(crate) async fn camera_webrtc(State(st): State<Shared>, AxPath(cid): AxPath<
             "图片文件夹源没有实时流；请在「图片识别」页查看关键图片",
         )
         .into_response()),
-        Some(_) => Ok(
-            Json(json!({"camera_id": cid, "ws_url": format!("/ws/webrtc/{cid}")})).into_response(),
-        ),
+        Some(c) => {
+            // LS-042 决策 A：USB / 文件源或 go2rtc 不可用时明确返回 mode="snapshot" 优雅降级，
+            // 仅 RTSP 源且 go2rtc 可用时走 WebRTC，消除无限重连报错。
+            let mode = if c.type_ == "rtsp" && go2rtc_reachable() {
+                "webrtc"
+            } else {
+                "snapshot"
+            };
+            Ok(Json(json!({
+                "camera_id": cid,
+                "mode": mode,
+                "ws_url": format!("/ws/webrtc/{cid}"),
+            }))
+            .into_response())
+        }
+    })
+}
+
+fn go2rtc_reachable() -> bool {
+    let addr = std::env::var("LS_GO2RTC_ADDR").unwrap_or_else(|_| "127.0.0.1:1984".into());
+    std::net::TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 1984))),
+        std::time::Duration::from_millis(80),
+    )
+    .is_ok()
+}
+
+/// GET /ws/webrtc/:cid——WebRTC 信令代理到本机 go2rtc（LS-042 决策 A）。
+/// go2rtc 不可用时返回 503（前端应先看 /api/cameras/:cid/webrtc 的 mode 字段自动降级快照轮播）。
+pub(crate) async fn ws_webrtc(
+    State(st): State<Shared>,
+    AxPath(cid): AxPath<i64>,
+    headers: axum::http::HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    if !go2rtc_reachable() {
+        return detail_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "go2rtc 未运行，已降级为快照轮播",
+        )
+        .into_response();
+    }
+    let exists = ls_store::Store::open(&st.db_path)
+        .ok()
+        .and_then(|s| s.camera(cid).ok().flatten())
+        .is_some();
+    if !exists {
+        return detail_err(StatusCode::NOT_FOUND, "camera not found").into_response();
+    }
+    let addr = std::env::var("LS_GO2RTC_ADDR").unwrap_or_else(|_| "127.0.0.1:1984".into());
+    let upstream_url = format!("ws://{addr}/api/ws?src=cam_{cid}");
+    let wants_proto = headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').any(|p| p.trim() == "labsentinel"))
+        .unwrap_or(false);
+    let upgrade = if wants_proto {
+        ws.protocols(["labsentinel"])
+    } else {
+        ws
+    };
+    upgrade.on_upgrade(move |client_ws| async move {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as TMsg;
+        let Ok((up_ws, _)) = tokio_tungstenite::connect_async(&upstream_url).await else {
+            return;
+        };
+        let (mut c_tx, mut c_rx) = client_ws.split();
+        let (mut u_tx, mut u_rx) = up_ws.split();
+        let c2u = async {
+            while let Some(Ok(msg)) = c_rx.next().await {
+                let out = match msg {
+                    axum::extract::ws::Message::Text(t) => TMsg::Text(t),
+                    axum::extract::ws::Message::Binary(b) => TMsg::Binary(b),
+                    axum::extract::ws::Message::Ping(p) => TMsg::Ping(p),
+                    axum::extract::ws::Message::Pong(p) => TMsg::Pong(p),
+                    axum::extract::ws::Message::Close(_) => break,
+                };
+                if u_tx.send(out).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let u2c = async {
+            while let Some(Ok(msg)) = u_rx.next().await {
+                let out = match msg {
+                    TMsg::Text(t) => axum::extract::ws::Message::Text(t.to_string()),
+                    TMsg::Binary(b) => axum::extract::ws::Message::Binary(b.to_vec()),
+                    TMsg::Ping(p) => axum::extract::ws::Message::Ping(p.to_vec()),
+                    TMsg::Pong(p) => axum::extract::ws::Message::Pong(p.to_vec()),
+                    TMsg::Close(_) => break,
+                    _ => continue,
+                };
+                if c_tx.send(out).await.is_err() {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            _ = c2u => {},
+            _ = u2c => {},
+        }
     })
 }
 
 pub(crate) async fn camera_groups(State(st): State<Shared>) -> Response {
     with_store(&st, |s| {
-        let groups = s.camera_groups()?;
+        let cams = s.cameras()?;
+        let mut by_group: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        for c in &cams {
+            let e = by_group.entry(c.group_name.clone()).or_insert((0, 0));
+            e.0 += 1;
+            if c.status == "running" {
+                e.1 += 1;
+            }
+        }
+        let groups: Vec<Value> = by_group
+            .into_iter()
+            .map(|(name, (count, running))| {
+                json!({"name": name, "count": count, "running": running})
+            })
+            .collect();
         Ok(Json(json!({"groups": groups})))
     })
 }

@@ -56,14 +56,15 @@ async function reload(showSpinner = false) {
       api.system(),
       api.folderImages(query()),
     ])
-    folders.value = cams.filter(c => c.type === 'folder')
-    summary.value = sum
-    items.value = pics.items
-    live.value = Object.fromEntries((sys.cameras || [])
-      .filter(c => c.kind === 'folder').map(c => [String(c.id), c]))
-    if (!selected.value && folders.value.length) {
-      // 首次进入默认选第一个文件夹（保持"打开即有内容"）
+    folders.value = (Array.isArray(cams) ? cams : []).filter(c => c.type === 'folder')
+    summary.value = sum || { items: [], totals: {} }
+    items.value = Array.isArray(pics?.items) ? pics.items : []
+    live.value = Object.fromEntries((Array.isArray(sys?.cameras) ? sys.cameras : [])
+      .filter(c => (c.kind || c.type) === 'folder').map(c => [String(c.id), c]))
+    if (!loaded.value && !selected.value && folders.value.length) {
+      // 仅首次进入默认选第一个文件夹；用户主动选「全部文件夹」后不再强行跳回
       selected.value = String(folders.value[0].id)
+      loaded.value = true
       await reload(false)
       return
     }
@@ -247,7 +248,8 @@ function thumbFailed(it) {
   display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 24px 12px;
 }
 .modal {
-  background: var(--bg, #fff); color: var(--text, #111); border-radius: 10px;
+  background: var(--surface, #fff); color: var(--text-primary, #111); border-radius: 10px;
+  border: 1px solid var(--divider);
   width: min(94vw, 1000px); padding: 16px; cursor: default;
 }
 .modal .full { width: 100%; max-height: 66vh; object-fit: contain; margin-top: 10px; background: #111; display: block; }

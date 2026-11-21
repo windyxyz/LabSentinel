@@ -35,17 +35,19 @@ const cameras = ref([])
 const events = ref([])
 const now = ref('')
 let clockTimer = null
+let camTimer = null
 let stopWs = null
 
 const cols = computed(() => (cameras.value.length <= 1 ? 1 : cameras.value.length <= 4 ? 2 : 3))
 
 function isVideo(c) {
-  return c && (c.type === 'rtsp' || c.type === 'file' || c.type === 'usb')
+  return c && (c.type === 'rtsp' || c.type === 'file')
 }
 
 async function loadCameras() {
   try {
-    cameras.value = await api.cameras()
+    const cs = await api.cameras()
+    cameras.value = Array.isArray(cs) ? cs : []
   } catch { /* 忽略：下一轮 */ }
 }
 
@@ -53,7 +55,7 @@ onMounted(async () => {
   await loadCameras()
   try {
     const list = await api.events({ limit: 50 })
-    events.value = (list || []).slice(0, 50)
+    events.value = (Array.isArray(list) ? list : []).slice(0, 50)
   } catch { /* ignore */ }
   stopWs = connectEvents((ev) => {
     events.value.unshift(ev)
@@ -62,11 +64,12 @@ onMounted(async () => {
   clockTimer = setInterval(() => {
     now.value = new Date().toLocaleString('zh-CN', { hour12: false })
   }, 1000)
-  setInterval(loadCameras, 30000)  // 摄像头增删自动反映
+  camTimer = setInterval(loadCameras, 30000)  // 摄像头增删自动反映
 })
 
 onBeforeUnmount(() => {
   if (clockTimer) clearInterval(clockTimer)
+  if (camTimer) clearInterval(camTimer)
   if (stopWs) stopWs()
 })
 </script>
