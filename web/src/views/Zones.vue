@@ -1,6 +1,7 @@
 <script setup>
-import { onMounted, ref, watch, nextTick } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue'
 import { api, mediaUrl } from '../api'
+import SchedulePicker from '../components/SchedulePicker.vue'
 
 const NATIVE_W = 1280, NATIVE_H = 720
 const DISP_W = 640, DISP_H = 360
@@ -35,12 +36,6 @@ async function addCal() {
     calMsg.value = (r.replaced ? '已覆盖 ' : '已添加 ') + newCal.value.date
     await loadCal()
   } catch (e) { calMsg.value = String(e.message || e) }
-}
-function toggleDay(n) {
-  const days = new Set(newRule.value.days_of_week.split(',').filter(Boolean))
-  const key = String(n)
-  days.has(key) ? days.delete(key) : days.add(key)
-  newRule.value.days_of_week = ['1', '2', '3', '4', '5', '6', '7'].filter(d => days.has(d)).join(',')
 }
 function dayLabel(r) {
   const s = String(r.days_of_week || '')
@@ -81,7 +76,11 @@ async function doCopy() {
 }
 
 watch(camId, load, { immediate: true })
-onMounted(() => { loadCal(); loadTpls() })  // 任务112/116
+onMounted(() => {
+  loadCal(); loadTpls() // 任务112/116
+  window.addEventListener('keydown', onKey) // LS-052 撤销/重做
+})
+onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 // 任务116：规则模板库（只存规则参数，不绑摄像头/区域）
 const tplName = ref('')
 const tplList = ref([])
@@ -140,10 +139,91 @@ async function load() {
   draw()
 }
 
-function onCanvasClick(e) {
-  const r = e.target.getBoundingClientRect()
-  drawing.value.push([Math.round(e.clientX - r.left), Math.round(e.clientY - r.top)])
+// LS-052：安全区高对比区分色板（浅/深主题均可见）
+const ZONE_COLORS = ['#4da3ff', '#f5a524', '#22c55e', '#a855f7', '#ef4444', '#06b6d4', '#eab308', '#ec4899']
+const zoneColor = (i) => ZONE_COLORS[i % ZONE_COLORS.length]
+
+// LS-052：撤销/重做栈（仅针对正在绘制的顶点序列）
+const undoStack = ref([])
+const redoStack = ref([])
+function pushUndo() {
+  undoStack.value.push(drawing.value.map((p) => [...p]))
+  if (undoStack.value.length > 100) undoStack.value.shift()
+  redoStack.value = []
+}
+function undo() {
+  if (!undoStack.value.length) return
+  redoStack.value.push(drawing.value.map((p) => [...p]))
+  drawing.value = undoStack.value.pop()
   draw()
+}
+function redo() {
+  if (!redoStack.value.length) return
+  undoStack.value.push(drawing.value.map((p) => [...p]))
+  drawing.value = redoStack.value.pop()
+  draw()
+}
+
+// LS-052：拖拽已有安全区顶点（松手保存）
+const drag = ref(null) // {zid, idx, zoneIndex}
+const hoverVertex = ref(null) // {zid, idx}
+const SNAP_PX = 8
+const dragging = ref(false)
+
+function canvasPos(e) {
+  const r = e.target.getBoundingClientRect()
+  return [Math.round(e.clientX - r.left), Math.round(e.clientY - r.top)]
+}
+
+function findVertex(pos) {
+  for (let zi = 0; zi < zones.value.length; zi++) {
+    const z = zones.value[zi]
+    if (!Array.isArray(z.polygon)) continue
+    for (let i = 0; i < z.polygon.length; i++) {
+      const [x, y] = z.polygon[i]
+      const dx = x * SCALE - pos[0]
+      const dy = y * SCALE - pos[1]
+      if (Math.hypot(dx, dy) <= SNAP_PX) return { zid: z.id, idx: i, zoneIndex: zi }
+    }
+  }
+  return null
+}
+
+function onCanvasClick(e) {
+  if (dragging.value) return // 拖拽结束的 click 不新增顶点
+  pushUndo()
+  drawing.value.push(canvasPos(e))
+  draw()
+}
+function onMouseDown(e) {
+  const hit = findVertex(canvasPos(e))
+  if (hit) {
+    drag.value = hit
+    dragging.value = false
+  }
+}
+function onMouseMove(e) {
+  const pos = canvasPos(e)
+  if (!drag.value) {
+    hoverVertex.value = findVertex(pos)
+    return
+  }
+  dragging.value = true
+  const z = zones.value.find((x) => x.id === drag.value.zid)
+  if (!z || !Array.isArray(z.polygon)) return
+  z.polygon[drag.value.idx] = [Math.round(pos[0] / SCALE), Math.round(pos[1] / SCALE)]
+  draw()
+}
+async function onMouseUp() {
+  if (drag.value && dragging.value) {
+    const z = zones.value.find((x) => x.id === drag.value.zid)
+    if (z && Array.isArray(z.polygon)) {
+      try { await api.updateZone(z.id, z.polygon) } catch { /* 保存失败保留本地显示 */ }
+    }
+  }
+  drag.value = null
+  dragging.value = false
+  setTimeout(() => (dragging.value = false), 0)
 }
 function onDblClick() {
   if (drawing.value.length >= 3 && zname.value) {
@@ -151,25 +231,66 @@ function onDblClick() {
     api.addZone({ camera_id: camId.value, name: zname.value, polygon }).then(load)
   }
 }
+function refreshBase() {
+  snapT.value = Date.now() // 时间戳防缓存，强制拉最新快照
+  nextTick(draw)
+}
 function draw() {
   const c = document.getElementById('zoneCanvas')
   if (!c) return
   const ctx = c.getContext('2d')
+  if (!ctx) return
   ctx.clearRect(0, 0, DISP_W, DISP_H)
-  const paint = (pts, color, fill) => {
+  const paint = (pts, color, fill, close) => {
     if (pts.length < 2) return
     ctx.beginPath()
     ctx.moveTo(pts[0][0], pts[0][1])
     pts.slice(1).forEach(p => ctx.lineTo(p[0], p[1]))
-    if (fill) { ctx.closePath(); ctx.fillStyle = color + '33'; ctx.fill() }
+    if (close) { ctx.closePath(); ctx.fillStyle = color + '33'; ctx.fill() }
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke()
   }
-  zones.value.forEach(z => {
-    if (Array.isArray(z.polygon)) {
-      paint(z.polygon.map(([x, y]) => [x * SCALE, y * SCALE]), '#4da3ff', true)
+  zones.value.forEach((z, zi) => {
+    if (!Array.isArray(z.polygon)) return
+    const pts = z.polygon.map(([x, y]) => [x * SCALE, y * SCALE])
+    const color = zoneColor(zi)
+    paint(pts, color, true, true)
+    // 顶点圆点 + 名称标签（居中）
+    ctx.fillStyle = color
+    pts.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill() })
+    if (pts.length) {
+      const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length
+      const cy = pts.reduce((s, p) => s + p[1], 0) / pts.length
+      ctx.font = '13px sans-serif'
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'
+      const tw = ctx.measureText(z.name || '').width + 10
+      ctx.fillRect(cx - tw / 2, cy - 10, tw, 20)
+      ctx.fillStyle = '#fff'
+      ctx.textAlign = 'center'
+      ctx.fillText(z.name || '', cx, cy + 5)
+      ctx.textAlign = 'start'
     }
   })
-  paint(drawing.value, '#f5c518', drawing.value.length >= 3)
+  paint(drawing.value, '#f5c518', drawing.value.length >= 3, drawing.value.length >= 3)
+  // 悬停顶点高亮
+  if (hoverVertex.value) {
+    const z = zones.value.find((x) => x.id === hoverVertex.value.zid)
+    const v = z?.polygon?.[hoverVertex.value.idx]
+    if (v) {
+      ctx.beginPath()
+      ctx.arc(v[0] * SCALE, v[1] * SCALE, 7, 0, Math.PI * 2)
+      ctx.strokeStyle = '#fff'
+      ctx.lineWidth = 2
+      ctx.stroke()
+    }
+  }
+}
+
+// LS-052：Ctrl+Z / Ctrl+Y 撤销重做（焦点在输入框时不拦截）
+function onKey(e) {
+  const tag = (e.target?.tagName || '').toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo() }
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo() }
 }
 
 async function addRule(zoneId) {
@@ -186,18 +307,23 @@ async function addRule(zoneId) {
         <option v-for="c in cams" :key="c.id" :value="c.id">{{ c.name }}</option>
       </select>
       <input v-model="zname" placeholder="新安全区名称（先填再画）" style="width:180px" />
-      <button class="ghost" @click="drawing = []; draw()">清除未保存顶点</button>
-      <span class="muted">单击加顶点 · 双击闭合并保存（≥3 顶点）</span>
+      <button class="ghost" @click="pushUndo(); drawing = []; draw()">清除未保存顶点</button>
+      <button class="ghost" :disabled="!undoStack.length" title="Ctrl+Z" @click="undo">撤销</button>
+      <button class="ghost" :disabled="!redoStack.length" title="Ctrl+Y" @click="redo">重做</button>
+      <button class="ghost" @click="refreshBase">刷新底图</button>
+      <span class="muted">单击加顶点 · 双击闭合并保存（≥3 顶点）· 拖拽已有顶点微调</span>
     </div>
     <div style="position:relative; width:640px; height:360px; background:#000; border-radius:6px">
       <img v-if="camId" :src="mediaUrl(`/api/cameras/${camId}/snapshot?t=${snapT}`)" alt="摄像头画面（用于绘制安全区）" width="640" height="360" @error="snapT = 0" />
-      <canvas id="zoneCanvas" class="zone-canvas" width="640" height="360" @click="onCanvasClick" @dblclick="onDblClick"></canvas>
+      <canvas id="zoneCanvas" class="zone-canvas" width="640" height="360"
+              @click="onCanvasClick" @dblclick="onDblClick"
+              @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @mouseleave="onMouseUp"></canvas>
       <p v-if="!snapT" class="muted" style="position:absolute; top:45%; width:100%; text-align:center">
         点击"取最新快照"显示画面后再画区
       </p>
     </div>
     <div class="row" style="margin-top:10px">
-      <button class="ghost" @click="snapT = Date.now(); nextTick(draw)">取最新快照</button>
+      <button class="ghost" @click="refreshBase">刷新底图（最新快照）</button>
     </div>
   </div>
 
@@ -222,20 +348,16 @@ async function addRule(zoneId) {
       </select>
       <select v-model="newRule.level"><option :value="1">L1 提示</option><option :value="2">L2 警告</option><option :value="3">L3 严重</option></select>
       <input v-model.number="newRule.cooldown_s" placeholder="冷却(秒)" style="width:90px" />
-      <input v-model="newRule.time_start" style="width:70px" /> —
-      <input v-model="newRule.time_end" style="width:70px" />
       <input v-model.number="newRule.threshold"
              :placeholder="newRule.behavior === 'solo_after_hours' ? '滞留秒数' : '人数阈值'"
              style="width:100px" />
-    </div>
-    <!-- 任务112：生效星期 + 仅假期 -->
-    <div class="row" style="margin-top:6px">
-      <span class="muted">生效星期：</span>
-      <label v-for="(w, i) in WEEKDAYS" :key="w" class="muted" style="margin-right:6px">
-        <input type="checkbox" :checked="newRule.days_of_week.split(',').includes(String(i + 1))"
-               @change="toggleDay(i + 1)" style="margin:0 2px 0 0" />周{{ w }}</label>
       <label class="muted"><input type="checkbox" v-model="newRule.holiday_only" />仅假期生效</label>
     </div>
+    <!-- LS-052：可视化周时段排班（100% 兼容 days_of_week/time_start/time_end 契约） -->
+    <SchedulePicker
+      v-model:days-of-week="newRule.days_of_week"
+      v-model:time-start="newRule.time_start"
+      v-model:time-end="newRule.time_end" />
     <table>
       <tr v-for="r in rules" :key="r.id">
         <td>#{{ r.id }}</td><td>区 {{ r.zone_id ?? '全部' }}</td><td>{{ r.behavior }}</td>

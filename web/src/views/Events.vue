@@ -194,12 +194,54 @@ onMounted(() => {
 })
 onUnmounted(() => window.removeEventListener('keydown', onKey))
 
+// LS-052：键盘快审——J/↓ 下一条、K/↑ 上一条、A 确认、F 误报、I 忽略、Space 播放/暂停、Esc 关闭。
+// 焦点在 input/textarea/select 时不触发（避免误伤搜索框/下拉）。
 function onKey(e) {
   if (e.key === 'Escape') {
     if (zoom.value) { zoom.value = null }
     else if (videoZoom.value !== null) { videoZoom.value = null }
     else if (drawer.value) { closeDrawer() }
+    return
   }
+  const tag = (e.target?.tagName || '').toLowerCase()
+  const typing = tag === 'input' || tag === 'textarea' || tag === 'select'
+  if (typing) return
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key
+  const list = rows.value || []
+  if (!list.length) return
+  const curIdx = drawer.value ? list.findIndex((r) => r.id === drawer.value.id) : -1
+  const openAt = (idx) => {
+    if (idx < 0 || idx >= list.length) return
+    drawer.value = list[idx]
+  }
+  if (k === 'j' || k === 'ArrowDown') {
+    e.preventDefault()
+    openAt(curIdx < 0 ? 0 : Math.min(curIdx + 1, list.length - 1))
+  } else if (k === 'k' || k === 'ArrowUp') {
+    e.preventDefault()
+    openAt(curIdx < 0 ? 0 : Math.max(curIdx - 1, 0))
+  } else if (k === 'a' && drawer.value) {
+    e.preventDefault(); quickMark('acked')
+  } else if (k === 'f' && drawer.value) {
+    e.preventDefault(); quickMark('false_positive')
+  } else if (k === 'i' && drawer.value) {
+    e.preventDefault(); quickMark('ignored')
+  } else if (k === ' ' && drawer.value) {
+    e.preventDefault()
+    const v = document.querySelector('.drawer video')
+    if (v) { v.paused ? v.play().catch(() => {}) : v.pause() }
+  }
+}
+
+// 快审标记后自动跳到下一条
+async function quickMark(status) {
+  const cur = drawer.value
+  if (!cur) return
+  const idx = rows.value.findIndex((r) => r.id === cur.id)
+  await mark(cur, status)
+  const next = rows.value[idx + 1] || rows.value[idx] || null
+  if (next) drawer.value = next
+  else closeDrawer()
 }
 
 // 任务135：View Transitions（尊重 prefers-reduced-motion；不支持/减少动效直接切换）
@@ -288,6 +330,16 @@ async function mark(e, status) {
       <a :href="mediaUrl(exportFilteredUrl)" download>
         <button class="ghost">导出当前筛选</button>
       </a>
+    </div>
+    <!-- LS-052：键盘快审提示条（浅/深主题均用设计令牌） -->
+    <div class="kbd-hints muted">
+      <span><kbd>J</kbd>/<kbd>↓</kbd> 下一条</span>
+      <span><kbd>K</kbd>/<kbd>↑</kbd> 上一条</span>
+      <span><kbd>A</kbd> 已确认</span>
+      <span><kbd>F</kbd> 误报</span>
+      <span><kbd>I</kbd> 忽略</span>
+      <span><kbd>Space</kbd> 播放/暂停</span>
+      <span><kbd>Esc</kbd> 关闭</span>
     </div>
 
     <!-- 任务136：事件时间线（7 天×24 小时热力条，点击跳该小时） -->
@@ -442,6 +494,11 @@ async function mark(e, status) {
 </style>
 
 <style scoped>
+/* LS-052：键盘快审提示条 */
+.kbd-hints { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; margin: 4px 2px 8px; }
+.kbd-hints kbd { font-family: ui-monospace, monospace; font-size: 11px; padding: 1px 5px;
+  border: 1px solid var(--stroke-default); border-radius: 4px; background: var(--card-bg-secondary);
+  color: var(--text-primary); }
 /* 任务19：分页条 */
 .pager { justify-content: flex-start; }
 /* 表格小屏横向滚动（任务17B） */

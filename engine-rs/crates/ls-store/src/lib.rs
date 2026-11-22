@@ -640,6 +640,18 @@ impl Store {
             .execute("DELETE FROM zones WHERE id=?", params![id])
     }
 
+    /// LS-052：更新安全区多边形（拖拽顶点后保存；名称不变）。
+    pub fn update_zone_polygon(
+        &self,
+        id: i64,
+        polygon_json: &str,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE zones SET polygon=? WHERE id=?",
+            params![polygon_json, id],
+        )
+    }
+
     // ---- rules ----
     pub fn rules_all(&self) -> rusqlite::Result<Vec<RuleFullRow>> {
         // RA1.1（ADR-0011）：补选 days_of_week——Python store.rules 读该列

@@ -66,6 +66,33 @@ pub(crate) async fn delete_zone(State(st): State<Shared>, AxPath(zid): AxPath<i6
     })
 }
 
+/// LS-052：PUT /api/zones/:zid——拖拽顶点后保存多边形（≥3 顶点）。
+pub(crate) async fn update_zone(
+    State(st): State<Shared>,
+    AxPath(zid): AxPath<i64>,
+    Json(body): Json<Value>,
+) -> Response {
+    let polygon = body.get("polygon").cloned().unwrap_or(Value::Null);
+    let valid = polygon
+        .as_array()
+        .map(|a| a.len() >= 3 && a.iter().all(|p| p.as_array().is_some_and(|xy| xy.len() >= 2)))
+        .unwrap_or(false);
+    if !valid {
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "polygon 必须为 ≥3 个 [x,y] 顶点的数组",
+        )
+        .into_response();
+    }
+    with_store(&st, |s| {
+        if s.update_zone_polygon(zid, &polygon.to_string())? > 0 {
+            Ok(Json(json!({"ok": true, "id": zid, "polygon": polygon})).into_response())
+        } else {
+            Ok(detail_err(StatusCode::NOT_FOUND, "zone not found").into_response())
+        }
+    })
+}
+
 #[allow(clippy::type_complexity)]
 pub(crate) fn rule_json(
     t: &(

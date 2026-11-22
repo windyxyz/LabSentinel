@@ -98,6 +98,7 @@ export const api = {
   folderScan: (id) => req('POST', `/api/folders/${id}/scan`),
   zones: (cid) => req('GET', `/api/zones?camera_id=${cid}`),
   addZone: (d) => req('POST', '/api/zones', d),
+  updateZone: (id, polygon) => req('PUT', `/api/zones/${id}`, { polygon }),
   delZone: (id) => req('DELETE', `/api/zones/${id}`),
   copyConfig: (cid, payload) => req('POST', `/api/cameras/${cid}/copy-config`, payload),
   rules: (cid) => req('GET', `/api/rules?camera_id=${cid}`),

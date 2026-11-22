@@ -48,6 +48,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/zones"),
     ("POST", "/api/zones"),
     ("DELETE", "/api/zones/:zid"),
+    ("PUT", "/api/zones/:zid"), // LS-052 拖拽顶点保存
     ("GET", "/api/rules"),
     ("POST", "/api/rules"),
     ("DELETE", "/api/rules/:rid"),
@@ -186,7 +187,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/cameras/bulk", post(cameras_bulk))
         .route("/cameras/usb-devices", get(usb_devices))
         .route("/zones", get(zones_list).post(add_zone))
-        .route("/zones/:zid", delete(delete_zone))
+        .route("/zones/:zid", delete(delete_zone).put(update_zone))
         .route("/rules", get(rules_list).post(add_rule))
         .route("/rules/:rid", delete(delete_rule))
         .route("/rule-templates", get(templates_list).post(add_template))
