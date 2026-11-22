@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "ls-dispatch"
 description = "LabSentinel 告警派发（L2/T-329）：8 渠道 HTTP+邮件等价语义、域名白名单、静默/过滤、每渠道队列+令牌桶+摘要、重试/死信写同一 alert_deliveries"
 version.workspace = true

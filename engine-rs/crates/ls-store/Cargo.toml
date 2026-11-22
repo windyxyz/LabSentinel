@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "ls-store"
 description = "LabSentinel SQLite 存储层（rusqlite，与 Python store.MIGRATIONS 同 schema/同迁移编号；双向兼容 ADR-0008）"
 version.workspace = true

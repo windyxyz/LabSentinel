@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "ls-proto"
 description = "LabSentinel 分析器 gRPC 契约代码生成（proto/analyzer.proto，T-320/T-327）"
 version.workspace = true

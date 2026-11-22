@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "ls-server"
 description = "LabSentinel 控制面（L3/T-331）：axum 单二进制 HTTP/WS 服务，路由与 JSON 契约 1:1 对齐 OpenAPI 快照；含鉴权/CSRF/Host/WS 事件广播/静态 SPA"
 version.workspace = true

@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "ls-analyzer"
 description = "LabSentinel Rust 分析器 sidecar（gRPC 服务，T-327）：配置快照/摄像头生命周期/事件流/状态；数据面（ingest/infer）由 T-325/T-326 填充"
 version.workspace = true

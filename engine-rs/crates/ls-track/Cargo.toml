@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "ls-track"
 description = "LabSentinel ByteTrack 轨迹跟踪（supervision 0.25.1 逐函数移植；与 Python 共享 testdata/vectors/track 序列向量，T-324）"
 version.workspace = true

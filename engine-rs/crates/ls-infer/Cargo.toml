@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "ls-infer"
 description = "LabSentinel 推理：YOLO 后处理（decode/NMS 纯 Rust，与 Python 共享检测向量）+ tract 纯 Rust 推理（feature=tract，无需 libclang/ORT 运行时）"
 version.workspace = true
