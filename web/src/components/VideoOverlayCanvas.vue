@@ -109,9 +109,17 @@ function loop() {
   raf = requestAnimationFrame(loop)
 }
 
+function closeSocket() {
+  clearTimeout(reconnectTimer)
+  if (ws) {
+    ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+    try { ws.close() } catch { /* ignore */ }
+    ws = null
+  }
+}
+
 watch(() => props.cameraId, () => {
-  try { ws?.close() } catch { /* ignore */ }
-  ws = null
+  closeSocket()
   latest = null
   connect()
 })
@@ -123,6 +131,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   closed = true
+  closeSocket()
   cancelAnimationFrame(raf)
   clearTimeout(reconnectTimer)
   try { ws?.close() } catch { /* ignore */ }

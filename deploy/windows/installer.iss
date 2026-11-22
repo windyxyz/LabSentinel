@@ -107,6 +107,7 @@ Type: filesandordirs; Name: "{app}\versions"
 Type: filesandordirs; Name: "{app}\server"
 Type: filesandordirs; Name: "{app}\data"
 Type: files; Name: "{app}\current.txt"
+Type: files; Name: "{app}\.env"
 ; 用户数据（%LOCALAPPDATA%\LabSentinel）默认保留；卸载时可选择一并删除，
 ; 见 [Code] InitializeUninstall（静默卸载用 /REMOVEDATA=1 显式删除）。
 

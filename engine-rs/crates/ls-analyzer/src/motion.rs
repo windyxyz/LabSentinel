@@ -94,6 +94,8 @@ impl MotionGate {
         self.stats.total_frames += 1;
 
         if !self.cfg.enabled || has_active_tracks {
+            // 活跃跟踪或停用时清空旧参考帧，避免人离开后拿数分钟前的旧帧误判静止
+            self.prev = None;
             self.mark_full();
             return false;
         }
@@ -142,9 +144,9 @@ pub fn downsample_gray(bgr: &[u8], w: u32, h: u32) -> [u8; DW * DH] {
                 let row = y * w * 3;
                 for x in x0..x1.min(w) {
                     let i = row + x * 3;
-                    // ITU-R BT.601 灰度（整数近似）
+                    // ITU-R BT.601 灰度（BGR 通道顺序：0.114*B + 0.587*G + 0.299*R）
                     let g =
-                        (77u32 * bgr[i] as u32 + 150 * bgr[i + 1] as u32 + 29 * bgr[i + 2] as u32)
+                        (29u32 * bgr[i] as u32 + 150 * bgr[i + 1] as u32 + 77 * bgr[i + 2] as u32)
                             / 256;
                     sum += g;
                     n += 1;

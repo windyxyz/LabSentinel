@@ -545,6 +545,7 @@ pub fn run_cleanup_with(
             if let Some(p) = snap {
                 remove_file_counted(p, cfg, &mut stats);
             }
+            remove_file_counted(&format!("thumbs/ev_{id}.jpg"), cfg, &mut stats);
             conn.execute("UPDATE events SET snapshot=NULL WHERE id=?", [id])
                 .map_err(|e| e.to_string())?;
         }
@@ -552,6 +553,7 @@ pub fn run_cleanup_with(
             for p in [snap, video].into_iter().flatten() {
                 remove_file_counted(p, cfg, &mut stats);
             }
+            remove_file_counted(&format!("thumbs/ev_{id}.jpg"), cfg, &mut stats);
             conn.execute("DELETE FROM events WHERE id=?", [id])
                 .map_err(|e| e.to_string())?;
             stats.deleted_events += 1;

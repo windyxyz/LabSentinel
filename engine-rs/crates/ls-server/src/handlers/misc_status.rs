@@ -479,6 +479,10 @@ fn run_ppe_benchmark(st: &Shared, body: &Value) -> Response {
     if candidate.is_empty() {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "candidate_path 必填").into_response();
     }
+    // 安全校验：禁止 UNC / 网络路径（防 Windows SMB NTLM 泄漏），并限制在受信任模型目录内
+    if candidate.starts_with("\\\\") || candidate.starts_with("//") {
+        return detail_err(StatusCode::FORBIDDEN, "禁止网络/UNC 候选模型路径").into_response();
+    }
     let Ok(cand_path) = std::path::Path::new(&candidate).canonicalize() else {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "候选模型路径不存在").into_response();
     };
@@ -488,7 +492,29 @@ fn run_ppe_benchmark(st: &Shared, body: &Value) -> Response {
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("onnx"))
     {
-        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "候选模型不是文件").into_response();
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "候选模型不是有效 .onnx 文件",
+        )
+        .into_response();
+    }
+    let allowed_roots = [
+        std::path::PathBuf::from(&st.data_dir).join("models"),
+        crate::deploy::default_install_root().join("models"),
+        std::path::PathBuf::from("models"),
+        std::path::PathBuf::from("m0-spike"),
+    ];
+    let in_allowed = allowed_roots.iter().any(|root| {
+        root.canonicalize()
+            .ok()
+            .is_some_and(|r| cand_path.starts_with(&r))
+    });
+    if !in_allowed {
+        return detail_err(
+            StatusCode::FORBIDDEN,
+            "候选模型必须位于 models/ 或数据目录 models/ 内（已拒绝越界路径）",
+        )
+        .into_response();
     }
     // 当前模型路径（env > app_settings > 随包）
     let Ok(store) = ls_store::Store::open(&st.db_path) else {
@@ -736,7 +762,7 @@ pub(crate) async fn diagnostics_bundle(State(st): State<Shared>) -> Response {
                 | "report.daily_enabled"
                 | "report.weekly_enabled"
                 | "perf.motion_gate_enabled"
-                | "ppe_enabled" => Some(matches!(v.as_str(), "1" | "true" | "on")),
+                | "ppe.enabled" => Some(matches!(v.as_str(), "1" | "true" | "on")),
                 _ => None,
             };
             if let Some(value) = value {

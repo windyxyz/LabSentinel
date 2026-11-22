@@ -64,7 +64,8 @@ DEFAULT_MAP = {
 def normalize_class(name: str, mapping: dict[str, str] | None = None) -> str | None:
     """别名 → 标准词；跳过项目词表之外的类别。"""
     key = name.strip().lower().replace("-", "_")
-    table = {**DEFAULT_MAP, **(mapping or {})}
+    custom = {k.strip().lower(): v for k, v in (mapping or {}).items()}
+    table = {**DEFAULT_MAP, **custom}
     # 先按原样、再按下划线/空格归一化查
     for k in (name.strip().lower(), key, key.replace("_", " ")):
         if k in table:
@@ -209,8 +210,9 @@ def write_dataset(samples: list[Sample], out: Path, val_ratio: float = 0.2) -> d
     for sub in ("images/train", "images/val", "labels/train", "labels/val"):
         (out / sub).mkdir(parents=True, exist_ok=True)
     n_train = n_val = 0
+    stride = max(1, round(1 / val_ratio))
     for i, s in enumerate(samples):
-        split = "val" if i % max(1, round(1 / val_ratio)) == 0 else "train"
+        split = "val" if len(samples) > 1 and (i + 1) % stride == 0 else "train"
         stem = f"{i:06d}_{s.image.stem}"
         dst_img = out / "images" / split / (stem + s.image.suffix)
         dst_lab = out / "labels" / split / (stem + ".txt")
@@ -231,9 +233,26 @@ def write_dataset(samples: list[Sample], out: Path, val_ratio: float = 0.2) -> d
 
 
 def extract_user_zip(zip_path: Path, out_dir: Path) -> Path:
+    """安全解压用户标注 ZIP（防 Zip-Slip 路径穿越与符号链接逃逸）。"""
     out_dir.mkdir(parents=True, exist_ok=True)
+    root = out_dir.resolve()
     with zipfile.ZipFile(zip_path) as z:
-        z.extractall(out_dir)
+        for info in z.infolist():
+            # 拒绝符号链接（Unix mode 0o120000）
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                raise ValueError(f"ZIP 含符号链接，已拒绝: {info.filename}")
+            rel = Path(info.filename)
+            if rel.is_absolute() or rel.drive or ".." in rel.parts:
+                raise ValueError(f"ZIP 含非法路径，已拒绝: {info.filename}")
+            target = (root / rel).resolve()
+            if not target.is_relative_to(root):
+                raise ValueError(f"ZIP 路径越出目标目录，已拒绝: {info.filename}")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(info) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
     return out_dir
 
 
@@ -247,7 +266,8 @@ def class_names(root: Path) -> list[str]:
     import yaml
     names = yaml.safe_load(yaml_file.read_text(encoding="utf-8-sig"))["names"]
     if isinstance(names, dict):
-        return [str(names.get(i, "")) for i in range(max(names, default=-1) + 1)]
+        int_map = {int(k): str(v) for k, v in names.items()}
+        return [int_map.get(i, "") for i in range(max(int_map, default=-1) + 1)]
     return list(names)
 
 
@@ -275,24 +295,32 @@ def main(argv: list[str] | None = None) -> int:
         samples = remap_class_ids(load_yolo_dir(root), names, mapping)
         print(f"[load] {root}: {len(samples)} 张")
         all_public.extend(samples)
+    import tempfile
     user_samples: list[Sample] = []
-    if args.user_zip:
-        tmp = out.parent / "_user_zip"
-        extract_user_zip(Path(args.user_zip), tmp)
-        classes_file = tmp / "classes.txt"
-        names = classes_file.read_text(encoding="utf-8").splitlines() if classes_file.is_file() else CANONICAL
-        user_samples = remap_class_ids(load_yolo_dir(tmp), names, mapping)
-        print(f"[load] user-zip: {len(user_samples)} 张")
+    tmp_ctx = tempfile.TemporaryDirectory(prefix="ls_user_zip_") if args.user_zip else None
     try:
-        u, p = (int(x) for x in args.mix_ratio.split(":"))
-    except ValueError:
-        u, p = 1, 3
-    merged = dedupe(mix(user_samples, dedupe(all_public), (u, p)))
-    if not merged:
-        print("[失败] 没有可用样本", file=sys.stderr)
-        return 2
-    stats = write_dataset(merged, out)
-    print(f"[ok] {out}: {stats}")
+        if tmp_ctx is not None:
+            tmp = Path(tmp_ctx.name)
+            extract_user_zip(Path(args.user_zip), tmp)
+            try:
+                names = class_names(tmp)
+            except ValueError:
+                names = CANONICAL
+            user_samples = remap_class_ids(load_yolo_dir(tmp), names, mapping)
+            print(f"[load] user-zip: {len(user_samples)} 张")
+        try:
+            u, p = (int(x) for x in args.mix_ratio.split(":"))
+        except ValueError:
+            u, p = 1, 3
+        merged = dedupe(mix(user_samples, dedupe(all_public), (u, p)))
+        if not merged:
+            print("[失败] 没有可用样本", file=sys.stderr)
+            return 2
+        stats = write_dataset(merged, out)
+        print(f"[ok] {out}: {stats}")
+    finally:
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
     return 0
 
 

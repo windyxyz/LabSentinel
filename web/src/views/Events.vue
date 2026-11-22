@@ -199,6 +199,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 // 焦点在 input/textarea/select 时不触发（避免误伤搜索框/下拉）。
 function onKey(e) {
   if (annotation.value) return
+  if (e.ctrlKey || e.metaKey || e.altKey) return
   if (e.key === 'Escape') {
     if (zoom.value) { zoom.value = null }
     else if (videoZoom.value !== null) { videoZoom.value = null }

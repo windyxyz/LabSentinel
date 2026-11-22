@@ -108,12 +108,17 @@ def main():
     model = RTDETR(weights) if args.arch == "rtdetr-l" else YOLO(weights)
     aug = {}
     if args.aug == "lab":
-        # 实验室灰度/低光/远景增强预设
-        from albumentations import RandomBrightnessContrast, ToGray
+        # 实验室灰度/低光/远景增强预设（albumentations 为可选依赖，缺失时降级为内置增强）
         aug = dict(scale=0.9, hsv_v=0.5, hsv_s=0.5, degrees=5.0,
-                   mosaic=1.0, close_mosaic=10,
-                   augmentations=[ToGray(p=0.25), RandomBrightnessContrast(
-                       brightness_limit=(-0.45, 0.10), contrast_limit=0.2, p=0.35)])
+                   mosaic=1.0, close_mosaic=10)
+        try:
+            from albumentations import RandomBrightnessContrast, ToGray
+            aug["augmentations"] = [
+                ToGray(p=0.25),
+                RandomBrightnessContrast(brightness_limit=(-0.45, 0.10), contrast_limit=0.2, p=0.35),
+            ]
+        except ImportError:
+            print("[warn] 未安装 albumentations，降级使用 Ultralytics 内置 HSV/scale/mosaic 增强")
     model.train(
         data=str(data_path),
         epochs=args.epochs,
@@ -136,10 +141,12 @@ def main():
     if not best.exists():
         sys.exit(f"[error] 未找到 best.pt（预期位置 {best}），请检查训练输出目录。")
 
-    shutil.copy2(best, BEST_COPY_DST)
+    copy_dst = BEST_COPY_DST.parent / f"{args.arch}_ppe.pt"
+    copy_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(best, copy_dst)
     print(f"[done] 训练完成，结果目录: {best.parents[2]}")
-    print(f"[done] best.pt 已复制: {best} -> {BEST_COPY_DST}")
-    print(f"[next] 运行 tools/export_onnx.py 导出 ONNX（--weights {BEST_COPY_DST}）")
+    print(f"[done] best.pt 已复制: {best} -> {copy_dst}")
+    print(f"[next] 运行 tools/export_onnx.py 导出 ONNX（--weights {copy_dst}）")
 
 
 if __name__ == "__main__":

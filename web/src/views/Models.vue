@@ -210,7 +210,8 @@ onMounted(load)
           <span class="muted" style="font-size:12px">
             上传后立即启用；替换文件保存在数据目录 models\ppe-custom.onnx，卸载不删除用户数据。</span>
         </div>
-        <dialog v-if="bench" open class="card" aria-label="模型对比评测">
+        <dialog v-if="bench" open class="card" aria-label="模型对比评测"
+                style="background:var(--dialog-bg);color:var(--text-primary);box-shadow:var(--shadow-dialog);z-index:60;border:1px solid var(--stroke-default)">
           <p>本次评测 {{ bench.images }} 张图片</p>
           <section v-for="{ title, data } in benchSides" :key="title">
             <b>{{ title }}</b>

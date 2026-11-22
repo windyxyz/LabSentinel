@@ -145,11 +145,25 @@ async fn main() {
         .nth(1)
         .and_then(|port| port.parse::<u16>().ok());
     if let Some(port) = wait_port {
+        let wait_host = std::env::var("LS_HOST")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "127.0.0.1".into());
         let ready = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            while tokio::net::TcpListener::bind(("127.0.0.1", port))
-                .await
-                .is_err()
-            {
+            // Windows 上 0.0.0.0 仍被占用时 bind(127.0.0.1) 可能误成功，故先探测旧端口仍可连，
+            // 并确认实际监听地址 (wait_host, port) 已完全释放。
+            loop {
+                let still_alive = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .is_ok();
+                if !still_alive
+                    && tokio::net::TcpListener::bind((wait_host.as_str(), port))
+                        .await
+                        .is_ok()
+                {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         })

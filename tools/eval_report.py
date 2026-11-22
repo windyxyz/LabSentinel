@@ -76,13 +76,16 @@ def bench_onnx(model_path: Path, images: list[Path], imgsz: int = 640) -> dict:
             out = sess.run(None, {inp.name: blob})[0]
             total += (time.perf_counter() - t) * 1000
             n += 1
-            # 粗算检出数：经典 [1,4+nc,N] 取置信度 >0.25 的列数
+            # 粗算检出数：NMS-free [1,N,6] / 经典 YOLO [1,4+nc,N] / RT-DETR [1,N,4+nc]
             arr = np.asarray(out)
             if arr.ndim == 3 and arr.shape[2] == 6:
                 dets += int((arr[0, :, 4] > 0.25).sum())
-            elif arr.ndim == 3 and arr.shape[1] > 4:
+            elif arr.ndim == 3 and arr.shape[1] < arr.shape[2] and arr.shape[1] > 4:
                 scores = arr[0, 4:, :]
                 dets += int((scores.max(axis=0) > 0.25).sum())
+            elif arr.ndim == 3 and arr.shape[2] > 4:
+                scores = arr[0, :, 4:]
+                dets += int((scores.max(axis=1) > 0.25).sum())
         return {
             "model": model_path.name,
             "ms": total / n if n else None,

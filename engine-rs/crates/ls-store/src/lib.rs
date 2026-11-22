@@ -1084,7 +1084,7 @@ impl Store {
              WHERE COALESCE(status,'pending') IN ('retry','failed') \
                AND (?6 IS NULL OR id=?6)
                AND updated_ts <= CASE attempts WHEN 0 THEN ?1 WHEN 1 THEN ?2
-                   WHEN 2 THEN ?3 WHEN 3 THEN ?4 WHEN 4 THEN ?5 END
+                   WHEN 2 THEN ?3 WHEN 3 THEN ?4 ELSE ?5 END
                ORDER BY updated_ts ASC, id ASC LIMIT ?7",
         )?;
         let rows = stmt.query_map(
@@ -1206,10 +1206,26 @@ impl Store {
     }
 
     pub fn dataset_sample_by_id(&self, id: i64) -> rusqlite::Result<Option<DatasetSample>> {
-        Ok(self
-            .dataset_samples(None, 1_000_000)?
-            .into_iter()
-            .find(|s| s.id == id))
+        rusqlite::OptionalExtension::optional(self.conn.query_row(
+            "SELECT id,source_type,source_id,camera_id,image_path,width,height,status,boxes_json,created_at,updated_at \
+             FROM dataset_samples WHERE id=?",
+            [id],
+            |r| {
+                Ok(DatasetSample {
+                    id: r.get(0)?,
+                    source_type: r.get(1)?,
+                    source_id: r.get(2)?,
+                    camera_id: r.get(3)?,
+                    image_path: r.get(4)?,
+                    width: r.get(5)?,
+                    height: r.get(6)?,
+                    status: r.get(7)?,
+                    boxes_json: r.get(8)?,
+                    created_at: r.get(9)?,
+                    updated_at: r.get(10)?,
+                })
+            },
+        ))
     }
 
     pub fn update_dataset_sample(

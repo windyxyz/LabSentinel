@@ -41,7 +41,8 @@ pub fn clahe_bgr(bgr: &[u8], w: u32, h: u32, cfg: ClaheConfig) -> Vec<u8> {
                 bgr[i * 3 + 1] as u32,
                 bgr[i * 3 + 2] as u32,
             );
-            ((77 * b + 150 * g + 29 * r) / 256) as u8
+            // ITU-R BT.601 灰度（BGR 通道顺序：0.114*B + 0.587*G + 0.299*R）
+            ((29 * b + 150 * g + 77 * r) / 256) as u8
         })
         .collect();
     // 全局直方图映射（与块映射混合，避免"单色块"下局部 CDF 退化）
@@ -59,7 +60,6 @@ pub fn clahe_bgr(bgr: &[u8], w: u32, h: u32, cfg: ClaheConfig) -> Vec<u8> {
             .clamp(0.0, 255.0) as u8;
     }
     let mut maps: Vec<[u8; 256]> = Vec::with_capacity(tx * ty);
-    let mut hist = [[0u32; 256]; 1024]; // ≤32×32 块
     for tyi in 0..ty {
         let y0 = tyi * h / ty;
         let y1 = ((tyi + 1) * h / ty).max(y0 + 1).min(h);
@@ -83,10 +83,11 @@ pub fn clahe_bgr(bgr: &[u8], w: u32, h: u32, cfg: ClaheConfig) -> Vec<u8> {
                     *v = clip;
                 }
             }
-            // 均匀重分配截断量
+            // 均匀重分配截断量（含余数，避免小 ROI 块 excess<256 时被丢弃导致整块变黑）
             let add = excess / 256;
-            for v in hh.iter_mut() {
-                *v += add;
+            let rem = (excess % 256) as usize;
+            for (idx, v) in hh.iter_mut().enumerate() {
+                *v += add + u32::from(idx < rem);
             }
             // 累计分布 → 映射；与全局映射 50/50 混合（单色块退化保护）
             let mut cdf = 0u32;
@@ -100,7 +101,6 @@ pub fn clahe_bgr(bgr: &[u8], w: u32, h: u32, cfg: ClaheConfig) -> Vec<u8> {
                 };
                 map[i] = ((local as u16 + gmap[i] as u16) / 2) as u8;
             }
-            hist[tyi * tx + txi] = hh; // 保留（调试/扩展用）
             maps.push(map);
         }
     }
@@ -136,21 +136,21 @@ pub fn clahe_bgr(bgr: &[u8], w: u32, h: u32, cfg: ClaheConfig) -> Vec<u8> {
     out
 }
 
-/// 判断 ROI 是否接近灰度图（B/G/R 通道均值差很小）——用于自动启用 CLAHE。
+/// 判断 ROI 是否接近灰度图（逐像素 B/G/R 通道平均离散度很小）——用于自动启用 CLAHE。
 pub fn looks_grayscale(bgr: &[u8], w: u32, h: u32) -> bool {
-    let n = (w as usize * h as usize).max(1);
-    let mut sb = 0u64;
-    let mut sg = 0u64;
-    let mut sr = 0u64;
-    for i in 0..n.min(bgr.len() / 3) {
-        sb += bgr[i * 3] as u64;
-        sg += bgr[i * 3 + 1] as u64;
-        sr += bgr[i * 3 + 2] as u64;
+    let count = (w as usize * h as usize).min(bgr.len() / 3);
+    if count == 0 {
+        return false;
     }
-    let (mb, mg, mr) = (sb / n as u64, sg / n as u64, sr / n as u64);
-    let max = mb.max(mg).max(mr) as i64;
-    let min = mb.min(mg).min(mr) as i64;
-    max - min <= 12
+    let mut spread_sum = 0u64;
+    for i in 0..count {
+        let b = bgr[i * 3] as i32;
+        let g = bgr[i * 3 + 1] as i32;
+        let r = bgr[i * 3 + 2] as i32;
+        spread_sum += ((b - g).abs() + (g - r).abs() + (b - r).abs()) as u64;
+    }
+    // 平均每像素通道差 ≤ 12 视为灰度/夜视红外图
+    (spread_sum / (count as u64 * 3)) <= 12
 }
 
 #[cfg(test)]

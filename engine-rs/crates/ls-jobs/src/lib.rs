@@ -106,18 +106,21 @@ pub fn weekly_due(
     }
 }
 
-/// 两个 ISO 日期是否在同一自然周（周一为起点）。纯字符串比较 + 日期差近似。
+/// 两个 ISO 日期（YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS）是否在同一自然周（周一为起点）。
 fn same_iso_week(a: &str, b: &str) -> bool {
-    // 简单稳妥：同一周 ⇔ 两日期相差 < 7 天且 b >= a 且 b-a 的星期偏移对齐；
-    // 这里用「相差 ≤ 6 天」近似（调度每天检查一次，重复窗口已足够窄）。
-    match (
-        ls_core::time::parse_local_datetime(a),
-        ls_core::time::parse_local_datetime(b),
-    ) {
-        (Some(x), Some(y)) => {
-            let dx = ls_core::time::diff_minutes(y, x) / (60 * 24);
-            (0..7).contains(&dx)
-        }
+    let parse_monday_key = |s: &str| -> Option<i64> {
+        let iso = if s.len() == 10 {
+            format!("{s}T00:00:00")
+        } else {
+            s.to_string()
+        };
+        let dt = ls_core::time::parse_local_datetime(&iso)?;
+        let epoch = ls_core::time::parse_local_datetime("2000-01-03T00:00:00")?; // 2000-01-03 is Monday
+        let days = ls_core::time::diff_minutes(dt, epoch).div_euclid(60 * 24);
+        Some(days.div_euclid(7))
+    };
+    match (parse_monday_key(a), parse_monday_key(b)) {
+        (Some(wa), Some(wb)) => wa == wb,
         _ => a == b,
     }
 }
@@ -641,6 +644,9 @@ impl Jobs {
         }
         let channels = self.alert_channels_snapshot();
         for (did, event_id, channel_name, attempts) in rows {
+            if self.stop.load(Ordering::SeqCst) {
+                break;
+            }
             let Some(ev) = store.event_by_id(event_id).ok().flatten() else {
                 let _ = store.update_delivery(did, "dead_letter", attempts, Some("事件已删除"));
                 continue;
@@ -726,12 +732,11 @@ impl Jobs {
             &today,
             last_weekly.as_deref(),
         ) {
+            let week_start_iso = ls_core::time::local_days_ago_iso(6);
+            let week_start = format!("{}T00:00:00", week_start_iso.get(..10).unwrap_or(&today));
             sends.extend(
                 store
-                    .report_summary(
-                        &ls_core::time::local_days_ago_iso(6),
-                        &format!("{today}T23:59:59"),
-                    )
+                    .report_summary(&week_start, &format!("{today}T23:59:59"))
                     .map(|summary| ("周报", summary)),
             );
         }
@@ -739,6 +744,9 @@ impl Jobs {
             return;
         }
         let channels = self.alert_channels_snapshot();
+        if channels.is_empty() {
+            return;
+        }
         let names: std::collections::HashMap<i64, String> = store
             .cameras()
             .unwrap_or_default()
@@ -746,6 +754,9 @@ impl Jobs {
             .map(|c| (c.id, c.name))
             .collect();
         for (title, summary) in sends {
+            if self.stop.load(Ordering::SeqCst) {
+                break;
+            }
             let text = report_text(
                 title,
                 summary.total,
@@ -754,8 +765,18 @@ impl Jobs {
                 &summary.top,
                 &names,
             );
+            let mut any_ok = false;
             for (ch, cfg) in &channels {
-                let _ = ls_dispatch::deliver_with_backoff(*ch, cfg, 2, &text, None, &[0, 0, 0]);
+                if self.stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let d = ls_dispatch::deliver_with_backoff(*ch, cfg, 2, &text, None, &[1]);
+                if d.ok {
+                    any_ok = true;
+                }
+            }
+            if !any_ok {
+                continue;
             }
             if title == "日报" {
                 let _ = store.setting_set("report.last_daily_date", &today);

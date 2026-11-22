@@ -477,6 +477,14 @@ impl CameraPipeline {
             .cloned()
             .collect();
         for rule in solo_rules {
+            // 仅在规则生效时段/工作日/节假日窗口内累计单人留守时长，避免窗口刚开始就瞬间误报
+            if !weekday_allowed(&rule.weekdays, &now)
+                || !self.holiday_allowed(&rule, &now)
+                || !hour_in_window(&rule.time_start, &rule.time_end, &now)
+            {
+                self.solo_since.remove(&rule.id);
+                continue;
+            }
             let ids: HashSet<i64> = if rule.zone_id == 0 {
                 active_ids.clone()
             } else {
@@ -516,13 +524,13 @@ impl CameraPipeline {
                 } else {
                     Some(rule.zone_id)
                 };
-                self.try_fire(
+                self.try_fire_rule(
+                    &rule,
                     zid,
                     "solo_after_hours",
                     tid,
                     &detail,
                     rule.level,
-                    &now,
                     frame_ts,
                     &mut out,
                 );
@@ -570,6 +578,23 @@ impl CameraPipeline {
         let Some(rule) = chosen else {
             return false;
         };
+        self.try_fire_rule(
+            &rule, zone_id, behavior, track_id, detail, level_hint, frame_ts, out,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_fire_rule(
+        &mut self,
+        rule: &RuleSpec,
+        zone_id: Option<i64>,
+        behavior: &str,
+        track_id: i64,
+        detail: &str,
+        level_hint: i64,
+        frame_ts: &str,
+        out: &mut Vec<Candidate>,
+    ) -> bool {
         let key = (rule.id, track_id);
         // LS-043：cooldown_s 单位为秒，按 analysis_fps 换算为帧数（此前直接与 frame_index 比较缩短了 fps 倍）
         let cd_frames = if rule.cooldown_s > 0 {

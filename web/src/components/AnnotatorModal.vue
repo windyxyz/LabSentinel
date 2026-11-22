@@ -16,7 +16,7 @@
           </div>
         </div>
         <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px">
-          <select v-model="cls" aria-label="标注类别">
+          <select v-model="cls" aria-label="标注类别" @change="applyClass">
             <option v-for="c in CLASSES" :key="c" :value="c">{{ c }}</option>
           </select>
           <span class="muted">拖拽画框或调整角点 · 滚轮缩放 · Alt + 拖拽平移 · 数字键切类</span>
@@ -97,7 +97,15 @@ function scale() {
   }
 }
 function pos(e) {
-  return imagePoint(e.clientX, e.clientY, imgEl().getBoundingClientRect(), props.sample.width, props.sample.height)
+  const img = imgEl()
+  if (!img || !props.sample) return { x: 0, y: 0 }
+  return imagePoint(e.clientX, e.clientY, img.getBoundingClientRect(), props.sample.width, props.sample.height)
+}
+function applyClass() {
+  if (selected.value >= 0 && boxes.value[selected.value]) {
+    boxes.value[selected.value].class = cls.value
+    draw()
+  }
 }
 function onImgLoad() { draw() }
 function color(name) { return getComputedStyle(canvasEl.value).getPropertyValue(name).trim() }

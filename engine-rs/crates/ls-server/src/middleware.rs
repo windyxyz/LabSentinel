@@ -261,11 +261,21 @@ pub(crate) async fn guard_middleware(
 fn share_read_path(path: &str) -> bool {
     matches!(
         path,
-        "/api/share-links/verify" | "/api/cameras" | "/api/stats/daily" | "/api/events"
+        "/api/share-links/verify"
+            | "/api/cameras"
+            | "/api/stats/daily"
+            | "/api/events"
+            | "/ws/events"
     ) || path
         .strip_prefix("/api/cameras/")
         .and_then(|tail| tail.split_once('/'))
         .is_some_and(|(id, op)| id.parse::<i64>().is_ok() && matches!(op, "snapshot" | "webrtc"))
+        || path
+            .strip_prefix("/ws/webrtc/")
+            .is_some_and(|id| id.parse::<i64>().is_ok())
+        || path
+            .strip_prefix("/ws/detections/")
+            .is_some_and(|id| id.parse::<i64>().is_ok())
 }
 
 fn share_device(st: &Shared, token: &str) -> bool {
