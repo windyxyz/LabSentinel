@@ -57,9 +57,11 @@ allow = [
 ignore = true
 
 [bans]
-# 同名多版本默认警告（避免体积膨胀/符号冲突），阻断循环依赖与通配符版本
+# 同名多版本默认警告（避免体积膨胀/符号冲突），阻断循环依赖与外部通配符版本；
+# 本地 workspace 内部 `{ path = "../ls-*" }` 依赖允许不写冗余版本号。
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 deny = []
 skip = []
