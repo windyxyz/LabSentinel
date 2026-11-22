@@ -2,6 +2,7 @@
 pub(crate) mod alerts;
 pub(crate) mod cameras;
 pub(crate) mod config_io;
+pub(crate) mod dataset;
 pub(crate) mod events;
 pub(crate) mod export;
 pub(crate) mod folder_images;
@@ -15,6 +16,7 @@ pub(crate) mod zones_rules;
 pub(crate) use alerts::*;
 pub(crate) use cameras::*;
 pub(crate) use config_io::*;
+pub(crate) use dataset::*;
 pub(crate) use events::*;
 pub(crate) use export::*;
 pub(crate) use folder_images::*;

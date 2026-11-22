@@ -28,6 +28,20 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/system/restart"),
     ("GET", "/api/system/autostart"),
     ("PUT", "/api/system/autostart"),
+    // ---- LS-054：数据飞轮 / 诊断包 / 只读分享链接 ----
+    ("POST", "/api/dataset/samples/from-event/:eid"),
+    ("POST", "/api/dataset/samples/from-folder/:iid"),
+    ("POST", "/api/dataset/samples/capture/:cid"),
+    ("GET", "/api/dataset/samples"),
+    ("GET", "/api/dataset/samples/:id/image"),
+    ("PUT", "/api/dataset/samples/:id"),
+    ("DELETE", "/api/dataset/samples/:id"),
+    ("GET", "/api/dataset/export.zip"),
+    ("GET", "/api/diagnostics/bundle.zip"),
+    ("GET", "/api/share-links"),
+    ("POST", "/api/share-links"),
+    ("DELETE", "/api/share-links/:id"),
+    ("GET", "/api/share-links/verify"),
     ("GET", "/api/events"),
     ("POST", "/api/events/:id/status"),
     ("GET", "/api/cameras"),
@@ -190,6 +204,33 @@ pub fn build_router(state: Shared) -> Router {
             "/system/autostart",
             get(autostart_get).put(autostart_put),
         )
+        // LS-054
+        .route(
+            "/dataset/samples/from-event/:eid",
+            post(samples_from_event),
+        )
+        .route(
+            "/dataset/samples/from-folder/:iid",
+            post(samples_from_folder),
+        )
+        .route("/dataset/samples/capture/:cid", post(samples_capture))
+        .route(
+            "/dataset/samples",
+            get(samples_list),
+        )
+        .route(
+            "/dataset/samples/:id",
+            put(sample_update).delete(sample_delete),
+        )
+        .route("/dataset/samples/:id/image", get(sample_image))
+        .route("/dataset/export.zip", get(dataset_export))
+        .route("/diagnostics/bundle.zip", get(diagnostics_bundle))
+        .route(
+            "/share-links",
+            get(share_links_list).post(share_link_create),
+        )
+        .route("/share-links/:id", delete(share_link_delete))
+        .route("/share-links/verify", get(share_link_verify))
         .route("/events", get(events))
         .route("/events/:id/status", post(set_status))
         .route("/events/bulk-status", post(bulk_event_status))

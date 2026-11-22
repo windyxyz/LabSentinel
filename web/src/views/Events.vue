@@ -233,6 +233,20 @@ function onKey(e) {
   }
 }
 
+// LS-054：事件截图一键加入标注池（AI 预标注）
+const poolBusy = ref(false)
+const poolMsg = ref('')
+async function addToPool(e) {
+  if (!e?.id) return
+  poolBusy.value = true
+  poolMsg.value = ''
+  try {
+    const r = await api.datasetFromEvent(e.id)
+    poolMsg.value = `已加入标注池（样本 #${r.id}，可在 设置→数据管理 标注）`
+  } catch (err) { poolMsg.value = String(err.message || err) }
+  poolBusy.value = false
+}
+
 // 快审标记后自动跳到下一条
 async function quickMark(status) {
   const cur = drawer.value
@@ -467,6 +481,9 @@ async function mark(e, status) {
              :download="`event-${drawer.id}-evidence.zip`"
              style="display:inline-flex; align-items:center; text-decoration:none">
             <button class="ghost">下载证据包</button></a>
+          <button class="ghost" :disabled="poolBusy" @click="addToPool(drawer)">
+            {{ poolBusy ? '加入中…' : '快速标注（加入标注池）' }}</button>
+          <span v-if="poolMsg" class="muted" style="font-size:12px">{{ poolMsg }}</span>
           <p class="muted" style="font-size:12px; margin:4px 0 0">
             含事件信息+截图+视频；无媒体时仅含事件信息与说明 README。</p>
         </div>

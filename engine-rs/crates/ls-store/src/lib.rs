@@ -7,9 +7,9 @@
 use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
-/// schema 权威编号（v14 = UX2 cascade 判定列，2026-11-20）；文档/诊断常量，
-/// 实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 14;
+/// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
+/// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
+pub const SCHEMA_VERSION_LATEST: i64 = 16;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
@@ -99,7 +99,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(15, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(16, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -149,7 +149,18 @@ impl Store {
              CREATE TABLE IF NOT EXISTS devices(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
                platform TEXT DEFAULT '', token_hash TEXT NOT NULL UNIQUE, \
-               created_ts TEXT NOT NULL, last_seen_ts TEXT, revoked INTEGER DEFAULT 0);",
+               created_ts TEXT NOT NULL, last_seen_ts TEXT, revoked INTEGER DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS dataset_samples(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT NOT NULL, \
+               source_id TEXT NOT NULL, camera_id INTEGER, image_path TEXT NOT NULL, \
+               width INTEGER NOT NULL, height INTEGER NOT NULL, \
+               status TEXT NOT NULL DEFAULT 'pending', boxes_json TEXT NOT NULL DEFAULT '[]', \
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS share_links(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
+               token_hash TEXT NOT NULL UNIQUE, ttl_hours INTEGER NOT NULL, \
+               created_ts TEXT NOT NULL, expires_ts TEXT NOT NULL, \
+               revoked INTEGER DEFAULT 0);",
         )?;
         Ok(true)
     }
@@ -194,7 +205,26 @@ impl Store {
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(15, 'rust-ls041-days-of-week')",
             [],
         )?;
-        Ok(15)
+        // v16（LS-054）：数据飞轮样本池 + 只读值守分享链接（幂等建表）
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dataset_samples(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT NOT NULL, \
+               source_id TEXT NOT NULL, camera_id INTEGER, image_path TEXT NOT NULL, \
+               width INTEGER NOT NULL, height INTEGER NOT NULL, \
+               status TEXT NOT NULL DEFAULT 'pending', boxes_json TEXT NOT NULL DEFAULT '[]', \
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS idx_dataset_samples_status ON dataset_samples(status);
+             CREATE TABLE IF NOT EXISTS share_links(\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
+               token_hash TEXT NOT NULL UNIQUE, ttl_hours INTEGER NOT NULL, \
+               created_ts TEXT NOT NULL, expires_ts TEXT NOT NULL, \
+               revoked INTEGER DEFAULT 0);",
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(16, 'rust-ls054-dataset-share')",
+            [],
+        )?;
+        Ok(16)
     }
 
     /// UX3/UX4 优雅关停：WAL checkpoint 回主库（托盘退出/shutdown 语义——
@@ -518,6 +548,33 @@ pub struct Delivery {
     pub attempts: i64,
     pub last_error: Option<String>,
     pub updated_ts: Option<String>,
+}
+
+/// LS-054：数据飞轮样本（人工标注工作台）。
+#[derive(Debug, Clone, Serialize)]
+pub struct DatasetSample {
+    pub id: i64,
+    pub source_type: String,
+    pub source_id: String,
+    pub camera_id: Option<i64>,
+    pub image_path: String,
+    pub width: i64,
+    pub height: i64,
+    pub status: String,
+    pub boxes_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// LS-054：只读值守分享链接。
+#[derive(Debug, Clone, Serialize)]
+pub struct ShareLink {
+    pub id: i64,
+    pub name: String,
+    pub ttl_hours: i64,
+    pub created_ts: String,
+    pub expires_ts: String,
+    pub revoked: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1074,6 +1131,176 @@ impl Store {
         })?;
         let top: Vec<(i64, i64)> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok((total, violation, unhandled, top))
+    }
+
+    // ---- LS-054：数据飞轮样本池 ----
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_dataset_sample(
+        &self,
+        source_type: &str,
+        source_id: &str,
+        camera_id: Option<i64>,
+        image_path: &str,
+        width: i64,
+        height: i64,
+        boxes_json: &str,
+    ) -> rusqlite::Result<i64> {
+        let now = chrono_now();
+        self.conn.execute(
+            "INSERT INTO dataset_samples(source_type,source_id,camera_id,image_path,width,height,status,boxes_json,created_at,updated_at) \
+             VALUES(?,?,?,?,?,?,'pending',?,?,?)",
+            params![source_type, source_id, camera_id, image_path, width, height, boxes_json, now, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn dataset_samples(
+        &self,
+        status: Option<&str>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<DatasetSample>> {
+        let mut sql = String::from(
+            "SELECT id,source_type,source_id,camera_id,image_path,width,height,COALESCE(status,'pending'),boxes_json,created_at,updated_at \
+             FROM dataset_samples WHERE 1=1");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(s) = status {
+            sql.push_str(" AND COALESCE(status,'pending')=?");
+            args.push(Box::new(s.to_string()));
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        args.push(Box::new(limit));
+        let vals: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(vals.as_slice(), |r| {
+            Ok(DatasetSample {
+                id: r.get(0)?,
+                source_type: r.get(1)?,
+                source_id: r.get(2)?,
+                camera_id: r.get(3)?,
+                image_path: r.get(4)?,
+                width: r.get(5)?,
+                height: r.get(6)?,
+                status: r.get(7)?,
+                boxes_json: r.get(8)?,
+                created_at: r.get(9)?,
+                updated_at: r.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn dataset_sample_by_id(&self, id: i64) -> rusqlite::Result<Option<DatasetSample>> {
+        Ok(self
+            .dataset_samples(None, 1_000_000)?
+            .into_iter()
+            .find(|s| s.id == id))
+    }
+
+    pub fn update_dataset_sample(
+        &self,
+        id: i64,
+        boxes_json: &str,
+        status: &str,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE dataset_samples SET boxes_json=?, status=?, updated_at=? WHERE id=?",
+            params![boxes_json, status, chrono_now(), id],
+        )
+    }
+
+    pub fn delete_dataset_sample(&self, id: i64) -> rusqlite::Result<usize> {
+        self.conn
+            .execute("DELETE FROM dataset_samples WHERE id=?", params![id])
+    }
+
+    /// 各类别样本数（均衡度展示）：从 boxes_json 统计 class 名。
+    /// 返回 [(class_name, count)]，按数量降序。
+    pub fn dataset_class_counts(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let rows = self.dataset_samples(None, 100_000)?;
+        let mut m: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        for s in rows {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s.boxes_json) {
+                if let Some(arr) = v.as_array() {
+                    for b in arr {
+                        let cls = b
+                            .get("class")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("unknown");
+                        *m.entry(cls.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let mut out: Vec<(String, i64)> = m.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(out)
+    }
+
+    // ---- LS-054：只读值守分享链接 ----
+
+    pub fn add_share_link(
+        &self,
+        name: &str,
+        token_hash: &str,
+        ttl_hours: i64,
+        created_ts: &str,
+        expires_ts: &str,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO share_links(name,token_hash,ttl_hours,created_ts,expires_ts,revoked) \
+             VALUES(?,?,?,?,?,0)",
+            params![name, token_hash, ttl_hours, created_ts, expires_ts],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn share_links(&self) -> rusqlite::Result<Vec<ShareLink>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,name,ttl_hours,created_ts,expires_ts,COALESCE(revoked,0) \
+             FROM share_links ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ShareLink {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                ttl_hours: r.get(2)?,
+                created_ts: r.get(3)?,
+                expires_ts: r.get(4)?,
+                revoked: r.get::<_, i64>(5)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn revoke_share_link(&self, id: i64) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE share_links SET revoked=1 WHERE id=?",
+            params![id],
+        )
+    }
+
+    /// 按 token hash 查有效链接（未吊销且未过期）。
+    pub fn share_link_valid(&self, token_hash: &str, now_ts: &str) -> rusqlite::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM share_links WHERE token_hash=? AND COALESCE(revoked,0)=0 AND expires_ts > ?",
+            params![token_hash, now_ts],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 中间件用：若该 hash 属于分享链接则要求未吊销未过期；不属于则放行（普通设备令牌）。
+    pub fn share_link_allows(&self, token_hash: &str, now_ts: &str) -> rusqlite::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM share_links WHERE token_hash=?",
+            params![token_hash],
+            |r| r.get(0),
+        )?;
+        if n == 0 {
+            return Ok(true);
+        }
+        self.share_link_valid(token_hash, now_ts)
     }
 
     // ---- 告警静默（任务81） ----
@@ -1993,9 +2220,9 @@ mod tests {
         let s = Store::open(p.to_str().unwrap()).unwrap();
         // UX2：v12 存量库先迁移到 v14（events cascade 列；幂等复跑安全），
         // 之后的读写 SELECT 都含新列
-        assert_eq!(s.migrate().unwrap(), 15);
-        assert_eq!(s.migrate().unwrap(), 15); // 二次调用不炸
-        assert_eq!(s.schema_version().unwrap(), 15);
+        assert_eq!(s.migrate().unwrap(), 16);
+        assert_eq!(s.migrate().unwrap(), 16); // 二次调用不炸
+        assert_eq!(s.schema_version().unwrap(), 16);
         let eid = s
             .add_event(&NewEvent {
                 camera_id: 1,
@@ -2031,7 +2258,7 @@ mod tests {
         assert!(cols.contains(&"vlm_verdict".to_string()));
         assert!(cols.contains(&"vlm_ts".to_string()));
         assert!(cols.contains(&"vlm_suppressed".to_string()));
-        assert_eq!(s.schema_version().unwrap(), 15);
+        assert_eq!(s.schema_version().unwrap(), 16);
     }
 
     #[test]
@@ -2049,7 +2276,7 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         assert!(cols.iter().any(|c| c == "vlm_verdict"));
-        assert_eq!(s.schema_version().unwrap(), 15);
+        assert_eq!(s.schema_version().unwrap(), 16);
         // 验证 WAL 模式已开启
         let jm: String = s
             .conn()
@@ -2076,8 +2303,51 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(s.migrate().unwrap(), 15);
+        assert_eq!(s.migrate().unwrap(), 16);
         let rules = s.rules_all().unwrap();
         assert_eq!(rules[0].10.as_deref(), Some("1,2,3,4,5,6,7"));
+    }
+
+    #[test]
+    fn dataset_sample_crud_and_class_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        s.ensure_schema().unwrap();
+        s.migrate().unwrap();
+        let boxes = r#"[{"class":"person","x1":1,"y1":2,"x2":30,"y2":40},
+                        {"class":"no_gloves","x1":5,"y1":6,"x2":20,"y2":25}]"#;
+        let id = s
+            .add_dataset_sample("event", "7", Some(1), "dataset_pool/event_7.jpg", 1280, 720, boxes)
+            .unwrap();
+        let rows = s.dataset_samples(None, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "pending");
+        // 类别统计在标注框仍存在时计算
+        let counts = s.dataset_class_counts().unwrap();
+        assert_eq!(counts.len(), 2);
+        assert_eq!(s.update_dataset_sample(id, "[]", "verified").unwrap(), 1);
+        assert_eq!(s.delete_dataset_sample(id).unwrap(), 1);
+        assert!(s.dataset_samples(None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn share_link_ttl_and_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        s.ensure_schema().unwrap();
+        s.migrate().unwrap();
+        let hash = "abc123";
+        let id = s
+            .add_share_link("值班", hash, 24, "2026-11-22T10:00:00", "2026-11-23T10:00:00")
+            .unwrap();
+        // 未过期 → 有效
+        assert!(s.share_link_valid(hash, "2026-11-22T12:00:00").unwrap());
+        // 已过期 → 无效
+        assert!(!s.share_link_valid(hash, "2026-11-24T00:00:00").unwrap());
+        // 吊销后 → 无效
+        assert_eq!(s.revoke_share_link(id).unwrap(), 1);
+        assert!(!s.share_link_valid(hash, "2026-11-22T12:00:00").unwrap());
+        // 非分享 hash 放行（普通设备令牌）
+        assert!(s.share_link_allows("other", "2026-11-22T12:00:00").unwrap());
     }
 }

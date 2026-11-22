@@ -263,6 +263,13 @@ pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
     if dev.revoked {
         return None;
     }
+    // LS-054：分享链接令牌额外校验 TTL（过期/吊销即失效）
+    if !s
+        .share_link_allows(&hash, &ls_core::time::local_now_iso())
+        .unwrap_or(true)
+    {
+        return None;
+    }
     if let Ok(mut ps) = st.pair_state.lock() {
         let now = std::time::Instant::now();
         let need = ps

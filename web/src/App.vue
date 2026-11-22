@@ -1,5 +1,6 @@
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
+import { api, adminToken } from './api'
 import Insights from './views/Insights.vue'
 import Sources from './views/Sources.vue'
 import Events from './views/Events.vue'
@@ -44,7 +45,25 @@ function hashTab() {
 const active = ref(hashTab())
 const showWelcome = ref(true)
 // T-709：值班大屏路由（无 vue-router 的轻量判定）——/wall 全屏无导航
-const isWall = window.location.pathname.replace(/\/+$/, '') === '/wall'
+// LS-054：只读值守分享链接——URL 携带 readonly_token 时校验后锁定只读大屏
+const readonly = ref(false)
+function extractReadonlyToken() {
+  // 支持 /wall?readonly_token=... 与 #/wall?readonly_token=...
+  const fromSearch = new URLSearchParams(window.location.search).get('readonly_token')
+  const hash = window.location.hash
+  const qi = hash.indexOf('?')
+  const fromHash = qi >= 0 ? new URLSearchParams(hash.slice(qi + 1)).get('readonly_token') : null
+  return (fromSearch || fromHash || sessionStorage.getItem('ls_readonly_token') || '').trim()
+}
+const readonlyToken = extractReadonlyToken()
+if (readonlyToken) {
+  // 读令牌直接放进 adminToken 槽位（只读令牌写操作会被服务端拒绝）
+  adminToken.set(readonlyToken)
+  sessionStorage.setItem('ls_readonly_token', readonlyToken)
+  readonly.value = true
+}
+const isWall = readonly.value
+  || window.location.pathname.replace(/\/+$/, '') === '/wall'
 function go(key) {
   active.value = key
   window.history.replaceState(null, '', `#/${key}`)
@@ -53,6 +72,19 @@ function go(key) {
 window.addEventListener('hashchange', () => {
   normalizeHash()
   active.value = hashTab()
+})
+
+// LS-054：分享令牌有效性校验（过期/吊销则清除只读态并提示）
+onMounted(async () => {
+  if (!readonly.value || !readonlyToken) return
+  try {
+    const r = await api.verifyShareLink(readonlyToken)
+    if (!r?.valid) {
+      readonly.value = false
+      sessionStorage.removeItem('ls_readonly_token')
+      adminToken.set('')
+    }
+  } catch { /* 校验失败：保持只读视图，写操作仍会被服务端拒绝 */ }
 })
 </script>
 

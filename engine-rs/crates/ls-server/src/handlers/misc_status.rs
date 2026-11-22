@@ -384,6 +384,182 @@ pub(crate) async fn autostart_put(Json(body): Json<Value>) -> Response {
     }
 }
 
+// ---- LS-054：只读值守分享链接 + 一键脱敏诊断包 ----
+
+pub(crate) async fn share_links_list(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        let now = ls_core::time::local_now_iso();
+        let rows = s.share_links()?;
+        Ok(Json(json!({
+            "links": rows.iter().map(|l| json!({
+                "id": l.id, "name": l.name, "ttl_hours": l.ttl_hours,
+                "created_ts": l.created_ts, "expires_ts": l.expires_ts,
+                "revoked": l.revoked, "expired": l.expires_ts <= now,
+            })).collect::<Vec<_>>(),
+        })).into_response())
+    })
+}
+
+pub(crate) async fn share_link_create(
+    State(st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("值守分享")
+        .trim()
+        .to_string();
+    let ttl = body.get("ttl_hours").and_then(|v| v.as_i64()).unwrap_or(24);
+    if !matches!(ttl, 24 | 168 | 720) {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "ttl_hours 仅支持 24/168/720")
+            .into_response();
+    }
+    let token = crate::envfile::random_token();
+    let hash = sha256_hex(token.as_bytes());
+    let created = ls_core::time::local_now_iso();
+    let expires = ls_core::time::format_iso(ls_core::time::local_offset_secs(ttl * 3600));
+    let out = with_store(&st, |s| {
+        let id = s.add_share_link(&name, &hash, ttl, &created, &expires)?;
+        // 复用 devices 读令牌体系：同一 hash 登记为只读设备，读保护下即可访问
+        let _ = s.add_device(&format!("分享:{name}"), "share", &hash);
+        Ok(Json(json!({
+            "ok": true, "id": id, "token": token,
+            "expires_ts": expires,
+            "url": format!("/wall?readonly_token={token}"),
+        }))
+        .into_response())
+    });
+    out
+}
+
+pub(crate) async fn share_link_delete(
+    State(st): State<Shared>,
+    AxPath(id): AxPath<i64>,
+) -> Response {
+    with_store(&st, |s| {
+        // 先取 hash 以便同步吊销设备令牌
+        let hash: Option<String> = s
+            .conn()
+            .query_row("SELECT token_hash FROM share_links WHERE id=?", [id], |r| r.get(0))
+            .ok();
+        let n = s.revoke_share_link(id)?;
+        if let Some(h) = hash {
+            if let Ok(Some(dev)) = s.device_by_hash(&h) {
+                let _ = s.revoke_device(dev.id);
+            }
+        }
+        if n > 0 {
+            Ok(Json(json!({"ok": true})).into_response())
+        } else {
+            Ok(detail_err(StatusCode::NOT_FOUND, "link not found").into_response())
+        }
+    })
+}
+
+/// GET /api/share-links/verify?token=…——前端只读链接进入前校验有效性。
+pub(crate) async fn share_link_verify(
+    State(st): State<Shared>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let token = q.get("token").map(|s| s.trim()).unwrap_or("");
+    if token.is_empty() {
+        return Json(json!({"valid": false})).into_response();
+    }
+    let hash = sha256_hex(token.as_bytes());
+    let valid = ls_store::Store::open(&st.db_path)
+        .ok()
+        .and_then(|s| s.share_link_valid(&hash, &ls_core::time::local_now_iso()).ok())
+        .unwrap_or(false);
+    Json(json!({"valid": valid})).into_response()
+}
+
+/// GET /api/diagnostics/bundle.zip——脱敏诊断包（版本/系统/GPU/工具探测/配置摘要/近2天日志）。
+pub(crate) async fn diagnostics_bundle(State(st): State<Shared>) -> Response {
+    let mut zip = crate::handlers::events::ZipWriter::new();
+    zip.add_file("version.txt", format!("LabSentinel {}\n", st.version).as_bytes());
+    let (providers, gpu_active) = (
+        json!(["DmlExecutionProvider", "CPUExecutionProvider"]),
+        ls_infer::yolo::ep_used(),
+    );
+    let ffmpeg = ls_core::bin::find("ffmpeg");
+    let go2rtc = crate::go2rtc::Go2rtcSupervisor::resolve_bin(&crate::deploy::default_install_root());
+    let system = json!({
+        "version": st.version,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "data_dir_set": !st.data_dir.is_empty(),
+        "providers": providers,
+        "gpu_active": gpu_active,
+        "ffmpeg": {"path_found": ffmpeg.is_file(), "file": ffmpeg.file_name().map(|s| s.to_string_lossy().to_string())},
+        "go2rtc": {"found": go2rtc.is_some()},
+        "go2rtc_status": st.go2rtc.status(),
+    });
+    zip.add_file(
+        "system.json",
+        serde_json::to_string_pretty(&system).unwrap_or_default().as_bytes(),
+    );
+    // 配置摘要：敏感键一律 ***
+    if let Ok(s) = ls_store::Store::open(&st.db_path) {
+        let settings = s.settings_by_prefix("").unwrap_or_default();
+        let mut redacted = serde_json::Map::new();
+        for (k, v) in settings {
+            let lower = k.to_ascii_lowercase();
+            let sensitive = lower.contains("key")
+                || lower.contains("token")
+                || lower.contains("secret")
+                || lower.contains("password")
+                || lower.contains("passwd")
+                || lower.contains("webhook")
+                || lower.contains("smtp")
+                || lower.contains("api");
+            redacted.insert(
+                k,
+                json!(if sensitive { "***".to_string() } else { v }),
+            );
+        }
+        zip.add_file(
+            "config.redacted.json",
+            serde_json::to_string_pretty(&Value::Object(redacted))
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+    }
+    // 近 2 天日志（按文件名日期倒序取 2 个）
+    let logs_dir = std::path::Path::new(&st.data_dir).join("logs");
+    let mut logs: Vec<std::path::PathBuf> = std::fs::read_dir(&logs_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("server-") && n.ends_with(".log"))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    logs.sort();
+    for p in logs.iter().rev().take(2) {
+        if let (Ok(bytes), Some(name)) = (std::fs::read(p), p.file_name().and_then(|n| n.to_str())) {
+            zip.add_file(&format!("logs/{name}"), &bytes);
+        }
+    }
+    let bytes = zip.finish();
+    (
+        [
+            (header::CONTENT_TYPE, "application/zip"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"labsentinel-diagnostics.zip\"",
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 pub(crate) async fn metrics(State(st): State<Shared>) -> Response {
     let (cams, events) = match ls_store::Store::open(&st.db_path) {
         Ok(s) => (

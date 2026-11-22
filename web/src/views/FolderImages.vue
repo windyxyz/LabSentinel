@@ -98,6 +98,20 @@ function violationsText(it) {
 function thumbFailed(it) {
   it.thumb_error = true
 }
+
+// LS-054：文件夹图一键加入标注池（AI 预标注）
+const poolBusy = ref(false)
+const poolMsg = ref('')
+async function addToPool(it) {
+  if (!it?.id) return
+  poolBusy.value = true
+  poolMsg.value = ''
+  try {
+    const r = await api.datasetFromFolder(it.id)
+    poolMsg.value = `已加入标注池（样本 #${r.id}）`
+  } catch (e) { poolMsg.value = String(e.message || e) }
+  poolBusy.value = false
+}
 </script>
 
 <template>
@@ -214,6 +228,9 @@ function thumbFailed(it) {
       <div class="row" style="margin-top:10px">
         <a class="link-btn" :href="mediaUrl(detail.file_url)" target="_blank" rel="noopener">查看原图</a>
         <a class="link-btn" :href="mediaUrl(detail.file_url)" :download="detail.name">下载原图</a>
+        <button class="ghost" :disabled="poolBusy" @click="addToPool(detail)">
+          {{ poolBusy ? '加入中…' : '快速标注（加入标注池）' }}</button>
+        <span v-if="poolMsg" class="muted" style="font-size:12px">{{ poolMsg }}</span>
         <span class="muted">关联事件 #{{ detail.event_id || '—' }}</span>
       </div>
     </div>

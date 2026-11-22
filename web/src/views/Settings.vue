@@ -8,6 +8,7 @@ import { api, adminToken } from '../api'
 import DetectPanel from './DetectPanel.vue'
 import Devices from './Devices.vue'
 import Face from './Face.vue'
+import AnnotatorModal from '../components/AnnotatorModal.vue'
 
 const search = ref('')
 const active = ref('detect')
@@ -330,6 +331,43 @@ async function toggleAutostart() {
   } catch (e) { netMsg.value = String(e.message || e) }
   netBusy.value = false
 }
+// LS-054：样本标注池 + 只读分享链接
+const pool = ref(null)
+const poolStatus = ref('')
+const shares = ref([])
+const shareName = ref('值班分享')
+const shareTtl = ref(24)
+const shareToken = ref('')
+const annotator = ref(null)
+async function loadPool() {
+  try { pool.value = await api.datasetSamples({ status: poolStatus.value }) } catch { /* 静默 */ }
+}
+async function exportDataset() {
+  const a = document.createElement('a')
+  a.href = api.datasetExportUrl()
+  a.download = 'labsentinel-yolo-dataset.zip'
+  a.click()
+}
+async function loadShares() {
+  try { shares.value = (await api.shareLinks()).links || [] } catch { /* 静默 */ }
+}
+async function createShare() {
+  netBusy.value = true; netMsg.value = ''
+  try {
+    const r = await api.createShareLink({ name: shareName.value, ttl_hours: Number(shareTtl.value) })
+    shareToken.value = r.url || r.token
+    await loadShares()
+    netMsg.value = '已生成只读值守链接（只显示一次）'
+  } catch (e) { netMsg.value = String(e.message || e) }
+  netBusy.value = false
+}
+async function revokeShare(id) {
+  if (!confirm('吊销该分享链接？已打开的页面将在下次请求时失效。')) return
+  try { await api.deleteShareLink(id); await loadShares() } catch { /* 静默 */ }
+}
+function openAnnotator(s) {
+  annotator.value = { sample: s, imageUrl: `/api/dataset/samples/${s.id}/image` }
+}
 async function restartServer() {
   if (!confirm('立即重启服务？当前分析与页面会短暂中断。')) return
   netBusy.value = true
@@ -431,7 +469,7 @@ async function loadCams() {
   try { cams.value = await api.cameras() } catch { /* 服务未就绪时静默 */ }
 }
 onMounted(() => {
-  loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadGo2rtc(); loadNetwork()
+  loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadGo2rtc(); loadNetwork(); loadPool(); loadShares()
   // UX1：hash 深链分区（#/settings/face 等，App.vue 旧路由重定向后落到这里）
   const sub = window.location.hash.split('/')[2]
   if (sections.some((s) => s.id === sub)) active.value = sub
@@ -570,6 +608,36 @@ onMounted(() => {
     <p v-if="cfgMsg" class="muted" style="margin-top:6px; white-space:pre-wrap">{{ cfgMsg }}</p>
     <p class="muted" style="margin-top:4px">
       导出的配置不含摄像头密码（已脱敏）；导入后不会自动启动摄像头。</p>
+    <hr style="border:none;border-top:1px solid var(--divider);margin:12px 0" />
+    <h3 style="margin:0 0 8px">样本标注池（数据飞轮）</h3>
+    <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
+      <select v-model="poolStatus" aria-label="样本状态筛选" @change="loadPool">
+        <option value="">全部状态</option>
+        <option value="pending">待标注</option>
+        <option value="verified">已核验</option>
+        <option value="ambiguous">模糊弃用</option>
+      </select>
+      <button class="ghost" @click="loadPool">刷新</button>
+      <button class="ghost" @click="exportDataset">导出 YOLO 训练集 ZIP（仅已核验）</button>
+      <span class="muted" style="font-size:12px">共 {{ pool?.total ?? 0 }} 个样本</span>
+    </div>
+    <div v-if="pool?.class_counts?.length" class="muted" style="font-size:12px;margin-top:6px">
+      类别分布：<span v-for="c in pool.class_counts" :key="c.class" style="margin-right:10px">{{ c.class }} {{ c.count }}</span>
+    </div>
+    <table v-if="pool?.samples?.length" style="margin-top:8px">
+      <tr><th>ID</th><th>来源</th><th>状态</th><th>框数</th><th></th></tr>
+      <tr v-for="s in pool.samples.slice(0, 50)" :key="s.id">
+        <td>#{{ s.id }}</td>
+        <td>{{ s.source_type }} {{ s.source_id }}</td>
+        <td><span :class="s.status === 'verified' ? 'st-ok' : 'st-idle'">{{ s.status }}</span></td>
+        <td>{{ Array.isArray(s.boxes) ? s.boxes.length : 0 }}</td>
+        <td>
+          <button class="ghost" @click="openAnnotator(s)">标注</button>
+          <button class="ghost" @click="api.datasetDelete(s.id).then(loadPool)">删除</button>
+        </td>
+      </tr>
+    </table>
+    <p v-else class="muted" style="margin-top:8px">暂无样本——在事件详情或图片文件夹详情点「加入标注池」，或从实时画面抓拍。</p>
       </section>
       <section v-show="show('template')" class="panel">
     <h3 style="margin:14px 0 10px">告警文案模板 <span class="muted" style="font-size:12px">（网页编辑，保存即生效）</span></h3>
@@ -677,6 +745,27 @@ onMounted(() => {
             </template>
           </div>
         </template>
+        <hr style="border:none;border-top:1px solid var(--divider);margin:12px 0" />
+        <b>只读值守分享链接</b>
+        <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px;margin-top:6px">
+          <input v-model="shareName" placeholder="链接名称" style="width:160px" />
+          <select v-model.number="shareTtl" aria-label="有效期">
+            <option :value="24">24 小时</option>
+            <option :value="168">7 天</option>
+            <option :value="720">30 天</option>
+          </select>
+          <button :disabled="netBusy" @click="createShare">生成只读链接</button>
+          <span v-if="shareToken" class="muted" style="font-size:12px;word-break:break-all">
+            链接：<code>{{ shareToken }}</code>（只显示一次）</span>
+        </div>
+        <table v-if="shares.length" style="margin-top:8px">
+          <tr><th>名称</th><th>有效期</th><th>到期</th><th>状态</th><th></th></tr>
+          <tr v-for="l in shares" :key="l.id">
+            <td>{{ l.name }}</td><td>{{ l.ttl_hours }}h</td><td>{{ l.expires_ts }}</td>
+            <td><span :class="l.revoked || l.expired ? 'st-idle' : 'st-ok'">{{ l.revoked ? '已吊销' : (l.expired ? '已过期' : '有效') }}</span></td>
+            <td><button v-if="!l.revoked" class="ghost" @click="revokeShare(l.id)">吊销</button></td>
+          </tr>
+        </table>
         <p v-if="netMsg" class="muted" style="margin-top:8px">{{ netMsg }}</p>
       </section>
 
@@ -687,6 +776,12 @@ onMounted(() => {
       <button class="ghost" :disabled="serverLogBusy" @click="loadServerLog">
         {{ serverLogBusy ? '读取中…' : '查看服务日志（尾部 200 行）' }}</button>
       <span class="muted">停止后摄像头分析与事件推送将暂停；重新启动程序后恢复。</span>
+    </div>
+    <div class="row" style="align-items:center;margin-top:8px">
+      <a :href="api.diagnosticsBundleUrl()" download>
+        <button class="ghost">导出诊断包（脱敏 ZIP）</button>
+      </a>
+      <span class="muted" style="font-size:12px">含版本/系统/GPU/工具探测/脱敏配置/近 2 天日志，不含任何密钥。</span>
     </div>
     <!-- LS-051：go2rtc 流媒体托管状态 -->
     <div v-if="go2rtc" class="row" style="align-items:center; margin-top:10px; flex-wrap:wrap">
@@ -710,6 +805,9 @@ onMounted(() => {
       <pre style="white-space:pre-wrap; font-size:12px; margin-top:8px">{{ pluginLog.text }}</pre>
     </div>
   </div>
+  <!-- LS-054：样本标注弹窗 -->
+  <AnnotatorModal v-if="annotator" :sample="annotator.sample" :image-url="annotator.imageUrl"
+                  @close="annotator = null" @saved="annotator = null; loadPool()" />
 </template>
 
 <style scoped>

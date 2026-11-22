@@ -342,7 +342,7 @@ pub(crate) struct ZipWriter {
 }
 
 impl ZipWriter {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             out: Vec::new(),
             central: Vec::new(),
@@ -373,7 +373,7 @@ impl ZipWriter {
         !c
     }
 
-    fn add_file(&mut self, name: &str, data: &[u8]) {
+    pub(crate) fn add_file(&mut self, name: &str, data: &[u8]) {
         let crc = Self::crc32(data);
         let offset = self.out.len() as u32;
         // 本地文件头：sig, ver(20), flags(0), method(stored), time/date(0), crc,
@@ -419,7 +419,7 @@ impl ZipWriter {
         self.central.extend_from_slice(name.as_bytes());
     }
 
-    fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         let cd_offset = self.out.len() as u32;
         let cd_size = self.central.len() as u32;
         let count = {
