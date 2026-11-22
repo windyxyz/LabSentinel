@@ -11,5 +11,13 @@
 | LS-043 | PPE 单次多类推理 2× 提速 + 灰度图 0 检出调优/诊断 + GUI 日志落盘 + Worker/ffmpeg/规则/跟踪器加固 | P1 | DONE | 2026-11-22 | 已完成并全绿提交，转锁定 `LS-044` |
 | LS-044 | 安全加固 + `retention` 相对路径防误删 + 派发重试/模板/MQTT 退避 + 完整 `graceful_shutdown` + `spawn_blocking` | P1 | DONE | 2026-11-22 | 已完成并全绿提交，转锁定 `LS-045` |
 | LS-045 | CI 门禁加固（`rust.yml`/Node 22/契约审计）+ 安装器 BOM/停服/Prefetch/`--rollback` + `LS_HOST`/`.env` + 依赖与 `NOTICE`/文档收口 | P1 | DONE | 2026-11-22 | 已完成并全绿提交，转锁定 `LS-046` |
-| LS-046 | 本机打包与安装/卸载冒烟实证；真机 24h RTSP & 外部真实 VLM 验收准备（`v0.5.0`） | P2 | DONE | 2026-11-22 | 本机 `zip`（100.2MB）+ `setup.exe`（75.0MB）+ `smoke_rust.py` 全绿 PASS；真机 24h RTSP 与外部真实 VLM API Key 留待现场人工验收与 `v0.5.0` 发版 |
+| LS-046 | 本机打包与安装/卸载冒烟实证；真机 24h RTSP & 外部真实 VLM 验收准备（`v0.5.0`） | P2 | DONE | 2026-11-22 | 本机 `zip`（100.2MB）+ `setup.exe`（75.0MB）+ `smoke_rust.py` 全绿 PASS；真机 24h RTSP 与外部真实 VLM API Key 留待现场人工验收 |
+| LS-050 | v0.5.0 · 性能底座（Motion Gate 运动预筛 + 缩略图缓存懒加载）+ 识别与规则增强（PPE 阈值 UI + 单人留守 + 动态 PPE 类 + 自定义 VLM 提示词） | P0 | READY | 2026-11-22 | 分发 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 卡片 1，交付后主线审阅复验 |
+| LS-051 | v0.5.0 · Rust 托管 `go2rtc`（Job Object）+ WS 实时检测框 Canvas 叠加 + 全屏值守大屏与提示音 | P0 | READY | 2026-11-22 | 分发 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 卡片 2，交付后主线审阅复验 |
+| LS-052 | v0.5.0 · 交互体验升级（安全区拖拽顶点/撤销 + 可视化周时段排班 + 事件流键盘快审） | P1 | READY | 2026-11-22 | 分发 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 卡片 3，交付后主线审阅复验 |
+| LS-053 | v0.5.0 · 告警与日常运维闭环（失败重试消费者 + 定时日报/周报 + 网页局域网配置/自重启 + Windows 开机自启） | P1 | READY | 2026-11-22 | 分发 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 卡片 4，交付后主线审阅复验 |
+| LS-054 | v0.5.0 · 网页端便携标注工作台（数据飞轮 + AI 预标注 + YOLO ZIP 导出）+ 一键脱敏诊断包 + 只读值守链接 | P0 | READY | 2026-11-22 | 分发 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 卡片 5，交付后主线审阅复验 |
+| LS-055 | v0.5.0 · 推理引擎新架构升级（NMS-free RT-DETR/YOLO26/YOLO12 + 动态尺寸/FP16 + 灰度 CLAHE）+ 模型 A/B 对比评测 | P1 | READY | 2026-11-22 | 分发 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 卡片 6，交付后主线审阅复验 |
+| LS-056 | v0.5.0 · 多源公开数据集聚合下载（HF 镜像免 Key）+ 统一清洗合并 + 灰度/远景增强混合训练与自动评测（`tools/`） | P1 | READY | 2026-11-22 | 分发 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 卡片 7，交付后主线审阅复验 |
+| LS-057 | v0.5.0 · 全量验收、版本同步（`0.5.0`）、`CHANGELOG.md` 与本机双产物打包冒烟实证 | P0 | READY | 2026-11-22 | 待 `LS-050`～`LS-056` 全部审阅合入后执行卡片 8 |
 | LS-900 | 代码签名证书（T-403）与 GitHub uploads 网络通道（S302）处理 | P3 | BLOCKED | 2026-11-22 | 人工事项：待证书到位或用户调整本机网络/hosts |

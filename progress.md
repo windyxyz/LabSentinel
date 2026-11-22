@@ -2,24 +2,21 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID**: `LS-046`（全部计划批次 `LS-040`～`LS-046` 已验证完成并入库 `main`）
-- **Task-Name**: 本机打包与安装/卸载冒烟实证；真机 24h RTSP & 外部真实 VLM 验收准备
+- **Task-ID**: `LS-050`～`LS-057`（`v0.5.0` 规划已落盘 `READY`，待分发给外部 AI 执行并由主线 AI 审阅合入；`LS-040`～`LS-046` 已全部 `DONE`）
+- **Task-Name**: `v0.5.0` 功能/交互/性能/模型能力全面升级（多 AI 分发 + 主线审阅模式）
 - **Files Changed**:
-  - `LS-046`：本机打包产出 `Resources/dist/labsentinel-rust-0.4.0-20261122.zip`（100.2MB）与 `Resources/dist/LabSentinel-setup-0.4.0.exe`（75.0MB，已 gitignore），`smoke_rust.py` 5/5 项全绿 PASS；同步更新接力 3 件套。
+  - 新增 [docs/plan/v0.5.0-ai-dispatch-prompts.md](file:///d:/User/Desktop/TOOLS/监控识别/docs/plan/v0.5.0-ai-dispatch-prompts.md)（含全局公共前缀、8 张可直接复制分发的 AI 任务卡片与 7 条主线审阅官清单）
+  - 更新 `task_plan.md`、`task_registry.md`、`progress.md`、`修改记录_会话备忘.md`
 - **Completed This Session**:
-  - `LS-040`（`17da1fb`）：全仓四线审阅与接力 7 件套入库
-  - `LS-041`（`da1dbd1`）：P0 止血批（DirectML 全局锁、`jiff` 替换 `chrono`、SQLite WAL、VLM/PPE/告警修复）
-  - `LS-042`（`4722d8c`）：前后端契约对齐 + 前端 11 处 P0 修复 + `/ws/webrtc/:cid` 代理与快照降级 + 6 例回归测试
-  - `LS-043`（`035e29e`）：PPE 单次前向 2× 提速 + 灰度 ROI 精检 + `CREATE_NO_WINDOW` + Worker/ffmpeg/规则加固
-  - `LS-044`（`068c5f3`）：安全加固 + `retention` 相对路径防误删 + `backup` 原子写 + `mqtt` 指数退避 + 完整 `graceful_shutdown`
-  - `LS-045`（`28e5701`）：CI 门禁 + `contract_audit.py` + 安装器 BOM/停服/Prefetch/`--rollback` + `.env`/`LS_HOST` + 10 crate `[lints]` + `NOTICE`/文档收口
-  - `LS-046`：本机 `--release`（LTO）打包 `zip` + Inno Setup 7 `setup.exe` + `smoke_rust.py` 全绿 PASS
+  - `LS-040`～`LS-046` 全部完成并入库 `main`（`cafb102`）；
+  - 完成 `/grill-me` 决策对齐，将 8 大升级模块（性能/识别/实时大屏/交互/运维/便携标注数据飞轮/新架构推理引擎/多源公开数据集与专项训练）全部纳入 `v0.5.0`（`LS-050`～`LS-057`）并编写多 AI 分发任务书。
 - **Open TODO**:
-  1. 人工/现场项：真机 24h RTSP 稳定性压测、外部真实 VLM API Key 连通性实测；
-  2. 待用户确认发布时机后，运行 `python scripts/bump_version.py 0.5.0`、更新 `CHANGELOG.md` 并推送 `v0.5.0` tag 触发 CI 发布。
-- **Risks/Blockers**: 代码签名证书（`LS-900`）与本地直传 GitHub Release（S302）仍为已知外部约束，正式发布走 CI `release.yml`。
+  1. 用户按需将 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 中的卡片 1～7 分发给其他 AI 执行；
+  2. 执行 AI 交回成果后，由主线 AI 按第 9 节审阅清单逐项复核、修改缺陷、跑通门禁并合入 `main`；
+  3. 全部合入后执行 `LS-057` 完成 `v0.5.0` 正式打包与发版准备。
+- **Risks/Blockers**: 并行分发多张卡片时注意共享文件合并点（`router.rs`、`worker.rs`、`Settings.vue`、`Zones.vue`、`Events.vue`），建议优先按批次合入或由主线 AI 统一解决冲突。
 - **Next First Command**:
-  - `git log --oneline -n 8`（确认本地提交后由用户决定是否 `git push` 或准备 `v0.5.0` 发版）
+  - 复制 `docs/plan/v0.5.0-ai-dispatch-prompts.md` 中的「全局公共前缀 + 卡片 1（`LS-050`）」分发给执行 AI（`LS-052` 纯前端、`LS-053` 运维、`LS-056` `tools/` 亦可并行分发）。
 
 ---
 

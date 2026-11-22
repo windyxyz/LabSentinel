@@ -1,48 +1,74 @@
-# Task Plan — LabSentinel v0.4.0 全仓审阅修复与演进计划
+# Task Plan — LabSentinel v0.5.0 功能/交互/性能与模型能力全面升级计划
 
 ## Goal
 
-基于 2026-11-22 四线全仓代码审阅结果，按「**P0 止血 → 前后端契约对齐 → PPE 灰度图调优与 Worker 健壮性 → 安全与后台可靠性加固 → CI/打包/安装器/文档收口 → 本地打包冒烟与 v0.5.0 就绪**」分 6 个独立可验证的 `Task-ID` 批次（`LS-041`～`LS-046`）全面清零高危缺陷并夯实工程防线。
+在 `v0.4.0` 全仓加固（`LS-040`～`LS-046` 已全部收口，本地 `main @ cafb102`）基础上，推进 **`v0.5.0` 大版本升级**，覆盖：性能底座、识别与规则增强、实时画面与全屏大屏、交互体验、告警与运维闭环、网页端便携标注（数据飞轮）、新架构推理引擎与多源公开数据集训练管道。
 
-## 已确认设计决策（2026-11-22 用户批准全部推荐方案 A）
+> **协作模式**：用户将 `LS-050`～`LS-057` 各批次分发给其他 AI 并行/分批实现，由主线 AI 按 [docs/plan/v0.5.0-ai-dispatch-prompts.md](docs/plan/v0.5.0-ai-dispatch-prompts.md) 中的审阅清单进行代码审查、缺陷修补、门禁复验与合入。
 
-1. **接力文件入库（`LS-040`）**：7 个接力文件同步最新审阅结果后提交至 `main`。
-2. **实时画面 `/ws/webrtc/:cid`（`LS-042`）**：Rust 补齐到 `go2rtc` 的 WS 代理；`go2rtc` 不可用或为 USB/文件源时 `/api/cameras/:id/webrtc` 返回 `mode: "snapshot"`，前端 `Cameras.vue`/`Wall.vue` 无缝降级快照轮播。
-3. **局域网监听 `LS_HOST` / `.env`（`LS-045`）**：`main.rs` 真正实现启动读 `.env` 与 `LS_HOST`，非回环地址强制要求 `LS_ADMIN_TOKEN`，否则拒绝启动。
+## 已确认设计决策（2026-11-22 `/grill-me` 全部对齐）
+
+1. **发布节奏**：`LS-050`～`LS-056` 全部纳入 `v0.5.0`，每批全绿提交 `main`，最后由 `LS-057` 统一版本同步、双产物打包与发版就绪。
+2. **识别与规则（`LS-050`）**：新增本地「单人留守（`solo_after_hours`）」规则 + 动态映射自定义 PPE 模型类别（`no_gloves`/`no_goggles` 等）+ 网页端可编辑自定义 VLM 提示词模板 + 前端开放 PPE 阈值与灰度诊断（零包体膨胀）。
+3. **实时画面与大屏（`LS-051`）**：前端 `<canvas>` 叠加层 + WebSocket 实时检测框/跟踪 ID/合规态（同时兼容 WebRTC 与快照轮播，零重编码开销）+ Rust 进程内托管 `go2rtc`（Windows Job Object 防孤儿）+ 全屏值守大屏与提示音。
+4. **运维闭环（`LS-053`）**：告警失败重试后台消费者 + 定时日报/周报自动推送 + 网页端局域网配置（自动生成强随机令牌 + 写 `.env` + 一键优雅自重启）+ Windows `HKCU\...\Run` 开机自启（免管理员、卸载自动清理）。
+5. **数据飞轮与便携标注（`LS-054`）**：网页端内置轻量画框标注（AI 预标注打底、缩放平移、数字键切类、SQLite v16 落库）+ 一键导出标准 YOLO 训练集 ZIP（`images/` + `labels/` + `data.yaml`）+ 一键脱敏诊断包 + 复用 `devices` 只读令牌的值守分享链接（24h/7d/30d TTL + 吊销）。
+6. **模型架构与训练管道（`LS-055` / `LS-056`）**：`ls-infer` 支持 NMS-free（RT-DETR/YOLO26/YOLOv10）、动态分辨率（640/960/1280）、FP16 与灰度 CLAHE + 网页端模型 A/B 评测；`tools/` 新增多源公开数据集聚合下载（优先 HF 镜像免 Key）、统一词表清洗合并、灰度/远景增强与 `--user-zip` 1:3 混合训练脚本。
 
 ## Current Phase
 
-- **`LS-040`**：`DONE`（接力文件已同步并提交入库 `main`）
-- **当前锁定执行**：**`LS-041`（Phase 1 · P0 止血批）**
+- **上一阶段（`LS-040`～`LS-046`）**：`DONE`（全部验证通过并提交至本地 `main @ cafb102`，`zip` 100.2MB + `setup.exe` 75.0MB + `smoke_rust.py` 5/5 PASS）。
+- **当前阶段（`v0.5.0`）**：`LS-050`～`LS-057` 已规划完毕并生成多 AI 分发任务书（`docs/plan/v0.5.0-ai-dispatch-prompts.md`），全部处于 `READY` 待分发状态。
 
 ---
 
-## Active Phases
+## Active Phases（`v0.5.0` · `LS-050` ～ `LS-057`）
 
-### Phase 1 · `LS-041`（P0 止血批）— `ACTIVE`
-- **DirectML 安全 & `EP_USED`**：`ls-infer/src/yolo.rs` 加进程级 `DML_LOCK`（覆盖建会话/`run`/`Drop`）+ `with_memory_pattern(false)` + `with_parallel_execution(false)` + 单例 `ORT` Environment + `EP_USED` 改 `RwLock`；`ls-infer/src/lib.rs` 放宽 `#[cfg(any(feature="tract", feature="ort"))]`。
-- **SQLite WAL + 规则修复 + 本地时区统一（替 `chrono`）**：`ls-store` 开 `PRAGMA journal_mode=WAL`、`add_rule` 写 `'1,2,3,4,5,6,7'`、`migrate()` 升级 v15 修存量 `days_of_week='0'`；`ls-core::time` 引入 `jiff` 统一全仓本地时区、移除 `chrono`（解除 `RUSTSEC-2026-0543`）；`worker.rs` 实时流禁用 `2026-01-01` 合成时间戳。
-- **自定义 PPE 上传全通**：`router.rs` 为 3 个上传路由加 `DefaultBodyLimit` + 流式限额；`worker.rs` 补读 `app_settings["ppe_model"]`；`ppe_upload` 校验 ONNX 并写入/继承 `ppe-custom.classes.txt`；`ppe_status` 回显 `classes`/`warning` 并缓存 SHA256；`build_rust.py` 去掉 `LabSentinel.bat` 强注 `LS_PPE_MODEL`。
-- **VLM & 多接入档案修复**：`vlm.rs` `openai_compat` 补 `Authorization: Bearer` 与 `/v1` 去重；`gemini` 改 `x-goog-api-key` 请求头 + `/v1beta` + 唯一临时文件 + 错误脱敏；`ureq` 加 `http_status_as_error(false)`；`detect.rs` 修 `usage_try_consume` 原子化/off-by-one/合规前置、虚拟档案迁移保密钥、消除影子覆盖与双重重启；`worker.rs` 修 `cascade + suppress` 吞事件与放行丢截图。
-- **告警渠道 P0 修复**：`alerts.rs` 补 PushPlus/Qmsg `url`、`smtp_port` 数字解析、`smtp_security`、模板清空清理内存、`alert_channels_snapshot` 合并 env 回退、`alert_test` 0 发送返 `ok: false`。
+### Phase 1 · `LS-050`（性能底座 + PPE/VLM 识别与规则增强）— `READY`
+- Motion Gate 运动检测预筛（静止空画面跳过 YOLO/PPE，含活跃 track 守卫 + 周期心跳全检防漏判，网页可开关/调阈值）。
+- 事件/文件夹缩略图后端按需生成缓存（纳入 `retention.rs` 清理）+ 前端 `loading="lazy"` 懒加载。
+- 前端开放 `ppe.violation_conf`/`ppe.wearing_conf` 滑块与灰度/远景诊断；新增 `solo_after_hours` 本地规则；动态支持自定义 PPE 模型类别；网页端可编辑自定义 VLM 提示词模板。
 
-### Phase 2 · `LS-042`（前后端契约对齐与前端 P0 修复）— `READY`
-- 后端对齐：`stats/hourly` 24 项数组、`folder-images` 补 URL/区域/违规、`events` 筛选/计数/批量/证据包、`config/import+export` `warnings`+`zone_name`、`rule-templates` 双键兼容、`alert-silences` `duration_s`+`remaining_s`、`alerts/status` 真 `channels`、`camera-groups` 对象数组、`cameras`/`rules` 全字段落库、`/ws/webrtc/:cid` 代理与降级。
-- 前端全视图修复：`ReportsView`、`Events`、`FolderImages`、`Settings`、`Zones`、`DetectPanel`、`Models`、`Welcome`、`FsPicker`、`Devices`、`Cameras`、`Wall`、`Face`、`api.js`、`style.css` 及多根组件收口。
-- 补齐 8 组前端回归单测（基于 Rust 真实响应结构）。
+### Phase 2 · `LS-051`（实时画面、Rust 托管 `go2rtc` 与全屏值守大屏）— `READY`
+- Rust 进程内托管 `go2rtc.exe`（`CREATE_NO_WINDOW` + Windows Job Object + 同步 RTSP 流 + `graceful_shutdown` 退出）。
+- 新增 `/ws/detections/:cid` 实时检测元数据广播 + 前端 `<canvas>` 叠加层（兼容 WebRTC 与快照轮播，一键显隐）。
+- `Wall.vue` 全屏值守大屏（1/4/9 宫格、当日合规率条、新告警浮窗与提示音/桌面通知开关）。
 
-### Phase 3 · `LS-043`（PPE 效果/性能与 Worker/管道加固）— `READY`
-- `YoloModel::detect_classes` 单次前向多类解码（2× 提速 + 去 8400 次 Vec 分配）+ 空图/迟滞守卫 + 网页可调 `ppe.violation_conf`/`ppe.wearing_conf` + 人框 ROI 扩框二次精检 + `POST /api/models/ppe/diagnose` + `log` 门面落文件日志 + 修 `model.json` 覆盖与 `Unknown` 误报 `enter_no_ppe`。
-- `worker.rs` 修 `folder_loop` `.take(20)` 饥饿、`given_up` 清理与 RAII 句柄守卫、`Instant` 下溢、`mode == "api"` 异步无阻塞、有界工作线程池；`ls-ingest`/`evidence.rs`/`discovery.rs` 补 `CREATE_NO_WINDOW`、RTSP `-rw_timeout`、USB 15s 超时、`alive_since` 首帧置位；`pipeline.rs`/`ls-core`/`ls-track` 修 `lost_track_buffer` 双重缩放、`cooldown_s` 单位、`occupancy_over` 串台、`zones.rs` `i128` 交叉乘、`ls-track` 除零与 env 缓存。
+### Phase 3 · `LS-052`（交互体验升级）— `READY`
+- `Zones.vue` 安全区拖拽顶点、撤销/重做、多区域配色标签、刷新底图。
+- 新增 `SchedulePicker.vue` 可视化周时段排班选择器（100% 兼容现有 `days_of_week`/`start_time`/`end_time` 契约）。
+- `Events.vue` 键盘快审（`J/K/A/F/I/Space/Esc`，输入框聚焦时不误触发）+ 快捷键提示条。
 
-### Phase 4 · `LS-044`（安全加固、后台可靠性与优雅退出）— `READY`
-- `/ws/events` 校验 `trusted_hosts`；限流改 `ConnectInfo` + 桶清理；补 `ADMIN_GETS`；`/api/cameras` 脱敏 RTSP 密码；路径 containment 统一 `Path::starts_with`；`plugins.rs` Zip 限额与原子安装；URL 防 `@` 绕过 + `max_redirects(0)`；`detect_models` 防 key 外泄；修 `urldecode`/`discovery`/`version_gt`/`genai` panic 与下溢；`fernet.rs` 并发建锁与标准兼容；`logs_tail` 真尾读与 JSON 脱敏。
-- `retention.rs` 相对路径按 `data_dir` 解析防误删；`backup.rs` 原子 `.tmp`+真实 `db_path`；`alert-deliveries/:did/retry` 真重投；`dispatch_event` 接自定义模板；`mqtt.rs` 断线退避与 `try_publish`；`graceful_shutdown` 完整停 `jobs`/插件/`mqtt`/托盘；`models_active`/`ppe_download` 自动重启；长 IO 迁 `spawn_blocking`。
+### Phase 4 · `LS-053`（告警与日常运维闭环）— `READY`
+- `ls-jobs` 告警失败重试后台消费者（消费 `alert_deliveries`，支持手工 retry 立即唤醒与退避封顶）。
+- 定时日报/周报自动汇总推送（复用现有告警渠道、同日去重、支持立即测试发送）。
+- 网页端局域网配置（自动生成令牌 + 写 `.env` + 一键优雅自重启）+ Windows `HKCU\...\Run` 开机自启（同步 `installer.iss` 卸载清理）。
 
-### Phase 5 · `LS-045`（CI、打包/安装器、依赖与文档合规）— `READY`
-- CI：`release.yml` 挂 `rust.yml`、Node 22、删冗余 CPU ort、补 PPE/DML/升级/删数据冒烟；新增 `scripts/contract_audit.py` 进 `tests.yml`；`rust_route_coverage.py --fail-under 95`；统一 `deny.toml`（`all-features=true`）与 `cargo-audit`；补 `SECURITY-EXCEPTIONS.md` 过期检查。
-- 安装器与打包：`installer.iss` UTF-8 BOM + 升级前停服 + `{win}\Prefetch` + `current.txt` + 探活失败提示；`deploy.rs` 修 `--rollback` 自覆盖与 SemVer；`build_rust.py` 清空 `DIST` + 去重 DLL + SHA256 强校；`bump_version.py` 五源同步；10 子 crate 补 `[lints] workspace = true`；gRPC 迁可选 `grpc` feature；替换 `fs2`；`main.rs` 实现 `.env` + `LS_HOST`（非回环强门控）；清死脚本。
-- 文档：重写 `NOTICE`、同步 `docs/plan/status.md`、`README.md`、`docs/guide/安装与卸载.md`、`CHANGELOG.md`。
+### Phase 5 · `LS-054`（网页端便携标注工作台 + 诊断包 + 只读值守链接）— `READY`
+- SQLite v16 `dataset_samples` 表 + 事件/文件夹/实时抓拍一键入池并跑 AI 预标注 + 前端 `AnnotatorModal.vue`（画框/改角/缩放平移/数字键切类/已核验标记）+ 导出标准 YOLO 训练集 ZIP（8:2 `train/val` + `data.yaml`）。
+- `GET /api/diagnostics/bundle.zip` 一键脱敏诊断包（严格脱敏所有密钥）。
+- 复用 `devices` 只读令牌生成 24h/7d/30d TTL 只读值守链接（`#/wall?readonly_token=...`），自动锁定只读大屏并支持随时吊销。
 
-### Phase 6 · `LS-046`（本机打包与验收就绪）— `READY`
-- 执行本机全量打包（`zip` + `setup.exe`）与 `smoke_rust.py` / `acceptance_rust_only.py` / `acceptance_vlm.py` 端到端实证；保留真机 24h RTSP 与外部真实 VLM API Key 人工验收清单待现场执行。
+### Phase 6 · `LS-055`（推理引擎新架构升级与模型 A/B 评测）— `READY`
+- `ls-infer` 自动读取动态输入分辨率（640/960/1280）、自动识别 NMS-free `[1, N, 6]`（RT-DETR/YOLO26/YOLOv10）、兼容 DirectML FP16、新增纯 Rust 灰度 CLAHE ROI 预处理。
+- `POST /api/models/ppe/benchmark` + 网页端新旧模型 A/B 对比评测（耗时与检出对比，满意再一键切换）。
+
+### Phase 7 · `LS-056`（多源公开数据集聚合、现成权重复用与专项训练管道）— `READY`
+- `tools/dataset_hub.py` + `tools/datasets_registry.json`（优先 HF 镜像免 Key，兼容 Roboflow/本地，逐项登记许可与现成开源权重）。
+- `tools/merge_datasets.py`（多源标签统一映射、坏图/越界框清洗、MD5 去重、`--user-zip` 与公开数据 1:3 混合）。
+- `tools/train_ppe.py` 升级（多架构 `--arch`、灰度/低光/远景增强预设、限线程）+ `tools/eval_report.py` 自动输出对比表 + `tools/export_onnx.py` 支持 `--half` FP16。
+
+### Phase 8 · `LS-057`（`v0.5.0` 全量验收、文档收口与本机双产物实证）— `READY`
+- `bump_version.py 0.5.0` + `CHANGELOG.md` + 全量门禁（Rust 三连 / Web / `contract_audit.py` / `rust_route_coverage.py --fail-under 95`）+ `build_rust.py --strict --zip` + `build_setup_exe.py` + `smoke_rust.py`。
+
+---
+
+## Completed Historical Phases（`LS-040` ～ `LS-046` · `DONE`）
+
+- `LS-040`（`17da1fb`）：初始化接力 7 件套 + 四线全仓审阅。
+- `LS-041`（`da1dbd1`）：P0 止血批（DirectML 全局锁、`jiff` 替 `chrono`、SQLite WAL、规则 `days_of_week` v15、VLM 鉴权脱敏、自定义 PPE 上传、PushPlus/Qmsg）。
+- `LS-042`（`4722d8c`）：前后端契约全面对齐 + 前端 11 处 P0 修复 + `/ws/webrtc/:cid` 代理与快照降级 + 6 例回归测试。
+- `LS-043`（`035e29e`）：PPE 单次多类前向 2× 提速 + 灰度 ROI 二次精检 + `CREATE_NO_WINDOW` + Worker/ffmpeg/规则加固。
+- `LS-044`（`068c5f3`）：安全加固 + `retention` 相对路径防误删 + `backup` 原子写 + `mqtt` 退避 + 完整 `graceful_shutdown`。
+- `LS-045`（`28e5701`）：CI 门禁 + `contract_audit.py` + 安装器 BOM/停服/Prefetch/`--rollback` + `.env`/`LS_HOST` + 10 crate `[lints]` + `NOTICE`/文档收口。
+- `LS-046`（`cafb102`）：本机 `--release`（LTO）打包 `zip`（100.2MB）+ `setup.exe`（75.0MB）+ `smoke_rust.py` 5/5 PASS。
