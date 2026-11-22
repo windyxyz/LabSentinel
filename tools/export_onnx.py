@@ -41,6 +41,8 @@ def parse_args():
                     help=f"data.yaml 路径，用于交叉核对类别顺序（默认 {DEFAULT_DATA}，--data '' 跳过核对）")
     ap.add_argument("--skip-verify", action="store_true",
                     help="跳过导出后的 onnxruntime 输入形状验证")
+    ap.add_argument("--half", action="store_true",
+                    help="LS-056：导出 FP16 ONNX（DirectML FP16 提速；CPU 推理需 EP 支持）")
     return ap.parse_args()
 
 
@@ -83,13 +85,28 @@ def main():
     check_names(names, args.data)
 
     print(f"[info] 导出 FP32 ONNX: {weights.name} -> opset={args.opset} imgsz={args.imgsz}")
-    exported = Path(model.export(format="onnx", imgsz=args.imgsz, opset=args.opset))
+    exported = Path(model.export(format="onnx", imgsz=args.imgsz, opset=args.opset, half=args.half))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     if exported.resolve() != out.resolve():
         shutil.copy2(exported, out)
         print(f"[info] 导出产物 {exported} 已复制到 {out}")
-    print(f"[done] FP32 ONNX: {out}（{out.stat().st_size / 1e6:.2f} MB）")
+    # LS-056：导出后同步生成 classes.txt 与 SHA256
+    classes_file = out.with_name(out.stem + ".classes.txt")
+    try:
+        import hashlib
+        names = model.names if isinstance(model.names, dict) else {}
+        if names:
+            text = "\n".join(str(names[i]) for i in sorted(names)) + "\n"
+            classes_file.write_text(text, encoding="utf-8")
+        digest = hashlib.sha256(out.read_bytes()).hexdigest()
+        (out.with_name(out.stem + ".sha256.txt")).write_text(
+            digest + "  " + out.name + "\n", encoding="utf-8"
+        )
+        print(f"[info] 类别表: {classes_file}；SHA256: {digest}")
+    except Exception as e:  # 类别/哈希生成失败不阻断导出
+        print(f"[warn] classes/sha256 生成失败: {e}")
+    print(f"[done] {'FP16' if args.half else 'FP32'} ONNX: {out}（{out.stat().st_size / 1e6:.2f} MB）")
 
     if not args.skip_verify:
         import onnxruntime as ort

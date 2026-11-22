@@ -83,3 +83,18 @@
 - **首轮**（v2 效果若仍不达标即启动）：300-500 帧，1-2 天标注，1 晚训练 → v3 模型
 - **常规**：每 1-2 月一轮增量 200 帧
 - **每次发布**：公开模型评估表 + （可选）更新开源数据集版本
+
+## v0.5.0 闭环（LS-056 已实现）
+
+```
+网页随手标（事件/文件夹/实时抓拍 → 标注池 → 核验）
+  → 导出 YOLO 训练集 ZIP（设置→数据管理）
+  → python tools/merge_datasets.py --user-zip <zip> --src pub=<公开集> --mix-ratio 1:3
+  → python tools/train_ppe.py --arch yolo11n --data <merged>/data.yaml --aug lab
+  → python tools/export_onnx.py --half（自动 classes.txt + SHA256）
+  → python tools/eval_report.py --old ... --new ...
+  → 网页「模型管理」上传替换 / A/B 对比评测
+```
+
+公开源登记：`tools/datasets_registry.json`（逐项许可 + HF 镜像 `HF_ENDPOINT`）；
+离线单测：`python -m unittest discover -s tools/tests -v`。

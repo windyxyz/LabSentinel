@@ -204,3 +204,34 @@ D:/LabSentinel/gpu-venv/Scripts/python.exe tools/train_ppe.py \
 | `golden_diff.py` | 比对两份 gold jsonl 事件流，输出一致率与差异明细 | 验证记录 §逐帧对齐 |
 
 > 需要重新生成黄金事件流时用 Rust：`ls-analyzer --golden <video> --out <jsonl>`。
+
+## 十、v0.5.0 数据飞轮流水线（LS-056）
+
+```bash
+# 0) 网页端：事件详情/文件夹详情 →「快速标注（加入标注池）」→ 设置→数据管理→标注→导出 YOLO 训练集 ZIP
+
+# 1) 查看/下载公开数据集与现成权重（HF 镜像免 Key）
+python tools/dataset_hub.py list
+HF_ENDPOINT=https://hf-mirror.com python tools/dataset_hub.py download hf-ppe-detection --out Resources/datasets/_downloads
+
+# 2) 清洗合并：统一类别词表 + 坏图/越界框剔除 + MD5 去重 + 1:3 混合
+python tools/merge_datasets.py --src pub=Resources/datasets/_downloads/hf-ppe-detection \
+    --user-zip ~/Downloads/labsentinel-yolo-dataset.zip --mix-ratio 1:3 \
+    --out Resources/datasets/_mixed
+
+# 3) 训练（多架构 + 灰度/低光/远景增强 + 线程限流）
+python tools/train_ppe.py --arch yolo11n --data Resources/datasets/_mixed/data.yaml \
+    --epochs 80 --threads 4 --aug lab
+
+# 4) 导出 FP32/FP16 ONNX（自动生成 classes.txt 与 SHA256）
+python tools/export_onnx.py --weights Resources/runs/detect/runs/ppe_v2/weights/best.pt \
+    --out m0-spike/yolo11n_ppe_v2.onnx [--half]
+
+# 5) A/B 对比（mAP50/耗时/灰度召回，Markdown 表）
+python tools/eval_report.py --old m0-spike/yolo11n_ppe.onnx --new m0-spike/yolo11n_ppe_v2.onnx \
+    --data Resources/datasets/_mixed/data.yaml --out Resources/runs/eval-v2.md
+
+# 6) 网页端：设置→模型与检测→本地模型→上传替换（或「对比评测」先看差异）
+```
+
+离线单测：`python -m unittest discover -s tools/tests -v`（不联网、不依赖 ultralytics）。

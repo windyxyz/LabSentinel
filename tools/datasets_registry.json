@@ -1,0 +1,43 @@
+{
+  "_readme": "LS-056 公开数据集与现成权重登记表（仅收录许可明确：CC BY 4.0 / MIT / Apache-2.0）。url 支持 HuggingFace 仓库（type=huggingface，自动拼接 HF_ENDPOINT 镜像）、直链（type=direct）、Roboflow 导出页（type=roboflow，需 API Key）与本地路径（type=local）。sha256 可空（空则只校验大小）。",
+  "datasets": [
+    {
+      "name": "lab-ppe",
+      "title": "LAB PPE（实验服/手套/护目镜）",
+      "type": "direct",
+      "url": "https://github.com/Windy-LabSentinel/assets/releases/download/ppe-v1/lab-ppe-yolo.zip",
+      "license": "CC BY 4.0",
+      "classes": ["lab coat", "no lab coat", "gloves", "no gloves", "goggles", "no goggles"],
+      "notes": "网页端导出的 YOLO ZIP 与公开数据混合训练的默认公开源；若资产未就绪可用本地路径。"
+    },
+    {
+      "name": "hf-ppe-detection",
+      "title": "HuggingFace PPE detection（示例登记）",
+      "type": "huggingface",
+      "repo": "keremberke/ppe-detection",
+      "file": "data.zip",
+      "license": "MIT",
+      "classes": ["person", "helmet", "vest"],
+      "notes": "HF 免 Key 下载；设置 HF_ENDPOINT=https://hf-mirror.com 走镜像。"
+    },
+    {
+      "name": "local-lab-ppe",
+      "title": "本地已有数据集（Resources/datasets/lab-ppe）",
+      "type": "local",
+      "path": "Resources/datasets/lab-ppe",
+      "license": "见目录内 README",
+      "classes": ["lab coat", "no lab coat", "gloves", "no gloves", "goggles", "no goggles"],
+      "notes": "不联网；用于离线合并/训练。"
+    }
+  ],
+  "weights": [
+    {
+      "name": "yolo11n",
+      "title": "Ultralytics YOLO11n COCO 预训练",
+      "type": "direct",
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt",
+      "license": "AGPL-3.0",
+      "notes": "训练起点；也可用 ultralytics 自动下载。"
+    }
+  ]
+}

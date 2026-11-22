@@ -44,6 +44,21 @@ def parse_args():
                     help="本次训练结果子目录名（默认 runs/ppe_v2，位于 Resources/runs/detect 下；勿与已有目录重名，或加 --exist-ok）")
     ap.add_argument("--exist-ok", action="store_true",
                     help="允许覆盖已存在的同名结果目录（默认不允许）")
+    # LS-056：多架构 / 数据飞轮混合 / 灰度增强 / 线程限流
+    ap.add_argument("--arch", default="yolo11n",
+                    choices=["yolo11n", "yolo11s", "yolo12n", "yolo12s", "rtdetr-l"],
+                    help="模型架构（默认 yolo11n；非 yolo11n 时自动用 ultralytics 下载预训练权重）")
+    ap.add_argument("--user-zip", default="",
+                    help="网页端导出的 YOLO 训练集 ZIP（与公开数据混合）")
+    ap.add_argument("--mix-public", default="1:3",
+                    help="user:public 混合比例（默认 1:3）")
+    ap.add_argument("--public-src", action="append", default=[],
+                    help="公开数据集 name=path（可多次；与 --user-zip 一起使用）")
+    ap.add_argument("--threads", type=int, default=4,
+                    help="torch 线程上限（默认 4，避免训练拖垮本机）")
+    ap.add_argument("--aug", default="lab",
+                    choices=["lab", "none"],
+                    help="增强预设：lab=灰度/低光/远景增强（默认），none=ultralytics 默认")
     return ap.parse_args()
 
 
@@ -57,12 +72,44 @@ def main():
     if not data_path.exists():
         sys.exit(f"[error] data.yaml 不存在: {data_path}（先运行 tools/download_datasets.py 下载数据集）")
 
+    # LS-056：--user-zip 与公开数据混合（复用 merge_datasets 清洗/去重/比例）
+    if args.user_zip:
+        import subprocess
+        merged = ROOT / "Resources" / "datasets" / "_mixed"
+        cmd = [sys.executable, str(ROOT / "tools" / "merge_datasets.py"),
+               "--user-zip", args.user_zip, "--mix-ratio", args.mix_public,
+               "--out", str(merged)]
+        for spec in args.public_src:
+            cmd += ["--src", spec]
+        if not args.public_src:
+            # 无公开源时仅清洗用户 ZIP
+            cmd += []
+        print(f"[info] 混合数据集: {' '.join(cmd)}")
+        rc = subprocess.run(cmd).returncode
+        if rc != 0:
+            sys.exit(f"[error] merge_datasets 失败 rc={rc}")
+        data_path = merged / "data.yaml"
+
+    import torch
+    try:
+        torch.set_num_threads(max(1, args.threads))
+        print(f"[info] torch 线程上限 = {args.threads}")
+    except Exception:
+        pass
+
     from ultralytics import YOLO
 
     print(f"[info] 起点: {model_path.name}  数据: {data_path}")
     print(f"[info] epochs={args.epochs} patience={args.patience} imgsz={args.imgsz} "
           f"batch={args.batch} device={args.device or 'auto'} -> {args.project}/{args.name}")
-    model = YOLO(str(model_path))
+    # 架构选择：默认沿用 --model；指定非 yolo11n 时用 ultralytics 预训练权重
+    weights = str(model_path) if args.arch == "yolo11n" else f"{args.arch}.pt"
+    model = YOLO(weights)
+    aug = {}
+    if args.aug == "lab":
+        # 实验室灰度/低光/远景增强预设
+        aug = dict(scale=0.9, hsv_v=0.5, hsv_s=0.5, degrees=5.0,
+                   mosaic=1.0, close_mosaic=10, erasing=0.4)
     model.train(
         data=str(data_path),
         epochs=args.epochs,
@@ -73,6 +120,7 @@ def main():
         workers=args.workers,
         project=args.project,
         name=args.name,
+        **aug,
         exist_ok=args.exist_ok,
     )
 
