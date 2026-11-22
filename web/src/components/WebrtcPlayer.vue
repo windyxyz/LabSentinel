@@ -31,7 +31,7 @@
 -->
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { adminToken } from '../api'
+import { requestToken } from '../api'
 
 const props = defineProps({
   /** go2rtc 信令 WebSocket 完整地址，如 ws://localhost:1984/api/ws?src=1 */
@@ -160,7 +160,7 @@ function connect() {
   const raw = String(props.wsUrl || '')
   const wsUrl = raw.startsWith('ws') ? raw
     : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + raw
-  const t = adminToken.get()
+  const t = requestToken()
   ws = new WebSocket(wsUrl, t ? ['labsentinel', 'bearer.' + t] : undefined)
 
   ws.onopen = async () => {

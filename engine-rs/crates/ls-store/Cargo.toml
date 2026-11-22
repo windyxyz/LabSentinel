@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ls-core = { version = "0.1.0", path = "../ls-core" }
+ls-core = { path = "../ls-core" }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

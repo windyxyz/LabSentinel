@@ -3,17 +3,16 @@
 //! 设计要点：
 //! - Windows 下给子进程绑 Windows Job Object（kill-on-close）——主进程正常退出 /
 //!   崩溃 / taskkill 时内核自动杀掉 job 内进程，杜绝孤儿（复用 `winjob`，零新增 unsafe）；
-//! - **Job 句柄有意 `mem::forget`**：句柄存活到进程终止，进程退出时 Windows 关闭
-//!   全部句柄 → job 触发 kill-on-close → 子进程被内核回收。这样 `ChildGuard`
-//!   只持有 `std::process::Child`（Send），可安全放进 `AppState`，无需任何 unsafe impl。
 //! - 所有 Windows 子进程加 `CREATE_NO_WINDOW`（0x0800_0000）——杜绝控制台黑框闪现；
 //! - Drop 时先 kill 再 wait 兜底。
 
 use std::process::{Child, Command, Stdio};
 
-/// 受守护的子进程。Drop = 终止 + 回收；Job 句柄由进程生命周期兜底。
+/// 受守护的子进程。Drop 终止并回收子进程，然后关闭 Job 句柄。
 pub struct ChildGuard {
     child: Option<Child>,
+    #[cfg(windows)]
+    _job: crate::winjob::JobHandle,
 }
 
 impl ChildGuard {
@@ -27,15 +26,23 @@ impl ChildGuard {
             use std::os::windows::process::CommandExt;
             // 0x0800_0000 = CREATE_NO_WINDOW：所有 Windows 子进程必须加，杜绝黑框
             cmd.creation_flags(0x0800_0000);
-        }
-        let child = cmd.spawn().map_err(|e| format!("子进程启动失败: {e}"))?;
-        // 绑 Job Object：assign 成功后**故意泄漏句柄**（存活至进程退出 → 内核兜底杀子进程）
-        if let Some(job) = crate::winjob::JobHandle::new() {
-            if job.assign_child(&child) {
-                std::mem::forget(job);
+            let job = crate::winjob::JobHandle::new().ok_or("无法创建子进程 Job Object")?;
+            let mut child = cmd.spawn().map_err(|e| format!("子进程启动失败: {e}"))?;
+            if !job.assign_child(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("无法将子进程加入 Job Object".into());
             }
+            Ok(Self {
+                child: Some(child),
+                _job: job,
+            })
         }
-        Ok(Self { child: Some(child) })
+        #[cfg(not(windows))]
+        {
+            let child = cmd.spawn().map_err(|e| format!("子进程启动失败: {e}"))?;
+            Ok(Self { child: Some(child) })
+        }
     }
 
     /// 进程是否仍存活（不阻塞）。
@@ -75,7 +82,7 @@ mod tests {
         #[cfg(windows)]
         let cmd = {
             let mut c = Command::new("cmd");
-            c.args(["/c", "pause"]);
+            c.args(["/c", "ping", "-n", "15", "127.0.0.1"]);
             c
         };
         #[cfg(not(windows))]

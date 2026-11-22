@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, mediaUrl, TYPE_TEXT } from '../api'
+import AnnotatorModal from '../components/AnnotatorModal.vue'
 import AsyncState from '../components/AsyncState.vue'
 
 const folders = ref([])
@@ -102,13 +103,15 @@ function thumbFailed(it) {
 // LS-054：文件夹图一键加入标注池（AI 预标注）
 const poolBusy = ref(false)
 const poolMsg = ref('')
+const annotation = ref(null)
 async function addToPool(it) {
   if (!it?.id) return
   poolBusy.value = true
   poolMsg.value = ''
   try {
     const r = await api.datasetFromFolder(it.id)
-    poolMsg.value = `已加入标注池（样本 #${r.id}）`
+    if (r?.sample?.id) annotation.value = r.sample
+    else poolMsg.value = `已加入标注池（样本 #${r.id}）`
   } catch (e) { poolMsg.value = String(e.message || e) }
   poolBusy.value = false
 }
@@ -235,6 +238,8 @@ async function addToPool(it) {
       </div>
     </div>
   </div>
+  <AnnotatorModal v-if="annotation" :sample="annotation" :image-url="`/api/dataset/samples/${annotation.id}/image`"
+    @close="annotation = null" @saved="annotation = null" />
 </template>
 
 <style scoped>

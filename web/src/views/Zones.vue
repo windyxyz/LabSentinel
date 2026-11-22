@@ -69,7 +69,7 @@ async function doCopy() {
       copy_rules: copyRules.value, name_suffix: '' })
     copyMsg.value = `复制完成：区域 新建${r.zones_created}/跳过${r.zones_skipped}；` +
       `规则 新建${r.rules_created}/跳过${r.rules_skipped}` +
-      (r.warnings.length ? `\n${r.warnings.join('\n')}` : '')
+      (Array.isArray(r.warnings) && r.warnings.length ? `\n${r.warnings.join('\n')}` : '')
     load()
   } catch (e) { copyMsg.value = String(e.message || e) }
   copyBusy.value = false
@@ -135,6 +135,8 @@ async function load() {
   const rs = await api.rules(camId.value)
   rules.value = Array.isArray(rs) ? rs : []
   drawing.value = []
+  undoStack.value = []
+  redoStack.value = []
   await nextTick()
   draw()
 }
@@ -143,25 +145,43 @@ async function load() {
 const ZONE_COLORS = ['#4da3ff', '#f5a524', '#22c55e', '#a855f7', '#ef4444', '#06b6d4', '#eab308', '#ec4899']
 const zoneColor = (i) => ZONE_COLORS[i % ZONE_COLORS.length]
 
-// LS-052：撤销/重做栈（仅针对正在绘制的顶点序列）
 const undoStack = ref([])
 const redoStack = ref([])
-function pushUndo() {
-  undoStack.value.push(drawing.value.map((p) => [...p]))
+function pushUndo(entry = { points: drawing.value.map(p => [...p]) }) {
+  undoStack.value.push(entry)
   if (undoStack.value.length > 100) undoStack.value.shift()
   redoStack.value = []
 }
-function undo() {
-  if (!undoStack.value.length) return
-  redoStack.value.push(drawing.value.map((p) => [...p]))
-  drawing.value = undoStack.value.pop()
+const editError = ref('')
+const savingPolygon = ref(false)
+async function moveHistory(from, to) {
+  if (!from.value.length || savingPolygon.value) return
+  const entry = from.value.at(-1)
+  const zone = zones.value.find(z => z.id === entry.id)
+  if (entry.id && !zone) return
+  const points = (zone?.polygon || drawing.value).map(p => [...p])
+  if (zone && !await persistPolygon(zone.id, entry.points)) return
+  if (zone) zone.polygon = entry.points
+  else drawing.value = entry.points
+  from.value.pop()
+  to.value.push({ id: entry.id, points })
   draw()
 }
-function redo() {
-  if (!redoStack.value.length) return
-  undoStack.value.push(drawing.value.map((p) => [...p]))
-  drawing.value = redoStack.value.pop()
-  draw()
+const undo = () => moveHistory(undoStack, redoStack)
+const redo = () => moveHistory(redoStack, undoStack)
+
+async function persistPolygon(id, polygon) {
+  savingPolygon.value = true
+  editError.value = ''
+  try {
+    await api.updateZone(id, polygon)
+    return true
+  } catch (error) {
+    editError.value = error.message
+    return false
+  } finally {
+    savingPolygon.value = false
+  }
 }
 
 // LS-052：拖拽已有安全区顶点（松手保存）
@@ -172,14 +192,18 @@ const dragging = ref(false)
 
 function canvasPos(e) {
   const r = e.target.getBoundingClientRect()
-  return [Math.round(e.clientX - r.left), Math.round(e.clientY - r.top)]
+  return [
+    Math.round(Math.max(0, Math.min(DISP_W, (e.clientX - r.left) * DISP_W / (r.width || DISP_W)))),
+    Math.round(Math.max(0, Math.min(DISP_H, (e.clientY - r.top) * DISP_H / (r.height || DISP_H)))),
+  ]
 }
 
-function findVertex(pos) {
+function findVertex(pos, exclude) {
   for (let zi = 0; zi < zones.value.length; zi++) {
     const z = zones.value[zi]
     if (!Array.isArray(z.polygon)) continue
     for (let i = 0; i < z.polygon.length; i++) {
+      if (!Array.isArray(z.polygon[i]) || (exclude?.zid === z.id && exclude.idx === i)) continue
       const [x, y] = z.polygon[i]
       const dx = x * SCALE - pos[0]
       const dy = y * SCALE - pos[1]
@@ -190,15 +214,16 @@ function findVertex(pos) {
 }
 
 function onCanvasClick(e) {
-  if (dragging.value) return // 拖拽结束的 click 不新增顶点
+  if (dragging.value || savingPolygon.value) return
   pushUndo()
   drawing.value.push(canvasPos(e))
   draw()
 }
 function onMouseDown(e) {
+  if (savingPolygon.value) return
   const hit = findVertex(canvasPos(e))
   if (hit) {
-    drag.value = hit
+    drag.value = { ...hit, original: zones.value[hit.zoneIndex].polygon.map(point => [...point]) }
     dragging.value = false
   }
 }
@@ -211,19 +236,22 @@ function onMouseMove(e) {
   dragging.value = true
   const z = zones.value.find((x) => x.id === drag.value.zid)
   if (!z || !Array.isArray(z.polygon)) return
-  z.polygon[drag.value.idx] = [Math.round(pos[0] / SCALE), Math.round(pos[1] / SCALE)]
+  const snap = findVertex(pos, drag.value)
+  z.polygon[drag.value.idx] = snap ? [...zones.value[snap.zoneIndex].polygon[snap.idx]]
+    : [Math.round(pos[0] / SCALE), Math.round(pos[1] / SCALE)]
   draw()
 }
 async function onMouseUp() {
-  if (drag.value && dragging.value) {
-    const z = zones.value.find((x) => x.id === drag.value.zid)
+  const edit = drag.value
+  drag.value = null
+  setTimeout(() => (dragging.value = false), 0)
+  if (edit && dragging.value) {
+    const z = zones.value.find((x) => x.id === edit.zid)
     if (z && Array.isArray(z.polygon)) {
-      try { await api.updateZone(z.id, z.polygon) } catch { /* 保存失败保留本地显示 */ }
+      if (await persistPolygon(z.id, z.polygon)) pushUndo({ id: z.id, points: edit.original })
+      else { z.polygon = edit.original; draw() }
     }
   }
-  drag.value = null
-  dragging.value = false
-  setTimeout(() => (dragging.value = false), 0)
 }
 function onDblClick() {
   if (drawing.value.length >= 3 && zname.value) {
@@ -322,9 +350,7 @@ async function addRule(zoneId) {
         点击"取最新快照"显示画面后再画区
       </p>
     </div>
-    <div class="row" style="margin-top:10px">
-      <button class="ghost" @click="refreshBase">刷新底图（最新快照）</button>
-    </div>
+    <p v-if="editError" role="status">{{ editError }}</p>
   </div>
 
   <div class="panel">

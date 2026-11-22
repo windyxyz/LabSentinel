@@ -75,7 +75,11 @@ pub(crate) async fn update_zone(
     let polygon = body.get("polygon").cloned().unwrap_or(Value::Null);
     let valid = polygon
         .as_array()
-        .map(|a| a.len() >= 3 && a.iter().all(|p| p.as_array().is_some_and(|xy| xy.len() >= 2)))
+        .map(|a| {
+            a.len() >= 3
+                && a.iter()
+                    .all(|p| p.as_array().is_some_and(|xy| xy.len() >= 2))
+        })
         .unwrap_or(false);
     if !valid {
         return detail_err(

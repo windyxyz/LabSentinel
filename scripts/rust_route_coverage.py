@@ -51,7 +51,8 @@ def openapi_routes() -> dict[str, list[str]]:
 
 def rust_routes(exe: Path) -> set[tuple[str, str]]:
     r = subprocess.run([str(exe), "--dump-routes"], capture_output=True, text=True,
-                       timeout=30, env={**os.environ, "LS_LOG_FILE": "0"})
+                       timeout=30, env={**os.environ, "LS_LOG_FILE": "0"},
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode != 0:
         raise SystemExit(f"[coverage] --dump-routes 失败: {r.stderr[-300:]}")
     data = json.loads(r.stdout)

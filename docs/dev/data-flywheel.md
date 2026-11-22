@@ -89,12 +89,13 @@
 ```
 网页随手标（事件/文件夹/实时抓拍 → 标注池 → 核验）
   → 导出 YOLO 训练集 ZIP（设置→数据管理）
-  → python tools/merge_datasets.py --user-zip <zip> --src pub=<公开集> --mix-ratio 1:3
+  → python tools/merge_datasets.py --user-zip <zip> --src pub=<已解压的公开集> --mix-ratio 1:3 --out <merged>
   → python tools/train_ppe.py --arch yolo11n --data <merged>/data.yaml --aug lab
   → python tools/export_onnx.py --half（自动 classes.txt + SHA256）
-  → python tools/eval_report.py --old ... --new ...
+  → python tools/eval_report.py --old <old.onnx> --new <new.onnx> --data <验证集data.yaml> --gray-data <灰度子集data.yaml>
   → 网页「模型管理」上传替换 / A/B 对比评测
 ```
 
-公开源登记：`tools/datasets_registry.json`（逐项许可 + HF 镜像 `HF_ENDPOINT`）；
-离线单测：`python -m unittest discover -s tools/tests -v`。
+公开源登记表包含数据集署名、许可和下载路径。工业 PPE 数据可补充手套、护目镜等类别，实验服和现场灰度画面仍需使用实验室标注样本。合并前保留独立的现场验证集。
+
+训练工具安装与完整命令见 [tools/README.md](../../tools/README.md#十v050-数据飞轮流水线ls-056)。

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
@@ -17,7 +18,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 import dataset_hub  # noqa: E402
 import merge_datasets as md  # noqa: E402
 
-JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
+from PIL import Image
+
+jpeg_buf = io.BytesIO()
+Image.new("RGB", (4, 4), "white").save(jpeg_buf, format="JPEG")
+JPEG = jpeg_buf.getvalue()
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 64
 
 
@@ -39,7 +44,7 @@ class DatasetHubTests(unittest.TestCase):
     def test_huggingface_url_uses_mirror(self):
         e = {"name": "x", "type": "huggingface", "repo": "a/b", "file": "d.zip"}
         url = dataset_hub.resolve_url(e, hf_endpoint="https://hf-mirror.com")
-        self.assertEqual(url, "https://hf-mirror.com/a/b/resolve/main/d.zip")
+        self.assertEqual(url, "https://hf-mirror.com/datasets/a/b/resolve/main/d.zip")
 
     def test_local_returns_none(self):
         e = {"name": "x", "type": "local", "path": "Resources/datasets/lab-ppe"}
@@ -51,7 +56,7 @@ class MergeDatasetTests(unittest.TestCase):
         self.assertEqual(md.normalize_class("Lab Coat"), "lab_coat")
         self.assertEqual(md.normalize_class("no-lab-coat"), "no_lab_coat")
         self.assertEqual(md.normalize_class("no goggles"), "no_goggles")
-        self.assertEqual(md.normalize_class("unknown-thing"), "person")
+        self.assertIsNone(md.normalize_class("unknown-thing"))
 
     def test_valid_box(self):
         self.assertTrue(md.valid_box(0.5, 0.5, 0.2, 0.2))

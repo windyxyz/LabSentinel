@@ -4,11 +4,13 @@
 
 **开源实验室安全行为智能监控系统**：接入现有摄像头（RTSP）、USB/视频文件，或外部软件持续截图的图片文件夹，自动识别进入安全区未穿实验服、统计人数，异常实时多渠道告警。全本地部署，隐私可控。
 
-![Release](https://img.shields.io/badge/Release-0.4.0-blue) ![Rust](https://img.shields.io/badge/Rust-单二进制-dea584) ![Vue](https://img.shields.io/badge/Vue-3-42b883) ![License](https://img.shields.io/badge/License-AGPL--3.0-red) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
+![Version](https://img.shields.io/badge/Version-0.5.0-blue) ![Rust](https://img.shields.io/badge/Rust-单二进制-dea584) ![Vue](https://img.shields.io/badge/Vue-3-42b883) ![License](https://img.shields.io/badge/License-AGPL--3.0-red) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
 
 </div>
 
 ## ✨ 功能一览（30 秒了解）
+
+v0.5.0 增加运动预筛、单人留守规则、实时检测框、全屏值守、告警重试、日报周报、网页标注和模型对比评测。 [完整变更](CHANGELOG.md#050---2026-11-22)
 
 - 🔍 **白大褂检测**：进入安全区自动判定穿着状态（证据分级判定，不把“看不清”当“违规”误报）
 - 🖼️ **图片文件夹自动识别**：外部截图软件持续写入目录 → 自动识别关键图片（有人/违规）并按摄像头/时间汇报，原始截图只读

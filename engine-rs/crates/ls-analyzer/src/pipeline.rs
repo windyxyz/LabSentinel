@@ -70,6 +70,13 @@ pub struct PersonDetection {
     pub ppe: PpeStatus,
 }
 
+pub struct LiveTrack {
+    pub id: i64,
+    pub bbox: [f32; 4],
+    pub ppe: PpeStatus,
+    pub confidence: f32,
+}
+
 /// 检测器抽象（T-325 接入 ort 后替换实现）。
 pub trait Detector: Send {
     /// 检测一帧（BGR raw），返回人员框 + 实验服状态。
@@ -113,7 +120,7 @@ pub struct CameraPipeline {
     last_active_count: usize,
     /// LS-051：上一帧活跃轨迹 `(track_id, tlbr, PPE 状态)`，供实时检测框广播。
     /// 用 Box 存以让新字段不影响现有栈上构造大小敏感路径。
-    last_tracks: Vec<(i64, [f32; 4], PpeStatus)>,
+    last_tracks: Vec<LiveTrack>,
     frame_index: u64,
     /// L1 对齐诊断：true 时每帧记录 ByteTrack 激活轨迹 (track_id, tlbr)
     pub log_tracks: bool,
@@ -188,8 +195,8 @@ impl CameraPipeline {
         self.last_active_count
     }
 
-    /// LS-051：上一帧活跃轨迹 `(track_id, tlbr, ppe)`，供实时检测框广播。
-    pub fn last_tracks(&self) -> &[(i64, [f32; 4], PpeStatus)] {
+    /// LS-051：上一帧活跃轨迹，供实时检测框广播。
+    pub fn last_tracks(&self) -> &[LiveTrack] {
         &self.last_tracks
     }
 
@@ -271,12 +278,22 @@ impl CameraPipeline {
         self.last_tracks = active
             .iter()
             .map(|(b, id)| {
-                let ppe = dets
-                    .iter()
-                    .position(|d| d.box_ == *b)
-                    .map(|i| det_ppe[i])
-                    .unwrap_or(PpeStatus::Unknown);
-                (*id, *b, ppe)
+                let detected = dets.iter().position(|d| d.box_ == *b);
+                let ppe = detected.map_or(PpeStatus::Unknown, |i| det_ppe[i]);
+                let ppe = if ppe == PpeStatus::Unknown {
+                    self.last_tracks
+                        .iter()
+                        .find(|t| t.id == *id)
+                        .map_or(ppe, |t| t.ppe)
+                } else {
+                    ppe
+                };
+                LiveTrack {
+                    id: *id,
+                    bbox: *b,
+                    ppe,
+                    confidence: detected.map_or(0., |i| dets[i].score),
+                }
             })
             .collect();
 
@@ -758,16 +775,30 @@ mod tests {
         // fps=5，阈值 3s → 需帧序号差 ≥15，即第 16 帧触发（首帧起算）
         let mut fired = 0;
         for _ in 0..15 {
-            fired += p.process(&d, ts).iter().filter(|c| c.behavior == "solo_after_hours").count();
+            fired += p
+                .process(&d, ts)
+                .iter()
+                .filter(|c| c.behavior == "solo_after_hours")
+                .count();
         }
         assert_eq!(fired, 0, "未达 3 秒不触发");
         let hit = p.process(&d, ts);
-        assert_eq!(hit.iter().filter(|c| c.behavior == "solo_after_hours").count(), 1);
-        assert!(hit.iter().any(|c| c.detail.contains("单人留守") || c.detail.contains("仅 1 人")));
+        assert_eq!(
+            hit.iter()
+                .filter(|c| c.behavior == "solo_after_hours")
+                .count(),
+            1
+        );
+        assert!(hit
+            .iter()
+            .any(|c| c.detail.contains("单人留守") || c.detail.contains("仅 1 人")));
         // 空帧清零后重新计时，再喂 15 帧不应触发
         p.process(&[], ts);
         for _ in 0..15 {
-            assert!(p.process(&d, ts).iter().all(|c| c.behavior != "solo_after_hours"));
+            assert!(p
+                .process(&d, ts)
+                .iter()
+                .all(|c| c.behavior != "solo_after_hours"));
         }
     }
 
@@ -791,7 +822,10 @@ mod tests {
             det([500.0, 10.0, 560.0, 120.0]),
         ];
         for _ in 0..30 {
-            assert!(p.process(&two, ts).iter().all(|c| c.behavior != "solo_after_hours"));
+            assert!(p
+                .process(&two, ts)
+                .iter()
+                .all(|c| c.behavior != "solo_after_hours"));
         }
     }
 

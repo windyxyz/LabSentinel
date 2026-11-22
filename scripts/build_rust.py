@@ -55,7 +55,8 @@ def build_binary() -> Path:
                             f"-L {W64 / 'lib'} -C link-arg=-lucrt")
     args += ["build", "--release", "-p", "ls-server"]
     env.setdefault("CARGO_TARGET_DIR", str(TARGET))
-    r = subprocess.run(args, cwd=ENGINE_RS, env=env)
+    r = subprocess.run(args, cwd=ENGINE_RS, env=env,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode:
         raise SystemExit("[失败] cargo build -p ls-server 失败（先确认工具链/LS_W64DEVKIT 构建配方）")
     name = "labsentinel-server.exe" if sys.platform == "win32" else "labsentinel-server"

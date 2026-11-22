@@ -17,8 +17,8 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/health/live"),
     ("GET", "/api/health/ready"),
     ("GET", "/api/system"),
-    ("GET", "/api/go2rtc/status"),   // LS-051
-    ("PUT", "/api/go2rtc/config"),   // LS-051
+    ("GET", "/api/go2rtc/status"), // LS-051
+    ("PUT", "/api/go2rtc/config"), // LS-051
     // ---- LS-053：日报/周报、局域网配置、开机自启 ----
     ("GET", "/api/reports/schedule"),
     ("PUT", "/api/reports/schedule"),
@@ -201,24 +201,15 @@ pub fn build_router(state: Shared) -> Router {
         .route("/reports/send-now", post(reports_send_now))
         .route("/system/network", get(network_get).put(network_put))
         .route("/system/restart", post(system_restart))
-        .route(
-            "/system/autostart",
-            get(autostart_get).put(autostart_put),
-        )
+        .route("/system/autostart", get(autostart_get).put(autostart_put))
         // LS-054
-        .route(
-            "/dataset/samples/from-event/:eid",
-            post(samples_from_event),
-        )
+        .route("/dataset/samples/from-event/:eid", post(samples_from_event))
         .route(
             "/dataset/samples/from-folder/:iid",
             post(samples_from_folder),
         )
         .route("/dataset/samples/capture/:cid", post(samples_capture))
-        .route(
-            "/dataset/samples",
-            get(samples_list),
-        )
+        .route("/dataset/samples", get(samples_list))
         .route(
             "/dataset/samples/:id",
             put(sample_update).delete(sample_delete),
@@ -308,6 +299,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/folders/:cid/scan", post(folder_scan)) // RA1.3：摘最后一条 503
         .route("/logs", get(logs_tail))
         .route("/models/ppe/status", get(ppe_status))
+        .route("/models/ppe/benchmark", post(ppe_benchmark))
         .route("/models/local", get(models_local)) // RA5：模型模块化清单
         .route("/models/active", put(models_active)) // RA5：检测模型切换
         .route("/fs/list", get(fs_list)) // RA5-UX：目录浏览

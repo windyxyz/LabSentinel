@@ -349,7 +349,8 @@ pub fn deliver_with_backoff(
         .max_redirects(0)
         .build()
         .into();
-    for attempt in 0..4u32 {
+    let max_attempts = backoff_secs.len().min(3) as u32 + 1;
+    for attempt in 0..max_attempts {
         // Python httpx timeout=5 同口径
         let req = agent.post(&cfg.url);
         let (status, resp_body) = match ch {
@@ -428,7 +429,7 @@ pub fn deliver_with_backoff(
             status,
             resp_body.chars().take(120).collect::<String>()
         ));
-        if attempt < 3 {
+        if attempt + 1 < max_attempts {
             // 退避可注入（N-34）：越界/0 值不等待
             if let Some(&s) = backoff_secs.get(attempt as usize) {
                 if s > 0 {
@@ -439,7 +440,7 @@ pub fn deliver_with_backoff(
     }
     Delivery {
         ok: false,
-        attempts: 4,
+        attempts: max_attempts,
         error,
     }
 }

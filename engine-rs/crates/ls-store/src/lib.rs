@@ -60,6 +60,13 @@ pub struct Store {
     conn: Connection,
 }
 
+pub struct ReportSummary {
+    pub total: i64,
+    pub violation: i64,
+    pub unhandled: i64,
+    pub top: Vec<(i64, i64)>,
+}
+
 impl Store {
     /// 打开已有库（Python 建库路径）；空文件则由 Python 负责首次建库。
     pub fn open(path: &str) -> rusqlite::Result<Self> {
@@ -539,6 +546,11 @@ pub struct AuditRow {
     pub status_code: Option<i64>,
 }
 
+/// 待重试投递：(delivery_id, event_id, channel, attempts)
+pub type RetryableDelivery = (i64, i64, String, i64);
+/// 单条投递：(event_id, status, attempts, last_error)
+pub type DeliveryRow = (i64, String, i64, Option<String>);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Delivery {
     pub id: i64,
@@ -698,11 +710,7 @@ impl Store {
     }
 
     /// LS-052：更新安全区多边形（拖拽顶点后保存；名称不变）。
-    pub fn update_zone_polygon(
-        &self,
-        id: i64,
-        polygon_json: &str,
-    ) -> rusqlite::Result<usize> {
+    pub fn update_zone_polygon(&self, id: i64, polygon_json: &str) -> rusqlite::Result<usize> {
         self.conn.execute(
             "UPDATE zones SET polygon=? WHERE id=?",
             params![polygon_json, id],
@@ -1057,8 +1065,8 @@ impl Store {
 
     pub fn retry_delivery(&self, id: i64) -> rusqlite::Result<bool> {
         let n = self.conn.execute(
-            "UPDATE alert_deliveries SET status='pending', attempts=0, last_error=NULL, updated_ts=? WHERE id=?",
-            params![chrono_now(), id],
+            "UPDATE alert_deliveries SET status='retry', attempts=0, last_error=NULL, updated_ts=? WHERE id=? AND status != 'ok'",
+            params!["1970-01-01T00:00:00", id],
         )?;
         Ok(n > 0)
     }
@@ -1067,26 +1075,35 @@ impl Store {
     /// updated_ts 早于 cutoff）。返回 (delivery_id, event_id, channel, attempts)。
     pub fn retryable_deliveries(
         &self,
-        max_attempts: i64,
-        cutoff_ts: &str,
+        cutoffs: &[String; 5],
+        delivery_id: Option<i64>,
         limit: i64,
-    ) -> rusqlite::Result<Vec<(i64, i64, String, i64)>> {
+    ) -> rusqlite::Result<Vec<RetryableDelivery>> {
         let mut stmt = self.conn.prepare(
             "SELECT id,event_id,channel,attempts FROM alert_deliveries \
              WHERE COALESCE(status,'pending') IN ('retry','failed') \
-               AND attempts < ? AND updated_ts <= ? ORDER BY id ASC LIMIT ?",
+               AND (?6 IS NULL OR id=?6)
+               AND updated_ts <= CASE attempts WHEN 0 THEN ?1 WHEN 1 THEN ?2
+                   WHEN 2 THEN ?3 WHEN 3 THEN ?4 WHEN 4 THEN ?5 END
+               ORDER BY updated_ts ASC, id ASC LIMIT ?7",
         )?;
-        let rows = stmt.query_map(params![max_attempts, cutoff_ts, limit], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                cutoffs[0],
+                cutoffs[1],
+                cutoffs[2],
+                cutoffs[3],
+                cutoffs[4],
+                delivery_id,
+                limit
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
         rows.collect()
     }
 
     /// LS-053：单条投递详情（重试消费者回写用）。
-    pub fn delivery_by_id(
-        &self,
-        id: i64,
-    ) -> rusqlite::Result<Option<(i64, String, i64, Option<String>)>> {
+    pub fn delivery_by_id(&self, id: i64) -> rusqlite::Result<Option<DeliveryRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT event_id, COALESCE(status,'pending'), attempts, last_error \
              FROM alert_deliveries WHERE id=?",
@@ -1101,12 +1118,7 @@ impl Store {
     }
 
     /// LS-053：日报汇总——指定时间窗内事件总数/违规数/未处置数/Top3 摄像头。
-    /// 返回 (total, violation, unhandled, [(camera_id, count)])。
-    pub fn report_summary(
-        &self,
-        start_ts: &str,
-        end_ts: &str,
-    ) -> rusqlite::Result<(i64, i64, i64, Vec<(i64, i64)>)> {
+    pub fn report_summary(&self, start_ts: &str, end_ts: &str) -> rusqlite::Result<ReportSummary> {
         let total: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM events WHERE ts >= ? AND ts <= ?",
             params![start_ts, end_ts],
@@ -1126,11 +1138,14 @@ impl Store {
             "SELECT camera_id, COUNT(*) AS n FROM events WHERE ts >= ? AND ts <= ? \
              AND level >= 2 GROUP BY camera_id ORDER BY n DESC LIMIT 3",
         )?;
-        let rows = stmt.query_map(params![start_ts, end_ts], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
+        let rows = stmt.query_map(params![start_ts, end_ts], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let top: Vec<(i64, i64)> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok((total, violation, unhandled, top))
+        Ok(ReportSummary {
+            total,
+            violation,
+            unhandled,
+            top,
+        })
     }
 
     // ---- LS-054：数据飞轮样本池 ----
@@ -1223,17 +1238,14 @@ impl Store {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s.boxes_json) {
                 if let Some(arr) = v.as_array() {
                     for b in arr {
-                        let cls = b
-                            .get("class")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("unknown");
+                        let cls = b.get("class").and_then(|c| c.as_str()).unwrap_or("unknown");
                         *m.entry(cls.to_string()).or_insert(0) += 1;
                     }
                 }
             }
         }
         let mut out: Vec<(String, i64)> = m.into_iter().collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|a| std::cmp::Reverse(a.1));
         Ok(out)
     }
 
@@ -1274,10 +1286,8 @@ impl Store {
     }
 
     pub fn revoke_share_link(&self, id: i64) -> rusqlite::Result<usize> {
-        self.conn.execute(
-            "UPDATE share_links SET revoked=1 WHERE id=?",
-            params![id],
-        )
+        self.conn
+            .execute("UPDATE share_links SET revoked=1 WHERE id=?", params![id])
     }
 
     /// 按 token hash 查有效链接（未吊销且未过期）。
@@ -2317,7 +2327,15 @@ mod tests {
         let boxes = r#"[{"class":"person","x1":1,"y1":2,"x2":30,"y2":40},
                         {"class":"no_gloves","x1":5,"y1":6,"x2":20,"y2":25}]"#;
         let id = s
-            .add_dataset_sample("event", "7", Some(1), "dataset_pool/event_7.jpg", 1280, 720, boxes)
+            .add_dataset_sample(
+                "event",
+                "7",
+                Some(1),
+                "dataset_pool/event_7.jpg",
+                1280,
+                720,
+                boxes,
+            )
             .unwrap();
         let rows = s.dataset_samples(None, 10).unwrap();
         assert_eq!(rows.len(), 1);
@@ -2338,7 +2356,13 @@ mod tests {
         s.migrate().unwrap();
         let hash = "abc123";
         let id = s
-            .add_share_link("值班", hash, 24, "2026-11-22T10:00:00", "2026-11-23T10:00:00")
+            .add_share_link(
+                "值班",
+                hash,
+                24,
+                "2026-11-22T10:00:00",
+                "2026-11-23T10:00:00",
+            )
             .unwrap();
         // 未过期 → 有效
         assert!(s.share_link_valid(hash, "2026-11-22T12:00:00").unwrap());

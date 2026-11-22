@@ -1,6 +1,7 @@
 // 任务133：api.js 契约测试（mock fetch，零网络）。
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, adminToken, mediaUrl, connectEvents } from '../src/api'
+import { flushPromises } from '@vue/test-utils'
 
 function mockFetch(status, body) {
   const fn = vi.fn().mockResolvedValue({
@@ -25,13 +26,18 @@ describe('adminToken / mediaUrl', () => {
     expect(adminToken.get()).toBe('')
   })
 
-  it('mediaUrl：无 token 原样；有 token 按 ?/& 拼接', () => {
+  it('mediaUrl：令牌只经请求头发送，签名保留原查询参数', async () => {
     expect(mediaUrl('/api/events/1/snapshot')).toBe('/api/events/1/snapshot')
+    const exp = Math.floor(Date.now() / 1000) + 300
+    const fetch = mockFetch(200, { exp, sig: 'sha256=test' })
     adminToken.set('t 1')
-    expect(mediaUrl('/api/events/1/snapshot'))
-      .toBe('/api/events/1/snapshot?token=t%201')
+    expect(mediaUrl('/api/events/1/snapshot')).toBe('')
+    expect(mediaUrl('/api/cameras/1/snapshot?x=1')).toBe('')
+    await flushPromises()
+    expect(fetch.mock.calls[0][1].headers['X-Admin-Token']).toBe('t 1')
+    expect(mediaUrl('/api/events/1/snapshot')).toBe(`/api/events/1/snapshot?exp=${exp}&sig=sha256=test`)
     expect(mediaUrl('/api/cameras/1/snapshot?x=1'))
-      .toBe('/api/cameras/1/snapshot?x=1&token=t%201')
+      .toBe(`/api/cameras/1/snapshot?x=1&exp=${exp}&sig=sha256=test`)
   })
 })
 

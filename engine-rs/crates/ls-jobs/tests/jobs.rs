@@ -483,21 +483,83 @@ fn retry_backoff_is_exponential_and_capped() {
 
 #[test]
 fn report_due_respects_time_and_same_day_dedup() {
-    assert!(!ls_jobs::report_due(false, "18:00", "19:00", "2026-11-22", None));
-    assert!(!ls_jobs::report_due(true, "18:00", "17:59", "2026-11-22", None));
-    assert!(ls_jobs::report_due(true, "18:00", "18:00", "2026-11-22", None));
-    assert!(ls_jobs::report_due(true, "18:00", "19:00", "2026-11-22", Some("2026-11-21")));
-    assert!(!ls_jobs::report_due(true, "18:00", "19:00", "2026-11-22", Some("2026-11-22")));
+    assert!(!ls_jobs::report_due(
+        false,
+        "18:00",
+        "19:00",
+        "2026-11-22",
+        None
+    ));
+    assert!(!ls_jobs::report_due(
+        true,
+        "18:00",
+        "17:59",
+        "2026-11-22",
+        None
+    ));
+    assert!(ls_jobs::report_due(
+        true,
+        "18:00",
+        "18:00",
+        "2026-11-22",
+        None
+    ));
+    assert!(ls_jobs::report_due(
+        true,
+        "18:00",
+        "19:00",
+        "2026-11-22",
+        Some("2026-11-21")
+    ));
+    assert!(!ls_jobs::report_due(
+        true,
+        "18:00",
+        "19:00",
+        "2026-11-22",
+        Some("2026-11-22")
+    ));
 }
 
 #[test]
 fn weekly_due_checks_weekday_and_same_week_dedup() {
     // 周一=1；今天周三=3
-    assert!(!ls_jobs::weekly_due(true, 1, "09:00", 3, "10:00", "2026-11-25", None));
-    assert!(!ls_jobs::weekly_due(true, 1, "09:00", 1, "08:59", "2026-11-23", None));
-    assert!(ls_jobs::weekly_due(true, 1, "09:00", 1, "09:00", "2026-11-23", None));
+    assert!(!ls_jobs::weekly_due(
+        true,
+        1,
+        "09:00",
+        3,
+        "10:00",
+        "2026-11-25",
+        None
+    ));
+    assert!(!ls_jobs::weekly_due(
+        true,
+        1,
+        "09:00",
+        1,
+        "08:59",
+        "2026-11-23",
+        None
+    ));
+    assert!(ls_jobs::weekly_due(
+        true,
+        1,
+        "09:00",
+        1,
+        "09:00",
+        "2026-11-23",
+        None
+    ));
     // 同周已发（周一发过，周三再检查也不发）
-    assert!(!ls_jobs::weekly_due(true, 1, "09:00", 3, "10:00", "2026-11-25", Some("2026-11-23")));
+    assert!(!ls_jobs::weekly_due(
+        true,
+        1,
+        "09:00",
+        3,
+        "10:00",
+        "2026-11-25",
+        Some("2026-11-23")
+    ));
 }
 
 #[test]
@@ -510,4 +572,24 @@ fn report_text_contains_metrics_and_top_cameras() {
     assert!(text.contains("未处置：2"));
     assert!(text.contains("合规率：70%"));
     assert!(text.contains("试剂区（3 次）"));
+}
+
+#[test]
+fn retry_consumer_honors_delay_and_manual_retry_reaches_dead_letter() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("retry.db");
+    let store = Store::open(db_path.to_str().unwrap()).unwrap();
+    store.ensure_schema().unwrap();
+    let id = store.add_delivery(999, "webhook").unwrap();
+    store
+        .update_delivery(id, "failed", 1, Some("test failure"))
+        .unwrap();
+    let jobs = ls_jobs::Jobs::new(
+        db_path.clone(),
+        ls_jobs::JobsConfig::default_for_db(&db_path),
+    );
+    jobs.retry_tick();
+    assert_eq!(store.delivery_by_id(id).unwrap().unwrap().1, "failed");
+    assert!(jobs.retry_now(id).unwrap());
+    assert_eq!(store.delivery_by_id(id).unwrap().unwrap().1, "dead_letter");
 }

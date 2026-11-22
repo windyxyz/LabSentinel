@@ -67,7 +67,8 @@ def main() -> int:
         str(iss),
     ]
     print("ISCC:", cmd, flush=True)
-    r = subprocess.run(cmd, timeout=900)
+    r = subprocess.run(cmd, timeout=900,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     print("rc:", r.returncode)
     if r.returncode != 0:
         return r.returncode

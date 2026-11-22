@@ -109,15 +109,20 @@ pub(crate) async fn go2rtc_configure(
     Json(body): Json<Value>,
 ) -> Response {
     let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) else {
-        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "enabled 必须是布尔值").into_response();
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "enabled 必须是布尔值")
+            .into_response();
     };
-    if let Ok(s) = ls_store::Store::open(&st.db_path) {
-        let _ = s.setting_set("go2rtc.enabled", if enabled { "1" } else { "0" });
+    if ls_store::Store::open(&st.db_path)
+        .and_then(|s| s.setting_set("go2rtc.enabled", if enabled { "1" } else { "0" }))
+        .is_err()
+    {
+        return server_err();
     }
     st.go2rtc.set_enabled(enabled);
     if enabled {
-        let install = crate::deploy::default_install_root();
-        let _ = st.go2rtc.ensure_running(&install, crate::go2rtc::DEFAULT_API);
+        let state = st.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || state.go2rtc.sync_cameras(&state.db_path)).await;
     }
     Json(json!({"ok": true, "status": st.go2rtc.status()})).into_response()
 }
@@ -189,10 +194,9 @@ pub(crate) async fn reports_send_now(State(st): State<Shared>) -> Response {
         return server_err();
     };
     let today = ls_core::time::local_today_iso();
-    let Ok((total, violation, unhandled, top)) = store.report_summary(
-        &format!("{today}T00:00:00"),
-        &format!("{today}T23:59:59"),
-    ) else {
+    let Ok(summary) =
+        store.report_summary(&format!("{today}T00:00:00"), &format!("{today}T23:59:59"))
+    else {
         return server_err();
     };
     let names: std::collections::HashMap<i64, String> = store
@@ -201,7 +205,14 @@ pub(crate) async fn reports_send_now(State(st): State<Shared>) -> Response {
         .into_iter()
         .map(|c| (c.id, c.name))
         .collect();
-    let text = ls_jobs::report_text("日报", total, violation, unhandled, &top, &names);
+    let text = ls_jobs::report_text(
+        "日报",
+        summary.total,
+        summary.violation,
+        summary.unhandled,
+        &summary.top,
+        &names,
+    );
     let channels = st.jobs.alert_channels_snapshot();
     let mut sent = 0;
     let mut errors = Vec::new();
@@ -232,11 +243,12 @@ pub(crate) async fn network_get(State(_st): State<Shared>) -> Response {
     let trusted = crate::envfile::get_key(&content, "LS_TRUSTED_HOSTS").unwrap_or_default();
     let token_set = crate::envfile::get_key(&content, "LS_ADMIN_TOKEN")
         .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
+        .unwrap_or(!_st.admin_token.is_empty());
     Json(json!({
         "lan": host == "0.0.0.0",
         "host": host, "port": port,
         "trusted_hosts": trusted,
+        "read_protected": crate::envfile::get_key(&content, "LS_AUTH_READ_PROTECTED").map_or(_st.read_protected, |v| v == "1" || v.eq_ignore_ascii_case("true")),
         "admin_token_set": token_set,
         "env_path": path.to_string_lossy(),
     }))
@@ -245,6 +257,8 @@ pub(crate) async fn network_get(State(_st): State<Shared>) -> Response {
 
 /// PUT /api/system/network——写 .env（保留旧键/注释），lan=true 强制要求非空令牌。
 pub(crate) async fn network_put(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    static NET_CONFIG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = NET_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     let path = env_path(&st);
     let mut content = std::fs::read_to_string(&path).unwrap_or_default();
     let lan = body.get("lan").and_then(|v| v.as_bool());
@@ -260,14 +274,22 @@ pub(crate) async fn network_put(State(st): State<Shared>, Json(body): Json<Value
         .and_then(|v| v.as_str())
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
-    if body.get("generate_token").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if body
+        .get("generate_token")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         token = Some(crate::envfile::random_token());
     }
     let existing_token = crate::envfile::get_key(&content, "LS_ADMIN_TOKEN")
-        .unwrap_or_default()
+        .unwrap_or_else(|| st.admin_token.clone())
         .trim()
         .to_string();
-    if lan == Some(true) && token.is_none() && existing_token.is_empty() {
+    let read_protected = body.get("read_protected").and_then(Value::as_bool);
+    if (lan == Some(true) || read_protected == Some(true))
+        && token.is_none()
+        && existing_token.is_empty()
+    {
         return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
             "开启局域网访问前必须设置管理令牌（可点「生成强随机令牌」）",
@@ -276,18 +298,33 @@ pub(crate) async fn network_put(State(st): State<Shared>, Json(body): Json<Value
     }
     if let Some(t) = &token {
         if t.len() < 16 || t.contains(['\n', '\r']) {
-            return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "管理令牌至少 16 字符且不含换行")
-                .into_response();
+            return detail_err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "管理令牌至少 16 字符且不含换行",
+            )
+            .into_response();
         }
     }
     if let Some(l) = lan {
-        content = crate::envfile::set_key(&content, "LS_HOST", if l { "0.0.0.0" } else { "127.0.0.1" });
+        content =
+            crate::envfile::set_key(&content, "LS_HOST", if l { "0.0.0.0" } else { "127.0.0.1" });
     }
     if let Some(p) = port {
         content = crate::envfile::set_key(&content, "LS_PORT", &p.to_string());
     }
     if let Some(t) = body.get("trusted_hosts").and_then(|v| v.as_str()) {
+        if t.contains(['\n', '\r']) {
+            return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "可信主机列表不能包含换行")
+                .into_response();
+        }
         content = crate::envfile::set_key(&content, "LS_TRUSTED_HOSTS", t.trim());
+    }
+    if let Some(read) = read_protected.or_else(|| (lan == Some(true)).then_some(true)) {
+        content = crate::envfile::set_key(
+            &content,
+            "LS_AUTH_READ_PROTECTED",
+            if read { "1" } else { "0" },
+        );
     }
     if let Some(t) = &token {
         content = crate::envfile::set_key(&content, "LS_ADMIN_TOKEN", t);
@@ -299,16 +336,37 @@ pub(crate) async fn network_put(State(st): State<Shared>, Json(body): Json<Value
         )
         .into_response();
     }
-    Json(json!({"ok": true, "token": token, "env_path": path.to_string_lossy()}))
-        .into_response()
+    Json(json!({"ok": true, "token": token, "env_path": path.to_string_lossy()})).into_response()
 }
 
 /// POST /api/system/restart——拉起新进程后优雅退出旧进程（.env 已落盘）。
 pub(crate) async fn system_restart(State(st): State<Shared>) -> Response {
-    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("labsentinel-server.exe"));
-    let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--console").collect();
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("labsentinel-server.exe"));
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| matches!(a.as_str(), "--launch" | "--tray"))
+        .collect();
     let mut cmd = std::process::Command::new(&exe);
-    cmd.args(&args);
+    let old_port = std::env::var("LS_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8000);
+    cmd.args(&args)
+        .arg("--wait-for-old-port")
+        .arg(old_port.to_string());
+    let content = std::fs::read_to_string(env_path(&st)).unwrap_or_default();
+    for key in [
+        "LS_HOST",
+        "LS_PORT",
+        "LS_TRUSTED_HOSTS",
+        "LS_ADMIN_TOKEN",
+        "LS_AUTH_READ_PROTECTED",
+    ] {
+        if let Some(value) = crate::envfile::get_key(&content, key) {
+            cmd.env(key, value);
+        }
+    }
     if let Some(dir) = exe.parent() {
         cmd.current_dir(dir);
     }
@@ -317,38 +375,46 @@ pub(crate) async fn system_restart(State(st): State<Shared>) -> Response {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let spawned = cmd.spawn().is_ok();
+    if cmd.spawn().is_err() {
+        return detail_err(StatusCode::INTERNAL_SERVER_ERROR, "无法启动新服务进程").into_response();
+    }
     let st2 = Arc::clone(&st);
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         crate::graceful_shutdown(&st2, "网页重启服务");
     });
-    Json(json!({"ok": true, "spawned": spawned})).into_response()
+    Json(json!({"ok": true, "spawned": true})).into_response()
 }
 
 /// Windows 开机自启：HKCU\...\Run\LabSentinel（免管理员，reg.exe + CREATE_NO_WINDOW）。
+#[cfg(windows)]
 const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
 const AUTOSTART_NAME: &str = "LabSentinel";
 
+#[cfg(windows)]
 fn reg_run(args: &[&str]) -> Result<String, String> {
     let mut cmd = std::process::Command::new("reg");
-    cmd.args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    cmd.args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
     let out = cmd.output().map_err(|e| format!("reg.exe 启动失败: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("reg.exe 退出码: {}", out.status));
+    }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 pub(crate) async fn autostart_get() -> Response {
     #[cfg(windows)]
     {
-        let key = format!("{AUTOSTART_KEY}\\{AUTOSTART_NAME}");
-        let out = reg_run(&["query", &key]).unwrap_or_default();
-        let enabled = out.to_ascii_lowercase().contains("labsentinel");
-        return Json(json!({"supported": true, "enabled": enabled})).into_response();
+        let enabled = reg_run(&["query", AUTOSTART_KEY, "/v", AUTOSTART_NAME]).is_ok();
+        Json(json!({"supported": true, "enabled": enabled})).into_response()
     }
     #[cfg(not(windows))]
     {
@@ -363,19 +429,30 @@ pub(crate) async fn autostart_put(Json(body): Json<Value>) -> Response {
     };
     #[cfg(windows)]
     {
-        let key = format!("{AUTOSTART_KEY}\\{AUTOSTART_NAME}");
         let res = if enabled {
             let exe = std::env::current_exe()
                 .unwrap_or_else(|_| std::path::PathBuf::from("labsentinel-server.exe"));
             let val = format!("\"{}\" --launch --tray", exe.display());
-            reg_run(&["add", &key, "/v", "", "/t", "REG_SZ", "/d", &val, "/f"])
+            reg_run(&[
+                "add",
+                AUTOSTART_KEY,
+                "/v",
+                AUTOSTART_NAME,
+                "/t",
+                "REG_SZ",
+                "/d",
+                &val,
+                "/f",
+            ])
+        } else if reg_run(&["query", AUTOSTART_KEY, "/v", AUTOSTART_NAME]).is_ok() {
+            reg_run(&["delete", AUTOSTART_KEY, "/v", AUTOSTART_NAME, "/f"])
         } else {
-            reg_run(&["delete", &key, "/f"])
+            Ok(String::new())
         };
-        return match res {
+        match res {
             Ok(_) => Json(json!({"supported": true, "enabled": enabled})).into_response(),
             Err(e) => detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response(),
-        };
+        }
     }
     #[cfg(not(windows))]
     {
@@ -387,6 +464,12 @@ pub(crate) async fn autostart_put(Json(body): Json<Value>) -> Response {
 /// LS-055：模型 A/B 对比评测——同一批样本分别用当前模型与候选模型顺序推理，
 /// 返回平均单帧耗时与检出数量（DirectML 会话内部已走 dml_lock 串行）。
 pub(crate) async fn ppe_benchmark(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    tokio::task::spawn_blocking(move || run_ppe_benchmark(&st, &body))
+        .await
+        .unwrap_or_else(|_| server_err())
+}
+
+fn run_ppe_benchmark(st: &Shared, body: &Value) -> Response {
     let candidate = body
         .get("candidate_path")
         .and_then(|v| v.as_str())
@@ -399,7 +482,12 @@ pub(crate) async fn ppe_benchmark(State(st): State<Shared>, Json(body): Json<Val
     let Ok(cand_path) = std::path::Path::new(&candidate).canonicalize() else {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "候选模型路径不存在").into_response();
     };
-    if !cand_path.is_file() {
+    if !cand_path.is_file()
+        || !cand_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("onnx"))
+    {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "候选模型不是文件").into_response();
     }
     // 当前模型路径（env > app_settings > 随包）
@@ -422,7 +510,9 @@ pub(crate) async fn ppe_benchmark(State(st): State<Shared>, Json(body): Json<Val
     let mut images: Vec<(Vec<u8>, u32, u32)> = Vec::new();
     if let Ok(samples) = store.dataset_samples(None, 20) {
         for s in samples {
-            let p = std::path::Path::new(&st.data_dir).join(&s.image_path);
+            let Some(p) = super::dataset::sample_path(st, &s.image_path) else {
+                continue;
+            };
             if let Ok((bgr, w, h)) = ls_ingest::decode_image(&p, 640, 640) {
                 images.push((bgr, w, h));
             }
@@ -434,49 +524,67 @@ pub(crate) async fn ppe_benchmark(State(st): State<Shared>, Json(body): Json<Val
         for y in 0..360usize {
             for x in 0..640usize {
                 let center = (x as i64 - 320).pow(2) + (y as i64 - 180).pow(2) < 80 * 80;
-                bgr.extend_from_slice(if center { &[200, 210, 220] } else { &[80, 60, 40] });
+                bgr.extend_from_slice(if center {
+                    &[200, 210, 220]
+                } else {
+                    &[80, 60, 40]
+                });
             }
         }
         images.push((bgr, 640, 360));
     }
-    let run = |path: &str| -> Result<(f64, usize), String> {
-        let mut model = ls_infer::yolo::YoloModel::load(
-            std::path::Path::new(path),
-            640,
-            0.25,
-            0.5,
-            0.0,
-            None,
-            true,
-        )?;
-        let mut total_ms = 0f64;
-        let mut count = 0usize;
-        for (bgr, w, h) in &images {
-            let t = std::time::Instant::now();
-            if let Ok(dets) = model.detect(bgr, *w, *h) {
-                count += dets.len();
-            }
-            total_ms += t.elapsed().as_secs_f64() * 1000.0;
+    let use_gpu = store.setting_get("infer.use_gpu").ok().flatten().as_deref() != Some("0")
+        && std::env::var("LS_GPU").as_deref() != Ok("0");
+    let run = |path: &std::path::Path| -> Result<Value, String> {
+        let classes = ls_analyzer::ppe::load_class_names(path);
+        if classes.is_empty() {
+            return Err("模型缺少配套 .classes.txt 类名表".into());
         }
-        Ok((total_ms / images.len().max(1) as f64, count))
+        let specs: Vec<_> = (0..classes.len()).map(|index| (index, 0.25, 0.0)).collect();
+        let mut model = ls_infer::yolo::YoloModel::load(path, 640, 0.25, 0.5, 0.0, None, use_gpu)?;
+        let mut total_ms = 0f64;
+        let mut counts = vec![0usize; classes.len()];
+        let mut per_image = Vec::with_capacity(images.len());
+        for (index, (bgr, w, h)) in images.iter().enumerate() {
+            let t = std::time::Instant::now();
+            let detections = model.detect_classes(bgr, *w, *h, &specs)?;
+            let elapsed = t.elapsed().as_secs_f64() * 1000.0;
+            total_ms += elapsed;
+            for (count, boxes) in counts.iter_mut().zip(&detections) {
+                *count += boxes.len();
+            }
+            per_image.push(json!({"index": index + 1, "ms": elapsed,
+                "detections": detections.iter().map(Vec::len).sum::<usize>()}));
+        }
+        let (_, hash) = cached_file_sha256(path).unwrap_or_default();
+        Ok(json!({
+            "avg_ms": total_ms / images.len() as f64,
+            "detections": counts.iter().sum::<usize>(),
+            "classes": classes.iter().zip(counts).map(|(class, count)| json!({"class": class, "count": count})).collect::<Vec<_>>(),
+            "per_image": per_image, "input": model.input_dimensions(), "format": "ONNX", "sha256": hash,
+        }))
     };
-    let current_res = run(&current);
-    let cand_res = run(&cand_path.to_string_lossy());
+    let current_res = run(std::path::Path::new(&current));
+    let cand_res = run(&cand_path);
+    if body.get("activate").and_then(Value::as_bool) == Some(true) && cand_res.is_ok() {
+        if std::env::var("LS_PPE_MODEL").is_ok_and(|p| !p.trim().is_empty()) {
+            return detail_err(StatusCode::CONFLICT, "LS_PPE_MODEL 正在覆盖网页选择")
+                .into_response();
+        }
+        if store
+            .setting_set("ppe_model", &cand_path.to_string_lossy())
+            .is_err()
+            || store.setting_set("ppe.enabled", "1").is_err()
+        {
+            return server_err();
+        }
+        crate::worker::restart_all_running(st, &store);
+    }
     Json(json!({
         "ok": current_res.is_ok() && cand_res.is_ok(),
         "images": images.len(),
-        "current": {
-            "path": current,
-            "avg_ms": current_res.as_ref().map(|r| r.0).unwrap_or(-1.0),
-            "detections": current_res.as_ref().map(|r| r.1).unwrap_or(0),
-            "error": current_res.err(),
-        },
-        "candidate": {
-            "path": cand_path.to_string_lossy(),
-            "avg_ms": cand_res.as_ref().map(|r| r.0).unwrap_or(-1.0),
-            "detections": cand_res.as_ref().map(|r| r.1).unwrap_or(0),
-            "error": cand_res.err(),
-        },
+        "current": current_res.unwrap_or_else(|e| json!({"error": e})),
+        "candidate": cand_res.unwrap_or_else(|e| json!({"error": e})),
     }))
     .into_response()
 }
@@ -493,7 +601,8 @@ pub(crate) async fn share_links_list(State(st): State<Shared>) -> Response {
                 "created_ts": l.created_ts, "expires_ts": l.expires_ts,
                 "revoked": l.revoked, "expired": l.expires_ts <= now,
             })).collect::<Vec<_>>(),
-        })).into_response())
+        }))
+        .into_response())
     })
 }
 
@@ -501,6 +610,13 @@ pub(crate) async fn share_link_create(
     State(st): State<Shared>,
     Json(body): Json<Value>,
 ) -> Response {
+    if st.admin_token.is_empty() || !st.read_protected {
+        return detail_err(
+            StatusCode::CONFLICT,
+            "生成分享链接前，请启用管理令牌与读取保护",
+        )
+        .into_response();
+    }
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
@@ -509,8 +625,11 @@ pub(crate) async fn share_link_create(
         .to_string();
     let ttl = body.get("ttl_hours").and_then(|v| v.as_i64()).unwrap_or(24);
     if !matches!(ttl, 24 | 168 | 720) {
-        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "ttl_hours 仅支持 24/168/720")
-            .into_response();
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "ttl_hours 仅支持 24/168/720",
+        )
+        .into_response();
     }
     let token = crate::envfile::random_token();
     let hash = sha256_hex(token.as_bytes());
@@ -519,11 +638,11 @@ pub(crate) async fn share_link_create(
     let out = with_store(&st, |s| {
         let id = s.add_share_link(&name, &hash, ttl, &created, &expires)?;
         // 复用 devices 读令牌体系：同一 hash 登记为只读设备，读保护下即可访问
-        let _ = s.add_device(&format!("分享:{name}"), "share", &hash);
+        s.add_device(&format!("分享:{name}"), "share", &hash)?;
         Ok(Json(json!({
             "ok": true, "id": id, "token": token,
             "expires_ts": expires,
-            "url": format!("/wall?readonly_token={token}"),
+            "url": format!("/#/wall?readonly_token={token}"),
         }))
         .into_response())
     });
@@ -538,7 +657,9 @@ pub(crate) async fn share_link_delete(
         // 先取 hash 以便同步吊销设备令牌
         let hash: Option<String> = s
             .conn()
-            .query_row("SELECT token_hash FROM share_links WHERE id=?", [id], |r| r.get(0))
+            .query_row("SELECT token_hash FROM share_links WHERE id=?", [id], |r| {
+                r.get(0)
+            })
             .ok();
         let n = s.revoke_share_link(id)?;
         if let Some(h) = hash {
@@ -566,7 +687,10 @@ pub(crate) async fn share_link_verify(
     let hash = sha256_hex(token.as_bytes());
     let valid = ls_store::Store::open(&st.db_path)
         .ok()
-        .and_then(|s| s.share_link_valid(&hash, &ls_core::time::local_now_iso()).ok())
+        .and_then(|s| {
+            s.share_link_valid(&hash, &ls_core::time::local_now_iso())
+                .ok()
+        })
         .unwrap_or(false);
     Json(json!({"valid": valid})).into_response()
 }
@@ -574,13 +698,17 @@ pub(crate) async fn share_link_verify(
 /// GET /api/diagnostics/bundle.zip——脱敏诊断包（版本/系统/GPU/工具探测/配置摘要/近2天日志）。
 pub(crate) async fn diagnostics_bundle(State(st): State<Shared>) -> Response {
     let mut zip = crate::handlers::events::ZipWriter::new();
-    zip.add_file("version.txt", format!("LabSentinel {}\n", st.version).as_bytes());
+    zip.add_file(
+        "version.txt",
+        format!("LabSentinel {}\n", st.version).as_bytes(),
+    );
     let (providers, gpu_active) = (
         json!(["DmlExecutionProvider", "CPUExecutionProvider"]),
         ls_infer::yolo::ep_used(),
     );
     let ffmpeg = ls_core::bin::find("ffmpeg");
-    let go2rtc = crate::go2rtc::Go2rtcSupervisor::resolve_bin(&crate::deploy::default_install_root());
+    let go2rtc =
+        crate::go2rtc::Go2rtcSupervisor::resolve_bin(&crate::deploy::default_install_root());
     let system = json!({
         "version": st.version,
         "os": std::env::consts::OS,
@@ -590,30 +718,30 @@ pub(crate) async fn diagnostics_bundle(State(st): State<Shared>) -> Response {
         "gpu_active": gpu_active,
         "ffmpeg": {"path_found": ffmpeg.is_file(), "file": ffmpeg.file_name().map(|s| s.to_string_lossy().to_string())},
         "go2rtc": {"found": go2rtc.is_some()},
-        "go2rtc_status": st.go2rtc.status(),
+        "go2rtc_running": st.go2rtc.status()["running"],
     });
     zip.add_file(
         "system.json",
-        serde_json::to_string_pretty(&system).unwrap_or_default().as_bytes(),
+        serde_json::to_string_pretty(&system)
+            .unwrap_or_default()
+            .as_bytes(),
     );
     // 配置摘要：敏感键一律 ***
     if let Ok(s) = ls_store::Store::open(&st.db_path) {
         let settings = s.settings_by_prefix("").unwrap_or_default();
         let mut redacted = serde_json::Map::new();
         for (k, v) in settings {
-            let lower = k.to_ascii_lowercase();
-            let sensitive = lower.contains("key")
-                || lower.contains("token")
-                || lower.contains("secret")
-                || lower.contains("password")
-                || lower.contains("passwd")
-                || lower.contains("webhook")
-                || lower.contains("smtp")
-                || lower.contains("api");
-            redacted.insert(
-                k,
-                json!(if sensitive { "***".to_string() } else { v }),
-            );
+            let value = match k.as_str() {
+                "go2rtc.enabled"
+                | "report.daily_enabled"
+                | "report.weekly_enabled"
+                | "perf.motion_gate_enabled"
+                | "ppe_enabled" => Some(matches!(v.as_str(), "1" | "true" | "on")),
+                _ => None,
+            };
+            if let Some(value) = value {
+                redacted.insert(k, json!(value));
+            }
         }
         zip.add_file(
             "config.redacted.json",
@@ -624,23 +752,14 @@ pub(crate) async fn diagnostics_bundle(State(st): State<Shared>) -> Response {
     }
     // 近 2 天日志（按文件名日期倒序取 2 个）
     let logs_dir = std::path::Path::new(&st.data_dir).join("logs");
-    let mut logs: Vec<std::path::PathBuf> = std::fs::read_dir(&logs_dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("server-") && n.ends_with(".log"))
-                        .unwrap_or(false)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    logs.sort();
-    for p in logs.iter().rev().take(2) {
-        if let (Ok(bytes), Some(name)) = (std::fs::read(p), p.file_name().and_then(|n| n.to_str())) {
-            zip.add_file(&format!("logs/{name}"), &bytes);
+    for days in 0..2 {
+        let date = ls_core::time::local_days_ago_date(days).replace('-', "");
+        let name = format!("server-{date}.log");
+        if let Some(path) = rooted_file(&logs_dir, std::path::Path::new(&name)) {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                let clean = redact_diagnostic_log(&raw);
+                zip.add_file(&format!("logs/{name}"), clean.as_bytes());
+            }
         }
     }
     let bytes = zip.finish();
@@ -655,6 +774,36 @@ pub(crate) async fn diagnostics_bundle(State(st): State<Shared>) -> Response {
         bytes,
     )
         .into_response()
+}
+
+fn redact_diagnostic_log(raw: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for line in raw.lines() {
+        let mut parts = line.splitn(3, ' ');
+        let (Some(ts), Some(level)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if ts.len() == 19
+            && ts
+                .bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b':' | b'T'))
+            && matches!(level, "[INFO]" | "[WARN]" | "[ERROR]" | "[PANIC]")
+        {
+            let _ = writeln!(out, "{ts} {level} ***");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[test]
+fn diagnostics_removes_freeform_secrets_including_continuations() {
+    let raw = "2026-11-22T09:00:00 [WARN] rtsp://user:rtsp-secret@host\nSMTP smtp-secret\n2026-11-22T09:10:00 [ERROR] api-secret";
+    assert_eq!(
+        redact_diagnostic_log(raw),
+        "2026-11-22T09:00:00 [WARN] ***\n2026-11-22T09:10:00 [ERROR] ***\n"
+    );
 }
 
 pub(crate) async fn metrics(State(st): State<Shared>) -> Response {
@@ -731,24 +880,29 @@ pub(crate) async fn sign_media(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let path = q.get("path").cloned().unwrap_or_default();
-    if !path.starts_with("/api/") || path.contains('?') || path.contains('#') || path.contains(' ')
-    {
+    if !signed_media_path(&path) {
         return detail_err(
             StatusCode::BAD_REQUEST,
             "path 只能是 /api/ 媒体路径（查询串自行拼接在签名后）",
         )
         .into_response();
     }
-    let ttl = 300i64;
-    let exp = std::time::SystemTime::now()
+    let exp = unix_seconds() + 300;
+    Json(json!({"exp": exp.to_string(), "sig": media_signature(&st, &path, exp)})).into_response()
+}
+
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-        + ttl;
+}
+
+fn media_signature(st: &Shared, path: &str, exp: i64) -> String {
     let msg = format!("{path}|{exp}");
     use hmac::Mac; // trait 方法（update/finalize）需在作用域
     type HmacSha256 = hmac::Hmac<sha2::Sha256>;
-    let mut mac = HmacSha256::new_from_slice(media_secret(&st).as_bytes())
+    let mut mac = HmacSha256::new_from_slice(media_secret(st).as_bytes())
         .expect("HMAC accepts any key length");
     mac.update(msg.as_bytes());
     let sig: String = mac
@@ -757,7 +911,51 @@ pub(crate) async fn sign_media(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Json(json!({"exp": exp.to_string(), "sig": format!("sha256={sig}")})).into_response()
+    format!("sha256={sig}")
+}
+
+fn signed_media_path(path: &str) -> bool {
+    if matches!(
+        path,
+        "/api/folder-images/export.csv"
+            | "/api/export/events.csv"
+            | "/api/export/stats.csv"
+            | "/api/export/monthly.pdf"
+            | "/api/export/evidence.zip"
+    ) {
+        return true;
+    }
+    let Some((group, tail)) = path.strip_prefix("/api/").and_then(|p| p.split_once('/')) else {
+        return false;
+    };
+    let Some((id, media)) = tail.split_once('/') else {
+        return false;
+    };
+    id.parse::<i64>().is_ok()
+        && matches!(
+            (group, media),
+            ("cameras", "snapshot")
+                | ("events", "thumb" | "snapshot" | "video" | "evidence.zip")
+                | ("folder-images", "file" | "thumb")
+        )
+}
+
+pub(crate) fn valid_media_signature(st: &Shared, uri: &axum::http::Uri) -> bool {
+    if !signed_media_path(uri.path()) {
+        return false;
+    }
+    let Ok(Query(query)) = Query::<std::collections::HashMap<String, String>>::try_from_uri(uri)
+    else {
+        return false;
+    };
+    let Some(exp) = query.get("exp").and_then(|s| s.parse::<i64>().ok()) else {
+        return false;
+    };
+    let now = unix_seconds();
+    (now..=now + 300).contains(&exp)
+        && query
+            .get("sig")
+            .is_some_and(|sig| crate::middleware::ct_eq(sig, &media_signature(st, uri.path(), exp)))
 }
 
 fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {

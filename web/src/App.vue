@@ -1,6 +1,6 @@
 <script setup>
-import { onMounted, ref } from 'vue'
-import { api, adminToken } from './api'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { api } from './api'
 import Insights from './views/Insights.vue'
 import Sources from './views/Sources.vue'
 import Events from './views/Events.vue'
@@ -44,55 +44,80 @@ function hashTab() {
 }
 const active = ref(hashTab())
 const showWelcome = ref(true)
+const logoUrl = '/icons/icon-512-app.png'
 // T-709：值班大屏路由（无 vue-router 的轻量判定）——/wall 全屏无导航
 // LS-054：只读值守分享链接——URL 携带 readonly_token 时校验后锁定只读大屏
-const readonly = ref(false)
-function extractReadonlyToken() {
+const shareStatus = ref('')
+function activateShare() {
   // 支持 /wall?readonly_token=... 与 #/wall?readonly_token=...
   const fromSearch = new URLSearchParams(window.location.search).get('readonly_token')
   const hash = window.location.hash
   const qi = hash.indexOf('?')
   const fromHash = qi >= 0 ? new URLSearchParams(hash.slice(qi + 1)).get('readonly_token') : null
-  return (fromSearch || fromHash || sessionStorage.getItem('ls_readonly_token') || '').trim()
+  const token = (fromSearch || fromHash || sessionStorage.getItem('ls_readonly_token') || '').trim()
+  if (token) {
+    sessionStorage.setItem('ls_readonly_token', token)
+    shareStatus.value = 'checking'
+    if (fromSearch || fromHash) window.history.replaceState(null, '', '/#/wall')
+  }
+  return token
 }
-const readonlyToken = extractReadonlyToken()
-if (readonlyToken) {
-  // 读令牌直接放进 adminToken 槽位（只读令牌写操作会被服务端拒绝）
-  adminToken.set(readonlyToken)
-  sessionStorage.setItem('ls_readonly_token', readonlyToken)
-  readonly.value = true
+let readonlyToken = activateShare()
+let shareTimer
+const wallPath = ref(isWallPath())
+const isWall = computed(() => Boolean(shareStatus.value) || wallPath.value)
+function isWallPath() {
+  return location.pathname.replace(/\/+$/, '') === '/wall' || location.hash.split('?')[0] === '#/wall'
 }
-const isWall = readonly.value
-  || window.location.pathname.replace(/\/+$/, '') === '/wall'
 function go(key) {
   active.value = key
   window.history.replaceState(null, '', `#/${key}`)
 }
 // 浏览器前进/后退时同步高亮（replaceState 不产生历史，仅外部 hash 变化触发）
-window.addEventListener('hashchange', () => {
+function onHashChange() {
   normalizeHash()
   active.value = hashTab()
-})
+  wallPath.value = isWallPath()
+  if (new URLSearchParams(location.hash.split('?')[1]).has('readonly_token')) {
+    readonlyToken = activateShare()
+    verifyShare()
+  }
+}
 
 // LS-054：分享令牌有效性校验（过期/吊销则清除只读态并提示）
-onMounted(async () => {
-  if (!readonly.value || !readonlyToken) return
+async function verifyShare() {
+  if (!readonlyToken) return
   try {
     const r = await api.verifyShareLink(readonlyToken)
-    if (!r?.valid) {
-      readonly.value = false
+    if (r?.valid === true) shareStatus.value = 'valid'
+    else {
+      shareStatus.value = 'invalid'
       sessionStorage.removeItem('ls_readonly_token')
-      adminToken.set('')
+      readonlyToken = ''
     }
-  } catch { /* 校验失败：保持只读视图，写操作仍会被服务端拒绝 */ }
+  } catch {
+    shareStatus.value = 'unavailable'
+  }
+}
+onMounted(() => {
+  window.addEventListener('hashchange', onHashChange)
+  verifyShare()
+  shareTimer = setInterval(verifyShare, 15000)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('hashchange', onHashChange)
+  clearInterval(shareTimer)
 })
 </script>
 
 <template>
-  <Wall v-if="isWall" />
+  <div v-if="shareStatus && shareStatus !== 'valid'" class="card" role="status">
+    {{ { checking: '正在验证分享链接…', invalid: '分享链接已过期或被吊销。', unavailable: '暂时无法验证分享链接。' }[shareStatus] }}
+  </div>
+  <Wall v-else-if="isWall" :readonly="shareStatus === 'valid'" />
   <div v-else class="layout">
     <nav>
-      <h1><img class="logo" src="/icons/icon-512-app.png" alt="LabSentinel 图标" />LabSentinel</h1>
+      <h1><img class="logo" :src="logoUrl" alt="LabSentinel 图标" />LabSentinel</h1>
       <a v-for="t in tabs" :key="t.key" :class="{ active: active === t.key }"
          :href="`#/${t.key}`" @click.prevent="go(t.key)">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"

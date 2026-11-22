@@ -36,7 +36,11 @@ pub fn clahe_bgr(bgr: &[u8], w: u32, h: u32, cfg: ClaheConfig) -> Vec<u8> {
     // 1) 灰度 + 块直方图 + 映射表
     let gray: Vec<u8> = (0..w * h)
         .map(|i| {
-            let (b, g, r) = (bgr[i * 3] as u32, bgr[i * 3 + 1] as u32, bgr[i * 3 + 2] as u32);
+            let (b, g, r) = (
+                bgr[i * 3] as u32,
+                bgr[i * 3 + 1] as u32,
+                bgr[i * 3 + 2] as u32,
+            );
             ((77 * b + 150 * g + 29 * r) / 256) as u8
         })
         .collect();
@@ -190,7 +194,10 @@ mod tests {
         assert!(
             (max_out as i32 - min_out as i32) > (max_in as i32 - min_in as i32),
             "CLAHE 应扩大对比度: in {}..{}, out {}..{}",
-            min_in, max_in, min_out, max_out
+            min_in,
+            max_in,
+            min_out,
+            max_out
         );
     }
 

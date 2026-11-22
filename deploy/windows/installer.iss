@@ -15,7 +15,7 @@
 ;   --archive / --rollback；健康检查用 --selftest-http。
 
 #ifndef LsAppVersion
-  #define LsAppVersion "0.4.0"
+  #define LsAppVersion "0.5.0"
 #endif
 #ifndef LsSourceDir
   ; 指向解压后的 Rust 发行包目录（labsentinel-rust-<ver>-<date>.zip 解包结果）

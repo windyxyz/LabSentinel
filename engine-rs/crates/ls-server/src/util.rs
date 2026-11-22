@@ -21,6 +21,15 @@ pub(crate) fn iso_days_ago(days: i64) -> String {
     ls_core::time::local_days_ago_date(days)
 }
 
+pub(crate) fn rooted_file(
+    base: &std::path::Path,
+    path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let base = base.canonicalize().ok()?;
+    let path = base.join(path).canonicalize().ok()?;
+    (path.starts_with(base) && path.is_file()).then_some(path)
+}
+
 /// secrets.token_urlsafe(32) 等价：32 系统熵字节 → base64url（无 padding）
 pub(crate) fn random_token() -> String {
     let mut buf = [0u8; 32];

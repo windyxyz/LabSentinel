@@ -54,7 +54,11 @@ pub fn get_key(content: &str, key: &str) -> Option<String> {
 
 /// 原子写 .env（内容先写 .env.tmp 再 rename）。
 pub fn write_env(path: &Path, content: &str) -> std::io::Result<()> {
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
+    let tmp = PathBuf::from(format!(
+        "{}.{}.tmp",
+        path.display(),
+        crate::util::uuid_like()
+    ));
     std::fs::write(&tmp, content.as_bytes())?;
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
@@ -65,28 +69,11 @@ pub fn write_env(path: &Path, content: &str) -> std::io::Result<()> {
     }
 }
 
-/// 生成强随机令牌（32 字节 hex；零新依赖：用系统时间+进程 id+计数器混合，
-/// 再经 std 的 RandomState 哈希扩散——足以满足局域网管理令牌强度，且不引 rand）。
+/// 生成 256 位系统随机令牌。
 pub fn random_token() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static CTR: AtomicU64 = AtomicU64::new(0);
-    let mut out = String::with_capacity(64);
-    for i in 0..4u64 {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0),
-        );
-        h.write_u64(std::process::id() as u64);
-        h.write_u64(CTR.fetch_add(1, Ordering::Relaxed));
-        h.write_u64(i);
-        out.push_str(&format!("{:016x}", h.finish()));
-    }
-    out
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("system entropy");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

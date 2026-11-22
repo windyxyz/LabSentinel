@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, nextTick, ref } from 'vue'
 import { api, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
+import AnnotatorModal from '../components/AnnotatorModal.vue'
 import AsyncState from '../components/AsyncState.vue'
 
 const rows = ref([])
@@ -197,6 +198,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 // LS-052：键盘快审——J/↓ 下一条、K/↑ 上一条、A 确认、F 误报、I 忽略、Space 播放/暂停、Esc 关闭。
 // 焦点在 input/textarea/select 时不触发（避免误伤搜索框/下拉）。
 function onKey(e) {
+  if (annotation.value) return
   if (e.key === 'Escape') {
     if (zoom.value) { zoom.value = null }
     else if (videoZoom.value !== null) { videoZoom.value = null }
@@ -236,13 +238,15 @@ function onKey(e) {
 // LS-054：事件截图一键加入标注池（AI 预标注）
 const poolBusy = ref(false)
 const poolMsg = ref('')
+const annotation = ref(null)
 async function addToPool(e) {
   if (!e?.id) return
   poolBusy.value = true
   poolMsg.value = ''
   try {
     const r = await api.datasetFromEvent(e.id)
-    poolMsg.value = `已加入标注池（样本 #${r.id}，可在 设置→数据管理 标注）`
+    if (r?.sample?.id) annotation.value = r.sample
+    else poolMsg.value = `已加入标注池（样本 #${r.id}）`
   } catch (err) { poolMsg.value = String(err.message || err) }
   poolBusy.value = false
 }
@@ -499,6 +503,8 @@ async function mark(e, status) {
   <div v-if="videoZoom !== null" style="position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="videoZoom = null">
     <video :src="mediaUrl(`/api/events/${videoZoom}/video`)" controls autoplay aria-label="事件视频回放" style="max-width:92vw; max-height:92vh" @click.stop />
   </div>
+  <AnnotatorModal v-if="annotation" :sample="annotation" :image-url="`/api/dataset/samples/${annotation.id}/image`"
+    @close="annotation = null" @saved="annotation = null" />
 </template>
 
 <style>

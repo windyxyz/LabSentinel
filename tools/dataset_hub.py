@@ -50,7 +50,8 @@ def resolve_url(entry: dict, hf_endpoint: str | None = None) -> str | None:
         file = entry.get("file", "")
         if not repo or not file:
             raise ValueError(f"huggingface 条目缺少 repo/file: {entry.get('name')}")
-        return f"{base}/{repo}/resolve/main/{file}"
+        prefix = "" if entry.get("kind") == "model" else "datasets/"
+        return f"{base}/{prefix}{repo}/resolve/main/{urllib.parse.quote(file)}"
     if t == "roboflow":
         # Roboflow 需要 API Key：仅拼接导出页，实际下载交给用户浏览器
         return entry.get("url")
@@ -73,23 +74,28 @@ def download(entry: dict, out_dir: Path, hf_endpoint: str | None = None) -> Path
         local = ROOT / entry.get("path", "")
         print(f"[local] {name}: {local}")
         return local
+    if entry.get("type") == "roboflow":
+        raise SystemExit(f"请在 Roboflow 导出 YOLO ZIP（需要账户），或使用已有本地副本：{url}")
+    if urllib.parse.urlsplit(url).scheme != "https":
+        raise ValueError("下载地址必须使用 HTTPS")
     suffix = Path(urllib.parse.urlsplit(url).path).suffix or ".bin"
     dest = out_dir / f"{name}{suffix}"
     tmp = dest.with_suffix(dest.suffix + ".part")
     print(f"[download] {name} <- {url}")
-    with urllib.request.urlopen(url, timeout=60) as r, tmp.open("wb") as f:
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-    want = (entry.get("sha256") or "").lower()
-    if want:
-        got = sha256_file(tmp)
-        if got != want:
-            tmp.unlink(missing_ok=True)
-            raise SystemExit(f"[失败] sha256 不匹配: {got} != {want}")
-    tmp.replace(dest)
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r, tmp.open("wb") as f:
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+            expected = r.headers.get("Content-Length")
+        size = tmp.stat().st_size
+        if not size or (expected and size != int(expected)):
+            raise ValueError("下载文件为空或未完整接收")
+        want = (entry.get("sha256") or "").lower()
+        if want and sha256_file(tmp) != want:
+            raise ValueError("下载文件 SHA256 不匹配")
+        tmp.replace(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     print(f"[ok] {dest}（{dest.stat().st_size / 1048576:.1f} MB）")
     return dest
 

@@ -10,17 +10,17 @@ name = "labsentinel-server"
 path = "src/main.rs"
 
 [dependencies]
-ls-store = { version = "0.1.0", path = "../ls-store" }
-ls-dispatch = { version = "0.1.0", path = "../ls-dispatch" }
-ls-core = { version = "0.1.0", path = "../ls-core" }
-ls-jobs = { version = "0.1.0", path = "../ls-jobs" }
+ls-store = { path = "../ls-store" }
+ls-dispatch = { path = "../ls-dispatch" }
+ls-core = { path = "../ls-core" }
+ls-jobs = { path = "../ls-jobs" }
 # RA1（ADR-0011）：进程内分析 worker——复用 ls-analyzer lib 目标的
 # pipeline（Candidate/规则）与 evidence（存证环/encode_mp4）；
 # ls-ingest 供 worker 生命周期（Ingest/ChildSlot ffmpeg 托管）
-ls-analyzer = { version = "0.1.0", path = "../ls-analyzer" }
+ls-analyzer = { path = "../ls-analyzer" }
 # UX（2026-11-21）：EP_USED 实际推理设备上报（/api/system gpu_active）
-ls-infer = { version = "0.1.0", path = "../ls-infer" }
-ls-ingest = { version = "0.1.0", path = "../ls-ingest" }
+ls-infer = { path = "../ls-infer" }
+ls-ingest = { path = "../ls-ingest" }
 axum = { version = "0.7", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-tungstenite = "0.24"

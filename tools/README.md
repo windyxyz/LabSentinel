@@ -207,15 +207,19 @@ D:/LabSentinel/gpu-venv/Scripts/python.exe tools/train_ppe.py \
 
 ## 十、v0.5.0 数据飞轮流水线（LS-056）
 
+在训练环境中安装 Pillow、PyYAML、Ultralytics、Albumentations 和 ONNX Runtime。导出 FP16 另需 `onnxconverter-common`。产品安装包包含 Rust 推理所需的运行库。 [ONNX Runtime FP16 文档](https://onnxruntime.ai/docs/performance/model-optimizations/float16.html)
+
 ```bash
 # 0) 网页端：事件详情/文件夹详情 →「快速标注（加入标注池）」→ 设置→数据管理→标注→导出 YOLO 训练集 ZIP
 
 # 1) 查看/下载公开数据集与现成权重（HF 镜像免 Key）
 python tools/dataset_hub.py list
 HF_ENDPOINT=https://hf-mirror.com python tools/dataset_hub.py download hf-ppe-detection --out Resources/datasets/_downloads
+# PowerShell 下设置 $env:HF_ENDPOINT = 'https://hf-mirror.com' 后运行同一下载命令。
+# 先解压下载的 hf-ppe-detection.zip。--src 指向包含 YOLO YAML 的解压目录。
 
 # 2) 清洗合并：统一类别词表 + 坏图/越界框剔除 + MD5 去重 + 1:3 混合
-python tools/merge_datasets.py --src pub=Resources/datasets/_downloads/hf-ppe-detection \
+python tools/merge_datasets.py --src pub=<已解压的公开数据集目录> \
     --user-zip ~/Downloads/labsentinel-yolo-dataset.zip --mix-ratio 1:3 \
     --out Resources/datasets/_mixed
 
@@ -225,13 +229,15 @@ python tools/train_ppe.py --arch yolo11n --data Resources/datasets/_mixed/data.y
 
 # 4) 导出 FP32/FP16 ONNX（自动生成 classes.txt 与 SHA256）
 python tools/export_onnx.py --weights Resources/runs/detect/runs/ppe_v2/weights/best.pt \
-    --out m0-spike/yolo11n_ppe_v2.onnx [--half]
+    --data Resources/datasets/_mixed/data.yaml --out m0-spike/yolo11n_ppe_v2.onnx --half
 
 # 5) A/B 对比（mAP50/耗时/灰度召回，Markdown 表）
 python tools/eval_report.py --old m0-spike/yolo11n_ppe.onnx --new m0-spike/yolo11n_ppe_v2.onnx \
-    --data Resources/datasets/_mixed/data.yaml --out Resources/runs/eval-v2.md
+    --data <独立验证集的data.yaml> --gray-data <灰度子集的data.yaml> --out Resources/runs/eval-v2.md
 
 # 6) 网页端：设置→模型与检测→本地模型→上传替换（或「对比评测」先看差异）
 ```
 
-离线单测：`python -m unittest discover -s tools/tests -v`（不联网、不依赖 ultralytics）。
+公开数据源和署名见 [Hugging Face PPE Detection](https://huggingface.co/datasets/51ddhesh/PPE_Detection) 与 [Ultralytics Construction-PPE](https://docs.ultralytics.com/datasets/detect/construction-ppe)。
+
+离线单测使用 Pillow 生成样本，可运行 `python -m unittest discover -s tools/tests -v`。

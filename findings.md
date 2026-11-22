@@ -31,3 +31,11 @@
 - GPU 默认开启走 DirectML（跨厂商通用，失败回落 CPU），但必须受 `DML_LOCK` 串行保护。
 - 提交者统一 `windyxyz <siyuan060203@163.com>`，远端只保留 `main`；发布双产物 `zip` + Inno Setup 7 `setup.exe`；PPE 随包分发；卸载干净且默认保留用户数据。
 - 中文路径坑：`CARGO_TARGET_DIR=C:\Users\User\devtools\ls-target`（纯 ASCII），`PATH` 前插 `w64devkit\bin` 与 `.cargo\bin`，配齐 `RUSTFLAGS`。
+
+## 4. v0.5.0 本机复验发现
+
+- ONNX Runtime rc.15 每进程只允许创建一个环境。PPE A/B 评测与多路 worker 必须复用该进程级环境。DirectML 会话创建、运行和释放继续走 `dml_lock()`。
+- 随包 go2rtc 1.9.15 使用 `-c` 读取内联配置。流名采用 `cam_<id>`。使用内联配置时，流已在内存注册或注销，持久化步骤仍返回 `config file disabled`。
+- 随包 FFmpeg 读取 JPEG 存证帧序列时显式指定 MJPEG 解码器，避免短图像序列探测失败。
+- 诊断包按允许列表导出配置项，并保留日志时间和级别。日志正文可携带第三方端点凭证及用户输入，因此统一脱敏。
+- 只读值守分享需要先启用管理令牌和读取保护。模板数据与真实现场样本应分开验证，工业 PPE 数据的类别覆盖与实验室现场不同。

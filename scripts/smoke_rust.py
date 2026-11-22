@@ -100,7 +100,8 @@ def main() -> int:
             except (OSError, ValueError) as e:
                 last = f"{type(e).__name__}"
             time.sleep(1)
-        print(f"[{'PASS' if ok3 else 'FAIL'}] 3 就绪 —— {last or 'ready'}")
+        readiness = "ready" if ok3 else (last or "timeout")
+        print(f"[{'PASS' if ok3 else 'FAIL'}] 3 就绪 —— {readiness}")
         ok_all &= ok3
 
         # [4] /api/system：backend=rust + version 精确匹配包内 VERSION + PPE 状态可达

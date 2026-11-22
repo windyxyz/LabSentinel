@@ -1,3 +1,5 @@
+import { ref } from 'vue'
+
 const BASE = ''
 
 // 管理令牌（任务16）：localStorage 持久化，启用鉴权的服务端要求写操作携带 X-Admin-Token
@@ -6,9 +8,28 @@ export const adminToken = {
   set: (v) => v ? localStorage.setItem('admin_token', v) : localStorage.removeItem('admin_token'),
 }
 
-// T-108（S-07）：签名媒体 URL——令牌不再进 URL/日志。按路径缓存签名参数（页面内复用），
-// 首次同步返回带旧 ?token= 的兼容 URL，签名到达后触发自定义事件让视图刷新（异步收尾）。
+export const requestToken = () => sessionStorage.getItem('ls_readonly_token') || adminToken.get()
+
+export async function fetchBinary(path) {
+  const token = requestToken()
+  const headers = token ? { 'X-Admin-Token': token } : {}
+  const response = await fetch(path, { headers, cache: 'no-store' })
+  if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`)
+  return response.blob()
+}
+
+export async function downloadBinary(path, filename) {
+  const url = URL.createObjectURL(await fetchBinary(path))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+// 按身份与媒体路径缓存短期签名，签名就绪后更新引用它的视图。
 const _sigCache = new Map()
+const signatureVersion = ref(0)
 
 // RA5-UX：Welcome 引导向导完成标记（localStorage；跳过/完成均写入不再弹出）
 export const setupDone = {
@@ -17,32 +38,34 @@ export const setupDone = {
 }
 export function mediaUrl(path) {
   if (!path || typeof path !== 'string') return ''
-  const t = adminToken.get()
+  const t = requestToken()
   if (!t) return path
+  void signatureVersion.value
   const base = path.split('?')[0]
+  const key = `${t}\n${base}`
   const extra = path.includes('?') ? '&' + path.split('?').slice(1).join('&') : ''
-  const hit = _sigCache.get(base)
+  const hit = _sigCache.get(key)
   if (hit && Number(hit.exp) > Date.now() / 1000 + 5) {
     return base + (extra ? '?' + extra.slice(1) : '') + (extra ? '&' : '?') + 'exp=' + hit.exp + '&sig=' + hit.sig
   }
   // 异步批量签名（并发同路径只发一次）
-  if (!_sigCache.has(base)) {
-    _sigCache.set(base, { exp: 0, sig: '' })
+  if (!hit || hit.exp) {
+    _sigCache.set(key, { exp: 0, sig: '' })
     req('GET', '/api/media/sign?path=' + encodeURIComponent(base))
       .then((r) => {
-        _sigCache.set(base, { exp: r.exp, sig: r.sig })
-        window.dispatchEvent(new CustomEvent('ls-media-signed', { detail: { base } }))
+        if (!Number.isFinite(Number(r?.exp)) || typeof r?.sig !== 'string') throw new Error('无效的媒体签名')
+        _sigCache.set(key, { exp: r.exp, sig: r.sig })
+        signatureVersion.value++
       })
-      .catch(() => _sigCache.delete(base))
+      .catch(() => _sigCache.delete(key))
   }
-  // 签名未到达前回退旧 ?token=（LS_ALLOW_URL_TOKEN=0 时这类 URL 会 401，签名到达后自愈）
-  return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(t)
+  return ''
 }
 
 async function req(method, path, body) {
   const isForm = body instanceof FormData
   const headers = body && !isForm ? { 'Content-Type': 'application/json' } : {}
-  const token = adminToken.get()
+  const token = requestToken()
   if (token) headers['X-Admin-Token'] = token
   const r = await fetch(BASE + path, {
     method,
@@ -164,7 +187,7 @@ export const api = {
   },
   ppeReset: () => req('POST', '/api/models/ppe/reset', {}),
   // LS-055：模型 A/B 对比评测
-  ppeBenchmark: (candidate_path) => req('POST', '/api/models/ppe/benchmark', { candidate_path }),
+  ppeBenchmark: (candidate_path, activate = false) => req('POST', '/api/models/ppe/benchmark', { candidate_path, activate }),
   // 0.4.0：API 多接入档案（保存多个上游，随时切换/测试/自动拉模型）
   detectProfiles: () => req('GET', '/api/detect/profiles'),
   saveDetectProfile: (p) => req('POST', '/api/detect/profiles', p),
@@ -184,7 +207,7 @@ export const api = {
   // 任务79：配置导入导出（导出走 fetch+blob，令牌经请求头传递；<a> 裸链接带不了）
   async configExportDownload() {
     const headers = {}
-    const token = adminToken.get()
+    const token = requestToken()
     if (token) headers['X-Admin-Token'] = token
     const r = await fetch('/api/config/export', { headers })
     if (!r.ok) {
@@ -240,7 +263,7 @@ export function connectEvents(onEvent, onState) {
     if (closed) return
     // T-106/T-201：令牌走 Sec-WebSocket-Protocol 子协议（不进 URL/日志），
     // 服务端口径与 HTTP 读一致（auth_read_protected 开启才要求令牌）。
-    const t = adminToken.get()
+    const t = requestToken()
     const protos = t ? ['labsentinel', 'bearer.' + t] : undefined
     ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/events', protos)
     ws.onopen = () => onState && onState('ok')

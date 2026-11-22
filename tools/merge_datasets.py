@@ -61,8 +61,8 @@ DEFAULT_MAP = {
 }
 
 
-def normalize_class(name: str, mapping: dict[str, str] | None = None) -> str:
-    """别名 → 标准词；未知类回退 person（避免训练集出现非法类）。"""
+def normalize_class(name: str, mapping: dict[str, str] | None = None) -> str | None:
+    """别名 → 标准词；跳过项目词表之外的类别。"""
     key = name.strip().lower().replace("-", "_")
     table = {**DEFAULT_MAP, **(mapping or {})}
     # 先按原样、再按下划线/空格归一化查
@@ -71,7 +71,7 @@ def normalize_class(name: str, mapping: dict[str, str] | None = None) -> str:
             return table[k]
     if key in CANONICAL:
         return key
-    return "person"
+    return None
 
 
 def parse_label_line(line: str) -> tuple[int, float, float, float, float] | None:
@@ -93,17 +93,19 @@ def valid_box(cx: float, cy: float, w: float, h: float) -> bool:
         return False
     if not (0 < w <= 1 + eps and 0 < h <= 1 + eps):
         return False
-    return True
+    return (cx - w / 2 >= -eps and cy - h / 2 >= -eps
+            and cx + w / 2 <= 1 + eps and cy + h / 2 <= 1 + eps)
 
 
 def is_readable_image(path: Path) -> bool:
-    """按文件头判断 JPEG/PNG（避免引入 Pillow 依赖）。"""
+    """解码整个图像，剔除首部正常但像素损坏的样本。"""
+    from PIL import Image
     try:
-        with path.open("rb") as f:
-            head = f.read(8)
-    except OSError:
+        with Image.open(path) as img:
+            img.load()
+    except (OSError, ValueError, Image.DecompressionBombError):
         return False
-    return head.startswith(b"\xff\xd8") or head.startswith(b"\x89PNG")
+    return True
 
 
 def md5_file(path: Path) -> str:
@@ -134,9 +136,11 @@ def load_yolo_dir(root: Path, mapping: dict[str, str] | None = None) -> list[Sam
             lab = labels_dir / rel.with_suffix(".txt")
             pairs.append((img, lab if lab.is_file() else None))
     else:
-        for img in sorted(root.glob("*")):
-            if img.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp"):
-                pairs.append((img, img.with_suffix(".txt")))
+        splits = [root / split for split in ("train", "val", "valid", "test") if (root / split / "images").is_dir()]
+        if splits:
+            return [sample for split in splits for sample in load_yolo_dir(split)]
+        pairs = [(img, img.with_suffix(".txt")) for img in sorted(root.glob("*"))
+                 if img.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")]
     for img, lab in pairs:
         if not is_readable_image(img):
             continue
@@ -166,9 +170,11 @@ def remap_class_ids(samples: list[Sample], class_names: list[str], mapping: dict
                 src = int(float(parts[0]))
             except (IndexError, ValueError):
                 continue
-            name = class_names[src] if 0 <= src < len(class_names) else "person"
-            dst = std_index[normalize_class(name, mapping)]
-            new_lines.append(" ".join([str(dst)] + parts[1:]))
+            if not 0 <= src < len(class_names):
+                continue
+            name = normalize_class(class_names[src], mapping)
+            if name in std_index:
+                new_lines.append(" ".join([str(std_index[name])] + parts[1:]))
         s.lines = new_lines
     return samples
 
@@ -205,8 +211,9 @@ def write_dataset(samples: list[Sample], out: Path, val_ratio: float = 0.2) -> d
     n_train = n_val = 0
     for i, s in enumerate(samples):
         split = "val" if i % max(1, round(1 / val_ratio)) == 0 else "train"
-        dst_img = out / "images" / split / s.image.name
-        dst_lab = out / "labels" / split / (s.image.stem + ".txt")
+        stem = f"{i:06d}_{s.image.stem}"
+        dst_img = out / "images" / split / (stem + s.image.suffix)
+        dst_lab = out / "labels" / split / (stem + ".txt")
         shutil.copy2(s.image, dst_img)
         dst_lab.write_text("\n".join(s.lines), encoding="utf-8")
         if split == "val":
@@ -230,6 +237,20 @@ def extract_user_zip(zip_path: Path, out_dir: Path) -> Path:
     return out_dir
 
 
+def class_names(root: Path) -> list[str]:
+    classes = root / "classes.txt"
+    if classes.is_file():
+        return classes.read_text(encoding="utf-8-sig").splitlines()
+    yaml_file = next(iter(sorted(root.glob("*.yaml"))), None)
+    if yaml_file is None:
+        raise ValueError(f"{root}: 缺少 classes.txt 或 YOLO YAML 类表")
+    import yaml
+    names = yaml.safe_load(yaml_file.read_text(encoding="utf-8-sig"))["names"]
+    if isinstance(names, dict):
+        return [str(names.get(i, "")) for i in range(max(names, default=-1) + 1)]
+    return list(names)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="多源 YOLO 数据集清洗与合并")
     ap.add_argument("--src", action="append", default=[], help="name=path（可多次）")
@@ -241,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
 
     mapping = json.loads(Path(args.map).read_text(encoding="utf-8")) if args.map else None
     out = Path(args.out)
+    if (out / "data.yaml").exists():
+        ap.error("--out 已包含训练集，请指定新的输出目录")
     all_public: list[Sample] = []
     for spec in args.src:
         if "=" not in spec:
@@ -248,12 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         _, path = spec.split("=", 1)
         root = Path(path)
-        classes_file = root / "classes.txt"
-        names = (
-            classes_file.read_text(encoding="utf-8").splitlines()
-            if classes_file.is_file()
-            else CANONICAL
-        )
+        names = class_names(root)
         samples = remap_class_ids(load_yolo_dir(root), names, mapping)
         print(f"[load] {root}: {len(samples)} 张")
         all_public.extend(samples)

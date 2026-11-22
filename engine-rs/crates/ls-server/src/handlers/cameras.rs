@@ -18,7 +18,7 @@ pub(crate) async fn cameras(State(st): State<Shared>) -> Response {
             rows.iter()
                 .map(|c| {
                     json!({"id": c.id, "name": c.name,
-            "source": c.source, "type": c.type_, "status": c.status,
+            "source": redact_camera_source(&c.source), "type": c.type_, "status": c.status,
             "group_name": c.group_name, "analyzer": c.analyzer})
                 })
                 .collect::<Vec<_>>(),
@@ -26,6 +26,17 @@ pub(crate) async fn cameras(State(st): State<Shared>) -> Response {
         .into_response(),
         Err(_) => server_err(),
     }
+}
+
+fn redact_camera_source(source: &str) -> String {
+    let Some((scheme, rest)) = source.split_once("://") else {
+        return source.to_string();
+    };
+    let host = rest.split('/').next().unwrap_or(rest);
+    if let Some((_, suffix)) = host.rsplit_once('@') {
+        return format!("{scheme}://***@{suffix}{}", &rest[host.len()..]);
+    }
+    source.to_string()
 }
 
 pub(crate) async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i64>) -> Response {
@@ -110,6 +121,9 @@ pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>
             Ok(id) => {
                 if !group_name.is_empty() {
                     let _ = s.set_camera_group(id, group_name);
+                }
+                if type_ == "rtsp" && !autostart {
+                    st.go2rtc.sync_camera(id, Some(&source));
                 }
                 let mut status = "stopped";
                 if autostart {
@@ -268,10 +282,13 @@ pub(crate) async fn ws_webrtc(
         )
         .into_response();
     }
+    if !super::events::ws_read_allowed(&st, &headers) {
+        return detail_err(StatusCode::UNAUTHORIZED, "实时画面鉴权失败").into_response();
+    }
     let exists = ls_store::Store::open(&st.db_path)
         .ok()
         .and_then(|s| s.camera(cid).ok().flatten())
-        .is_some();
+        .is_some_and(|c| c.type_ == "rtsp");
     if !exists {
         return detail_err(StatusCode::NOT_FOUND, "camera not found").into_response();
     }
@@ -591,6 +608,7 @@ pub(crate) async fn delete_camera(State(st): State<Shared>, AxPath(cid): AxPath<
     crate::worker::stop_worker(&st, cid);
     with_store(&st, |s| {
         s.delete_camera(cid)?;
+        st.go2rtc.sync_camera(cid, None);
         Ok(Json(json!({"ok": true})).into_response())
     })
 }

@@ -94,13 +94,13 @@ pub(crate) async fn deliveries_list(
 }
 
 pub(crate) async fn retry_delivery(State(st): State<Shared>, AxPath(did): AxPath<i64>) -> Response {
-    with_store(&st, |s| {
-        if s.retry_delivery(did)? {
-            Ok(Json(json!({"ok": true})).into_response())
-        } else {
-            Ok(detail_err(StatusCode::NOT_FOUND, "delivery not found").into_response())
+    match tokio::task::spawn_blocking(move || st.jobs.retry_now(did)).await {
+        Ok(Ok(true)) => Json(json!({"ok": true})).into_response(),
+        Ok(Ok(false)) => {
+            detail_err(StatusCode::NOT_FOUND, "delivery not found or already sent").into_response()
         }
-    })
+        _ => server_err(),
+    }
 }
 
 pub(crate) async fn silences_list(

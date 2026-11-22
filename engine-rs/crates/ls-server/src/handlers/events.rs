@@ -156,7 +156,13 @@ pub(crate) fn serve_event_media(
         Ok(s) => match s.event_by_id(eid) {
             Ok(Some(ev)) => {
                 let rel = col(&ev).clone().unwrap_or_default();
-                let p = std::path::Path::new(&st.data_dir).join(&rel);
+                let Some(p) = rooted_file(
+                    std::path::Path::new(&st.data_dir),
+                    std::path::Path::new(&rel),
+                ) else {
+                    return detail_err(StatusCode::NOT_FOUND, "media file not found")
+                        .into_response();
+                };
                 match std::fs::read(&p) {
                     Ok(bytes) => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
                     Err(_) => {
@@ -195,7 +201,12 @@ pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i6
     let Some(rel) = ev.snapshot.clone().filter(|s| !s.is_empty()) else {
         return detail_err(StatusCode::NOT_FOUND, "event has no snapshot").into_response();
     };
-    let src = std::path::Path::new(&st.data_dir).join(rel);
+    let Some(src) = rooted_file(
+        std::path::Path::new(&st.data_dir),
+        std::path::Path::new(&rel),
+    ) else {
+        return detail_err(StatusCode::NOT_FOUND, "snapshot file not found").into_response();
+    };
     // 320×180 解码缩放（ffmpeg 自带 CREATE_NO_WINDOW，见 ls_ingest::decode_image）
     let Ok((bgr, w, h)) = ls_ingest::decode_image(&src, 320, 180) else {
         // 缩略图失败时回退原图（功能降级但列表仍可见）
@@ -206,11 +217,12 @@ pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i6
     };
     if std::fs::create_dir_all(&dir).is_ok() {
         // 原子写：先写 .tmp 再改名，避免并发读到半截文件
-        let tmp = dir.join(format!("ev_{eid}.jpg.tmp"));
-        if std::fs::write(&tmp, &jpeg).is_ok() {
-            if std::fs::rename(&tmp, &cache).is_err() {
-                let _ = std::fs::remove_file(&tmp);
-            }
+        let tmp = dir.join(format!("ev_{eid}_{}.jpg.tmp", uuid_like()));
+        if std::fs::write(&tmp, &jpeg)
+            .and_then(|()| std::fs::rename(&tmp, &cache))
+            .is_err()
+        {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
     ([(header::CONTENT_TYPE, "image/jpeg")], jpeg).into_response()
@@ -275,6 +287,13 @@ fn headers_host(headers: &axum::http::HeaderMap) -> String {
         .to_string()
 }
 
+pub(super) fn ws_read_allowed(st: &Shared, headers: &axum::http::HeaderMap) -> bool {
+    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
+    ws_origin_ok(origin, &headers_host(headers), &st.allowed_origins)
+        && (!st.read_protected
+            || crate::middleware::check_read_token(st, ws_token(headers).as_deref()))
+}
+
 /// LS-051：`/ws/detections/:cid` 实时检测元数据广播（受 trusted_hosts + 读令牌守卫，
 /// 与 `/ws/events` 同鉴权口径）。客户端慢消费时 `handle_ws` 的 Lagged 自动丢弃，
 /// 不阻塞推理线程。
@@ -288,14 +307,12 @@ pub(crate) async fn ws_detections(
     if !ws_origin_ok(origin, &headers_host(&headers), &st.allowed_origins) {
         return (StatusCode::FORBIDDEN, "WS Origin 校验失败").into_response();
     }
-    if st.read_protected
-        && !crate::middleware::check_read_token(&st, ws_token(&headers).as_deref())
+    if st.read_protected && !crate::middleware::check_read_token(&st, ws_token(&headers).as_deref())
     {
         return (StatusCode::UNAUTHORIZED, "WS 读令牌校验失败").into_response();
     }
     // 只订阅本路相机：broadcast 全量帧，客户端按 camera_id 过滤（实现简单、零锁竞争）
     let rx = st.detections_tx.subscribe();
-    let _ = cid; // 路径参数已鉴权；CID 过滤在 handle_detections_ws 内按 JSON 字段做
     ws.protocols(["labsentinel"])
         .on_upgrade(move |socket| handle_detections_ws(socket, rx, cid))
 }

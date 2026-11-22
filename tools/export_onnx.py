@@ -1,4 +1,4 @@
-"""把训练好的 best.pt 导出为 FP32 ONNX（opset 13，imgsz 640），供 DirectML/NPU/CPU 推理。
+"""把训练好的 best.pt 导出为 ONNX（opset 13，imgsz 640），供 LabSentinel 推理。
 
 默认: m0-spike/yolo11n_ppe.pt -> m0-spike/yolo11n_ppe.onnx（server/.env 的 LS_PPE_MODEL 指向它）。
 导出后打印 10 类别顺序——PPE 引擎（PpeEngine）按类别名匹配，依赖 data.yaml 的 names 顺序。
@@ -43,6 +43,8 @@ def parse_args():
                     help="跳过导出后的 onnxruntime 输入形状验证")
     ap.add_argument("--half", action="store_true",
                     help="LS-056：导出 FP16 ONNX（DirectML FP16 提速；CPU 推理需 EP 支持）")
+    ap.add_argument("--arch", choices=["yolo", "rtdetr"], default="yolo",
+                    help="输入权重架构（默认 yolo）")
     return ap.parse_args()
 
 
@@ -55,6 +57,8 @@ def check_names(names: dict, data_yaml: str):
     with open(data_yaml, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     yaml_names = cfg.get("names")
+    if isinstance(yaml_names, dict):
+        yaml_names = [yaml_names[i] for i in sorted(yaml_names)]
     model_names = [names.get(i) for i in range(len(names))]
     if model_names == yaml_names:
         print(f"[verify] 类别顺序与 {data_yaml} 的 names 完全一致（{len(model_names)} 类）")
@@ -70,14 +74,17 @@ def main():
 
     # 依赖预检（AutoUpdate 已关闭，缺包时手动安装，勿污染 venv）
     import importlib.util
-    missing = [m for m in ("onnx", "onnxslim") if importlib.util.find_spec(m) is None]
+    required = ["onnx", "onnxslim"]
+    if args.half:
+        required.append("onnxconverter_common")
+    missing = [m for m in required if importlib.util.find_spec(m) is None]
     if missing:
         sys.exit(f"[error] 缺少依赖 {missing}，请手动安装（勿让 ultralytics 自动装 onnxruntime，与 directml 互斥）:\n"
                  f"        {sys.executable} -m pip install {' '.join(missing)} -i https://pypi.tuna.tsinghua.edu.cn/simple")
 
-    from ultralytics import YOLO
+    from ultralytics import RTDETR, YOLO
 
-    model = YOLO(str(weights))
+    model = RTDETR(str(weights)) if args.arch == "rtdetr" else YOLO(str(weights))
     names = model.names
     print(f"[info] 模型类别（nc={len(names)}，顺序即输出通道顺序，务必与 data.yaml names 一致）:")
     for i in range(len(names)):
@@ -85,10 +92,16 @@ def main():
     check_names(names, args.data)
 
     print(f"[info] 导出 FP32 ONNX: {weights.name} -> opset={args.opset} imgsz={args.imgsz}")
-    exported = Path(model.export(format="onnx", imgsz=args.imgsz, opset=args.opset, half=args.half))
+    exported = Path(model.export(format="onnx", imgsz=args.imgsz, opset=args.opset, half=False))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if exported.resolve() != out.resolve():
+    if args.half:
+        import onnx
+        from onnxconverter_common import float16
+        converted = float16.convert_float_to_float16(onnx.load(exported), keep_io_types=False)
+        onnx.checker.check_model(converted)
+        onnx.save(converted, out)
+    elif exported.resolve() != out.resolve():
         shutil.copy2(exported, out)
         print(f"[info] 导出产物 {exported} 已复制到 {out}")
     # LS-056：导出后同步生成 classes.txt 与 SHA256
@@ -118,6 +131,9 @@ def main():
         expect = (1, 3, args.imgsz, args.imgsz)
         if shape != expect:
             sys.exit(f"[error] 输入形状 {shape} 与预期 {expect} 不符！")
+        expected_type = "tensor(float16)" if args.half else "tensor(float)"
+        if inp.type != expected_type:
+            sys.exit(f"[error] 输入类型 {inp.type} 与预期 {expected_type} 不符！")
         print(f"[verify] 输入形状 {shape} == {expect}，OK")
         outs = sess.get_outputs()[0]
         print(f"[verify] 输出: {outs.name} shape={tuple(outs.shape)}")

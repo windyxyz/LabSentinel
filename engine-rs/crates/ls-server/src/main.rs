@@ -140,6 +140,25 @@ async fn main() {
     }
     // LS-045：读取安装根或当前目录下的 .env（不覆盖显式环境变量）
     load_dotenv(&deploy::default_install_root());
+    let wait_port = std::env::args()
+        .skip_while(|arg| arg != "--wait-for-old-port")
+        .nth(1)
+        .and_then(|port| port.parse::<u16>().ok());
+    if let Some(port) = wait_port {
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .is_err()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        })
+        .await;
+        if ready.is_err() {
+            eprintln!("[restart] 旧进程未在 30 秒内释放端口 {port}");
+            std::process::exit(1);
+        }
+    }
     // 健康自检（原为容器 HEALTHCHECK 设计，Docker 路线已终止——保留作通用探活）：
     // `labsentinel-server --healthcheck <db>` 只读探活即退出
     let launch_mode = std::env::args().any(|x| x == "--launch");
@@ -378,8 +397,7 @@ async fn main() {
         .unwrap_or(true);
     st.go2rtc.set_enabled(go2rtc_enabled);
     if go2rtc_enabled {
-        let install = deploy::default_install_root();
-        let _ = st.go2rtc.ensure_running(&install, go2rtc::DEFAULT_API);
+        st.go2rtc.sync_cameras(&st.db_path);
     }
     // RA2 反思修正：launch 模式下端口试探与 bind 之间存在 TOCTOU 窗口——
     // bind 失败不再 unwrap panic（会崩进程），优雅提示后退出

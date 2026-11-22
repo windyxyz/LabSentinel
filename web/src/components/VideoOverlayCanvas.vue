@@ -6,7 +6,7 @@
 
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { adminToken } from '../api'
+import { requestToken } from '../api'
 import { mapBox, stateColor } from '../overlay'
 
 const props = defineProps({
@@ -17,6 +17,7 @@ const props = defineProps({
 })
 
 const canvasEl = ref(null)
+const emit = defineEmits(['tracks'])
 let ws = null
 let reconnectTimer = null
 let closed = false
@@ -26,7 +27,7 @@ let raf = 0
 function connect() {
   if (closed) return
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const token = adminToken.get()
+  const token = requestToken()
   // 令牌经子协议传递（不落 URL/日志，与 /ws/events 同口径）
   const protocols = token ? ['labsentinel', 'bearer.' + token] : ['labsentinel']
   try {
@@ -38,10 +39,13 @@ function connect() {
   ws.onmessage = (m) => {
     try {
       const d = JSON.parse(m.data)
-      if (String(d.camera_id) === String(props.cameraId)) latest = d
+      if (String(d?.camera_id) === String(props.cameraId)) {
+        latest = d
+        emit('tracks', Array.isArray(d.tracks) ? d.tracks.length : 0)
+      }
     } catch { /* 忽略坏帧 */ }
   }
-  ws.onclose = () => { ws = null; scheduleReconnect() }
+  ws.onclose = () => { ws = null; latest = null; emit('tracks', 0); scheduleReconnect() }
   ws.onerror = () => { try { ws?.close() } catch { /* ignore */ } }
 }
 
@@ -68,8 +72,9 @@ function draw() {
   const iw = latest.img_w || props.imgW
   const ih = latest.img_h || props.imgH
   // 安全区多边形（蓝色半透明）
-  for (const z of latest.zones || []) {
-    const pts = (z.points || []).map(([x, y]) => mapBox([x, y, x, y], iw, ih, dispW, dispH))
+  for (const z of Array.isArray(latest.zones) ? latest.zones : []) {
+    const points = Array.isArray(z?.points) ? z.points.filter(Array.isArray) : []
+    const pts = points.map(([x, y]) => mapBox([x, y, x, y], iw, ih, dispW, dispH))
     const valid = pts.filter(Boolean)
     if (valid.length < 3) continue
     ctx.beginPath()
@@ -83,8 +88,8 @@ function draw() {
   }
   // 人框 + 跟踪 ID + 合规态颜色
   ctx.font = '13px ui-monospace, monospace'
-  for (const t of latest.tracks || []) {
-    const r = mapBox(t.box, iw, ih, dispW, dispH)
+  for (const t of Array.isArray(latest.tracks) ? latest.tracks : []) {
+    const r = mapBox(t?.box, iw, ih, dispW, dispH)
     if (!r) continue
     const color = stateColor(t.ppe_state)
     ctx.strokeStyle = color

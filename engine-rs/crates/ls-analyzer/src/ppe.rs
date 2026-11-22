@@ -301,7 +301,10 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
 /// 未识别的违规类统一回退 `enter_no_ppe`（与既有口径一致）；映射表与
 /// `ls-dispatch::type_text` / 前端 `TYPE_TEXT` 的键保持 1:1。
 pub fn violation_behavior(class_name: &str) -> &'static str {
-    let n = class_name.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    let n = class_name
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_");
     match n.as_str() {
         "no_gloves" | "gloves_no" | "without_gloves" => "no_gloves",
         "no_goggles" | "goggles_no" | "without_goggles" => "no_goggles",
@@ -354,4 +357,3 @@ mod tests {
         assert_eq!(got[2], ("no_mask".into(), "no_mask".into()));
     }
 }
-

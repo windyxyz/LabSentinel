@@ -4,21 +4,31 @@
     {
       "name": "lab-ppe",
       "title": "LAB PPE（实验服/手套/护目镜）",
-      "type": "direct",
-      "url": "https://github.com/Windy-LabSentinel/assets/releases/download/ppe-v1/lab-ppe-yolo.zip",
+      "type": "roboflow",
+      "url": "https://universe.roboflow.com/gavriels-workspace-e9azv/lab-ppe-p4qe4/dataset/1",
       "license": "CC BY 4.0",
       "classes": ["lab coat", "no lab coat", "gloves", "no gloves", "goggles", "no goggles"],
-      "notes": "网页端导出的 YOLO ZIP 与公开数据混合训练的默认公开源；若资产未就绪可用本地路径。"
+      "notes": "Gavriel's Workspace，Roboflow Universe v1，浏览器导出 YOLO；署名与许可见 NOTICE。"
     },
     {
       "name": "hf-ppe-detection",
-      "title": "HuggingFace PPE detection（示例登记）",
+      "title": "51ddhesh PPE Detection",
       "type": "huggingface",
-      "repo": "keremberke/ppe-detection",
-      "file": "data.zip",
-      "license": "MIT",
-      "classes": ["person", "helmet", "vest"],
+      "repo": "51ddhesh/PPE_Detection",
+      "file": "PPE.zip",
+      "license": "CC BY 4.0",
+      "source": "https://huggingface.co/datasets/51ddhesh/PPE_Detection",
+      "classes": ["Vest", "Safety Shoe", "Mask", "Helmet", "Goggles", "Gloves"],
       "notes": "HF 免 Key 下载；设置 HF_ENDPOINT=https://hf-mirror.com 走镜像。"
+    },
+    {
+      "name": "construction-ppe",
+      "title": "Ultralytics Construction-PPE（2026-11）",
+      "type": "direct",
+      "url": "https://github.com/ultralytics/assets/releases/download/v0.0.0/construction-ppe.zip",
+      "license": "CC BY 4.0",
+      "source": "https://docs.ultralytics.com/datasets/detect/construction-ppe",
+      "classes": ["helmet", "gloves", "vest", "boots", "goggles", "Person", "no_helmet", "no_goggle", "no_gloves", "no_boots", "forklift", "no_vest"]
     },
     {
       "name": "local-lab-ppe",

@@ -4,7 +4,7 @@
 // UX1（2026-11-20）：9 分区扩容——「模型与检测」置顶（UX2 三模式）；设备管理/
 // 人脸管理 从一级导航迁入；原「模型管理」页并入「模型与检测」的本地模型卡。
 import { computed, onMounted, ref } from 'vue'
-import { api, adminToken } from '../api'
+import { api, adminToken, downloadBinary } from '../api'
 import DetectPanel from './DetectPanel.vue'
 import Devices from './Devices.vue'
 import Face from './Face.vue'
@@ -278,6 +278,7 @@ async function saveNetwork() {
     const r = await api.saveNetworkConfig({
       lan: net.value.lan,
       port: net.value.port,
+      read_protected: net.value.lan || net.value.read_protected,
       trusted_hosts: net.value.trusted_hosts,
       generate_token: net.value.generate_token === true,
     })
@@ -334,22 +335,36 @@ async function toggleAutostart() {
 // LS-054：样本标注池 + 只读分享链接
 const pool = ref(null)
 const poolStatus = ref('')
+const poolClass = ref('')
+const poolMessage = ref('')
+const poolClasses = ref([])
 const shares = ref([])
 const shareName = ref('值班分享')
 const shareTtl = ref(24)
 const shareToken = ref('')
 const annotator = ref(null)
 async function loadPool() {
-  try { pool.value = await api.datasetSamples({ status: poolStatus.value }) } catch { /* 静默 */ }
+  try {
+    const result = await api.datasetSamples({ status: poolStatus.value, class: poolClass.value })
+    pool.value = { total: Number(result?.total) || 0, samples: Array.isArray(result?.samples) ? result.samples : [] }
+    poolClasses.value = Array.isArray(result?.class_counts) ? result.class_counts : []
+  } catch (err) { poolMessage.value = err.message }
 }
 async function exportDataset() {
-  const a = document.createElement('a')
-  a.href = api.datasetExportUrl()
-  a.download = 'labsentinel-yolo-dataset.zip'
-  a.click()
+  try { await downloadBinary(api.datasetExportUrl(), 'labsentinel-yolo-dataset.zip') }
+  catch (err) { poolMessage.value = err.message }
+}
+const diagnosticMessage = ref('')
+async function exportDiagnostics() {
+  diagnosticMessage.value = ''
+  try { await downloadBinary(api.diagnosticsBundleUrl(), 'labsentinel-diagnostics.zip') }
+  catch (err) { diagnosticMessage.value = err.message }
 }
 async function loadShares() {
-  try { shares.value = (await api.shareLinks()).links || [] } catch { /* 静默 */ }
+  try {
+    const result = await api.shareLinks()
+    shares.value = Array.isArray(result?.links) ? result.links : []
+  } catch { /* 静默 */ }
 }
 async function createShare() {
   netBusy.value = true; netMsg.value = ''
@@ -367,6 +382,13 @@ async function revokeShare(id) {
 }
 function openAnnotator(s) {
   annotator.value = { sample: s, imageUrl: `/api/dataset/samples/${s.id}/image` }
+}
+async function onAnnotationSaved({ id, next }) {
+  const index = pool.value?.samples.findIndex(sample => sample.id === id) ?? -1
+  const following = next && index >= 0 ? pool.value.samples[index + 1] : null
+  annotator.value = null
+  await loadPool()
+  if (following) openAnnotator(following)
 }
 async function restartServer() {
   if (!confirm('立即重启服务？当前分析与页面会短暂中断。')) return
@@ -619,10 +641,18 @@ onMounted(() => {
       </select>
       <button class="ghost" @click="loadPool">刷新</button>
       <button class="ghost" @click="exportDataset">导出 YOLO 训练集 ZIP（仅已核验）</button>
+      <select v-model="poolClass" aria-label="样本类别筛选" @change="loadPool">
+        <option value="">所有类别</option>
+        <option v-for="c in poolClasses" :key="c.class" :value="c.class">{{ c.class }}</option>
+      </select>
       <span class="muted" style="font-size:12px">共 {{ pool?.total ?? 0 }} 个样本</span>
+      <span v-if="poolMessage" class="muted" role="status">{{ poolMessage }}</span>
     </div>
-    <div v-if="pool?.class_counts?.length" class="muted" style="font-size:12px;margin-top:6px">
-      类别分布：<span v-for="c in pool.class_counts" :key="c.class" style="margin-right:10px">{{ c.class }} {{ c.count }}</span>
+    <div v-if="poolClasses.length" class="muted" style="font-size:12px;margin-top:6px">
+      <div v-for="c in poolClasses" :key="c.class">
+        <span>{{ c.class }} · {{ c.count }}</span>
+        <progress :aria-label="c.class" :value="c.count" :max="Math.max(1, ...poolClasses.map(item => item.count))" />
+      </div>
     </div>
     <table v-if="pool?.samples?.length" style="margin-top:8px">
       <tr><th>ID</th><th>来源</th><th>状态</th><th>框数</th><th></th></tr>
@@ -706,6 +736,7 @@ onMounted(() => {
         <template v-if="net">
           <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
             <label class="muted"><input type="checkbox" v-model="net.lan" /> 允许局域网访问</label>
+            <label class="muted"><input type="checkbox" v-model="net.read_protected" :disabled="net.lan" /> 读取保护</label>
             <label class="muted">端口 <input v-model.number="net.port" type="number" min="1" max="65535" style="width:90px" /></label>
             <label class="muted">信任主机 <input v-model="net.trusted_hosts" placeholder="可选，逗号分隔" style="width:200px" /></label>
             <span class="muted" style="font-size:12px">令牌：{{ net.admin_token_set ? '已设置' : '未设置' }}</span>
@@ -778,10 +809,9 @@ onMounted(() => {
       <span class="muted">停止后摄像头分析与事件推送将暂停；重新启动程序后恢复。</span>
     </div>
     <div class="row" style="align-items:center;margin-top:8px">
-      <a :href="api.diagnosticsBundleUrl()" download>
-        <button class="ghost">导出诊断包（脱敏 ZIP）</button>
-      </a>
-      <span class="muted" style="font-size:12px">含版本/系统/GPU/工具探测/脱敏配置/近 2 天日志，不含任何密钥。</span>
+      <button class="ghost" @click="exportDiagnostics">导出诊断包（脱敏 ZIP）</button>
+      <span class="muted" style="font-size:12px">含版本、系统、推理设备、工具状态和近两天的日志时间与级别。</span>
+      <span v-if="diagnosticMessage" role="status">{{ diagnosticMessage }}</span>
     </div>
     <!-- LS-051：go2rtc 流媒体托管状态 -->
     <div v-if="go2rtc" class="row" style="align-items:center; margin-top:10px; flex-wrap:wrap">
@@ -807,7 +837,7 @@ onMounted(() => {
   </div>
   <!-- LS-054：样本标注弹窗 -->
   <AnnotatorModal v-if="annotator" :sample="annotator.sample" :image-url="annotator.imageUrl"
-                  @close="annotator = null" @saved="annotator = null; loadPool()" />
+                  @close="annotator = null" @saved="onAnnotationSaved" />
 </template>
 
 <style scoped>

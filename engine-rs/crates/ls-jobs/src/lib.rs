@@ -67,7 +67,13 @@ pub fn retry_backoff_s(attempts: i64) -> u64 {
 
 /// LS-053：日报是否到点——启用、当前 HH:MM ≥ 设定时刻、且今天未发过。
 /// 纯函数便于单测。
-pub fn report_due(enabled: bool, due_hm: &str, now_hm: &str, today: &str, last_date: Option<&str>) -> bool {
+pub fn report_due(
+    enabled: bool,
+    due_hm: &str,
+    now_hm: &str,
+    today: &str,
+    last_date: Option<&str>,
+) -> bool {
     if !enabled {
         return false;
     }
@@ -104,7 +110,10 @@ pub fn weekly_due(
 fn same_iso_week(a: &str, b: &str) -> bool {
     // 简单稳妥：同一周 ⇔ 两日期相差 < 7 天且 b >= a 且 b-a 的星期偏移对齐；
     // 这里用「相差 ≤ 6 天」近似（调度每天检查一次，重复窗口已足够窄）。
-    match (ls_core::time::parse_local_datetime(a), ls_core::time::parse_local_datetime(b)) {
+    match (
+        ls_core::time::parse_local_datetime(a),
+        ls_core::time::parse_local_datetime(b),
+    ) {
         (Some(x), Some(y)) => {
             let dx = ls_core::time::diff_minutes(y, x) / (60 * 24);
             (0..7).contains(&dx)
@@ -237,6 +246,7 @@ pub struct Jobs {
     /// LS-053：日报/周报最近发送日期（防同日重复推送）
     report_last_daily: Mutex<Option<String>>,
     report_last_weekly: Mutex<Option<String>>,
+    retry_consumer: Mutex<()>,
 }
 
 impl Jobs {
@@ -256,6 +266,7 @@ impl Jobs {
             push_dedup: Mutex::new(std::collections::HashMap::new()),
             report_last_daily: Mutex::new(None),
             report_last_weekly: Mutex::new(None),
+            retry_consumer: Mutex::new(()),
         }
     }
 
@@ -594,11 +605,34 @@ impl Jobs {
     /// LS-053：告警失败重试——扫描 retry/failed 且未超次数/退避到期的投递，
     /// 用同一渠道快照真重发；成功 → ok，失败 → retry，超过上限 → dead_letter。
     pub fn retry_tick(&self) {
+        self.consume_retries(None);
+    }
+
+    pub fn retry_now(&self, id: i64) -> rusqlite::Result<bool> {
+        let _guard = lock(&self.retry_consumer);
+        let store = ls_store::Store::open(&self.db_path.to_string_lossy())?;
+        if !store.retry_delivery(id)? {
+            return Ok(false);
+        }
+        self.consume_retries_locked(&store, Some(id));
+        Ok(true)
+    }
+
+    fn consume_retries(&self, delivery_id: Option<i64>) {
+        let _guard = lock(&self.retry_consumer);
         let Ok(store) = ls_store::Store::open(&self.db_path.to_string_lossy()) else {
             return;
         };
-        let cutoff = ls_core::time::local_now_iso(); // 用当前时间做保守过滤（退避另算）
-        let rows = match store.retryable_deliveries(MAX_RETRY_ATTEMPTS, &cutoff, 20) {
+        self.consume_retries_locked(&store, delivery_id);
+    }
+
+    fn consume_retries_locked(&self, store: &ls_store::Store, delivery_id: Option<i64>) {
+        let cutoffs = std::array::from_fn(|i| {
+            ls_core::time::format_iso(ls_core::time::local_offset_secs(
+                -(retry_backoff_s(i as i64) as i64),
+            ))
+        });
+        let rows = match store.retryable_deliveries(&cutoffs, delivery_id, 20) {
             Ok(r) => r,
             Err(_) => return,
         };
@@ -607,17 +641,6 @@ impl Jobs {
         }
         let channels = self.alert_channels_snapshot();
         for (did, event_id, channel_name, attempts) in rows {
-            // 退避：updated_ts 距今不足 backoff 则跳过
-            let backoff = retry_backoff_s(attempts);
-            let age_ok = store
-                .delivery_by_id(did)
-                .ok()
-                .flatten()
-                .map(|(_, _, _, _)| true)
-                .unwrap_or(false);
-            if !age_ok {
-                continue;
-            }
             let Some(ev) = store.event_by_id(event_id).ok().flatten() else {
                 let _ = store.update_delivery(did, "dead_letter", attempts, Some("事件已删除"));
                 continue;
@@ -641,22 +664,17 @@ impl Jobs {
                 ev.level,
                 &text,
                 None,
-                &[0, 0, 0], // 消费者自身按轮询退避，内部不再长等
+                &[], // 消费者负责退避，每轮只投递一次
             );
             let next_attempts = attempts + 1;
             if d.ok {
                 let _ = store.update_delivery(did, "ok", next_attempts, None);
             } else if next_attempts >= MAX_RETRY_ATTEMPTS {
-                let _ = store.update_delivery(
-                    did,
-                    "dead_letter",
-                    next_attempts,
-                    d.error.as_deref(),
-                );
+                let _ =
+                    store.update_delivery(did, "dead_letter", next_attempts, d.error.as_deref());
             } else {
                 let _ = store.update_delivery(did, "retry", next_attempts, d.error.as_deref());
             }
-            let _ = backoff; // 退避窗口由下次轮询的 updated_ts 自然延后
         }
     }
 
@@ -685,14 +703,19 @@ impl Jobs {
         let last_daily = get("report.last_daily_date");
         let last_weekly = get("report.last_weekly_date");
 
-        let mut sends: Vec<(String, String, i64, i64, i64, Vec<(i64, i64)>)> = Vec::new();
-        if report_due(daily_enabled, &daily_time, &now_hm, &today, last_daily.as_deref()) {
-            if let Ok((t, v, u, top)) = store.report_summary(
-                &format!("{today}T00:00:00"),
-                &format!("{today}T23:59:59"),
-            ) {
-                sends.push(("日报".into(), today.clone(), t, v, u, top));
-            }
+        let mut sends = Vec::new();
+        if report_due(
+            daily_enabled,
+            &daily_time,
+            &now_hm,
+            &today,
+            last_daily.as_deref(),
+        ) {
+            sends.extend(
+                store
+                    .report_summary(&format!("{today}T00:00:00"), &format!("{today}T23:59:59"))
+                    .map(|summary| ("日报", summary)),
+            );
         }
         if weekly_due(
             weekly_enabled,
@@ -703,12 +726,14 @@ impl Jobs {
             &today,
             last_weekly.as_deref(),
         ) {
-            if let Ok((t, v, u, top)) = store.report_summary(
-                &ls_core::time::local_days_ago_iso(6),
-                &format!("{today}T23:59:59"),
-            ) {
-                sends.push(("周报".into(), today.clone(), t, v, u, top));
-            }
+            sends.extend(
+                store
+                    .report_summary(
+                        &ls_core::time::local_days_ago_iso(6),
+                        &format!("{today}T23:59:59"),
+                    )
+                    .map(|summary| ("周报", summary)),
+            );
         }
         if sends.is_empty() {
             return;
@@ -720,20 +745,27 @@ impl Jobs {
             .into_iter()
             .map(|c| (c.id, c.name))
             .collect();
-        for (title, date, total, violation, unhandled, top) in sends {
-            let text = report_text(&title, total, violation, unhandled, &top, &names);
+        for (title, summary) in sends {
+            let text = report_text(
+                title,
+                summary.total,
+                summary.violation,
+                summary.unhandled,
+                &summary.top,
+                &names,
+            );
             for (ch, cfg) in &channels {
                 let _ = ls_dispatch::deliver_with_backoff(*ch, cfg, 2, &text, None, &[0, 0, 0]);
             }
             if title == "日报" {
-                let _ = store.setting_set("report.last_daily_date", &date);
+                let _ = store.setting_set("report.last_daily_date", &today);
                 if let Ok(mut g) = self.report_last_daily.lock() {
-                    *g = Some(date);
+                    *g = Some(today.clone());
                 }
             } else {
-                let _ = store.setting_set("report.last_weekly_date", &date);
+                let _ = store.setting_set("report.last_weekly_date", &today);
                 if let Ok(mut g) = self.report_last_weekly.lock() {
-                    *g = Some(date);
+                    *g = Some(today.clone());
                 }
             }
         }

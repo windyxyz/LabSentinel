@@ -16,16 +16,17 @@ from pathlib import Path
 
 def markdown_table(rows: list[dict]) -> str:
     """rows: [{model, ms, detections, map50?, gray_recall?}] → Markdown 表。"""
-    head = "| 模型 | 单帧耗时(ms) | 检出数 | mAP50 | 灰度召回 |\n|---|---|---|---|---|"
+    head = "| 模型 | 单帧耗时(ms) | 检出数 | mAP50 | 灰度召回 | 误报占比 |\n|---|---|---|---|---|---|"
     lines = [head]
     for r in rows:
         lines.append(
-            "| {model} | {ms} | {detections} | {map50} | {gray} |".format(
+            "| {model} | {ms} | {detections} | {map50} | {gray} | {fp} |".format(
                 model=r.get("model", "?"),
                 ms=_fmt(r.get("ms")),
                 detections=r.get("detections", "—"),
                 map50=_fmt(r.get("map50")),
                 gray=_fmt(r.get("gray_recall")),
+                fp=_fmt(r.get("false_discovery")),
             )
         )
     return "\n".join(lines)
@@ -69,18 +70,19 @@ def bench_onnx(model_path: Path, images: list[Path], imgsz: int = 640) -> dict:
             if img is None:
                 continue
             blob = cv2.resize(img, (shape[3], shape[2]))
-            blob = blob[:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+            dtype = np.float16 if inp.type == "tensor(float16)" else np.float32
+            blob = (blob[:, :, ::-1].transpose(2, 0, 1)[None] / 255.0).astype(dtype)
             t = time.perf_counter()
             out = sess.run(None, {inp.name: blob})[0]
             total += (time.perf_counter() - t) * 1000
             n += 1
             # 粗算检出数：经典 [1,4+nc,N] 取置信度 >0.25 的列数
             arr = np.asarray(out)
-            if arr.ndim == 3 and arr.shape[1] > arr.shape[2]:
+            if arr.ndim == 3 and arr.shape[2] == 6:
+                dets += int((arr[0, :, 4] > 0.25).sum())
+            elif arr.ndim == 3 and arr.shape[1] > 4:
                 scores = arr[0, 4:, :]
                 dets += int((scores.max(axis=0) > 0.25).sum())
-            elif arr.ndim == 3 and arr.shape[2] == 6:
-                dets += int((arr[0, :, 4] > 0.25).sum())
         return {
             "model": model_path.name,
             "ms": total / n if n else None,
@@ -90,12 +92,23 @@ def bench_onnx(model_path: Path, images: list[Path], imgsz: int = 640) -> dict:
         return {"model": model_path.name, "ms": None, "detections": None, "error": str(e)}
 
 
+def evaluate_labels(model_path: Path, data: Path, gray_data: Path | None = None) -> dict:
+    from ultralytics import YOLO
+    model = YOLO(str(model_path), task="detect")
+    def validate(dataset: Path):
+        return model.val(data=str(dataset.resolve()), device="cpu", plots=False, verbose=False).box
+    metric = validate(data)
+    return {"map50": metric.map50, "false_discovery": 1.0 - metric.mp,
+            "gray_recall": validate(gray_data).mr if gray_data else None}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="新旧 ONNX 模型对比评测")
     ap.add_argument("--old", required=True)
     ap.add_argument("--new", required=True)
     ap.add_argument("--images", default="", help="验证集图片目录（默认取 --data 同级 images/val）")
     ap.add_argument("--data", default="", help="data.yaml（用于定位 val 图片）")
+    ap.add_argument("--gray-data", default="", help="同词表灰度验证子集的 data.yaml")
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--out", default="")
     args = ap.parse_args(argv)
@@ -112,11 +125,20 @@ def main(argv: list[str] | None = None) -> int:
     if not images:
         print("[警告] 未找到验证图片，仅输出模型文件信息")
     rows = [bench_onnx(Path(args.old), images), bench_onnx(Path(args.new), images)]
+    if args.data:
+        for path, row in zip((args.old, args.new), rows):
+            try:
+                row.update(evaluate_labels(Path(path), Path(args.data), Path(args.gray_data) if args.gray_data else None))
+            except Exception as exc:
+                row["error"] = str(exc)
     table = markdown_table(rows)
     print(table)
     if args.out:
         Path(args.out).write_text(table + "\n", encoding="utf-8")
-    return 0
+    for row in rows:
+        if row.get("error"):
+            print(f"[失败] {row['model']}: {row['error']}")
+    return int(any(row.get("error") for row in rows))
 
 
 if __name__ == "__main__":

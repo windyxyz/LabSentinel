@@ -4,6 +4,73 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 SemVer
 （决策 77-Q-05：下一版 0.2.0；构建元数据 `+<YYYYMMDD>.<shortsha>`）。
 
+## [0.5.0] - 2026-11-22
+
+### 性能底座与识别增强（LS-050）
+- **Motion Gate 运动预筛**：空场景/静止画面跳过 YOLO/PPE 推理（无活跃 track +
+  低帧差 + 心跳周期才跳过），网页「模型与检测 → 性能选项」可开关/调阈值，
+  `/api/system.perf.motion` 暴露总帧/跳过帧/比例。
+- **事件缩略图缓存**：`GET /api/events/:eid/thumb` 按需生成 320px JPEG 落
+  `data/thumbs/`，前端列表 `loading="lazy"`；retention 同步清理。
+- **单人留守规则**：新增 `solo_after_hours`（非工作时段单人滞留超阈值秒数），
+  中英文案/前端规则表单/事件类型映射齐全。
+- **动态 PPE 类别**：自定义 `.classes.txt` 的 `no_gloves`/`no_goggles`/`no_mask`
+  等违规类自动映射对应事件类型（未知类回退 `enter_no_ppe`）。
+- **PPE 阈值 UI**：模型管理开放违规/穿戴置信度滑块、类别清单与诊断提示。
+- **自定义 VLM 提示词**：`detect.vlm_prompt`（空=内置默认），网页可编辑即时生效。
+
+### 实时画面与全屏值守（LS-051）
+- **Rust 托管 go2rtc**：自动拉起（`CREATE_NO_WINDOW` + Windows Job Object 防孤儿），
+  相机启停同步注册/注销 RTSP 流，`graceful_shutdown` 显式停止；
+  `GET /api/go2rtc/status`、`PUT /api/go2rtc/config` + 设置页状态卡。
+- **实时检测框**：`/ws/detections/:cid` 推送 ≤5Hz 检测元数据（track/框/合规态/安全区），
+  前端 `VideoOverlayCanvas` 在 WebRTC 与快照轮播上精准等比叠加，可一键显隐。
+- **全屏值守大屏**：1/4/9 宫格切换、当日合规率与在场人数、新告警右下角浮窗、
+  浏览器提示音/桌面通知开关（默认静音）、全屏 API。
+
+### 交互体验（LS-052）
+- 安全区编辑器：拖拽顶点微调（松手保存 `PUT /api/zones/:zid`）、撤销/重做
+  （Ctrl+Z/Y）、多区高对比配色与名称标签、刷新底图。
+- `SchedulePicker` 可视化周时段排班：4 个快捷模板、星期勾选、跨午夜，
+  100% 兼容 `days_of_week/time_start/time_end` 契约。
+- 事件流键盘快审：J/K 上下、A 确认、F 误报、I 忽略、Space 播放/暂停、Esc 关闭；
+  输入框聚焦不误触，页面提供快捷键提示条。
+
+### 告警与运维闭环（LS-053）
+- **告警失败重试消费者**：每 30s 扫描 `retry/failed` 投递，按指数退避真重发，
+  超上限落 `dead_letter`；手工 retry 立即进入队列。
+- **定时日报/周报**：`report.*` 配置、同日/同周去重、复用告警渠道，
+  `GET/PUT /api/reports/schedule` + `POST /api/reports/send-now` + 设置页卡片。
+- **局域网配置**：`GET/PUT /api/system/network`（写 `.env` 保留旧键/注释、
+  令牌强校验 + 一键生成、`POST /api/system/restart` 优雅自重启）。
+- **开机自启**：`GET/PUT /api/system/autostart`（HKCU Run，免管理员），
+  安装器卸载阶段同步清理。
+
+### 数据飞轮与诊断（LS-054）
+- **schema v16**：`dataset_samples` + `share_links`。
+- **标注工作台**：事件、文件夹图和实时抓拍一键入池，使用本地人员检测预标注。支持拉框、调整角点、缩放平移、数字键切类和连续核验。
+- **YOLO 训练集导出**：`GET /api/dataset/export.zip`（仅已核验、8:2 划分、
+  归一化 labels、data.yaml/classes.txt/README）。
+- **脱敏诊断包**：`GET /api/diagnostics/bundle.zip`（版本、系统、推理设备、工具状态、允许导出的配置项和近两天日志的时间与级别）。
+- **只读值守链接**：24h/7d/30d TTL、复用设备读令牌体系、中间件 TTL 校验、
+  吊销即失效；前端携带 `readonly_token` 自动锁定只读大屏。
+
+### 推理引擎升级（LS-055）
+- **NMS-free 输出**：自动识别 `[1,N,6]`（RT-DETR/YOLO26/YOLOv10）并跳过 NMS。
+- **模型输入与 FP16**：读取 ONNX NCHW 输入尺寸，动态轴支持使用 `model.json` 的回退值。ONNX Runtime 支持 FP16 输入输出。
+- **灰度 CLAHE**：纯 Rust 局部对比度增强（全局映射混合防单色块退化），
+  仅灰度 ROI 触发；`LS_PPE_CLAHE` 可关。
+- **模型 A/B 评测**：`POST /api/models/ppe/benchmark` + 模型管理入口。
+
+### 训练管道（LS-056，`tools/` 开发支具）
+- `dataset_hub.py` + `datasets_registry.json`（HF 镜像免 Key/许可登记）。
+- `merge_datasets.py`（统一词表、坏图/越界清洗、MD5 去重、1:3 混合）。
+- `train_ppe.py` 多架构/`--user-zip`/灰度增强/线程限流；`eval_report.py` 对比表；
+  `export_onnx.py --half` + classes/SHA256；离线单测 11 项。
+
+### 发布（LS-057）
+- 版本号同步至 0.5.0，Windows 发布提供便携 ZIP 和 Inno Setup 安装器。
+
 ## [0.4.0] - 2026-11-21
 
 ### 模型管理 & API 多接入

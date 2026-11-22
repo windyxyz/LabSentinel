@@ -588,15 +588,8 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         motion_total: Arc::new(AtomicU64::new(0)),
     });
     st.workers.insert(cid, Arc::clone(&handle));
-    // LS-051：RTSP 源启动时同步注册到 go2rtc（失败仅日志，不阻塞分析）
     if cfg.spec.type_ == "rtsp" {
-        if let Err(e) = crate::go2rtc::Go2rtcSupervisor::apply_stream(
-            crate::go2rtc::DEFAULT_API,
-            &format!("cam{cid}"),
-            Some(&cfg.spec.source),
-        ) {
-            crate::logger::warn(&format!("[go2rtc] cam-{cid} 注册流失败（忽略）: {e}"));
-        }
+        st.go2rtc.sync_camera(cid, Some(&cfg.spec.source));
     }
     let st2 = Arc::clone(st);
     let is_folder = cfg.spec.type_ == "folder";
@@ -624,16 +617,6 @@ pub fn stop_worker(st: &Shared, cid: i64) -> bool {
     let Some(_) = st.workers.remove_and_stop(cid) else {
         return false;
     };
-    // LS-051：停止时从 go2rtc 注销该路流（失败仅日志）
-    if let Err(e) =
-        crate::go2rtc::Go2rtcSupervisor::apply_stream(
-            crate::go2rtc::DEFAULT_API,
-            &format!("cam{cid}"),
-            None,
-        )
-    {
-        crate::logger::warn(&format!("[go2rtc] cam-{cid} 注销流失败（忽略）: {e}"));
-    }
     if let Ok(s) = ls_store::Store::open(&st.db_path) {
         let _ = s.set_camera_status(cid, "stopped");
     }
@@ -784,24 +767,22 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     );
     let mut detector = ls_analyzer::detector::make_detector(&cfg.detector);
     // LS-050：Motion Gate 运动预筛（空场景跳过 YOLO/PPE）；运行时从 app_settings 读取
-    let mut motion_gate = ls_analyzer::motion::MotionGate::new(
-        ls_analyzer::motion::MotionConfig {
-            enabled: store
-                .setting_get("perf.motion_gate_enabled")
-                .ok()
-                .flatten()
-                .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(false),
-            threshold: store
-                .setting_get("perf.motion_threshold")
-                .ok()
-                .flatten()
-                .and_then(|v| v.trim().parse::<f32>().ok())
-                .filter(|v| v.is_finite() && *v >= 0.0)
-                .unwrap_or(ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD),
-            heartbeat_frames: ls_analyzer::motion::DEFAULT_HEARTBEAT_FRAMES,
-        },
-    );
+    let mut motion_gate = ls_analyzer::motion::MotionGate::new(ls_analyzer::motion::MotionConfig {
+        enabled: store
+            .setting_get("perf.motion_gate_enabled")
+            .ok()
+            .flatten()
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false),
+        threshold: store
+            .setting_get("perf.motion_threshold")
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD),
+        heartbeat_frames: ls_analyzer::motion::DEFAULT_HEARTBEAT_FRAMES,
+    });
     let mut motion_cfg_stamp = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     // LS-051：实时检测元数据广播节流（≤5Hz），慢客户端由 WS Lagged 丢弃
     let mut last_det_broadcast = std::time::Instant::now() - std::time::Duration::from_secs(3600);
@@ -938,17 +919,18 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         let tracks: Vec<serde_json::Value> = pipe
                             .last_tracks()
                             .iter()
-                            .map(|(id, b, ppe)| {
-                                let state = match ppe {
+                            .map(|track| {
+                                let state = match track.ppe {
                                     ls_analyzer::pipeline::PpeStatus::NoPpe => "violation",
                                     ls_analyzer::pipeline::PpeStatus::Wearing => "compliant",
                                     ls_analyzer::pipeline::PpeStatus::Unknown => "pending",
                                 };
                                 serde_json::json!({
-                                    "id": id,
-                                    "box": b,
+                                    "id": track.id,
+                                    "box": track.bbox,
+                                    "label": "person",
                                     "ppe_state": state,
-                                    "conf": 0.0,
+                                    "conf": track.confidence,
                                 })
                             })
                             .collect();
@@ -2116,11 +2098,17 @@ mod tests {
         let mut cfg = {
             let s = ls_store::Store::open(&st.db_path).unwrap();
             let cid = s
-                .add_camera_full("cam-bad", "rtsp://127.0.0.1:9/x", "rtsp", "")
+                .add_camera_full(
+                    "cam-bad",
+                    &tmp.path().join("missing.mp4").to_string_lossy(),
+                    "file",
+                    "",
+                )
                 .unwrap();
             WorkerConfig::from_db(&s, cid).unwrap().unwrap()
         };
-        cfg.max_restarts = 0; // 首次 spawn 失败即 given_up（不等退避序列）
+        cfg.spec.file_loop = true; // 缺失的循环文件源触发重连逻辑；普通文件 EOF 正常结束。
+        cfg.max_restarts = 0;
         start_worker(&st, cfg).unwrap();
         // given_up：状态 error + 注册表自清理（≤5s 轮询）
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

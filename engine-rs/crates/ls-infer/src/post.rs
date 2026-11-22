@@ -229,7 +229,7 @@ mod ls055_tests {
     #[test]
     fn nms_free_decode_filters_and_reverses_letterbox() {
         let g = letterbox_geom(1280, 720, 640); // r=0.5, dy=140
-        // 画布坐标 (0,140)-(640,500) → 原图整帧
+                                                // 画布坐标 (0,140)-(640,500) → 原图整帧
         let rows = vec![
             vec![0.0, 140.0, 640.0, 500.0, 0.9, 0.0],
             vec![10.0, 150.0, 100.0, 300.0, 0.2, 0.0], // 低分 → 丢弃

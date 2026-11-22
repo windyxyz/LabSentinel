@@ -90,13 +90,7 @@ impl MotionGate {
 
     /// 判定当前帧是否可跳过推理。调用方须在 `has_active_tracks=true` 时
     /// 直接全检（本方法亦内置该守卫，双保险）。
-    pub fn should_skip(
-        &mut self,
-        bgr: &[u8],
-        w: u32,
-        h: u32,
-        has_active_tracks: bool,
-    ) -> bool {
+    pub fn should_skip(&mut self, bgr: &[u8], w: u32, h: u32, has_active_tracks: bool) -> bool {
         self.stats.total_frames += 1;
 
         if !self.cfg.enabled || has_active_tracks {
@@ -149,12 +143,14 @@ pub fn downsample_gray(bgr: &[u8], w: u32, h: u32) -> [u8; DW * DH] {
                 for x in x0..x1.min(w) {
                     let i = row + x * 3;
                     // ITU-R BT.601 灰度（整数近似）
-                    let g = (77u32 * bgr[i] as u32 + 150 * bgr[i + 1] as u32 + 29 * bgr[i + 2] as u32) / 256;
+                    let g =
+                        (77u32 * bgr[i] as u32 + 150 * bgr[i + 1] as u32 + 29 * bgr[i + 2] as u32)
+                            / 256;
                     sum += g;
                     n += 1;
                 }
             }
-            out[dy * DW + dx] = if n > 0 { (sum / n) as u8 } else { 0 };
+            out[dy * DW + dx] = sum.checked_div(n).unwrap_or(0) as u8;
         }
     }
     out
@@ -225,7 +221,7 @@ mod tests {
         let mut gate = MotionGate::new(cfg());
         let f = solid(128, 72, 40, 40, 40);
         gate.should_skip(&f, 128, 72, false); // 首帧
-        // heartbeat=3：连续跳过 3 帧后第 4 帧强制全检
+                                              // heartbeat=3：连续跳过 3 帧后第 4 帧强制全检
         assert!(gate.should_skip(&f, 128, 72, false));
         assert!(gate.should_skip(&f, 128, 72, false));
         assert!(gate.should_skip(&f, 128, 72, false));

@@ -21,7 +21,8 @@
 /// Job 句柄封装：Drop 关句柄 → 内核杀 job 内全部子进程。
 #[cfg(windows)]
 pub struct JobHandle {
-    handle: windows_sys::Win32::Foundation::HANDLE,
+    // HANDLE 是进程级的句柄值，可由任意线程关闭。
+    handle: isize,
 }
 
 #[cfg(windows)]
@@ -50,7 +51,9 @@ impl JobHandle {
                 windows_sys::Win32::Foundation::CloseHandle(handle);
                 return None;
             }
-            Some(JobHandle { handle })
+            Some(JobHandle {
+                handle: handle as isize,
+            })
         }
     }
 
@@ -59,7 +62,7 @@ impl JobHandle {
     pub fn assign_child(&self, child: &std::process::Child) -> bool {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-        unsafe { AssignProcessToJobObject(self.handle, child.as_raw_handle() as _) != 0 }
+        unsafe { AssignProcessToJobObject(self.handle as _, child.as_raw_handle() as _) != 0 }
     }
 }
 
@@ -69,7 +72,7 @@ impl Drop for JobHandle {
         unsafe {
             // 最后一个句柄关闭 → JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 触发，
             // job 内所有进程被内核终止（server 死亡/Ingest drop 两路都到这）。
-            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            windows_sys::Win32::Foundation::CloseHandle(self.handle as _);
         }
     }
 }

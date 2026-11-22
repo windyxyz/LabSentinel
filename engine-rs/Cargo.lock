@@ -1626,7 +1626,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "ls-analyzer"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "jpeg-encoder",
  "ls-core",
@@ -1645,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "ls-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "jiff",
  "serde",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "ls-dispatch"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -1674,8 +1674,9 @@ dependencies = [
 
 [[package]]
 name = "ls-infer"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
+ "half",
  "ort",
  "serde",
  "serde_json",
@@ -1684,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "ls-ingest"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "ls-core",
  "serde",
@@ -1694,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "ls-jobs"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "fs2",
  "ls-core",
@@ -1710,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "ls-proto"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -1720,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "ls-server"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "aes",
  "axum 0.7.9",
@@ -1756,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "ls-store"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "ls-core",
  "rusqlite",
@@ -1767,7 +1768,7 @@ dependencies = [
 
 [[package]]
 name = "ls-track"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2124,6 +2125,7 @@ version = "2.0.0-rc.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37c87aa7a90b7ff3e0fe36cccd475df8d67f15f07f4d6c370c4b38464232813c"
 dependencies = [
+ "half",
  "libloading 0.9.1",
  "ndarray",
  "ort-sys",

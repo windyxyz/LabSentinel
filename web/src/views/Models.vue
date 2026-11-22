@@ -1,6 +1,6 @@
 <script setup>
 /** 实验服（PPE）模型：随包提供 + 启停开关 + 上传替换（0.4.0）。 */
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 
 const status = ref(null)
@@ -46,6 +46,11 @@ async function toggle(ev) {
 // LS-055：模型 A/B 对比评测
 const benchBusy = ref(false)
 const bench = ref(null)
+const benchPath = ref('')
+const benchSides = computed(() => [
+  { title: '当前模型', data: bench.value?.current },
+  { title: '候选模型', data: bench.value?.candidate },
+])
 async function runBenchmark() {
   const path = prompt('候选模型 .onnx 的完整路径：')
   if (!path || !path.trim()) return
@@ -54,9 +59,21 @@ async function runBenchmark() {
   msg.value = ''
   try {
     bench.value = await api.ppeBenchmark(path.trim())
-    msg.value = bench.value.ok ? '对比评测完成' : '评测完成（部分模型加载失败）'
+    benchPath.value = path.trim()
+    msg.value = bench.value?.ok ? '对比评测完成' : '评测中发现模型错误'
   } catch (e) { msg.value = String(e.message || e) }
   benchBusy.value = false
+}
+async function activateCandidate() {
+  benchBusy.value = true
+  try {
+    const result = await api.ppeBenchmark(benchPath.value, true)
+    if (!result?.candidate || result.candidate.error) throw new Error(result?.candidate?.error || '候选模型不可用')
+    await load()
+    bench.value = null
+    msg.value = '已启用候选模型'
+  } catch (err) { msg.value = err.message }
+  finally { benchBusy.value = false }
 }
 
 async function saveThreshold(key, raw) {
@@ -193,12 +210,26 @@ onMounted(load)
           <span class="muted" style="font-size:12px">
             上传后立即启用；替换文件保存在数据目录 models\ppe-custom.onnx，卸载不删除用户数据。</span>
         </div>
-        <div v-if="bench" class="muted" style="font-size:12px;margin-top:6px">
-          样本 {{ bench.images }} 张 · 当前模型：{{ bench.current.avg_ms?.toFixed?.(1) ?? bench.current.avg_ms }}ms /
-          检出 {{ bench.current.detections }}；候选模型：{{ bench.candidate.avg_ms?.toFixed?.(1) ?? bench.candidate.avg_ms }}ms /
-          检出 {{ bench.candidate.detections }}
-          <span v-if="bench.candidate.error" class="lv3">（候选失败：{{ bench.candidate.error }}）</span>
-        </div>
+        <dialog v-if="bench" open class="card" aria-label="模型对比评测">
+          <p>本次评测 {{ bench.images }} 张图片</p>
+          <section v-for="{ title, data } in benchSides" :key="title">
+            <b>{{ title }}</b>
+            <p v-if="data?.error" class="lv3">{{ data.error }}</p>
+            <template v-else-if="data">
+              <p>{{ data.avg_ms?.toFixed?.(1) ?? '—' }} ms/帧 · 检出 {{ data.detections }}</p>
+              <p v-if="Array.isArray(data.input)">{{ data.format }} · {{ data.input.join(' × ') }}</p>
+              <div v-for="item in (Array.isArray(data.classes) ? data.classes : [])" :key="item.class">{{ item.class }} · {{ item.count }}</div>
+              <details v-if="Array.isArray(data.per_image)">
+                <summary>逐图检出</summary>
+                <div v-for="row in data.per_image" :key="row.index">
+                  第 {{ row.index }} 张 · {{ row.ms?.toFixed?.(1) }} ms · {{ row.detections }} 项
+                </div>
+              </details>
+            </template>
+          </section>
+          <button v-if="bench.candidate && !bench.candidate.error" :disabled="benchBusy" @click="activateCandidate">启用候选模型</button>
+          <button class="ghost" @click="bench = null">关闭</button>
+        </dialog>
         <template v-if="!status.installed">
           <label style="display:block;margin:10px 0">
             <input type="checkbox" v-model="confirmed" />

@@ -25,3 +25,11 @@ export function stateColor(state) {
   if (state === 'violation') return '#ef4444'
   return '#9ca3af'
 }
+export function imagePoint(clientX, clientY, rect, width, height) {
+  const x = rect.width ? (clientX - rect.left) / rect.width : 0
+  const y = rect.height ? (clientY - rect.top) / rect.height : 0
+  return {
+    x: Math.max(0, Math.min(1, x)) * width,
+    y: Math.max(0, Math.min(1, y)) * height,
+  }
+}

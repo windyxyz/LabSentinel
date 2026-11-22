@@ -5,6 +5,201 @@ use crate::*;
 use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn dataset_export_contains_only_verified_samples_with_normalized_labels() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("dataset.db");
+    let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+    store.ensure_schema().unwrap();
+    let pool = dir.path().join("dataset_pool");
+    std::fs::create_dir(&pool).unwrap();
+    let jpeg = ls_analyzer::evidence::encode_jpeg_bgr(&vec![100; 100 * 100 * 3], 100, 100).unwrap();
+    let boxes = r#"[{"class":"person","x1":25,"y1":25,"x2":75,"y2":75}]"#;
+    for n in 0..6 {
+        let name = format!("sample{n}.jpg");
+        std::fs::write(pool.join(&name), &jpeg).unwrap();
+        let id = store
+            .add_dataset_sample(
+                "event",
+                &n.to_string(),
+                None,
+                &format!("dataset_pool/{name}"),
+                100,
+                100,
+                boxes,
+            )
+            .unwrap();
+        if n < 5 {
+            store.update_dataset_sample(id, boxes, "verified").unwrap();
+        }
+    }
+    let app = build_router(test_state_cfg_dir(
+        db.to_str().unwrap(),
+        "",
+        false,
+        dir.path().to_str().unwrap(),
+    ));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/dataset/export.zip")
+                .header("host", "localhost")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let names: Vec<_> = zip
+        .file_names()
+        .map(|name| name.unwrap().into_owned())
+        .collect();
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.starts_with("images/train/"))
+            .count(),
+        4
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.starts_with("images/val/"))
+            .count(),
+        1
+    );
+    assert!(!names.iter().any(|name| name.ends_with("event_6.jpg")));
+    let label_name = names
+        .iter()
+        .find(|name| name.starts_with("labels/val/"))
+        .unwrap();
+    let mut label = String::new();
+    zip.by_name(label_name)
+        .unwrap()
+        .read_to_string(&mut label)
+        .unwrap();
+    assert_eq!(label, "7 0.500000 0.500000 0.500000 0.500000");
+    assert!(zip.by_name("data.yaml").is_ok());
+}
+
+#[tokio::test]
+async fn share_links_enforce_read_only_expiry_and_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("share.db");
+    let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+    store.ensure_schema().unwrap();
+    let token = "unit-test-share-token";
+    let hash = crate::util::sha256_hex(token.as_bytes());
+    let id = store
+        .add_share_link(
+            "test",
+            &hash,
+            24,
+            "2026-01-01T00:00:00",
+            "9999-01-01T00:00:00",
+        )
+        .unwrap();
+    store.add_device("test", "share", &hash).unwrap();
+    let app = build_router(test_state_cfg(db.to_str().unwrap(), "test-admin", true));
+    let request = |method: &str, uri: &str| {
+        axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1")
+            .header("x-admin-token", token)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(request("GET", "/api/cameras"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("POST", "/api/events/1/status"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("GET", "/api/diagnostics/bundle.zip"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    store.revoke_share_link(id).unwrap();
+    assert_eq!(
+        app.oneshot(request("GET", "/api/cameras"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn detections_socket_enforces_host_and_read_token_and_delivers_frames() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("detections.db");
+    let st = test_state_cfg(db.to_str().unwrap(), "test-admin", true);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let url = format!("ws://{}/ws/detections/42", listener.local_addr().unwrap());
+    let app = build_router(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut invalid = url.clone().into_client_request().unwrap();
+    invalid
+        .headers_mut()
+        .insert("host", "invalid.example".parse().unwrap());
+    for (request, status) in [
+        (invalid, 400),
+        (url.clone().into_client_request().unwrap(), 401),
+    ] {
+        match tokio_tungstenite::connect_async(request).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status().as_u16(), status)
+            }
+            other => panic!("expected HTTP rejection, got {other:?}"),
+        }
+    }
+    let mut authorized = url.into_client_request().unwrap();
+    authorized.headers_mut().insert(
+        "sec-websocket-protocol",
+        "labsentinel, bearer.test-admin".parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(authorized).await.unwrap();
+    st.detections_tx
+        .send(json!({"camera_id": 99}).to_string())
+        .unwrap();
+    let frame = json!({"camera_id":42,"ts":"2026-11-22T08:00:00","img_w":1280,"img_h":720,"tracks":[],"zones":[]});
+    st.detections_tx.send(frame.to_string()).unwrap();
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(received.to_text().unwrap()).unwrap(),
+        frame
+    );
+    server.abort();
+}
 #[tokio::test]
 
 async fn live_and_system_contract() {

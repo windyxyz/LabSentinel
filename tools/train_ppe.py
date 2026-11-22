@@ -67,25 +67,26 @@ def main():
 
     model_path = Path(args.model)
     data_path = Path(args.data)
-    if not model_path.exists():
+    if args.arch == "yolo11n" and not model_path.exists():
         sys.exit(f"[error] 起点权重不存在: {model_path}（可从 GitHub 镜像下载 yolo11n.pt）")
-    if not data_path.exists():
+    if not args.user_zip and not data_path.exists():
         sys.exit(f"[error] data.yaml 不存在: {data_path}（先运行 tools/download_datasets.py 下载数据集）")
 
     # LS-056：--user-zip 与公开数据混合（复用 merge_datasets 清洗/去重/比例）
     if args.user_zip:
         import subprocess
-        merged = ROOT / "Resources" / "datasets" / "_mixed"
+        import tempfile
+        if not args.public_src and data_path.is_file():
+            args.public_src = [f"default={data_path.parent}"]
+        mixed_dir = tempfile.TemporaryDirectory(prefix="labsentinel-mix-")
+        merged = Path(mixed_dir.name) / "mixed"
         cmd = [sys.executable, str(ROOT / "tools" / "merge_datasets.py"),
                "--user-zip", args.user_zip, "--mix-ratio", args.mix_public,
                "--out", str(merged)]
         for spec in args.public_src:
             cmd += ["--src", spec]
-        if not args.public_src:
-            # 无公开源时仅清洗用户 ZIP
-            cmd += []
         print(f"[info] 混合数据集: {' '.join(cmd)}")
-        rc = subprocess.run(cmd).returncode
+        rc = subprocess.run(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode
         if rc != 0:
             sys.exit(f"[error] merge_datasets 失败 rc={rc}")
         data_path = merged / "data.yaml"
@@ -97,19 +98,22 @@ def main():
     except Exception:
         pass
 
-    from ultralytics import YOLO
+    from ultralytics import RTDETR, YOLO
 
     print(f"[info] 起点: {model_path.name}  数据: {data_path}")
     print(f"[info] epochs={args.epochs} patience={args.patience} imgsz={args.imgsz} "
           f"batch={args.batch} device={args.device or 'auto'} -> {args.project}/{args.name}")
     # 架构选择：默认沿用 --model；指定非 yolo11n 时用 ultralytics 预训练权重
     weights = str(model_path) if args.arch == "yolo11n" else f"{args.arch}.pt"
-    model = YOLO(weights)
+    model = RTDETR(weights) if args.arch == "rtdetr-l" else YOLO(weights)
     aug = {}
     if args.aug == "lab":
         # 实验室灰度/低光/远景增强预设
+        from albumentations import RandomBrightnessContrast, ToGray
         aug = dict(scale=0.9, hsv_v=0.5, hsv_s=0.5, degrees=5.0,
-                   mosaic=1.0, close_mosaic=10, erasing=0.4)
+                   mosaic=1.0, close_mosaic=10,
+                   augmentations=[ToGray(p=0.25), RandomBrightnessContrast(
+                       brightness_limit=(-0.45, 0.10), contrast_limit=0.2, p=0.35)])
     model.train(
         data=str(data_path),
         epochs=args.epochs,

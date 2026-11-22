@@ -1241,7 +1241,8 @@ mod tests {
         let cfg = DetectCfg::load(&s, _dir.path());
         assert!(cfg.vlm_prompt.is_empty());
         assert!(cfg.effective_prompt().contains("实验室安全监控分析员")); // 默认提示词
-        s.setting_set("detect.vlm_prompt", "只数人数，输出 JSON").unwrap();
+        s.setting_set("detect.vlm_prompt", "只数人数，输出 JSON")
+            .unwrap();
         let cfg = DetectCfg::load(&s, _dir.path());
         assert_eq!(cfg.effective_prompt(), "只数人数，输出 JSON");
         // 4000 字符上限
@@ -1256,7 +1257,10 @@ mod tests {
         let (_dir, s) = seed();
         let p = perf_config(&s);
         assert_eq!(p["motion_gate_enabled"], false);
-        assert_eq!(p["motion_threshold"], ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD);
+        assert_eq!(
+            p["motion_threshold"],
+            ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD
+        );
         s.setting_set("perf.motion_gate_enabled", "1").unwrap();
         s.setting_set("perf.motion_threshold", "3.5").unwrap();
         let p = perf_config(&s);

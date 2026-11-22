@@ -210,6 +210,8 @@ fn encode_mp4_with(frames: &[Vec<u8>], fps: f64, out: &Path, codec: &[&str]) -> 
         "error",
         "-f",
         "image2pipe",
+        "-c:v",
+        "mjpeg",
         "-framerate",
         &format!("{fps:.3}"),
         "-i",

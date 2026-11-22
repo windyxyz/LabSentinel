@@ -1,9 +1,14 @@
 // LS-051：VideoOverlayCanvas 坐标缩放 / 合规态颜色 + Wall 宫格与静音开关。
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import { mapBox, stateColor } from '../src/overlay.js'
+import { imagePoint, mapBox, stateColor } from '../src/overlay.js'
 
 describe('VideoOverlayCanvas 纯函数', () => {
+  it('标注坐标在缩放平移后仍对应原图像素，并限制在原图边界内', () => {
+    const zoomed = { left: -40, top: -80, width: 2400, height: 1200 }
+    expect(imagePoint(1160, 520, zoomed, 800, 400)).toEqual({ x: 400, y: 200 })
+    expect(imagePoint(9000, -100, zoomed, 800, 400)).toEqual({ x: 800, y: 0 })
+  })
   it('mapBox：等比缩放并居中（letterbox）', () => {
     // 1280x720 源 → 640x360 容器：scale=0.5，无偏移
     const r = mapBox([100, 50, 300, 250], 1280, 720, 640, 360)
@@ -80,4 +85,26 @@ describe('Wall.vue（LS-051 全屏值守）', () => {
     await muteBtn.trigger('click')
     expect(w.text()).toContain('静音')
   })
+})
+
+it('分享链接校验后锁定值守视图并保留本机管理令牌', async () => {
+  history.replaceState(null, '', '/#/wall?readonly_token=share-test')
+  localStorage.setItem('admin_token', 'local-admin')
+  const fetch = mockFetch({ 'GET /api/share-links/verify': { valid: true } })
+  const App = (await import('../src/App.vue')).default
+  const wallStub = { props: ['readonly'], template: '<div>{{ readonly ? "只读视图" : "值守视图" }}</div>' }
+  const view = mount(App, { global: { stubs: { Wall: wallStub } } })
+  try {
+    await flushPromises()
+    expect(view.text()).toBe('只读视图')
+    expect(view.find('nav').exists()).toBe(false)
+    expect(fetch.mock.calls[0][1].headers['X-Admin-Token']).toBe('share-test')
+    expect(localStorage.getItem('admin_token')).toBe('local-admin')
+    expect(location.hash).toBe('#/wall')
+  } finally {
+    view.unmount()
+    history.replaceState(null, '', '/')
+    sessionStorage.removeItem('ls_readonly_token')
+    localStorage.removeItem('admin_token')
+  }
 })

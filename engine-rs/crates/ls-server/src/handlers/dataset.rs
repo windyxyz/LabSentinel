@@ -20,11 +20,11 @@ fn pool_dir(st: &Shared) -> PathBuf {
 
 /// 拷贝源图到样本池，返回相对路径（相对 data_dir）。
 fn copy_into_pool(st: &Shared, src: &Path, tag: &str) -> Result<(String, u32, u32), String> {
-    let (bgr, w, h) = ls_ingest::decode_image(src, 1280, 720)
-        .map_err(|e| format!("图片解码失败: {e}"))?;
+    let (bgr, w, h) =
+        ls_ingest::decode_image(src, 1280, 720).map_err(|e| format!("图片解码失败: {e}"))?;
     let dir = pool_dir(st);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建样本池目录失败: {e}"))?;
-    let name = format!("{tag}.jpg");
+    let name = format!("{tag}_{}.jpg", uuid_like());
     let dest = dir.join(&name);
     let jpeg = ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h)
         .map_err(|e| format!("样本编码失败: {e}"))?;
@@ -34,9 +34,14 @@ fn copy_into_pool(st: &Shared, src: &Path, tag: &str) -> Result<(String, u32, u3
 }
 
 /// AI 预标注：本地人员检测 → boxes_json。
-fn preannotate(_st: &Shared, src: &Path) -> String {
-    let cfg = ls_analyzer::detector::DetectorConfig::from_env(None);
-    let mut det = ls_analyzer::detector::make_detector(&cfg);
+fn preannotate(st: &Shared, cid: i64, src: &Path) -> String {
+    let Ok(Some(cfg)) = ls_store::Store::open(&st.db_path)
+        .map_err(|e| e.to_string())
+        .and_then(|store| crate::worker::WorkerConfig::from_db(&store, cid))
+    else {
+        return "[]".into();
+    };
+    let mut det = ls_analyzer::detector::make_detector(&cfg.detector);
     match ls_ingest::decode_image(src, 1280, 720) {
         Ok((bgr, w, h)) => {
             let frame = ls_ingest::Frame {
@@ -86,16 +91,29 @@ pub(crate) async fn samples_from_event(
     let Some(rel) = ev.snapshot.filter(|s| !s.is_empty()) else {
         return detail_err(StatusCode::NOT_FOUND, "event has no snapshot").into_response();
     };
-    let src = std::path::Path::new(&st.data_dir).join(rel);
+    let Some(src) = rooted_file(Path::new(&st.data_dir), Path::new(&rel)) else {
+        return detail_err(StatusCode::NOT_FOUND, "snapshot file not found").into_response();
+    };
     let tag = format!("event_{eid}");
     let (rel, w, h) = match copy_into_pool(&st, &src, &tag) {
         Ok(v) => v,
         Err(e) => return detail_err(StatusCode::BAD_REQUEST, &e).into_response(),
     };
-    let boxes = preannotate(&st, &src);
-    match store.add_dataset_sample("event", &eid.to_string(), Some(ev.camera_id), &rel, w as i64, h as i64, &boxes) {
-        Ok(id) => Json(json!({"ok": true, "id": id, "boxes": serde_json::from_str::<Value>(&boxes).unwrap_or(json!([]))})).into_response(),
-        Err(_) => server_err(),
+    let boxes = preannotate(&st, ev.camera_id, &Path::new(&st.data_dir).join(&rel));
+    match store.add_dataset_sample(
+        "event",
+        &eid.to_string(),
+        Some(ev.camera_id),
+        &rel,
+        w as i64,
+        h as i64,
+        &boxes,
+    ) {
+        Ok(id) => created_sample(&store, id),
+        Err(_) => {
+            let _ = std::fs::remove_file(Path::new(&st.data_dir).join(&rel));
+            server_err()
+        }
     }
 }
 
@@ -109,16 +127,35 @@ pub(crate) async fn samples_from_folder(
     let Ok(Some(img)) = store.folder_image(iid) else {
         return detail_err(StatusCode::NOT_FOUND, "folder image not found").into_response();
     };
-    let src = std::path::Path::new(&st.data_dir).join(&img.path);
+    let Some(src) = store
+        .camera(img.camera_id)
+        .ok()
+        .flatten()
+        .filter(|c| c.type_ == "folder")
+        .and_then(|c| rooted_file(Path::new(&c.source), Path::new(&img.path)))
+    else {
+        return detail_err(StatusCode::NOT_FOUND, "folder image not found").into_response();
+    };
     let tag = format!("folder_{iid}");
     let (rel, w, h) = match copy_into_pool(&st, &src, &tag) {
         Ok(v) => v,
         Err(e) => return detail_err(StatusCode::BAD_REQUEST, &e).into_response(),
     };
-    let boxes = preannotate(&st, &src);
-    match store.add_dataset_sample("folder", &iid.to_string(), Some(img.camera_id), &rel, w as i64, h as i64, &boxes) {
-        Ok(id) => Json(json!({"ok": true, "id": id})).into_response(),
-        Err(_) => server_err(),
+    let boxes = preannotate(&st, img.camera_id, &Path::new(&st.data_dir).join(&rel));
+    match store.add_dataset_sample(
+        "folder",
+        &iid.to_string(),
+        Some(img.camera_id),
+        &rel,
+        w as i64,
+        h as i64,
+        &boxes,
+    ) {
+        Ok(id) => created_sample(&store, id),
+        Err(_) => {
+            let _ = std::fs::remove_file(Path::new(&st.data_dir).join(&rel));
+            server_err()
+        }
     }
 }
 
@@ -143,19 +180,43 @@ pub(crate) async fn samples_capture(
     if std::fs::create_dir_all(&dir).is_err() {
         return server_err();
     }
-    let name = format!("capture_{cid}_{}.jpg", ls_core::time::local_now_compact());
+    let Ok(store) = ls_store::Store::open(&st.db_path) else {
+        return server_err();
+    };
+    let name = format!("capture_{cid}_{}.jpg", uuid_like());
     let dest = dir.join(&name);
     if std::fs::write(&dest, &jpeg).is_err() {
         return server_err();
     }
-    let Ok(store) = ls_store::Store::open(&st.db_path) else {
+    let captured = copy_into_pool(&st, &dest, &format!("capture_{cid}"));
+    let _ = std::fs::remove_file(&dest);
+    let Ok((rel, w, h)) = captured else {
         return server_err();
     };
-    let rel = format!("dataset_pool/{name}");
-    let boxes = preannotate(&st, &dest);
-    match store.add_dataset_sample("capture", &cid.to_string(), Some(cid), &rel, 1280, 720, &boxes) {
-        Ok(id) => Json(json!({"ok": true, "id": id})).into_response(),
-        Err(_) => server_err(),
+    let boxes = preannotate(&st, cid, &Path::new(&st.data_dir).join(&rel));
+    match store.add_dataset_sample(
+        "capture",
+        &cid.to_string(),
+        Some(cid),
+        &rel,
+        w.into(),
+        h.into(),
+        &boxes,
+    ) {
+        Ok(id) => created_sample(&store, id),
+        Err(_) => {
+            let _ = std::fs::remove_file(Path::new(&st.data_dir).join(&rel));
+            server_err()
+        }
+    }
+}
+
+fn created_sample(store: &ls_store::Store, id: i64) -> Response {
+    match store.dataset_sample_by_id(id) {
+        Ok(Some(sample)) => {
+            Json(json!({"ok": true, "id": id, "sample": sample_json(&sample)})).into_response()
+        }
+        _ => server_err(),
     }
 }
 
@@ -166,7 +227,10 @@ pub(crate) async fn samples_list(
     let Ok(store) = ls_store::Store::open(&st.db_path) else {
         return server_err();
     };
-    let status = q.get("status").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    let status = q
+        .get("status")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty());
     let limit = q
         .get("limit")
         .and_then(|v| v.parse::<i64>().ok())
@@ -176,10 +240,24 @@ pub(crate) async fn samples_list(
         Ok(r) => r,
         Err(_) => return server_err(),
     };
+    let class = q.get("class").filter(|class| !class.is_empty());
+    let samples: Vec<_> = rows
+        .iter()
+        .map(sample_json)
+        .filter(|sample| {
+            class.is_none_or(|class| {
+                sample["boxes"].as_array().is_some_and(|boxes| {
+                    boxes
+                        .iter()
+                        .any(|b| b["class"].as_str() == Some(class.as_str()))
+                })
+            })
+        })
+        .collect();
     let counts = store.dataset_class_counts().unwrap_or_default();
     Json(json!({
-        "samples": rows.iter().map(sample_json).collect::<Vec<_>>(),
-        "total": rows.len(),
+        "total": samples.len(),
+        "samples": samples,
         "class_counts": counts.iter().map(|(k, v)| json!({"class": k, "count": v})).collect::<Vec<_>>(),
     }))
     .into_response()
@@ -195,8 +273,11 @@ pub(crate) async fn sample_update(
         .and_then(|v| v.as_str())
         .unwrap_or("pending");
     if !matches!(status, "pending" | "verified" | "ambiguous") {
-        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "status 必须是 pending|verified|ambiguous")
-            .into_response();
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "status 必须是 pending|verified|ambiguous",
+        )
+        .into_response();
     }
     let boxes = body.get("boxes").cloned().unwrap_or(json!([]));
     if !boxes.is_array() {
@@ -212,41 +293,23 @@ pub(crate) async fn sample_update(
 }
 
 /// GET /api/dataset/samples/:id/image——标注弹窗加载样本图（data_dir containment）。
-pub(crate) async fn sample_image(
-    State(st): State<Shared>,
-    AxPath(id): AxPath<i64>,
-) -> Response {
+pub(crate) async fn sample_image(State(st): State<Shared>, AxPath(id): AxPath<i64>) -> Response {
     let Ok(store) = ls_store::Store::open(&st.db_path) else {
         return server_err();
     };
     let Ok(Some(s)) = store.dataset_sample_by_id(id) else {
         return detail_err(StatusCode::NOT_FOUND, "sample not found").into_response();
     };
-    let base = std::path::Path::new(&st.data_dir);
-    let p = base.join(&s.image_path);
-    let ok = p
-        .canonicalize()
-        .ok()
-        .zip(base.canonicalize().ok())
-        .map(|(a, b)| a.starts_with(&b))
-        .unwrap_or(false);
-    if !ok {
+    let Some(p) = sample_path(&st, &s.image_path) else {
         return detail_err(StatusCode::NOT_FOUND, "image not found").into_response();
-    }
+    };
     match std::fs::read(&p) {
-        Ok(bytes) => (
-            [(axum::http::header::CONTENT_TYPE, "image/jpeg")],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], bytes).into_response(),
         Err(_) => detail_err(StatusCode::NOT_FOUND, "image not found").into_response(),
     }
 }
 
-pub(crate) async fn sample_delete(
-    State(st): State<Shared>,
-    AxPath(id): AxPath<i64>,
-) -> Response {
+pub(crate) async fn sample_delete(State(st): State<Shared>, AxPath(id): AxPath<i64>) -> Response {
     let Ok(store) = ls_store::Store::open(&st.db_path) else {
         return server_err();
     };
@@ -257,24 +320,18 @@ pub(crate) async fn sample_delete(
         .map(|s| s.image_path);
     match store.delete_dataset_sample(id) {
         Ok(n) if n > 0 => {
-            if let Some(rel) = rel {
-                let base = std::path::Path::new(&st.data_dir);
-                let p = base.join(rel);
-                // 防越界：规范化后必须仍在 data_dir 内
-                let ok = p
-                    .canonicalize()
-                    .ok()
-                    .zip(base.canonicalize().ok())
-                    .map(|(a, b)| a.starts_with(&b))
-                    .unwrap_or(false);
-                if ok {
-                    let _ = std::fs::remove_file(p);
-                }
+            if let Some(path) = rel.and_then(|rel| sample_path(&st, &rel)) {
+                let _ = std::fs::remove_file(path);
             }
             Json(json!({"ok": true})).into_response()
         }
         _ => detail_err(StatusCode::NOT_FOUND, "sample not found").into_response(),
     }
+}
+
+pub(super) fn sample_path(st: &Shared, relative: &str) -> Option<PathBuf> {
+    let path = Path::new(relative).strip_prefix("dataset_pool").ok()?;
+    rooted_file(&pool_dir(st), path)
 }
 
 /// 把像素框归一化为 YOLO 行：`cls cx cy w h`（0..1，clamp 防越界）。
@@ -286,8 +343,14 @@ pub fn yolo_label_line(b: &Value, img_w: i64, img_h: i64, class_index: usize) ->
     if !(img_w > 0 && img_h > 0) {
         return None;
     }
-    let (x1, x2) = (x1.min(x2).clamp(0.0, img_w as f64), x1.max(x2).clamp(0.0, img_w as f64));
-    let (y1, y2) = (y1.min(y2).clamp(0.0, img_h as f64), y1.max(y2).clamp(0.0, img_h as f64));
+    let (x1, x2) = (
+        x1.min(x2).clamp(0.0, img_w as f64),
+        x1.max(x2).clamp(0.0, img_w as f64),
+    );
+    let (y1, y2) = (
+        y1.min(y2).clamp(0.0, img_h as f64),
+        y1.max(y2).clamp(0.0, img_h as f64),
+    );
     let w = (x2 - x1) / img_w as f64;
     let h = (y2 - y1) / img_h as f64;
     if w <= 0.0 || h <= 0.0 {
@@ -316,7 +379,14 @@ pub(crate) async fn dataset_export(State(st): State<Shared>) -> Response {
     }
     // 类别表：固定标准词表（与 tools/merge_datasets.py 对齐）
     let classes = [
-        "lab_coat", "no_lab_coat", "gloves", "no_gloves", "goggles", "no_goggles", "mask", "person",
+        "lab_coat",
+        "no_lab_coat",
+        "gloves",
+        "no_gloves",
+        "goggles",
+        "no_goggles",
+        "mask",
+        "person",
     ];
     let class_index = |name: &str| -> usize {
         classes
@@ -328,7 +398,9 @@ pub(crate) async fn dataset_export(State(st): State<Shared>) -> Response {
     let mut train_n = 0usize;
     let mut val_n = 0usize;
     for (i, s) in samples.iter().enumerate() {
-        let src = std::path::Path::new(&st.data_dir).join(&s.image_path);
+        let Some(src) = sample_path(&st, &s.image_path) else {
+            continue;
+        };
         let Ok(bytes) = std::fs::read(&src) else {
             continue;
         };

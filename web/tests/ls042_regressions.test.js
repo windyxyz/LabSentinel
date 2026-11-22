@@ -63,7 +63,6 @@ describe('LS-042 前后端契约与 P0 回归', () => {
     adminToken.set('secret-tok')
     expect(mediaUrl(undefined)).toBe('')
     expect(mediaUrl('')).toBe('')
-    expect(mediaUrl('/api/folder-images/1/file')).toContain('token=secret-tok')
   })
 
   it('FolderImages：开启 admin_token 且条目缺 thumb_url 时不崩溃', async () => {

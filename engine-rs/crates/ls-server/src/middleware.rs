@@ -55,6 +55,47 @@ pub(crate) async fn guard_middleware(
         || method == axum::http::Method::PUT
         || method == axum::http::Method::PATCH
         || method == axum::http::Method::DELETE;
+    let provided = provided_token(&headers);
+    if let Some(token) = provided.as_deref() {
+        if share_device(&st, token) && (unsafe_m || !share_read_path(&path)) {
+            return detail_err(StatusCode::FORBIDDEN, "分享令牌仅可访问值守大屏").into_response();
+        }
+    }
+    const ADMIN_GETS: &[&str] = &[
+        "/api/diagnostics/bundle.zip",
+        "/api/dataset",
+        "/api/system/network",
+        "/api/system/autostart",
+        "/api/reports/schedule",
+        "/api/share-links",
+    ];
+    const PROTECTED_ADMIN_GETS: &[&str] = &[
+        "/api/audit",
+        "/api/devices",
+        "/api/config/summary",
+        "/api/config/export",
+        "/api/alerts/config",
+        "/api/detect/config",
+        "/api/detect/profiles",
+        "/api/logs",
+        "/api/backups/status",
+        "/api/maintenance",
+        "/api/plugins",
+        "/api/face/persons",
+    ];
+    let matches_path = |p: &&str| path == *p || path.starts_with(&format!("{p}/"));
+    let admin_get = ADMIN_GETS.iter().any(matches_path)
+        || (st.read_protected && PROTECTED_ADMIN_GETS.iter().any(matches_path));
+    if !unsafe_m
+        && admin_get
+        && path != "/api/share-links/verify"
+        && !st.admin_token.is_empty()
+        && !provided
+            .as_deref()
+            .is_some_and(|t| ct_eq(t, &st.admin_token))
+    {
+        return detail_err(StatusCode::UNAUTHORIZED, "该端点需要管理令牌").into_response();
+    }
     let mut actor = String::new();
     if unsafe_m && path.starts_with("/api/") {
         // CSRF/Fetch-Metadata（写请求跨站拒绝）
@@ -164,10 +205,13 @@ pub(crate) async fn guard_middleware(
         && st.read_protected
         && !path.starts_with("/api/health/")
         && path != "/api/v1/meta"
+        && path != "/api/share-links/verify"
     {
         // R2-103 对齐：读保护时 admin/read/设备令牌均可读
         let provided = provided_token(&headers);
-        if !check_read_token(&st, provided.as_deref()) {
+        if !check_read_token(&st, provided.as_deref())
+            && !crate::handlers::misc_status::valid_media_signature(&st, req.uri())
+        {
             return detail_err(
                 StatusCode::UNAUTHORIZED,
                 "需要管理令牌（X-Admin-Token 或 Authorization: Bearer）",
@@ -175,29 +219,6 @@ pub(crate) async fn guard_middleware(
             .into_response();
         }
         // P2-4 / LS-044：管理级 GET 端点（含配置导出/密钥配置/日志/备份/维护）——read 令牌不够
-        const ADMIN_GETS: &[&str] = &[
-            "/api/audit",
-            "/api/devices",
-            "/api/config/summary",
-            "/api/config/export",
-            "/api/alerts/config",
-            "/api/detect/config",
-            "/api/detect/profiles",
-            "/api/logs",
-            "/api/backups/status",
-            "/api/maintenance",
-            "/api/plugins",
-            "/api/face/persons",
-        ];
-        let admin_get = ADMIN_GETS
-            .iter()
-            .any(|p| path == *p || path.starts_with(&format!("{p}/")));
-        if admin_get && !st.admin_token.is_empty() {
-            let provided = provided.as_deref().unwrap_or("");
-            if !ct_eq(provided, &st.admin_token) {
-                return detail_err(StatusCode::UNAUTHORIZED, "该端点需要管理令牌").into_response();
-            }
-        }
         actor = "read".into();
     }
     let rid = uuid_like();
@@ -237,6 +258,30 @@ pub(crate) async fn guard_middleware(
     resp
 }
 
+fn share_read_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/share-links/verify" | "/api/cameras" | "/api/stats/daily" | "/api/events"
+    ) || path
+        .strip_prefix("/api/cameras/")
+        .and_then(|tail| tail.split_once('/'))
+        .is_some_and(|(id, op)| id.parse::<i64>().is_ok() && matches!(op, "snapshot" | "webrtc"))
+}
+
+fn share_device(st: &Shared, token: &str) -> bool {
+    if !st.admin_token.is_empty() && ct_eq(token, &st.admin_token) {
+        return false;
+    }
+    ls_store::Store::open(&st.db_path)
+        .ok()
+        .and_then(|s| {
+            s.device_by_hash(&sha256_hex(token.as_bytes()))
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|d| d.platform == "share")
+}
+
 /// 令牌来源：X-Admin-Token 优先，其次 Authorization: Bearer（R2-103 移动端惯例）
 pub(crate) fn provided_token(headers: &axum::http::HeaderMap) -> Option<String> {
     if let Some(v) = headers.get("x-admin-token").and_then(|v| v.to_str().ok()) {
@@ -264,9 +309,10 @@ pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
         return None;
     }
     // LS-054：分享链接令牌额外校验 TTL（过期/吊销即失效）
-    if !s
-        .share_link_allows(&hash, &ls_core::time::local_now_iso())
-        .unwrap_or(true)
+    if dev.platform == "share"
+        && !s
+            .share_link_valid(&hash, &ls_core::time::local_now_iso())
+            .unwrap_or(false)
     {
         return None;
     }

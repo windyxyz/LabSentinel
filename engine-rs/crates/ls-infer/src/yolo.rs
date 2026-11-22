@@ -15,6 +15,8 @@ use std::path::Path;
 
 #[cfg(feature = "ort")]
 use ort::session::Session;
+#[cfg(feature = "ort")]
+use ort::value::{TensorElementType, ValueType};
 #[cfg(feature = "tract")]
 use tract_onnx::prelude::*;
 
@@ -148,7 +150,10 @@ pub struct YoloModel {
     ort_session: Option<Session>,
     /// 当前会话是否运行在 DirectML(GPU)——用于触发进程级串行锁（防事故 A1 整机死机）。
     ep_is_dml: bool,
-    imgsz: u32,
+    input_w: u32,
+    input_h: u32,
+    #[cfg(feature = "ort")]
+    ort_fp16: bool,
     person_class: usize,
     conf: f32,
     iou: f32,
@@ -175,6 +180,21 @@ pub fn dml_lock() -> &'static std::sync::Mutex<()> {
     &LOCK
 }
 
+#[cfg(feature = "ort")]
+fn ort_environment() -> Result<&'static ort::environment::Environment, String> {
+    static ENVIRONMENT: std::sync::OnceLock<Result<ort::environment::Environment, String>> =
+        std::sync::OnceLock::new();
+    ENVIRONMENT
+        .get_or_init(|| {
+            ort::environment::init()
+                .with_name("labsentinel")
+                .build()
+                .map_err(|e| format!("ORT 环境初始化失败: {e}（ORT_DYLIB_PATH 是否设置？）"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// 实际生效的推理设备（"DirectML(GPU)" / "CPU" / "CPU(tract)"）——每次 load
 /// 成功后覆盖更新，网页切换 GPU/CPU 并软重启相机后 `/api/system` 实时反映最新设备。
 static EP_USED: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
@@ -190,6 +210,10 @@ pub fn set_ep_used(val: impl Into<String>) {
 }
 
 impl YoloModel {
+    pub fn input_dimensions(&self) -> (u32, u32) {
+        (self.input_w, self.input_h)
+    }
+
     /// 加载模型。`backend=None` 时按 `LS_INFER_BACKEND` 解析（缺省 tract）。
     /// `use_gpu=true` 时注册 DirectML EP（DX12 统一层——N 卡/A 卡/Intel i 卡/
     /// 核显全通吃），**失败自动回落 CPU**（任意设备鲁棒；实际生效设备见日志）。
@@ -205,6 +229,7 @@ impl YoloModel {
         let backend = backend
             .or_else(Backend::from_env)
             .ok_or("无可用推理后端（tract/ort feature 均未启用）")?;
+        let fallback = read_model_imgsz(path).unwrap_or(imgsz);
         let mut model = YoloModel {
             backend,
             #[cfg(feature = "tract")]
@@ -212,8 +237,10 @@ impl YoloModel {
             #[cfg(feature = "ort")]
             ort_session: None,
             ep_is_dml: false,
-            // LS-055：model.json 声明尺寸优先（640/960/1280 静态尺寸自动适配）
-            imgsz: read_model_imgsz(path).unwrap_or(imgsz),
+            input_w: fallback,
+            input_h: fallback,
+            #[cfg(feature = "ort")]
+            ort_fp16: false,
             // T-334/Q-14：模型角色声明（同目录 model.json 的 roles.person_class）。
             // 缺省 0 = COCO person 通道，旧模型无声明时行为不变。
             person_class: read_model_roles(path)
@@ -228,9 +255,26 @@ impl YoloModel {
         match backend {
             #[cfg(feature = "tract")]
             Backend::Tract => {
-                let m = tract_onnx::onnx()
+                let mut graph = tract_onnx::onnx()
                     .model_for_path(path)
-                    .map_err(|e| format!("加载模型失败: {e}"))?
+                    .map_err(|e| format!("加载模型失败: {e}"))?;
+                let fact = graph.input_fact(0).map_err(|e| e.to_string())?;
+                let dims = fact.shape.as_concrete_finite().map_err(|e| e.to_string())?;
+                if let Some(dims) = dims {
+                    let dims: Vec<_> = dims.iter().map(|&d| d as i64).collect();
+                    (model.input_w, model.input_h) = input_size(&dims, fallback)?;
+                } else {
+                    graph
+                        .set_input_fact(
+                            0,
+                            InferenceFact::dt_shape(
+                                f32::datum_type(),
+                                tvec!(1, 3, fallback as usize, fallback as usize),
+                            ),
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                let m = graph
                     .into_optimized()
                     .map_err(|e| format!("模型优化失败: {e}"))?
                     .into_runnable()
@@ -243,12 +287,9 @@ impl YoloModel {
             #[cfg(feature = "ort")]
             Backend::Ort => {
                 let bytes = std::fs::read(path).map_err(|e| format!("读取模型失败: {e}"))?;
-                let environment = ort::environment::init()
-                    .with_name("labsentinel")
-                    .build()
-                    .map_err(|e| format!("ORT 环境初始化失败: {e}（ORT_DYLIB_PATH 是否设置？）"))?;
+                let environment = ort_environment()?;
                 let build = |with_dml: bool| -> Result<Session, String> {
-                    let mut b = Session::builder(&environment)
+                    let mut b = Session::builder(environment)
                         .map_err(|e| format!("ORT builder 失败: {e}"))?;
                     if with_dml {
                         // ORT-DirectML 官方必填配置：禁用 memory_pattern 与并行图执行，
@@ -258,7 +299,9 @@ impl YoloModel {
                             .map_err(|e| format!("DirectML memory_pattern 配置失败: {e}"))?
                             .with_parallel_execution(false)
                             .map_err(|e| format!("DirectML parallel_execution 配置失败: {e}"))?
-                            .with_execution_providers([ort::ep::DirectML::default().build()])
+                            .with_execution_providers([ort::ep::DirectML::default()
+                                .build()
+                                .error_on_failure()])
                             .map_err(|e| format!("DirectML EP 注册失败: {e}"))?;
                     }
                     b.commit_from_memory(&bytes)
@@ -280,9 +323,23 @@ impl YoloModel {
                     (build(false)?, "CPU", false)
                 };
                 println!("[ls-infer] ORT 推理设备: {ep_used}");
-                set_ep_used(ep_used);
                 model.ep_is_dml = is_dml;
                 model.ort_session = Some(session);
+                let input = model
+                    .ort_session
+                    .as_ref()
+                    .and_then(|session| session.inputs().first())
+                    .ok_or("ORT 模型无输入")?;
+                let ValueType::Tensor { ty, shape, .. } = input.dtype() else {
+                    return Err("ORT 模型输入必须是图像张量".into());
+                };
+                model.ort_fp16 = match ty {
+                    TensorElementType::Float16 => true,
+                    TensorElementType::Float32 => false,
+                    _ => return Err(format!("不支持的输入类型: {ty:?}")),
+                };
+                (model.input_w, model.input_h) = input_size(shape, fallback)?;
+                set_ep_used(ep_used);
             }
             #[cfg(not(feature = "ort"))]
             Backend::Ort => return Err("ort feature 未启用".into()),
@@ -321,12 +378,12 @@ impl YoloModel {
         if specs.is_empty() {
             return Ok(Vec::new());
         }
-        let (data, geom) = letterbox_nchw(bgr, w, h, self.imgsz)?;
+        let (data, geom) = letterbox_nchw_wh(bgr, w, h, self.input_w, self.input_h)?;
         match self.backend {
             #[cfg(feature = "tract")]
             Backend::Tract => {
                 let input = tract_ndarray::Array4::<f32>::from_shape_vec(
-                    (1, 3, self.imgsz as usize, self.imgsz as usize),
+                    (1, 3, self.input_h as usize, self.input_w as usize),
                     data,
                 )
                 .map_err(|e| format!("输入张量形状错误: {e}"))?;
@@ -360,10 +417,16 @@ impl YoloModel {
             #[cfg(feature = "ort")]
             Backend::Ort => {
                 let session = self.ort_session.as_mut().ok_or("ORT 会话未初始化")?;
-                let tensor = ort::value::Tensor::from_array((
-                    [1usize, 3, self.imgsz as usize, self.imgsz as usize],
-                    data,
-                ))
+                let dims = [1usize, 3, self.input_h as usize, self.input_w as usize];
+                let tensor = if self.ort_fp16 {
+                    let data = data
+                        .into_iter()
+                        .map(half::f16::from_f32)
+                        .collect::<Vec<_>>();
+                    ort::value::Tensor::from_array((dims, data)).map(|tensor| tensor.into_dyn())
+                } else {
+                    ort::value::Tensor::from_array((dims, data)).map(|tensor| tensor.into_dyn())
+                }
                 .map_err(|e| format!("输入张量创建失败: {e}"))?;
                 // 事故 A1 防护：DirectML 推理必须跨线程串行；CPU 推理不加锁。
                 let _dml_guard = if self.ep_is_dml {
@@ -376,11 +439,21 @@ impl YoloModel {
                     .map_err(|e| format!("推理失败: {e}"))?;
                 // YOLO 单输出：取首个输出（SessionOutputs 可迭代，取第一个键值对）
                 let (_name, v) = outputs.iter().next().ok_or("模型无输出")?;
-                let (shape, flat) = v
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| format!("输出类型错误: {e}"))?;
-                let shape: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
-                let rows = rows_from_flat(&shape, flat)?;
+                let (shape, rows) = if let Ok((shape, flat)) = v.try_extract_tensor::<f32>() {
+                    let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+                    let rows = rows_from_flat(&shape, flat)?;
+                    (shape, rows)
+                } else {
+                    let (shape, flat) = v
+                        .try_extract_tensor::<half::f16>()
+                        .map_err(|e| format!("输出类型错误: {e}"))?;
+                    let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+                    let flat: Vec<_> = flat.iter().map(|v| v.to_f32()).collect();
+                    let rows = rows_from_flat(&shape, &flat)?;
+                    (shape, rows)
+                };
+                drop(v);
+                drop(outputs);
                 drop(_dml_guard);
                 let nms_free = is_nms_free_shape(&shape);
                 specs
@@ -423,13 +496,26 @@ impl YoloModel {
     }
 }
 
-/// LS-055：输出是否为端到端 NMS-free 形状（`[1, N, 6]` 或转置 `[1, 6, N]`，N 远大于 6）。
-fn is_nms_free_shape(shape: &[usize]) -> bool {
-    if shape.len() != 3 || shape[0] != 1 {
-        return false;
+fn input_size(shape: &[i64], fallback: u32) -> Result<(u32, u32), String> {
+    let [batch, channels, height, width] = shape else {
+        return Err(format!("模型输入必须为 NCHW，实得 {shape:?}"));
+    };
+    if *batch > 1 || (*channels > 0 && *channels != 3) {
+        return Err(format!("模型输入必须支持单张 RGB 图像，实得 {shape:?}"));
     }
-    let (a, b) = (shape[1], shape[2]);
-    (b == 6 && a > 60) || (a == 6 && b > 60)
+    let dimension = |n: i64| {
+        let n = if n > 0 { n } else { i64::from(fallback) };
+        (1..=4096)
+            .contains(&n)
+            .then_some(n as u32)
+            .ok_or_else(|| format!("模型输入尺寸超出范围: {n}"))
+    };
+    Ok((dimension(*width)?, dimension(*height)?))
+}
+
+/// LS-055：端到端输出使用 [1, N, 6]，经典双类别模型仍使用 [1, 6, N]。
+fn is_nms_free_shape(shape: &[usize]) -> bool {
+    matches!(shape, [1, _, 6])
 }
 
 /// 从动态维度视图取行（tract 路径）。
@@ -441,7 +527,7 @@ fn rows_from_dyn(
     if shape.len() != 3 || shape[0] != 1 {
         return Err(format!("输出维度异常: {shape:?}"));
     }
-    let (c_major, channels, anchors) = if shape[1] <= shape[2] {
+    let (c_major, channels, anchors) = if !is_nms_free_shape(shape) && shape[1] <= shape[2] {
         (true, shape[1], shape[2])
     } else {
         (false, shape[2], shape[1])
@@ -483,7 +569,7 @@ fn rows_from_shape_dims(
     if shape.len() != 3 || shape[0] != 1 {
         return Err(format!("输出维度异常: {shape:?}"));
     }
-    let (c_major, channels, anchors) = if shape[1] <= shape[2] {
+    let (c_major, channels, anchors) = if !is_nms_free_shape(shape) && shape[1] <= shape[2] {
         (true, shape[1], shape[2])
     } else {
         (false, shape[2], shape[1])
@@ -507,19 +593,29 @@ pub fn letterbox_nchw(
     h: u32,
     s: u32,
 ) -> Result<(Vec<f32>, LetterboxGeom), String> {
+    letterbox_nchw_wh(bgr, w, h, s, s)
+}
+
+fn letterbox_nchw_wh(
+    bgr: &[u8],
+    w: u32,
+    h: u32,
+    in_w: u32,
+    in_h: u32,
+) -> Result<(Vec<f32>, LetterboxGeom), String> {
     let expect = (w as usize) * (h as usize) * 3;
-    if bgr.len() < expect || w == 0 || h == 0 || s == 0 {
+    if bgr.len() < expect || w == 0 || h == 0 || in_w == 0 || in_h == 0 {
         return Err(format!(
             "帧尺寸不符: len={} expect={expect} w={w} h={h}",
             bgr.len()
         ));
     }
-    let g = post::letterbox_geom(w, h, s);
-    let nw = ((w as f32 * g.r).floor() as u32).max(1).min(s);
-    let nh = ((h as f32 * g.r).floor() as u32).max(1).min(s);
+    let g = post::letterbox_geom_wh(w, h, in_w, in_h);
+    let nw = ((w as f32 * g.r).floor() as u32).max(1).min(in_w);
+    let nh = ((h as f32 * g.r).floor() as u32).max(1).min(in_h);
     let pad = 114.0f32 / 255.0;
-    let mut data = vec![pad; (s as usize) * (s as usize) * 3];
-    let plane = (s as usize) * (s as usize);
+    let plane = (in_w as usize) * (in_h as usize);
+    let mut data = vec![pad; plane * 3];
     // cv2.resize(INTER_LINEAR) 定点复刻：Python 先 cv2.resize(uint8) 再 /255，
     // 这里同样先产 uint8 缩放帧，保证逐位一致（±1/255 的浮点差会传播到 conf）。
     let resized = resize_u8_linear_cv2(bgr, w, h, nw, nh, 3);
@@ -530,7 +626,7 @@ pub fn letterbox_nchw(
             for c in 0..3usize {
                 let v = resized[(y as usize * nw as usize + x as usize) * 3 + c] as f32 / 255.0;
                 let out_c = 2 - c; // BGR → RGB
-                data[out_c * plane + py * s as usize + px] = v;
+                data[out_c * plane + py * in_w as usize + px] = v;
             }
         }
     }
@@ -640,6 +736,21 @@ mod tests {
     }
 
     #[test]
+    fn input_dimensions_follow_tensor_and_dynamic_fallback() {
+        assert_eq!(input_size(&[1, 3, 720, 1280], 640).unwrap(), (1280, 720));
+        assert_eq!(input_size(&[-1, 3, -1, 960], 640).unwrap(), (960, 640));
+        assert!(input_size(&[1, 720, 1280, 3], 640).is_err());
+        assert!(is_nms_free_shape(&[1, 2, 6]));
+        assert!(!is_nms_free_shape(&[1, 6, 8400]));
+        assert_eq!(
+            rows_from_flat(&[1, 1, 6], &[0., 0., 1., 1., 0.8, 0.])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn detect_runs_repo_model_on_blank_frame() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let model = repo.join("m0-spike").join("yolo11n.onnx");
@@ -652,6 +763,9 @@ mod tests {
         let frame = vec![114u8; 640 * 640 * 3];
         let dets = m.detect(&frame, 640, 640).expect("推理可执行");
         assert!(dets.is_empty(), "纯灰图不应检出目标，实得 {dets:?}");
+        let mut second = YoloModel::load(&model, 640, 0.4, 0.5, 1200.0, None, false)
+            .expect("同一进程应能载入第二个会话");
+        assert!(second.detect(&frame, 640, 640).unwrap().is_empty());
     }
 
     #[test]
