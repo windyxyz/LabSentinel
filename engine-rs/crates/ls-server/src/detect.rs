@@ -42,6 +42,8 @@ pub struct DetectCfg {
     pub conf_hi: f64,
     pub daily_budget: u64,   // 0=不限
     pub on_negative: String, // keep | suppress
+    /// LS-050 自定义 VLM 提示词（空=走内置默认实验室安全提示词）。
+    pub vlm_prompt: String,
 }
 
 impl Default for DetectCfg {
@@ -59,6 +61,7 @@ impl Default for DetectCfg {
             conf_hi: 0.65,
             daily_budget: 200,
             on_negative: "keep".into(),
+            vlm_prompt: String::new(),
         }
     }
 }
@@ -131,6 +134,11 @@ impl DetectCfg {
             .unwrap_or(d.daily_budget);
         let on_negative =
             db_get(s, "detect.cascade.on_negative").unwrap_or_else(|| d.on_negative.clone());
+        // LS-050：自定义 VLM 提示词（DB → env，空=默认）。限长 4000 字符防滥用。
+        let vlm_prompt = db_get(s, "detect.vlm_prompt")
+            .or_else(|| env_get("LS_VLM_PROMPT"))
+            .map(|p| p.chars().take(4000).collect())
+            .unwrap_or_default();
         DetectCfg {
             mode,
             provider,
@@ -144,6 +152,16 @@ impl DetectCfg {
             conf_hi,
             daily_budget,
             on_negative,
+            vlm_prompt,
+        }
+    }
+
+    /// 生效的 VLM 提示词（自定义非空则用它，否则内置默认）。
+    pub fn effective_prompt(&self) -> String {
+        if self.vlm_prompt.trim().is_empty() {
+            crate::vlm::VLM_PROMPT.to_string()
+        } else {
+            self.vlm_prompt.clone()
         }
     }
 
@@ -485,6 +503,9 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
                 "daily_budget": cfg.daily_budget,
                 "on_negative": cfg.on_negative,
             },
+            // LS-050：自定义 VLM 提示词（空=内置默认）；性能开关（Motion Gate）
+            "vlm_prompt": cfg.vlm_prompt,
+            "perf": perf_config(s),
             "usage": {"date": usage.date, "count": usage.count,
                       "budget": usage.budget, "exhausted": usage.exhausted()},
             // UX（2026-11-21）：推理设备（DirectML——DX12 统一层，N/A/Intel 卡
@@ -493,6 +514,24 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
         }))
         .into_response())
     })
+}
+
+/// LS-050 性能开关（Motion Gate）读取：app_settings perf.*。
+pub fn perf_config(s: &ls_store::Store) -> Value {
+    let enabled = s
+        .setting_get("perf.motion_gate_enabled")
+        .ok()
+        .flatten()
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let threshold = s
+        .setting_get("perf.motion_threshold")
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD);
+    json!({"motion_gate_enabled": enabled, "motion_threshold": threshold})
 }
 
 /// runtime.ep 设置读取（dml|cpu；缺省 dml=GPU 优先——用户决策 2026-11-21）。
@@ -657,6 +696,36 @@ pub(crate) async fn detect_config_put(
             }
             if let Some(o) = c.get("on_negative").and_then(|x| x.as_str()) {
                 writes.push(("detect.cascade.on_negative".into(), o.into()));
+            }
+        }
+        // LS-050：自定义 VLM 提示词（空字符串=清除恢复默认），限长 4000
+        if let Some(p) = body.get("vlm_prompt").and_then(|x| x.as_str()) {
+            if p.chars().count() > 4000 {
+                return Ok(detail_err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "vlm_prompt 超过 4000 字符",
+                )
+                .into_response());
+            }
+            writes.push(("detect.vlm_prompt".into(), p.trim().to_string()));
+        }
+        // LS-050：性能开关（Motion Gate）——即时生效，worker 下次取帧即读新值
+        if let Some(perf) = body.get("perf") {
+            if let Some(e) = perf.get("motion_gate_enabled").and_then(|x| x.as_bool()) {
+                writes.push((
+                    "perf.motion_gate_enabled".into(),
+                    if e { "1".into() } else { "0".into() },
+                ));
+            }
+            if let Some(t) = perf.get("motion_threshold").and_then(|x| x.as_f64()) {
+                if !t.is_finite() || t < 0.0 || t > 255.0 {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "perf.motion_threshold 必须在 0~255",
+                    )
+                    .into_response());
+                }
+                writes.push(("perf.motion_threshold".into(), t.to_string()));
             }
         }
         // 先检查错误再落库，避免 api_key 加密失败时出现半套配置写入
@@ -1084,7 +1153,7 @@ pub(crate) async fn detect_test(State(st): State<Shared>, Json(body): Json<Value
     let started = std::time::Instant::now();
     match crate::vlm::analyze_frames(
         &vlm_cfg,
-        crate::vlm::VLM_PROMPT,
+        &cfg.effective_prompt(), // LS-050：自定义提示词（空=默认）
         std::slice::from_ref(&jpeg),
     ) {
         Ok(v) => Json(json!({
@@ -1164,6 +1233,35 @@ mod tests {
         assert_eq!(cfg.mode, "local");
         assert!(!cfg.vlm_enabled());
         assert_eq!(cfg.daily_budget, 200);
+    }
+
+    #[test]
+    fn vlm_prompt_custom_and_fallback() {
+        let (_dir, s) = seed();
+        let cfg = DetectCfg::load(&s, _dir.path());
+        assert!(cfg.vlm_prompt.is_empty());
+        assert!(cfg.effective_prompt().contains("实验室安全监控分析员")); // 默认提示词
+        s.setting_set("detect.vlm_prompt", "只数人数，输出 JSON").unwrap();
+        let cfg = DetectCfg::load(&s, _dir.path());
+        assert_eq!(cfg.effective_prompt(), "只数人数，输出 JSON");
+        // 4000 字符上限
+        let long = "x".repeat(5000);
+        s.setting_set("detect.vlm_prompt", &long).unwrap();
+        let cfg = DetectCfg::load(&s, _dir.path());
+        assert_eq!(cfg.vlm_prompt.chars().count(), 4000);
+    }
+
+    #[test]
+    fn perf_config_defaults_and_values() {
+        let (_dir, s) = seed();
+        let p = perf_config(&s);
+        assert_eq!(p["motion_gate_enabled"], false);
+        assert_eq!(p["motion_threshold"], ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD);
+        s.setting_set("perf.motion_gate_enabled", "1").unwrap();
+        s.setting_set("perf.motion_threshold", "3.5").unwrap();
+        let p = perf_config(&s);
+        assert_eq!(p["motion_gate_enabled"], true);
+        assert_eq!(p["motion_threshold"], 3.5);
     }
 
     #[test]

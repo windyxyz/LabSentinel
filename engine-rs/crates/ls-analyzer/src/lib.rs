@@ -6,5 +6,6 @@
 
 pub mod detector;
 pub mod evidence;
+pub mod motion;
 pub mod pipeline;
 pub mod ppe;

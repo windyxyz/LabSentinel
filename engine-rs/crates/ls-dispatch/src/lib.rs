@@ -214,6 +214,9 @@ pub fn type_text(type_: &str) -> String {
         "exit" => "有人离开监控区".to_string(),
         "stranger" => "陌生人进入".to_string(),
         "no_gloves" => "未戴手套".to_string(),
+        "no_goggles" => "未戴护目镜".to_string(),
+        "no_mask" => "未戴口罩".to_string(),
+        "solo_after_hours" => "单人留守超时".to_string(),
         other => other.to_string(),
     }
 }

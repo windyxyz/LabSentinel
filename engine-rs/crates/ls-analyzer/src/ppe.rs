@@ -277,3 +277,63 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
         }
     }
 }
+
+/// LS-050 动态 PPE 类别映射：自定义 `.classes.txt` 中的违规类
+/// （`no_gloves`/`no_goggles`/`no_mask`/`no_lab_coat` 等）→ 事件 behavior 字符串。
+/// 未识别的违规类统一回退 `enter_no_ppe`（与既有口径一致）；映射表与
+/// `ls-dispatch::type_text` / 前端 `TYPE_TEXT` 的键保持 1:1。
+pub fn violation_behavior(class_name: &str) -> &'static str {
+    let n = class_name.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    match n.as_str() {
+        "no_gloves" | "gloves_no" | "without_gloves" => "no_gloves",
+        "no_goggles" | "goggles_no" | "without_goggles" => "no_goggles",
+        "no_mask" | "mask_no" | "without_mask" => "no_mask",
+        // 实验服类违规沿用既有事件名，避免破坏生产告警链
+        "no_lab_coat" | "no_labcoat" | "no_ppe" | "lab_coat_no" => "enter_no_ppe",
+        _ => "enter_no_ppe",
+    }
+}
+
+/// 从类表筛出所有「违规类」（名字以 no_ 开头或含 without），返回
+/// `(类名, 事件 behavior)` 列表，供规则引擎按类触发。穿戴类（lab_coat 等）不在其列。
+pub fn violation_classes(classes: &[String]) -> Vec<(String, String)> {
+    classes
+        .iter()
+        .filter(|n| {
+            let l = n.trim().to_ascii_lowercase();
+            l.starts_with("no_") || l.contains("without") || l.ends_with("_no")
+        })
+        .map(|n| (n.clone(), violation_behavior(n).to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn violation_behavior_maps_known_classes() {
+        assert_eq!(violation_behavior("no_gloves"), "no_gloves");
+        assert_eq!(violation_behavior("No-Goggles"), "no_goggles");
+        assert_eq!(violation_behavior("without mask"), "no_mask");
+        assert_eq!(violation_behavior("no lab coat"), "enter_no_ppe");
+        assert_eq!(violation_behavior("something_else"), "enter_no_ppe");
+    }
+
+    #[test]
+    fn violation_classes_filters_and_keeps_behavior() {
+        let names = vec![
+            "person".to_string(),
+            "lab coat".to_string(),
+            "no_gloves".to_string(),
+            "no_goggles".to_string(),
+            "no_mask".to_string(),
+        ];
+        let got = violation_classes(&names);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0], ("no_gloves".into(), "no_gloves".into()));
+        assert_eq!(got[1], ("no_goggles".into(), "no_goggles".into()));
+        assert_eq!(got[2], ("no_mask".into(), "no_mask".into()));
+    }
+}
+

@@ -69,4 +69,13 @@ describe('Zones.vue 渲染健壮性', () => {
     expect(w.text()).toContain('坏数据')
     expect(w.text()).toContain('顶点数')
   })
+
+  it('LS-050：规则表单含单人留守选项', async () => {
+    mockFetch(BASE)
+    const w = mount(Zones)
+    await flushPromises()
+    expect(w.text()).toContain('单人留守超时')
+    const opt = w.find('option[value="solo_after_hours"]')
+    expect(opt.exists()).toBe(true)
+  })
 })

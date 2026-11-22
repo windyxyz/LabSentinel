@@ -347,7 +347,9 @@ async function mark(e, status) {
           </span>
         </td>
         <td>
-          <img v-if="e.has_snapshot" :src="mediaUrl(`/api/events/${e.id}/snapshot`)" alt="事件截图缩略图" class="snap" @click="zoom = mediaUrl(`/api/events/${e.id}/snapshot`)" />
+          <img v-if="e.has_snapshot" :src="mediaUrl(`/api/events/${e.id}/thumb`)" alt="事件截图缩略图"
+               class="snap" loading="lazy" decoding="async" width="120" height="68"
+               @click="zoom = mediaUrl(`/api/events/${e.id}/snapshot`)" />
         </td>
         <td>
           <button v-if="e.has_video" class="ghost" aria-label="播放事件视频" @click="videoZoom = e.id">▶</button>

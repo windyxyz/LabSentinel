@@ -183,4 +183,44 @@ describe('DetectPanel.vue（UX2）', () => {
     expect(w.text()).toContain('今日上限已用尽')
     expect(w.text()).toContain('仅本地')
   })
+
+  it('LS-050：VLM 提示词编辑与保存（留空=默认）', async () => {
+    const fn = mockFetch({
+      'GET /api/detect/config': {
+        ...CONFIG,
+        vlm_prompt: '自定义提示词：只数人数',
+        perf: { motion_gate_enabled: true, motion_threshold: 2 },
+      },
+      'PUT /api/detect/config': { ok: true },
+    })
+    const w = mount(DetectPanel)
+    await flushPromises()
+    const ta = w.find('textarea[aria-label="VLM 提示词"]')
+    expect(ta.exists()).toBe(true)
+    expect(ta.element.value).toBe('自定义提示词：只数人数')
+    await ta.setValue('新提示词')
+    const save = w.findAll('button').find((b) => b.text() === '保存提示词')
+    await save.trigger('click')
+    await flushPromises()
+    const put = fn.mock.calls.find((c) => c[1]?.method === 'PUT' && JSON.parse(c[1].body).vlm_prompt !== undefined)
+    expect(JSON.parse(put[1].body).vlm_prompt).toBe('新提示词')
+  })
+
+  it('LS-050：Motion Gate 开关保存 perf 配置', async () => {
+    const fn = mockFetch({
+      'GET /api/detect/config': {
+        ...CONFIG,
+        perf: { motion_gate_enabled: false, motion_threshold: 2 },
+      },
+      'PUT /api/detect/config': { ok: true },
+    })
+    const w = mount(DetectPanel)
+    await flushPromises()
+    expect(w.text()).toContain('启用运动预筛')
+    const save = w.findAll('button').find((b) => b.text() === '保存性能设置')
+    await save.trigger('click')
+    await flushPromises()
+    const put = fn.mock.calls.find((c) => c[1]?.method === 'PUT' && JSON.parse(c[1].body).perf !== undefined)
+    expect(JSON.parse(put[1].body).perf.motion_gate_enabled).toBe(false)
+  })
 })

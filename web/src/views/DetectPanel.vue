@@ -41,6 +41,11 @@ const apiCardEl = ref(null)
 const urlInputEl = ref(null)
 const runtimeEp = ref('dml')
 
+// ---- LS-050：自定义 VLM 提示词 + 性能开关（Motion Gate）----
+const vlmPrompt = ref('')
+const motionGate = ref(false)
+const motionThreshold = ref(2)
+
 const MODES = [
   { id: 'local', title: '仅本地', desc: '零成本离线——ONNX 本地推理，数据不出本机', icon: '<rect x="2.5" y="4" width="11" height="8" rx="1.5"/><path d="M5 13.5h6"/>' },
   { id: 'api', title: '仅 API', desc: '全量精判——所有画面交外部联网模型判定', icon: '<circle cx="8" cy="8" r="2.2"/><path d="M8 2v2.4M8 11.6V14M2 8h2.4M11.6 8H14"/>' },
@@ -103,6 +108,9 @@ async function load() {
     onNegative.value = d.cascade.on_negative
     usage.value = d.usage
     runtimeEp.value = d.runtime?.ep || 'dml'
+    vlmPrompt.value = d.vlm_prompt || ''
+    motionGate.value = !!d.perf?.motion_gate_enabled
+    motionThreshold.value = d.perf?.motion_threshold ?? 2
     // 档案接口失败（旧服务端/网络抖动）时回退旧单配置，页面仍可用
     let pf = { profiles: [], active: '' }
     try {
@@ -304,6 +312,32 @@ async function saveRuntimeEp(ep) {
   busy.value = false
 }
 
+// LS-050：自定义 VLM 提示词（留空=恢复内置默认），即时生效
+async function saveVlmPrompt() {
+  busy.value = true
+  msg.value = ''
+  try {
+    await api.saveDetectConfig({ vlm_prompt: vlmPrompt.value })
+    await load()
+    msg.value = vlmPrompt.value.trim() ? '已保存自定义提示词（后续 API 判定生效）' : '已恢复内置默认提示词'
+  } catch (e) { msg.value = String(e.message || e) }
+  busy.value = false
+}
+
+// LS-050：Motion Gate 性能开关（即时生效，无需重启）
+async function savePerf() {
+  busy.value = true
+  msg.value = ''
+  try {
+    await api.saveDetectConfig({
+      perf: { motion_gate_enabled: motionGate.value, motion_threshold: Number(motionThreshold.value) },
+    })
+    await load()
+    msg.value = motionGate.value ? '已开启运动预筛（静止空画面跳过推理）' : '已关闭运动预筛（每帧全检）'
+  } catch (e) { msg.value = String(e.message || e) }
+  busy.value = false
+}
+
 onMounted(load)
 </script>
 
@@ -416,6 +450,38 @@ onMounted(load)
             <template v-if="testResult.verdict"> —— 判定：{{ JSON.stringify(testResult.verdict) }}</template>
           </span>
           <span v-else-if="testResult" class="lv3">失败：{{ testResult.detail }}</span>
+        </div>
+      </div>
+
+      <!-- LS-050：性能开关（Motion Gate） -->
+      <div class="card">
+        <h3>性能选项</h3>
+        <label class="muted" style="display:block;margin:6px 0">
+          <input type="checkbox" v-model="motionGate" /> 启用运动预筛（Motion Gate）
+        </label>
+        <div class="row" style="align-items:center;flex-wrap:wrap">
+          <label class="muted">
+            帧差阈值 <b>{{ motionThreshold }}</b>
+            <input type="range" min="0" max="20" step="0.5" v-model.number="motionThreshold"
+                   style="vertical-align:middle" />（越大越容易跳过，建议 1~3）
+          </label>
+          <button class="ghost" :disabled="busy" @click="savePerf">保存性能设置</button>
+        </div>
+        <p class="muted" style="font-size:12px;margin-bottom:0">
+          无人在场且画面静止时跳过 YOLO/实验服推理（省 70%+ 算力）；有活跃目标或每 10 帧心跳强制全检，绝不漏判。跳过比例见仪表盘「后端」卡。</p>
+      </div>
+
+      <!-- LS-050：自定义 VLM 提示词 -->
+      <div class="card">
+        <h3>外部模型提示词（VLM）</h3>
+        <p class="muted" style="margin-top:0;font-size:12.5px">
+          自定义发给上游视觉模型的分析提示词；留空使用内置实验室安全模板。需输出 JSON：persons / no_ppe / violations / summary。</p>
+        <textarea v-model="vlmPrompt" rows="4" aria-label="VLM 提示词"
+                  placeholder="留空 = 使用内置默认提示词"
+                  style="width:100%; box-sizing:border-box; font-size:13px"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="ghost" :disabled="busy" @click="saveVlmPrompt">保存提示词</button>
+          <button class="ghost" :disabled="busy" @click="vlmPrompt = ''; saveVlmPrompt()">恢复默认</button>
         </div>
       </div>
 

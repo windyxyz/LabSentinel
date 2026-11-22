@@ -218,12 +218,15 @@ async function addRule(zoneId) {
         <option value="enter">进入安全区</option>
         <option value="exit">离开安全区</option>
         <option value="occupancy_over">在场人数超限</option>
+        <option value="solo_after_hours">单人留守超时（非工作时段）</option>
       </select>
       <select v-model="newRule.level"><option :value="1">L1 提示</option><option :value="2">L2 警告</option><option :value="3">L3 严重</option></select>
       <input v-model.number="newRule.cooldown_s" placeholder="冷却(秒)" style="width:90px" />
       <input v-model="newRule.time_start" style="width:70px" /> —
       <input v-model="newRule.time_end" style="width:70px" />
-      <input v-model.number="newRule.threshold" placeholder="人数阈值" style="width:90px" />
+      <input v-model.number="newRule.threshold"
+             :placeholder="newRule.behavior === 'solo_after_hours' ? '滞留秒数' : '人数阈值'"
+             style="width:100px" />
     </div>
     <!-- 任务112：生效星期 + 仅假期 -->
     <div class="row" style="margin-top:6px">

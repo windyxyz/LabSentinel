@@ -129,7 +129,8 @@ export const api = {
   ppeStatus: () => req('GET', '/api/models/ppe/status'),
   ppeDownload: (confirm_license) => req('POST', '/api/models/ppe/download', { confirm_license }),
   // 0.4.0：实验服模型启停/替换
-  ppeConfig: (enabled) => req('PUT', '/api/models/ppe/config', { enabled }),
+  // 0.5.0 LS-050：接受 {enabled?, violation_conf?, wearing_conf?, clahe_enabled?}
+  ppeConfig: (patch) => req('PUT', '/api/models/ppe/config', patch),
   ppeUpload: (file) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -192,6 +193,10 @@ export const TYPE_TEXT = {
   exit: '离开安全区',
   occupancy_over: '在场人数超限',
   stranger: '陌生人进入', // 人脸模块（默认关闭）产生；与服务端 constants.py 同步
+  solo_after_hours: '单人留守超时', // LS-050
+  no_gloves: '未戴手套',
+  no_goggles: '未戴护目镜',
+  no_mask: '未戴口罩',
 }
 
 export const STATUS_TEXT = {

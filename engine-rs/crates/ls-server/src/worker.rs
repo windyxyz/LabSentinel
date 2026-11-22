@@ -320,6 +320,9 @@ pub struct WorkerHandle {
     pub latest_jpeg: Mutex<Option<Vec<u8>>>,
     /// RA1.3：folder worker 立即扫描唤醒（POST /folders/{cid}/scan）
     pub wake: Arc<AtomicBool>,
+    /// LS-050：Motion Gate 统计（跳过帧数 / 总帧数），供 /api/system 读取
+    pub motion_skipped: Arc<AtomicU64>,
+    pub motion_total: Arc<AtomicU64>,
 }
 
 /// 全局 worker 注册表（AppState.workers）。
@@ -331,6 +334,19 @@ pub struct Workers {
 impl Workers {
     pub fn get(&self, cid: i64) -> Option<Arc<WorkerHandle>> {
         self.map.lock().ok()?.get(&cid).cloned()
+    }
+
+    /// LS-050：所有运行中相机的 Motion Gate 汇总统计（总帧/跳过帧）。
+    pub fn motion_stats(&self) -> (u64, u64) {
+        let Ok(map) = self.map.lock() else {
+            return (0, 0);
+        };
+        map.values().fold((0u64, 0u64), |(t, s), h| {
+            (
+                t + h.motion_total.load(Ordering::Relaxed),
+                s + h.motion_skipped.load(Ordering::Relaxed),
+            )
+        })
     }
 
     fn insert(&self, cid: i64, h: Arc<WorkerHandle>) {
@@ -568,6 +584,8 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         ffmpeg: Arc::new(Mutex::new(None)),
         latest_jpeg: Mutex::new(None),
         wake: Arc::new(AtomicBool::new(false)),
+        motion_skipped: Arc::new(AtomicU64::new(0)),
+        motion_total: Arc::new(AtomicU64::new(0)),
     });
     st.workers.insert(cid, Arc::clone(&handle));
     let st2 = Arc::clone(st);
@@ -745,6 +763,26 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         exit,
     );
     let mut detector = ls_analyzer::detector::make_detector(&cfg.detector);
+    // LS-050：Motion Gate 运动预筛（空场景跳过 YOLO/PPE）；运行时从 app_settings 读取
+    let mut motion_gate = ls_analyzer::motion::MotionGate::new(
+        ls_analyzer::motion::MotionConfig {
+            enabled: store
+                .setting_get("perf.motion_gate_enabled")
+                .ok()
+                .flatten()
+                .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false),
+            threshold: store
+                .setting_get("perf.motion_threshold")
+                .ok()
+                .flatten()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD),
+            heartbeat_frames: ls_analyzer::motion::DEFAULT_HEARTBEAT_FRAMES,
+        },
+    );
+    let mut motion_cfg_stamp = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     // RA2-S1：PPE 级联注入管线（未配置模型 → None → 仅人员检测，ppe 恒 Unknown）
     let ppe_runner = cfg.ppe.as_ref().and_then(ls_analyzer::ppe::make_ppe_runner);
     pipe.set_ppe(ppe_runner);
@@ -827,7 +865,40 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             *slot = Some(j.clone());
                         }
                     }
-                    let dets = detector.detect(&frame);
+                    // LS-050 Motion Gate：每秒刷新配置（网页开关/阈值即时生效）；
+                    // 无活跃 track + 低帧差 + 心跳未到 → 跳过 YOLO/PPE 推理。
+                    if motion_cfg_stamp.elapsed() >= std::time::Duration::from_secs(1) {
+                        motion_cfg_stamp = std::time::Instant::now();
+                        motion_gate.set_config(ls_analyzer::motion::MotionConfig {
+                            enabled: store
+                                .setting_get("perf.motion_gate_enabled")
+                                .ok()
+                                .flatten()
+                                .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+                                .unwrap_or(false),
+                            threshold: store
+                                .setting_get("perf.motion_threshold")
+                                .ok()
+                                .flatten()
+                                .and_then(|v| v.trim().parse::<f32>().ok())
+                                .filter(|v| v.is_finite() && *v >= 0.0)
+                                .unwrap_or(ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD),
+                            heartbeat_frames: ls_analyzer::motion::DEFAULT_HEARTBEAT_FRAMES,
+                        });
+                    }
+                    let motion_skip = motion_gate.should_skip(
+                        &frame.data,
+                        frame.width,
+                        frame.height,
+                        pipe.active_track_count() > 0,
+                    );
+                    handle.motion_total.fetch_add(1, Ordering::Relaxed);
+                    let dets = if motion_skip {
+                        handle.motion_skipped.fetch_add(1, Ordering::Relaxed);
+                        Vec::new() // 跳过昂贵推理；管线空帧路径仍走（保留 exit 语义/心跳）
+                    } else {
+                        detector.detect(&frame)
+                    };
                     // LS-041：实时流（rtsp/usb）使用真实本地时间，仅离线 file 回放沿用确定性时钟
                     let ts = if cfg.spec.type_ == "file" {
                         ls_analyzer::pipeline::frame_ts_for(frame.index, cfg.spec.analysis_fps)

@@ -177,6 +177,44 @@ pub(crate) async fn event_video(State(st): State<Shared>, AxPath(eid): AxPath<i6
     serve_event_media(&st, eid, |e| &e.video, "video/mp4")
 }
 
+/// LS-050：事件缩略图（宽 320px JPEG）——按需生成并缓存到 `data/thumbs/ev_<id>.jpg`，
+/// 列表页用它替代加载整张截图。命中缓存直接返回；否则 ffmpeg 解码缩放后编码落盘。
+pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
+    let Some(ev) = ls_store::Store::open(&st.db_path)
+        .ok()
+        .and_then(|s| s.event_by_id(eid).ok().flatten())
+    else {
+        return detail_err(StatusCode::NOT_FOUND, "event not found").into_response();
+    };
+    let dir = std::path::Path::new(&st.data_dir).join("thumbs");
+    let cache = dir.join(format!("ev_{eid}.jpg"));
+    if let Ok(bytes) = std::fs::read(&cache) {
+        return ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response();
+    }
+    let Some(rel) = ev.snapshot.clone().filter(|s| !s.is_empty()) else {
+        return detail_err(StatusCode::NOT_FOUND, "event has no snapshot").into_response();
+    };
+    let src = std::path::Path::new(&st.data_dir).join(rel);
+    // 320×180 解码缩放（ffmpeg 自带 CREATE_NO_WINDOW，见 ls_ingest::decode_image）
+    let Ok((bgr, w, h)) = ls_ingest::decode_image(&src, 320, 180) else {
+        // 缩略图失败时回退原图（功能降级但列表仍可见）
+        return serve_event_media(&st, eid, |e| &e.snapshot, "image/jpeg");
+    };
+    let Ok(jpeg) = ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h) else {
+        return serve_event_media(&st, eid, |e| &e.snapshot, "image/jpeg");
+    };
+    if std::fs::create_dir_all(&dir).is_ok() {
+        // 原子写：先写 .tmp 再改名，避免并发读到半截文件
+        let tmp = dir.join(format!("ev_{eid}.jpg.tmp"));
+        if std::fs::write(&tmp, &jpeg).is_ok() {
+            if std::fs::rename(&tmp, &cache).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+    ([(header::CONTENT_TYPE, "image/jpeg")], jpeg).into_response()
+}
+
 /// P0-1 修复（安全审计）：WS 握手校验——此前零鉴权（CSWSH：恶意网页可
 /// drive-by 读取事件流并绕过读保护）。语义对齐 Python `_ws_origin_ok` +
 /// `_ws_auth_check`：

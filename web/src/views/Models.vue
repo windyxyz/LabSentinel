@@ -30,11 +30,28 @@ async function toggle(ev) {
   busy.value = true
   msg.value = ''
   try {
-    const r = await api.ppeConfig(enabled)
+    const r = await api.ppeConfig({ enabled })
     await load()
     msg.value = enabled
       ? `已开启实验服检测${r.restarted ? `（${r.restarted} 路相机已重启生效）` : ''}`
       : `已关闭实验服检测（仅人员检测）${r.restarted ? `，${r.restarted} 路相机已重启` : ''}`
+  } catch (e) {
+    msg.value = String(e.message || e)
+    await load()
+  } finally {
+    busy.value = false
+  }
+}
+
+async function saveThreshold(key, raw) {
+  const val = Number(raw)
+  if (!Number.isFinite(val) || val < 0.05 || val > 0.95) return
+  busy.value = true
+  msg.value = ''
+  try {
+    const r = await api.ppeConfig({ [key]: val })
+    await load()
+    msg.value = `已保存${key === 'violation_conf' ? '违规' : '穿戴'}置信度${r.restarted ? `（${r.restarted} 路相机已重启）` : ''}`
   } catch (e) {
     msg.value = String(e.message || e)
     await load()
@@ -124,6 +141,26 @@ onMounted(load)
           <span>启用实验服检测</span>
         </label>
         <p class="muted" style="white-space:pre-wrap">{{ status.license_notice }}</p>
+        <p v-if="status.warning" class="lv2" style="font-size:12.5px">{{ status.warning }}</p>
+        <!-- LS-050：PPE 置信度阈值（改完即存，运行中相机软重启生效） -->
+        <div class="ppe-thresholds" style="margin:10px 0">
+          <label class="muted">
+            违规置信度 <b>{{ (status.violation_conf ?? 0.3).toFixed(2) }}</b>
+            <input type="range" min="0.05" max="0.95" step="0.05"
+                   :value="status.violation_conf ?? 0.3" :disabled="busy"
+                   @change="saveThreshold('violation_conf', $event.target.value)" />
+          </label>
+          <label class="muted" style="margin-left:16px">
+            穿戴置信度 <b>{{ (status.wearing_conf ?? 0.2).toFixed(2) }}</b>
+            <input type="range" min="0.05" max="0.95" step="0.05"
+                   :value="status.wearing_conf ?? 0.2" :disabled="busy"
+                   @change="saveThreshold('wearing_conf', $event.target.value)" />
+          </label>
+          <span class="muted" style="display:block;font-size:12px;margin-top:4px">
+            灰度/远景监控图若检出偏低，可适当降低违规置信度；阈值越低越敏感但误报增多。</span>
+        </div>
+        <p v-if="status.classes?.length" class="muted" style="font-size:12px">
+          模型类别（{{ status.classes.length }}）：{{ status.classes.join(' / ') }}</p>
         <p class="muted">
           校验 SHA256：<code>{{ status.sha256 || '—' }}</code><br />
           大小：<template v-if="status.size_bytes > 0">{{ (status.size_bytes / 1048576).toFixed(1) }} MB</template><template v-else>—</template>

@@ -76,10 +76,14 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
                "usage": {"count": u.count, "budget": u.budget,
                          "exhausted": u.exhausted()}})
     };
+    // LS-050：Motion Gate 跳过帧统计（总帧/跳过帧/比例）
+    let (motion_total, motion_skipped) = st.workers.motion_stats();
     Json(json!({
         "version": st.version,
         "schema_version": s.schema_version().unwrap_or(0),
         "backend": "rust",
+        "perf": {"motion": {"total_frames": motion_total, "skipped_frames": motion_skipped,
+                 "skip_ratio": if motion_total > 0 { motion_skipped as f64 / motion_total as f64 } else { 0.0 }}},
         "cameras": cams.iter().map(|c| json!({"id": c.id, "name": c.name,
             "status": c.status, "type": c.type_})).collect::<Vec<_>>(),
         "today_counts": today_counts,

@@ -356,6 +356,11 @@ pub fn run_cleanup_with(
             for p in [snap, vid].into_iter().flatten() {
                 remove_file_counted(p, cfg, &mut stats);
             }
+            // LS-050：事件过期时一并清理缓存缩略图（data/thumbs/ev_<id>.jpg）
+            let thumb = cfg.data_dir.join("thumbs").join(format!("ev_{id}.jpg"));
+            if safe_within(&thumb, &cfg.data_dir) {
+                let _ = fs::remove_file(&thumb);
+            }
             conn.execute("DELETE FROM events WHERE id=?", [id])
                 .map_err(|e| e.to_string())?;
             stats.deleted_events += 1;
@@ -650,11 +655,16 @@ fn data_bytes_capped(dir: &Path, limit: usize) -> (u64, bool) {
     (total, capped)
 }
 
-/// 四核心目录递归大小（db + snapshots + videos + annotation_pool）。
+/// 核心目录递归大小（db + snapshots + videos + annotation_pool + thumbs）。
 pub fn core_bytes(cfg: &RetentionConfig) -> u64 {
     let db = cfg.data_dir.join("labsentinel.db");
     let mut total = fs::metadata(db).map(|m| m.len()).unwrap_or(0);
-    for d in [&cfg.snapshot_dir, &cfg.video_dir, &cfg.annotation_pool_dir] {
+    for d in [
+        &cfg.snapshot_dir,
+        &cfg.video_dir,
+        &cfg.annotation_pool_dir,
+        &cfg.data_dir.join("thumbs"),
+    ] {
         total += crate::paths::dir_bytes(d);
     }
     total

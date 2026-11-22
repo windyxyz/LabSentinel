@@ -21,6 +21,9 @@ const STATUS = {
   mode: 'ppe', active: true, license_confirmed_required: false,
   license_notice: '随安装包提供', sha256: 'f00231e6', size_bytes: 10673073,
   model_path: 'yolo11n_ppe.onnx', note: '已启用',
+  // LS-050：阈值与类别清单
+  violation_conf: 0.3, wearing_conf: 0.2,
+  classes: ['person', 'lab coat', 'no lab coat', 'no_gloves'],
 }
 
 afterEach(() => { vi.unstubAllGlobals() })
@@ -78,5 +81,30 @@ describe('Models.vue（0.4.0）', () => {
     const post = fn.mock.calls.find((c) => c[1]?.method === 'POST')
     expect(post[0]).toContain('/api/models/ppe/reset')
     expect(w.text()).toContain('已恢复随包模型')
+  })
+
+  it('LS-050：展示 PPE 阈值滑块与类别清单', async () => {
+    mockFetch({ 'GET /api/models/ppe/status': STATUS })
+    const w = mount(Models)
+    await flushPromises()
+    expect(w.text()).toContain('违规置信度')
+    expect(w.text()).toContain('穿戴置信度')
+    expect(w.text()).toContain('no_gloves')
+    expect(w.findAll('input[type="range"]').length).toBe(2)
+  })
+
+  it('LS-050：拖动阈值滑块保存 violation_conf', async () => {
+    const fn = mockFetch({
+      'GET /api/models/ppe/status': STATUS,
+      'PUT /api/models/ppe/config': { ok: true, restarted: 0 },
+    })
+    const w = mount(Models)
+    await flushPromises()
+    const sliders = w.findAll('input[type="range"]')
+    sliders[0].element.value = '0.45'
+    await sliders[0].trigger('change')
+    await flushPromises()
+    const put = fn.mock.calls.find((c) => c[1]?.method === 'PUT')
+    expect(JSON.parse(put[1].body).violation_conf).toBe(0.45)
   })
 })

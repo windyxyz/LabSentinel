@@ -106,6 +106,11 @@ pub struct CameraPipeline {
     zone_states: HashMap<i64, ZoneState>,
     /// (rule_id, track_id) -> 最近触发帧序号
     last_fire: HashMap<(i64, i64), u64>,
+    /// LS-050 单人留守：rule_id -> (当前独处 track_id, 开始独处的帧序号)。
+    /// 独处人数 != 1 或 track 变化时清零重新计时。
+    solo_since: HashMap<i64, (i64, u64)>,
+    /// LS-050：上一帧活跃 track 数（Motion Gate 守卫：>0 时禁止跳帧）。
+    last_active_count: usize,
     frame_index: u64,
     /// L1 对齐诊断：true 时每帧记录 ByteTrack 激活轨迹 (track_id, tlbr)
     pub log_tracks: bool,
@@ -159,6 +164,8 @@ impl CameraPipeline {
             tracker,
             zone_states,
             last_fire: HashMap::new(),
+            solo_since: HashMap::new(),
+            last_active_count: 0,
             frame_index: 0,
             log_tracks: false,
             track_log: Vec::new(),
@@ -170,6 +177,11 @@ impl CameraPipeline {
     /// T-325/Q-14：注入 PPE 检测器（`None` 时保持「仅人员检测」）。
     pub fn set_ppe(&mut self, ppe: Option<Box<dyn PpeRunner>>) {
         self.ppe = ppe;
+    }
+
+    /// LS-050：上一帧活跃 track 数，供 Motion Gate 守卫（>0 禁止跳帧）。
+    pub fn active_track_count(&self) -> usize {
+        self.last_active_count
     }
 
     /// 处理一帧检测结果，返回本帧事件候选（未入库）。
@@ -193,6 +205,7 @@ impl CameraPipeline {
         // 与 Python `_analyze` 对齐：空检测帧**不调 ByteTrack**（track 状态冻结，
         // lost_time 不累积、frame_id 不推进），只对在场 track 补离场观测并回收状态。
         if dets.is_empty() {
+            self.last_active_count = 0;
             let mut exits: Vec<(i64, i64)> = Vec::new();
             for (zid, st) in self.zone_states.iter_mut() {
                 for tid in st.inside_ids() {
@@ -206,6 +219,8 @@ impl CameraPipeline {
                 let detail = format!("离开安全区「{}」", self.zone_name(zid));
                 self.try_fire(Some(zid), "exit", tid, &detail, 2, &now, frame_ts, &mut out);
             }
+            // LS-050：空帧无人 → 所有单人留守计时清零
+            self.solo_since.clear();
             if self.log_tracks {
                 self.track_log.push(Vec::new()); // 保持帧号对齐（空帧无激活轨迹）
                 self.state_log.push(self.tracker.state_snapshot());
@@ -221,6 +236,7 @@ impl CameraPipeline {
             })
             .collect();
         let active = self.tracker.update(&track_dets);
+        self.last_active_count = active.len();
         if self.log_tracks {
             self.track_log
                 .push(active.iter().map(|(b, id)| (*id, *b)).collect());
@@ -413,6 +429,67 @@ impl CameraPipeline {
                 );
             }
         }
+        // LS-050 单人留守（solo_after_hours）：画面/指定区域内恰好 1 人且
+        // 持续停留超过 rule.threshold 秒才触发。人数 != 1 或 track 变化即重新计时。
+        let solo_rules: Vec<RuleSpec> = self
+            .rules
+            .iter()
+            .filter(|r| r.enabled && r.behavior == "solo_after_hours")
+            .cloned()
+            .collect();
+        for rule in solo_rules {
+            let ids: HashSet<i64> = if rule.zone_id == 0 {
+                active_ids.clone()
+            } else {
+                occ.get(&rule.zone_id).cloned().unwrap_or_default()
+            };
+            if ids.len() != 1 {
+                self.solo_since.remove(&rule.id);
+                continue;
+            }
+            let tid = *ids.iter().next().unwrap();
+            let started = match self.solo_since.get(&rule.id).copied() {
+                Some((t, f)) if t == tid => f,
+                _ => {
+                    self.solo_since.insert(rule.id, (tid, self.frame_index));
+                    self.frame_index
+                }
+            };
+            let fps = self.camera.analysis_fps.max(1.0) as f64;
+            let dwell_frames = self.frame_index.saturating_sub(started) as f64 / fps;
+            let need_s = if rule.threshold > 0 {
+                rule.threshold as f64
+            } else {
+                60.0 // 缺省 60 秒
+            };
+            if dwell_frames >= need_s {
+                let where_ = if rule.zone_id == 0 {
+                    "画面".to_string()
+                } else {
+                    format!("「{}」", self.zone_name(rule.zone_id))
+                };
+                let detail = format!(
+                    "{where_}仅 1 人滞留已达 {:.0} 秒（非工作时段单人留守）",
+                    dwell_frames
+                );
+                let zid = if rule.zone_id == 0 {
+                    None
+                } else {
+                    Some(rule.zone_id)
+                };
+                self.try_fire(
+                    zid,
+                    "solo_after_hours",
+                    tid,
+                    &detail,
+                    rule.level,
+                    &now,
+                    frame_ts,
+                    &mut out,
+                );
+            }
+        }
+
         if self.log_tracks {
             self.state_log.push(self.tracker.state_snapshot());
         }
@@ -636,6 +713,63 @@ mod tests {
             box_,
             score: 0.9,
             ppe: PpeStatus::Unknown,
+        }
+    }
+
+    #[test]
+    fn solo_after_hours_triggers_after_dwell_and_resets_on_empty() {
+        // 单人滞留 3 秒（fps=5 → 15 帧）触发；空帧/多人重新计时。
+        let mut p = CameraPipeline::new(
+            camera(),
+            vec![zone()],
+            vec![RuleSpec {
+                threshold: 3,
+                cooldown_s: 0,
+                ..rule(11, "solo_after_hours", 2, 0)
+            }],
+            HashMap::new(),
+            1,
+            1,
+        );
+        let ts = "2026-01-01T22:00:00";
+        let d = [det([10.0, 10.0, 100.0, 200.0])];
+        // fps=5，阈值 3s → 需帧序号差 ≥15，即第 16 帧触发（首帧起算）
+        let mut fired = 0;
+        for _ in 0..15 {
+            fired += p.process(&d, ts).iter().filter(|c| c.behavior == "solo_after_hours").count();
+        }
+        assert_eq!(fired, 0, "未达 3 秒不触发");
+        let hit = p.process(&d, ts);
+        assert_eq!(hit.iter().filter(|c| c.behavior == "solo_after_hours").count(), 1);
+        assert!(hit.iter().any(|c| c.detail.contains("单人留守") || c.detail.contains("仅 1 人")));
+        // 空帧清零后重新计时，再喂 15 帧不应触发
+        p.process(&[], ts);
+        for _ in 0..15 {
+            assert!(p.process(&d, ts).iter().all(|c| c.behavior != "solo_after_hours"));
+        }
+    }
+
+    #[test]
+    fn solo_after_hours_ignores_multiple_people() {
+        let mut p = CameraPipeline::new(
+            camera(),
+            vec![zone()],
+            vec![RuleSpec {
+                threshold: 1,
+                ..rule(12, "solo_after_hours", 2, 0)
+            }],
+            HashMap::new(),
+            1,
+            1,
+        );
+        let ts = "2026-01-01T22:00:00";
+        // 两个分离的人框 → 两个 track（距离足够远，ByteTrack 不会合并）
+        let two = [
+            det([10.0, 10.0, 60.0, 120.0]),
+            det([500.0, 10.0, 560.0, 120.0]),
+        ];
+        for _ in 0..30 {
+            assert!(p.process(&two, ts).iter().all(|c| c.behavior != "solo_after_hours"));
         }
     }
 
