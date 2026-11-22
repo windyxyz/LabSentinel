@@ -113,6 +113,32 @@ fn read_model_roles(model_path: &Path) -> serde_json::Map<String, serde_json::Va
         .unwrap_or_default()
 }
 
+/// LS-055：模型目录 model.json 可声明输入尺寸（`imgsz` / `input_size` /
+/// `input: [w,h]`），用于 960/1280 等非默认尺寸的模型；缺省回退调用方传入值。
+fn read_model_imgsz(model_path: &Path) -> Option<u32> {
+    let dir = model_path.parent()?;
+    let text = std::fs::read_to_string(dir.join("model.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if let Some(n) = v.get("imgsz").and_then(|x| x.as_u64()) {
+        if (64..=4096).contains(&n) {
+            return Some(n as u32);
+        }
+    }
+    if let Some(n) = v.get("input_size").and_then(|x| x.as_u64()) {
+        if (64..=4096).contains(&n) {
+            return Some(n as u32);
+        }
+    }
+    if let Some(arr) = v.get("input").and_then(|x| x.as_array()) {
+        let w = arr.first().and_then(|x| x.as_u64())?;
+        let h = arr.get(1).and_then(|x| x.as_u64())?;
+        if w == h && (64..=4096).contains(&w) {
+            return Some(w as u32);
+        }
+    }
+    None
+}
+
 /// YOLO11 ONNX 会话（后端无关；`person_class` 由 model.json 角色声明，缺省 0）。
 pub struct YoloModel {
     backend: Backend,
@@ -186,7 +212,8 @@ impl YoloModel {
             #[cfg(feature = "ort")]
             ort_session: None,
             ep_is_dml: false,
-            imgsz,
+            // LS-055：model.json 声明尺寸优先（640/960/1280 静态尺寸自动适配）
+            imgsz: read_model_imgsz(path).unwrap_or(imgsz),
             // T-334/Q-14：模型角色声明（同目录 model.json 的 roles.person_class）。
             // 缺省 0 = COCO person 通道，旧模型无声明时行为不变。
             person_class: read_model_roles(path)
@@ -320,10 +347,11 @@ impl YoloModel {
                         .copied()
                         .ok_or_else(|| "输出索引越界".to_string())
                 })?;
+                let nms_free = is_nms_free_shape(&shape);
                 specs
                     .iter()
                     .map(|&(cid, conf, min_area)| {
-                        Self::decode_static(&rows, &geom, cid, conf, self.iou, min_area)
+                        Self::decode_static(&rows, &geom, cid, conf, self.iou, min_area, nms_free)
                     })
                     .collect()
             }
@@ -354,10 +382,11 @@ impl YoloModel {
                 let shape: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
                 let rows = rows_from_flat(&shape, flat)?;
                 drop(_dml_guard);
+                let nms_free = is_nms_free_shape(&shape);
                 specs
                     .iter()
                     .map(|&(cid, conf, min_area)| {
-                        Self::decode_static(&rows, &geom, cid, conf, self.iou, min_area)
+                        Self::decode_static(&rows, &geom, cid, conf, self.iou, min_area, nms_free)
                     })
                     .collect()
             }
@@ -374,11 +403,33 @@ impl YoloModel {
         conf: f32,
         iou: f32,
         min_box_area: f32,
+        nms_free: bool,
     ) -> Result<Vec<Det>, String> {
+        // LS-055：端到端 NMS-free 输出 `[1, N, 6]`（RT-DETR / YOLO26 / YOLOv10）
+        // 由调用方按输出 shape 判定（6 列且行数远大于列数），避免与经典 YOLO
+        // nc=2（4+nc=6 列）混淆。
+        if nms_free {
+            let mut dets: Vec<Det> = post::decode_nms_free(rows, conf, geom, Some(person_class))
+                .into_iter()
+                .map(|(d, _)| d)
+                .collect();
+            dets.retain(|d| (d.box_[2] - d.box_[0]) * (d.box_[3] - d.box_[1]) >= min_box_area);
+            // 端到端模型已内置去重，无需再 NMS
+            return Ok(dets);
+        }
         let mut dets = post::pick_class(rows, &[person_class], conf, geom);
         dets.retain(|d| (d.box_[2] - d.box_[0]) * (d.box_[3] - d.box_[1]) >= min_box_area);
         Ok(post::nms(dets, iou))
     }
+}
+
+/// LS-055：输出是否为端到端 NMS-free 形状（`[1, N, 6]` 或转置 `[1, 6, N]`，N 远大于 6）。
+fn is_nms_free_shape(shape: &[usize]) -> bool {
+    if shape.len() != 3 || shape[0] != 1 {
+        return false;
+    }
+    let (a, b) = (shape[1], shape[2]);
+    (b == 6 && a > 60) || (a == 6 && b > 60)
 }
 
 /// 从动态维度视图取行（tract 路径）。

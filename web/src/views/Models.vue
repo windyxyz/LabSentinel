@@ -43,6 +43,22 @@ async function toggle(ev) {
   }
 }
 
+// LS-055：模型 A/B 对比评测
+const benchBusy = ref(false)
+const bench = ref(null)
+async function runBenchmark() {
+  const path = prompt('候选模型 .onnx 的完整路径：')
+  if (!path || !path.trim()) return
+  benchBusy.value = true
+  bench.value = null
+  msg.value = ''
+  try {
+    bench.value = await api.ppeBenchmark(path.trim())
+    msg.value = bench.value.ok ? '对比评测完成' : '评测完成（部分模型加载失败）'
+  } catch (e) { msg.value = String(e.message || e) }
+  benchBusy.value = false
+}
+
 async function saveThreshold(key, raw) {
   const val = Number(raw)
   if (!Number.isFinite(val) || val < 0.05 || val > 0.95) return
@@ -172,8 +188,16 @@ onMounted(load)
           <button class="ghost" :disabled="busy || status.source !== 'custom'" @click="reset">
             恢复随包模型</button>
           <input ref="fileEl" type="file" accept=".onnx" style="display:none" @change="onFile" />
+          <button class="ghost" :disabled="benchBusy" @click="runBenchmark">
+            {{ benchBusy ? '评测中…' : '对比评测（A/B）' }}</button>
           <span class="muted" style="font-size:12px">
             上传后立即启用；替换文件保存在数据目录 models\ppe-custom.onnx，卸载不删除用户数据。</span>
+        </div>
+        <div v-if="bench" class="muted" style="font-size:12px;margin-top:6px">
+          样本 {{ bench.images }} 张 · 当前模型：{{ bench.current.avg_ms?.toFixed?.(1) ?? bench.current.avg_ms }}ms /
+          检出 {{ bench.current.detections }}；候选模型：{{ bench.candidate.avg_ms?.toFixed?.(1) ?? bench.candidate.avg_ms }}ms /
+          检出 {{ bench.candidate.detections }}
+          <span v-if="bench.candidate.error" class="lv3">（候选失败：{{ bench.candidate.error }}）</span>
         </div>
         <template v-if="!status.installed">
           <label style="display:block;margin:10px 0">

@@ -25,6 +25,8 @@ pub struct PpeConfig {
     pub wearing_class_names: Vec<String>,
     /// UX（2026-11-21）：GPU 推理（与主检测同设备；DirectML，失败回落 CPU）
     pub use_gpu: bool,
+    /// LS-055：灰度/低照度 ROI 启用 CLAHE 局部对比度增强
+    pub clahe_enabled: bool,
 }
 
 impl Default for PpeConfig {
@@ -40,6 +42,7 @@ impl Default for PpeConfig {
             violation_class_name: "no lab coat".into(),
             wearing_class_names: vec!["lab coat".into()],
             use_gpu: true,
+            clahe_enabled: true,
         }
     }
 }
@@ -103,6 +106,7 @@ pub struct YoloPpeRunner {
     wearing_classes: Vec<usize>,
     violation_conf: f32,
     wearing_conf: f32,
+    clahe_enabled: bool,
 }
 
 /// LS-043：升级框归属判定——要求交集占较小框面积 ≥ 0.20 或 PPE 框中心落入人框内，
@@ -197,6 +201,19 @@ impl PpeRunner for YoloPpeRunner {
                 let box_area = ((pb[2] - pb[0]).max(0.0)) * ((pb[3] - pb[1]).max(0.0));
                 if box_area / frame_area < 0.35 {
                     if let Some((roi, rw, rh)) = crop_bgr_roi(bgr, w, h, *pb) {
+                        // LS-055：灰度/低照度 ROI 先做 CLAHE 增强（仅灰度图触发，避免彩色失真）
+                        let roi = if self.clahe_enabled
+                            && ls_infer::preprocess::looks_grayscale(&roi, rw, rh)
+                        {
+                            ls_infer::preprocess::clahe_bgr(
+                                &roi,
+                                rw,
+                                rh,
+                                ls_infer::preprocess::ClaheConfig::default(),
+                            )
+                        } else {
+                            roi
+                        };
                         if let Ok(roi_dets) = self.model.detect_classes(&roi, rw, rh, &specs) {
                             let has_no = roi_dets.first().is_some_and(|v| !v.is_empty());
                             let has_wear = roi_dets.iter().skip(1).any(|v| !v.is_empty());
@@ -269,6 +286,7 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
                 wearing_classes,
                 violation_conf: cfg.violation_conf,
                 wearing_conf: cfg.wearing_conf,
+                clahe_enabled: cfg.clahe_enabled,
             }))
         }
         Err(e) => {

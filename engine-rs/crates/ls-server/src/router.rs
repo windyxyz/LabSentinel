@@ -29,6 +29,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/system/autostart"),
     ("PUT", "/api/system/autostart"),
     // ---- LS-054：数据飞轮 / 诊断包 / 只读分享链接 ----
+    ("POST", "/api/models/ppe/benchmark"),
     ("POST", "/api/dataset/samples/from-event/:eid"),
     ("POST", "/api/dataset/samples/from-folder/:iid"),
     ("POST", "/api/dataset/samples/capture/:cid"),

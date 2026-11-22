@@ -163,6 +163,8 @@ export const api = {
     return req('POST', '/api/models/ppe/upload', fd)
   },
   ppeReset: () => req('POST', '/api/models/ppe/reset', {}),
+  // LS-055：模型 A/B 对比评测
+  ppeBenchmark: (candidate_path) => req('POST', '/api/models/ppe/benchmark', { candidate_path }),
   // 0.4.0：API 多接入档案（保存多个上游，随时切换/测试/自动拉模型）
   detectProfiles: () => req('GET', '/api/detect/profiles'),
   saveDetectProfile: (p) => req('POST', '/api/detect/profiles', p),

@@ -384,6 +384,103 @@ pub(crate) async fn autostart_put(Json(body): Json<Value>) -> Response {
     }
 }
 
+/// LS-055：模型 A/B 对比评测——同一批样本分别用当前模型与候选模型顺序推理，
+/// 返回平均单帧耗时与检出数量（DirectML 会话内部已走 dml_lock 串行）。
+pub(crate) async fn ppe_benchmark(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    let candidate = body
+        .get("candidate_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if candidate.is_empty() {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "candidate_path 必填").into_response();
+    }
+    let Ok(cand_path) = std::path::Path::new(&candidate).canonicalize() else {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "候选模型路径不存在").into_response();
+    };
+    if !cand_path.is_file() {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "候选模型不是文件").into_response();
+    }
+    // 当前模型路径（env > app_settings > 随包）
+    let Ok(store) = ls_store::Store::open(&st.db_path) else {
+        return server_err();
+    };
+    let current = std::env::var("LS_PPE_MODEL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| store.setting_get("ppe_model").ok().flatten())
+        .filter(|p| std::path::Path::new(p).is_file())
+        .or_else(|| {
+            let p = crate::deploy::default_install_root().join("models/yolo11n_ppe.onnx");
+            p.is_file().then(|| p.to_string_lossy().into_owned())
+        });
+    let Some(current) = current else {
+        return detail_err(StatusCode::CONFLICT, "当前无可用实验服模型").into_response();
+    };
+    // 样本：标注池（最多 20 张）→ 无则内置样张
+    let mut images: Vec<(Vec<u8>, u32, u32)> = Vec::new();
+    if let Ok(samples) = store.dataset_samples(None, 20) {
+        for s in samples {
+            let p = std::path::Path::new(&st.data_dir).join(&s.image_path);
+            if let Ok((bgr, w, h)) = ls_ingest::decode_image(&p, 640, 640) {
+                images.push((bgr, w, h));
+            }
+        }
+    }
+    if images.is_empty() {
+        // 内置样张：纯色 640×360 BGR
+        let mut bgr = Vec::with_capacity(640 * 360 * 3);
+        for y in 0..360usize {
+            for x in 0..640usize {
+                let center = (x as i64 - 320).pow(2) + (y as i64 - 180).pow(2) < 80 * 80;
+                bgr.extend_from_slice(if center { &[200, 210, 220] } else { &[80, 60, 40] });
+            }
+        }
+        images.push((bgr, 640, 360));
+    }
+    let run = |path: &str| -> Result<(f64, usize), String> {
+        let mut model = ls_infer::yolo::YoloModel::load(
+            std::path::Path::new(path),
+            640,
+            0.25,
+            0.5,
+            0.0,
+            None,
+            true,
+        )?;
+        let mut total_ms = 0f64;
+        let mut count = 0usize;
+        for (bgr, w, h) in &images {
+            let t = std::time::Instant::now();
+            if let Ok(dets) = model.detect(bgr, *w, *h) {
+                count += dets.len();
+            }
+            total_ms += t.elapsed().as_secs_f64() * 1000.0;
+        }
+        Ok((total_ms / images.len().max(1) as f64, count))
+    };
+    let current_res = run(&current);
+    let cand_res = run(&cand_path.to_string_lossy());
+    Json(json!({
+        "ok": current_res.is_ok() && cand_res.is_ok(),
+        "images": images.len(),
+        "current": {
+            "path": current,
+            "avg_ms": current_res.as_ref().map(|r| r.0).unwrap_or(-1.0),
+            "detections": current_res.as_ref().map(|r| r.1).unwrap_or(0),
+            "error": current_res.err(),
+        },
+        "candidate": {
+            "path": cand_path.to_string_lossy(),
+            "avg_ms": cand_res.as_ref().map(|r| r.0).unwrap_or(-1.0),
+            "detections": cand_res.as_ref().map(|r| r.1).unwrap_or(0),
+            "error": cand_res.err(),
+        },
+    }))
+    .into_response()
+}
+
 // ---- LS-054：只读值守分享链接 + 一键脱敏诊断包 ----
 
 pub(crate) async fn share_links_list(State(st): State<Shared>) -> Response {

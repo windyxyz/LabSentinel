@@ -209,6 +209,9 @@ fn make_ppe_runner() -> Option<Box<dyn pipeline::PpeRunner>> {
         use_gpu: std::env::var("LS_GPU")
             .map(|v| v.trim() != "0")
             .unwrap_or(true),
+        clahe_enabled: std::env::var("LS_PPE_CLAHE")
+            .map(|v| !matches!(v.trim(), "0" | "false" | "off"))
+            .unwrap_or(true),
     };
     ppe::make_ppe_runner(&cfg)
 }

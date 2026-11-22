@@ -6,6 +6,7 @@
 //! 采用 tract（纯 Rust）先打通真实检测→事件闭环，ort 后端保留为后续可替换实现。
 
 pub mod post;
+pub mod preprocess;
 
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub mod yolo;

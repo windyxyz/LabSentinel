@@ -31,6 +31,63 @@ pub fn letterbox_geom(w: u32, h: u32, s: u32) -> LetterboxGeom {
     }
 }
 
+/// LS-055：非正方形输入的 letterbox 几何（RT-DETR/YOLO26 常用 960/1280 等）。
+pub fn letterbox_geom_wh(w: u32, h: u32, in_w: u32, in_h: u32) -> LetterboxGeom {
+    let (w, h, iw, ih) = (w as f32, h as f32, in_w as f32, in_h as f32);
+    let r = (ih / h).min(iw / w);
+    let nw = (w * r).floor();
+    let nh = (h * r).floor();
+    LetterboxGeom {
+        r,
+        dx: ((iw - nw) / 2.0).floor(),
+        dy: ((ih - nh) / 2.0).floor(),
+    }
+}
+
+/// LS-055：端到端 NMS-free 输出 `[x1, y1, x2, y2, score, class_id]` 解码
+/// （RT-DETR / YOLO26 / YOLOv10）。返回 (Det, class_id)。
+/// `class_filter` 为 Some 时仅保留该类；坐标为画布坐标，需反 letterbox。
+pub fn decode_nms_free(
+    rows: &[Vec<f32>],
+    conf: f32,
+    g: &LetterboxGeom,
+    class_filter: Option<usize>,
+) -> Vec<(Det, usize)> {
+    let mut out = Vec::new();
+    for row in rows {
+        if row.len() < 6 {
+            continue;
+        }
+        let score = row[4];
+        if !score.is_finite() || score <= conf {
+            continue;
+        }
+        let cls = row[5];
+        if !cls.is_finite() || cls < 0.0 {
+            continue;
+        }
+        let cls = cls.round() as usize;
+        if let Some(want) = class_filter {
+            if cls != want {
+                continue;
+            }
+        }
+        out.push((
+            Det {
+                box_: [
+                    (row[0] - g.dx) / g.r,
+                    (row[1] - g.dy) / g.r,
+                    (row[2] - g.dx) / g.r,
+                    (row[3] - g.dy) / g.r,
+                ],
+                score,
+            },
+            cls,
+        ));
+    }
+    out
+}
+
 /// YOLO 输出行 (cx, cy, w, h, cls...) → 原图 xyxy（反 letterbox）。
 pub fn decode_row(cx: f32, cy: f32, bw: f32, bh: f32, g: &LetterboxGeom) -> [f32; 4] {
     [
@@ -149,5 +206,42 @@ mod tests {
         let kept = nms(dets, 0.5);
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].score, 0.9);
+    }
+}
+
+#[cfg(test)]
+mod ls055_tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_letterbox_geometry() {
+        // 1280x720 → 960x960：r=0.75，nw=960，nh=540，dy=210
+        let g = letterbox_geom_wh(1280, 720, 960, 960);
+        assert!((g.r - 0.75).abs() < 1e-6);
+        assert!((g.dx - 0.0).abs() < 1e-6);
+        assert!((g.dy - 210.0).abs() < 1e-6);
+        // 1280x720 → 1280x1280：r=1.0，dy=280
+        let g2 = letterbox_geom_wh(1280, 720, 1280, 1280);
+        assert!((g2.r - 1.0).abs() < 1e-6);
+        assert!((g2.dy - 280.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nms_free_decode_filters_and_reverses_letterbox() {
+        let g = letterbox_geom(1280, 720, 640); // r=0.5, dy=140
+        // 画布坐标 (0,140)-(640,500) → 原图整帧
+        let rows = vec![
+            vec![0.0, 140.0, 640.0, 500.0, 0.9, 0.0],
+            vec![10.0, 150.0, 100.0, 300.0, 0.2, 0.0], // 低分 → 丢弃
+            vec![10.0, 150.0, 100.0, 300.0, 0.8, 1.0], // 非目标类 → 过滤
+        ];
+        let out = decode_nms_free(&rows, 0.3, &g, Some(0));
+        assert_eq!(out.len(), 1);
+        let (d, cls) = &out[0];
+        assert_eq!(*cls, 0);
+        assert!((d.box_[0] - 0.0).abs() < 1e-3);
+        assert!((d.box_[1] - 0.0).abs() < 1e-3);
+        assert!((d.box_[2] - 1280.0).abs() < 1e-3);
+        assert!((d.box_[3] - 720.0).abs() < 1e-3);
     }
 }
