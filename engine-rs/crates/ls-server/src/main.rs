@@ -32,6 +32,7 @@ use tower_http::services::{ServeDir, ServeFile};
 // 原 middleware::{self,..} 导入已改 `middleware::Next`（根 `mod middleware` 让名）。
 mod face;
 mod genai;
+mod go2rtc;
 mod handlers;
 mod middleware;
 mod plugins;
@@ -312,6 +313,8 @@ async fn main() {
         mqtt: ls_jobs::mqtt_from_env().map(Arc::new),
         plugins: plugins::PluginManager::default(),
         genai: genai::GenAI::from_env(),
+        go2rtc: Arc::new(go2rtc::Go2rtcSupervisor::new(true)),
+        detections_tx: broadcast::channel(64).0,
     });
     // R2-305：网页端配置的渠道（app_settings alert.*，Fernet 解密）注入 ls-jobs
     // escalation 发送——"网页端保存企微 webhook → rust 路径生效"的真实验收点。
@@ -366,6 +369,17 @@ async fn main() {
     }
     let app = build_router(st.clone());
     st.jobs.start();
+    // LS-051：按 app_settings 决定是否托管 go2rtc（缺失二进制优雅降级，不阻塞启动）
+    let go2rtc_enabled = ls_store::Store::open(&st.db_path)
+        .ok()
+        .and_then(|s| s.setting_get("go2rtc.enabled").ok().flatten())
+        .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
+        .unwrap_or(true);
+    st.go2rtc.set_enabled(go2rtc_enabled);
+    if go2rtc_enabled {
+        let install = deploy::default_install_root();
+        let _ = st.go2rtc.ensure_running(&install, go2rtc::DEFAULT_API);
+    }
     // RA2 反思修正：launch 模式下端口试探与 bind 之间存在 TOCTOU 窗口——
     // bind 失败不再 unwrap panic（会崩进程），优雅提示后退出
     let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
@@ -461,6 +475,8 @@ async fn selftest_http() -> bool {
         mqtt: None,
         plugins: plugins::PluginManager::default(),
         genai: genai::GenAI::from_env(),
+        go2rtc: Arc::new(go2rtc::Go2rtcSupervisor::new(true)),
+        detections_tx: broadcast::channel(64).0,
     });
     // 不 start() 后台作业：自检只验 API/DB 链路（顺带消除空 DB 的 backup 噪音）
     let app = build_router(st.clone());

@@ -17,6 +17,8 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/health/live"),
     ("GET", "/api/health/ready"),
     ("GET", "/api/system"),
+    ("GET", "/api/go2rtc/status"),   // LS-051
+    ("PUT", "/api/go2rtc/config"),   // LS-051
     ("GET", "/api/events"),
     ("POST", "/api/events/:id/status"),
     ("GET", "/api/cameras"),
@@ -32,6 +34,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/escalation/status"),
     ("GET", "/api/events/count"),
     ("GET", "/api/ws/events"),
+    ("GET", "/api/ws/detections/:cid"), // LS-051（root /ws/detections/:cid）
     // ---- R2-309 批次 1：cameras 扩展 ----
     ("DELETE", "/api/cameras/:id"),
     ("PUT", "/api/cameras/:id/group"),
@@ -163,6 +166,8 @@ pub fn build_router(state: Shared) -> Router {
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
         .route("/system", get(system))
+        .route("/go2rtc/status", get(go2rtc_status))
+        .route("/go2rtc/config", put(go2rtc_configure))
         .route("/events", get(events))
         .route("/events/:id/status", post(set_status))
         .route("/events/bulk-status", post(bulk_event_status))
@@ -316,6 +321,7 @@ pub fn build_router(state: Shared) -> Router {
     let ws = Router::new()
         .route("/ws/events", get(ws_events))
         .route("/ws/webrtc/:cid", get(ws_webrtc))
+        .route("/ws/detections/:cid", get(ws_detections)) // LS-051 实时检测框
         .with_state(state.clone());
     // 2026-11-11：接线 web_dist（此前字段有赋值但从未被路由使用——文件头注释声称
     // 的「静态 web/dist」一直未兑现）。ls-server 独立模式由此直接出 Web UI：

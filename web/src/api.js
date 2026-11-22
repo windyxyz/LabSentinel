@@ -84,6 +84,9 @@ export const api = {
   detectTest: () => req('POST', '/api/detect/test', {}),
   detectUsage: () => req('GET', '/api/detect/usage'),
   logsTail: (limit = 200) => req('GET', '/api/logs?limit=' + limit),
+  // LS-051：go2rtc 托管状态 / 开关
+  go2rtcStatus: () => req('GET', '/api/go2rtc/status'),
+  go2rtcConfig: (enabled) => req('PUT', '/api/go2rtc/config', { enabled }),
   eventsTimeline: (params = {}) => req('GET', '/api/events/timeline?' + new URLSearchParams(params)),
   setCameraAnalyzer: (id, analyzer) => req('PUT', `/api/cameras/${id}/analyzer`, { analyzer }),
   startCamera: (id) => req('POST', `/api/cameras/${id}/start`),

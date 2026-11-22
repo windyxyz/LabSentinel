@@ -588,6 +588,16 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         motion_total: Arc::new(AtomicU64::new(0)),
     });
     st.workers.insert(cid, Arc::clone(&handle));
+    // LS-051：RTSP 源启动时同步注册到 go2rtc（失败仅日志，不阻塞分析）
+    if cfg.spec.type_ == "rtsp" {
+        if let Err(e) = crate::go2rtc::Go2rtcSupervisor::apply_stream(
+            crate::go2rtc::DEFAULT_API,
+            &format!("cam{cid}"),
+            Some(&cfg.spec.source),
+        ) {
+            crate::logger::warn(&format!("[go2rtc] cam-{cid} 注册流失败（忽略）: {e}"));
+        }
+    }
     let st2 = Arc::clone(st);
     let is_folder = cfg.spec.type_ == "folder";
     let spawned = if is_folder {
@@ -614,6 +624,16 @@ pub fn stop_worker(st: &Shared, cid: i64) -> bool {
     let Some(_) = st.workers.remove_and_stop(cid) else {
         return false;
     };
+    // LS-051：停止时从 go2rtc 注销该路流（失败仅日志）
+    if let Err(e) =
+        crate::go2rtc::Go2rtcSupervisor::apply_stream(
+            crate::go2rtc::DEFAULT_API,
+            &format!("cam{cid}"),
+            None,
+        )
+    {
+        crate::logger::warn(&format!("[go2rtc] cam-{cid} 注销流失败（忽略）: {e}"));
+    }
     if let Ok(s) = ls_store::Store::open(&st.db_path) {
         let _ = s.set_camera_status(cid, "stopped");
     }
@@ -783,6 +803,8 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         },
     );
     let mut motion_cfg_stamp = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+    // LS-051：实时检测元数据广播节流（≤5Hz），慢客户端由 WS Lagged 丢弃
+    let mut last_det_broadcast = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     // RA2-S1：PPE 级联注入管线（未配置模型 → None → 仅人员检测，ppe 恒 Unknown）
     let ppe_runner = cfg.ppe.as_ref().and_then(ls_analyzer::ppe::make_ppe_runner);
     pipe.set_ppe(ppe_runner);
@@ -910,6 +932,41 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         &ts,
                         Some((&frame.data, frame.width, frame.height)),
                     );
+                    // LS-051：≤5Hz 推送实时检测框元数据（tracks + zones）到 WS 订阅者
+                    if last_det_broadcast.elapsed() >= std::time::Duration::from_millis(200) {
+                        last_det_broadcast = std::time::Instant::now();
+                        let tracks: Vec<serde_json::Value> = pipe
+                            .last_tracks()
+                            .iter()
+                            .map(|(id, b, ppe)| {
+                                let state = match ppe {
+                                    ls_analyzer::pipeline::PpeStatus::NoPpe => "violation",
+                                    ls_analyzer::pipeline::PpeStatus::Wearing => "compliant",
+                                    ls_analyzer::pipeline::PpeStatus::Unknown => "pending",
+                                };
+                                serde_json::json!({
+                                    "id": id,
+                                    "box": b,
+                                    "ppe_state": state,
+                                    "conf": 0.0,
+                                })
+                            })
+                            .collect();
+                        let zones: Vec<serde_json::Value> = cfg
+                            .zones
+                            .iter()
+                            .map(|z| serde_json::json!({"id": z.id, "points": z.points}))
+                            .collect();
+                        let payload = serde_json::json!({
+                            "camera_id": cfg.camera_id,
+                            "ts": ts,
+                            "img_w": frame.width,
+                            "img_h": frame.height,
+                            "tracks": tracks,
+                            "zones": zones,
+                        });
+                        let _ = st.detections_tx.send(payload.to_string());
+                    }
                     // UX2 cascade：suppress 策略下本地事件先不派发（复核肯定补投递）
                     let dispatch_now = !cascade_suppress;
                     let rules_hit = !cands.is_empty(); // 管线候选 = 规则/区域命中

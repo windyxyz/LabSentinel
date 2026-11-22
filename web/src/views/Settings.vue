@@ -250,6 +250,22 @@ async function loadServerLog() {
   serverLogBusy.value = false
 }
 
+// LS-051：go2rtc 托管状态（运行中/未找到/错误）+ 一键开关
+const go2rtc = ref(null)
+const go2rtcBusy = ref(false)
+async function loadGo2rtc() {
+  try { go2rtc.value = await api.go2rtcStatus() } catch { /* 旧服务端无此端点：静默 */ }
+}
+async function toggleGo2rtc() {
+  if (!go2rtc.value) return
+  go2rtcBusy.value = true
+  try {
+    await api.go2rtcConfig(!go2rtc.value.enabled)
+    await loadGo2rtc()
+  } catch (e) { serverLog.value = { file: '', lines: String(e.message || e) } }
+  go2rtcBusy.value = false
+}
+
 
 // 任务131：插件（外挂）管理（默认禁用；启用=管理员显式授权）
 const plugins = ref([])
@@ -334,7 +350,7 @@ async function loadCams() {
   try { cams.value = await api.cameras() } catch { /* 服务未就绪时静默 */ }
 }
 onMounted(() => {
-  loadAlerts(); loadPlugins(); loadCams(); loadTemplate()
+  loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadGo2rtc()
   // UX1：hash 深链分区（#/settings/face 等，App.vue 旧路由重定向后落到这里）
   const sub = window.location.hash.split('/')[2]
   if (sections.some((s) => s.id === sub)) active.value = sub
@@ -543,6 +559,15 @@ onMounted(() => {
       <button class="ghost" :disabled="serverLogBusy" @click="loadServerLog">
         {{ serverLogBusy ? '读取中…' : '查看服务日志（尾部 200 行）' }}</button>
       <span class="muted">停止后摄像头分析与事件推送将暂停；重新启动程序后恢复。</span>
+    </div>
+    <!-- LS-051：go2rtc 流媒体托管状态 -->
+    <div v-if="go2rtc" class="row" style="align-items:center; margin-top:10px; flex-wrap:wrap">
+      <b>实时画面服务（go2rtc）</b>
+      <span :class="go2rtc.running ? 'st-ok' : 'st-idle'">
+        {{ go2rtc.running ? `运行中（PID ${go2rtc.pid}）` : (go2rtc.enabled ? '未运行' : '已关闭') }}</span>
+      <button class="ghost" :disabled="go2rtcBusy" @click="toggleGo2rtc">
+        {{ go2rtc.enabled ? '关闭托管' : '开启托管' }}</button>
+      <span v-if="go2rtc.last_error" class="muted" style="font-size:12px">{{ go2rtc.last_error }}</span>
     </div>
     <div v-if="serverLog" class="muted" style="white-space:pre-wrap; border:1px solid var(--divider); border-radius:6px; padding:8px; margin-top:8px; max-height:260px; overflow:auto; font-size:12px">{{ serverLog.file ? `[${serverLog.file}]\n` : '' }}{{ serverLog.lines }}</div>
       </section>

@@ -111,6 +111,9 @@ pub struct CameraPipeline {
     solo_since: HashMap<i64, (i64, u64)>,
     /// LS-050：上一帧活跃 track 数（Motion Gate 守卫：>0 时禁止跳帧）。
     last_active_count: usize,
+    /// LS-051：上一帧活跃轨迹 `(track_id, tlbr, PPE 状态)`，供实时检测框广播。
+    /// 用 Box 存以让新字段不影响现有栈上构造大小敏感路径。
+    last_tracks: Vec<(i64, [f32; 4], PpeStatus)>,
     frame_index: u64,
     /// L1 对齐诊断：true 时每帧记录 ByteTrack 激活轨迹 (track_id, tlbr)
     pub log_tracks: bool,
@@ -166,6 +169,7 @@ impl CameraPipeline {
             last_fire: HashMap::new(),
             solo_since: HashMap::new(),
             last_active_count: 0,
+            last_tracks: Vec::new(),
             frame_index: 0,
             log_tracks: false,
             track_log: Vec::new(),
@@ -182,6 +186,11 @@ impl CameraPipeline {
     /// LS-050：上一帧活跃 track 数，供 Motion Gate 守卫（>0 禁止跳帧）。
     pub fn active_track_count(&self) -> usize {
         self.last_active_count
+    }
+
+    /// LS-051：上一帧活跃轨迹 `(track_id, tlbr, ppe)`，供实时检测框广播。
+    pub fn last_tracks(&self) -> &[(i64, [f32; 4], PpeStatus)] {
+        &self.last_tracks
     }
 
     /// 处理一帧检测结果，返回本帧事件候选（未入库）。
@@ -206,6 +215,7 @@ impl CameraPipeline {
         // lost_time 不累积、frame_id 不推进），只对在场 track 补离场观测并回收状态。
         if dets.is_empty() {
             self.last_active_count = 0;
+            self.last_tracks.clear();
             let mut exits: Vec<(i64, i64)> = Vec::new();
             for (zid, st) in self.zone_states.iter_mut() {
                 for tid in st.inside_ids() {
@@ -257,6 +267,18 @@ impl CameraPipeline {
             }
         }
         let active_ids: HashSet<i64> = active.iter().map(|(_, id)| *id).collect();
+        // LS-051：缓存本帧活跃轨迹 + PPE 状态，供实时检测框广播
+        self.last_tracks = active
+            .iter()
+            .map(|(b, id)| {
+                let ppe = dets
+                    .iter()
+                    .position(|d| d.box_ == *b)
+                    .map(|i| det_ppe[i])
+                    .unwrap_or(PpeStatus::Unknown);
+                (*id, *b, ppe)
+            })
+            .collect();
 
         // 本帧未再出现的在场 track：补离场观测（单帧漏检不立即翻转为 exit——迟滞生效）
         let mut exits: Vec<(i64, i64)> = Vec::new();

@@ -9,6 +9,7 @@ use axum::extract::{
 };
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
@@ -272,6 +273,62 @@ fn headers_host(headers: &axum::http::HeaderMap) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string()
+}
+
+/// LS-051：`/ws/detections/:cid` 实时检测元数据广播（受 trusted_hosts + 读令牌守卫，
+/// 与 `/ws/events` 同鉴权口径）。客户端慢消费时 `handle_ws` 的 Lagged 自动丢弃，
+/// 不阻塞推理线程。
+pub(crate) async fn ws_detections(
+    State(st): State<Shared>,
+    AxPath(cid): AxPath<i64>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
+    if !ws_origin_ok(origin, &headers_host(&headers), &st.allowed_origins) {
+        return (StatusCode::FORBIDDEN, "WS Origin 校验失败").into_response();
+    }
+    if st.read_protected
+        && !crate::middleware::check_read_token(&st, ws_token(&headers).as_deref())
+    {
+        return (StatusCode::UNAUTHORIZED, "WS 读令牌校验失败").into_response();
+    }
+    // 只订阅本路相机：broadcast 全量帧，客户端按 camera_id 过滤（实现简单、零锁竞争）
+    let rx = st.detections_tx.subscribe();
+    let _ = cid; // 路径参数已鉴权；CID 过滤在 handle_detections_ws 内按 JSON 字段做
+    ws.protocols(["labsentinel"])
+        .on_upgrade(move |socket| handle_detections_ws(socket, rx, cid))
+}
+
+async fn handle_detections_ws(
+    socket: axum::extract::ws::WebSocket,
+    mut rx: tokio::sync::broadcast::Receiver<String>,
+    cid: i64,
+) {
+    use axum::extract::ws::Message;
+    let (mut sender, mut receiver) = socket.split();
+    loop {
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Ok(raw) => {
+                        // 按 camera_id 过滤（值为 0 = 广播给所有）
+                        let keep = serde_json::from_str::<serde_json::Value>(&raw)
+                            .ok()
+                            .and_then(|v| v.get("camera_id").and_then(|x| x.as_i64()))
+                            .map(|c| c == cid || c == 0)
+                            .unwrap_or(false);
+                        if keep && sender.send(Message::Text(raw)).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            incoming = receiver.next() => {
+                if incoming.is_none() { break; } // 客户端关闭
+            }
+        }
+    }
 }
 
 // ==== R2-309 批次 4：网页端告警渠道配置（任务140 复刻 + Fernet 互操作）+ 局域网发现 ====

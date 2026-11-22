@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, mediaUrl } from '../api'
 import WebrtcPlayer from '../components/WebrtcPlayer.vue'
+import VideoOverlayCanvas from '../components/VideoOverlayCanvas.vue'
 import AsyncState from '../components/AsyncState.vue'
 import FsPicker from '../components/FsPicker.vue'
 
@@ -408,9 +409,12 @@ onBeforeUnmount(stopPoll)
 
   <div v-if="live" style="position:fixed; inset:0; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="live = null">
     <div style="width:min(92vw, 960px); cursor:default" @click.stop>
-      <WebrtcPlayer v-if="!live.poll" :ws-url="live.wsUrl" :label="live.name" />
-      <img v-else :src="mediaUrl(`/api/cameras/${live.id}/snapshot?t=${pollSnap}`)"
-           alt="USB 摄像头实时画面" style="width:100%; max-height:70vh; object-fit:contain; background:#000; border-radius:8px" />
+      <div style="position:relative">
+        <WebrtcPlayer v-if="!live.poll" :ws-url="live.wsUrl" :label="live.name" />
+        <img v-else :src="mediaUrl(`/api/cameras/${live.id}/snapshot?t=${pollSnap}`)"
+             alt="USB 摄像头实时画面" style="width:100%; max-height:70vh; object-fit:contain; background:#000; border-radius:8px" />
+        <VideoOverlayCanvas :camera-id="live.id" />
+      </div>
       <p class="muted" style="text-align:center; margin-top:8px">{{ live.poll ? '实时画面（快照轮播 · USB 摄像头）' : '实时画面（WebRTC，延迟约 1s）' }} · 点击空白处关闭</p>
     </div>
   </div>

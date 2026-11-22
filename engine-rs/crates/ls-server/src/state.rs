@@ -30,6 +30,10 @@ pub struct AppState {
     pub plugins: crate::plugins::PluginManager,
     /// RA2-S5：事件 AI 复核（默认 provider=none 零开销）
     pub genai: crate::genai::GenAI,
+    /// LS-051：go2rtc 进程内托管（CREATE_NO_WINDOW + Job Object 防孤儿）
+    pub go2rtc: crate::go2rtc::SharedGo2rtc,
+    /// LS-051：实时检测元数据广播（≤5Hz，WS /ws/detections/:cid 消费）
+    pub detections_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 #[derive(Default)]

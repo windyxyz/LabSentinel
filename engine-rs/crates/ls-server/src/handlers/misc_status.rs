@@ -98,6 +98,29 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
     }))
 }
 
+/// LS-051：go2rtc 进程状态 / 一键开关。
+pub(crate) async fn go2rtc_status(State(st): State<Shared>) -> Json<Value> {
+    Json(st.go2rtc.status())
+}
+
+pub(crate) async fn go2rtc_configure(
+    State(st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
+    let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) else {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "enabled 必须是布尔值").into_response();
+    };
+    if let Ok(s) = ls_store::Store::open(&st.db_path) {
+        let _ = s.setting_set("go2rtc.enabled", if enabled { "1" } else { "0" });
+    }
+    st.go2rtc.set_enabled(enabled);
+    if enabled {
+        let install = crate::deploy::default_install_root();
+        let _ = st.go2rtc.ensure_running(&install, crate::go2rtc::DEFAULT_API);
+    }
+    Json(json!({"ok": true, "status": st.go2rtc.status()})).into_response()
+}
+
 pub(crate) async fn metrics(State(st): State<Shared>) -> Response {
     let (cams, events) = match ls_store::Store::open(&st.db_path) {
         Ok(s) => (
