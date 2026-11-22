@@ -3,7 +3,7 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
-use axum::extract::{Path as AxPath, State};
+use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
@@ -122,8 +122,8 @@ pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>
                 if !group_name.is_empty() {
                     let _ = s.set_camera_group(id, group_name);
                 }
-                if type_ == "rtsp" && !autostart {
-                    st.go2rtc.sync_camera(id, Some(&source));
+                if type_ == "rtsp" {
+                    st.go2rtc.refresh();
                 }
                 let mut status = "stopped";
                 if autostart {
@@ -230,7 +230,11 @@ pub(crate) async fn start_camera(State(st): State<Shared>, AxPath(cid): AxPath<i
     })
 }
 
-pub(crate) async fn camera_webrtc(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
+pub(crate) async fn camera_webrtc(
+    State(st): State<Shared>,
+    AxPath(cid): AxPath<i64>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     with_store(&st, |s| match s.camera(cid)? {
         None => Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response()),
         Some(c) if c.type_ == "folder" => Ok(detail_err(
@@ -241,30 +245,24 @@ pub(crate) async fn camera_webrtc(State(st): State<Shared>, AxPath(cid): AxPath<
         Some(c) => {
             // LS-042 决策 A：USB / 文件源或 go2rtc 不可用时明确返回 mode="snapshot" 优雅降级，
             // 仅 RTSP 源且 go2rtc 可用时走 WebRTC，消除无限重连报错。
-            let mode = if c.type_ == "rtsp" && go2rtc_reachable() {
-                "webrtc"
-            } else {
-                "snapshot"
+            let shared = crate::middleware::provided_token(&headers)
+                .is_some_and(|token| crate::middleware::share_device(&st, &token));
+            let (mode, suffix) = match (
+                c.type_ == "rtsp" && st.go2rtc.address_for_camera(cid).is_some(),
+                shared,
+            ) {
+                (true, true) => ("mse", "?transport=mse"),
+                (true, false) => ("webrtc", ""),
+                (false, _) => ("snapshot", ""),
             };
             Ok(Json(json!({
                 "camera_id": cid,
                 "mode": mode,
-                "ws_url": format!("/ws/webrtc/{cid}"),
+                "ws_url": format!("/ws/webrtc/{cid}{suffix}"),
             }))
             .into_response())
         }
     })
-}
-
-fn go2rtc_reachable() -> bool {
-    let addr = std::env::var("LS_GO2RTC_ADDR").unwrap_or_else(|_| "127.0.0.1:1984".into());
-    std::net::TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 1984))),
-        std::time::Duration::from_millis(80),
-    )
-    .is_ok()
 }
 
 /// GET /ws/webrtc/:cid——WebRTC 信令代理到本机 go2rtc（LS-042 决策 A）。
@@ -272,19 +270,29 @@ fn go2rtc_reachable() -> bool {
 pub(crate) async fn ws_webrtc(
     State(st): State<Shared>,
     AxPath(cid): AxPath<i64>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Response {
-    if !go2rtc_reachable() {
+    if !super::events::ws_read_allowed(&st, &headers) {
+        return detail_err(StatusCode::UNAUTHORIZED, "实时画面鉴权失败").into_response();
+    }
+    let token = super::events::ws_token(&headers);
+    let mse = query.get("transport").is_some_and(|mode| mode == "mse");
+    if !mse
+        && token
+            .as_deref()
+            .is_some_and(|token| crate::middleware::share_device(&st, token))
+    {
+        return detail_err(StatusCode::FORBIDDEN, "分享画面需使用中继播放").into_response();
+    }
+    let Some(addr) = st.go2rtc.address_for_camera(cid) else {
         return detail_err(
             StatusCode::SERVICE_UNAVAILABLE,
             "go2rtc 未运行，已降级为快照轮播",
         )
         .into_response();
-    }
-    if !super::events::ws_read_allowed(&st, &headers) {
-        return detail_err(StatusCode::UNAUTHORIZED, "实时画面鉴权失败").into_response();
-    }
+    };
     let exists = ls_store::Store::open(&st.db_path)
         .ok()
         .and_then(|s| s.camera(cid).ok().flatten())
@@ -292,7 +300,6 @@ pub(crate) async fn ws_webrtc(
     if !exists {
         return detail_err(StatusCode::NOT_FOUND, "camera not found").into_response();
     }
-    let addr = std::env::var("LS_GO2RTC_ADDR").unwrap_or_else(|_| "127.0.0.1:1984".into());
     let upstream_url = format!("ws://{addr}/api/ws?src=cam_{cid}");
     let wants_proto = headers
         .get("sec-websocket-protocol")
@@ -304,48 +311,73 @@ pub(crate) async fn ws_webrtc(
     } else {
         ws
     };
-    upgrade.on_upgrade(move |client_ws| async move {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message as TMsg;
-        let Ok((up_ws, _)) = tokio_tungstenite::connect_async(&upstream_url).await else {
-            return;
-        };
-        let (mut c_tx, mut c_rx) = client_ws.split();
-        let (mut u_tx, mut u_rx) = up_ws.split();
-        let c2u = async {
-            while let Some(Ok(msg)) = c_rx.next().await {
-                let out = match msg {
-                    axum::extract::ws::Message::Text(t) => TMsg::Text(t),
-                    axum::extract::ws::Message::Binary(b) => TMsg::Binary(b),
-                    axum::extract::ws::Message::Ping(p) => TMsg::Ping(p),
-                    axum::extract::ws::Message::Pong(p) => TMsg::Pong(p),
-                    axum::extract::ws::Message::Close(_) => break,
-                };
-                if u_tx.send(out).await.is_err() {
-                    break;
+    upgrade
+        .max_message_size(64 * 1024)
+        .on_upgrade(move |client_ws| async move {
+            use futures_util::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message as TMsg;
+            let Ok(Ok((up_ws, _))) = tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                tokio_tungstenite::connect_async(&upstream_url),
+            )
+            .await
+            else {
+                return;
+            };
+            let (mut c_tx, mut c_rx) = client_ws.split();
+            let (mut u_tx, mut u_rx) = up_ws.split();
+            let c2u = async {
+                let mut started = false;
+                while let Some(Ok(msg)) = c_rx.next().await {
+                    let out = match msg {
+                        axum::extract::ws::Message::Text(t) => {
+                            let Ok(value) = serde_json::from_str::<Value>(&t) else {
+                                continue;
+                            };
+                            let Some(kind) = value.get("type").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            let Some(payload) = value.get("value").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            match (mse, started, kind) {
+                                (true, false, "mse") | (false, false, "webrtc/offer") => {
+                                    started = true
+                                }
+                                (false, true, "webrtc/candidate") => {}
+                                _ => continue,
+                            }
+                            TMsg::Text(json!({"type":kind, "value":payload}).to_string())
+                        }
+                        axum::extract::ws::Message::Close(_) => break,
+                        _ => continue,
+                    };
+                    if u_tx.send(out).await.is_err() {
+                        break;
+                    }
                 }
-            }
-        };
-        let u2c = async {
-            while let Some(Ok(msg)) = u_rx.next().await {
-                let out = match msg {
-                    TMsg::Text(t) => axum::extract::ws::Message::Text(t.to_string()),
-                    TMsg::Binary(b) => axum::extract::ws::Message::Binary(b.to_vec()),
-                    TMsg::Ping(p) => axum::extract::ws::Message::Ping(p.to_vec()),
-                    TMsg::Pong(p) => axum::extract::ws::Message::Pong(p.to_vec()),
-                    TMsg::Close(_) => break,
-                    _ => continue,
-                };
-                if c_tx.send(out).await.is_err() {
-                    break;
+            };
+            let u2c = async {
+                while let Some(Ok(msg)) = u_rx.next().await {
+                    let out = match msg {
+                        TMsg::Text(t) => axum::extract::ws::Message::Text(t.to_string()),
+                        TMsg::Binary(b) => axum::extract::ws::Message::Binary(b.to_vec()),
+                        TMsg::Ping(p) => axum::extract::ws::Message::Ping(p.to_vec()),
+                        TMsg::Pong(p) => axum::extract::ws::Message::Pong(p.to_vec()),
+                        TMsg::Close(_) => break,
+                        _ => continue,
+                    };
+                    if c_tx.send(out).await.is_err() {
+                        break;
+                    }
                 }
+            };
+            tokio::select! {
+                _ = c2u => {},
+                _ = u2c => {},
+                _ = super::events::socket_revoked(&st, token.as_deref()) => {},
             }
-        };
-        tokio::select! {
-            _ = c2u => {},
-            _ = u2c => {},
-        }
-    })
+        })
 }
 
 pub(crate) async fn camera_groups(State(st): State<Shared>) -> Response {
@@ -594,9 +626,15 @@ pub(crate) async fn camera_snapshot(
                 Json(json!({"detail": "暂无可用帧（刚启动或抽帧未命中）", "code": "no_frame"})),
             )
                 .into_response(),
-            Some(jpeg) => {
-                ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], jpeg).into_response()
-            }
+            Some(frame) => (
+                [
+                    ("content-type", "image/jpeg".to_string()),
+                    ("cache-control", "no-store".to_string()),
+                    ("x-ls-frame-time-ms", frame.captured_at_ms.to_string()),
+                ],
+                frame.jpeg,
+            )
+                .into_response(),
         },
     }
 }
@@ -608,7 +646,7 @@ pub(crate) async fn delete_camera(State(st): State<Shared>, AxPath(cid): AxPath<
     crate::worker::stop_worker(&st, cid);
     with_store(&st, |s| {
         s.delete_camera(cid)?;
-        st.go2rtc.sync_camera(cid, None);
+        st.go2rtc.refresh();
         Ok(Json(json!({"ok": true})).into_response())
     })
 }

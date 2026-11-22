@@ -63,6 +63,7 @@ chinese.Desktop=创建桌面快捷方式
 chinese.ShortcutOptGroup=快捷方式
 chinese.Verify=正在校验新版本…
 chinese.VerifyFailed=安装已完成，但新版本健康自检（--selftest-http）未通过（退出码 %1）。如属升级覆盖，可在安装目录执行 labsentinel-server.exe --rollback 回滚旧版。
+chinese.ArchiveFailed=无法归档现有安装。请检查安装目录的写入权限与磁盘空间后重试。
 chinese.Archive=正在归档旧版本…
 chinese.Launch=启动 LabSentinel
 chinese.RemoveUserData=是否同时删除 LabSentinel 的用户数据？%1 包含数据库、事件截图/录像、备份与密钥。选择「否」保留数据，重新安装后可继续使用。
@@ -75,6 +76,7 @@ english.Desktop=Create a desktop shortcut
 english.ShortcutOptGroup=Shortcuts
 english.Verify=Verifying the new version…
 english.VerifyFailed=Installation finished, but --selftest-http failed (exit code %1). If upgrading, you may run "labsentinel-server.exe --rollback" in the install directory.
+english.ArchiveFailed=The existing installation could not be archived. Check disk space and write permissions before retrying.
 english.Archive=Archiving the previous version…
 english.Launch=Launch LabSentinel
 english.RemoveUserData=Also delete LabSentinel user data? %1 contains the database, event snapshots/videos, backups and keys. Choose No to keep data for a future reinstall.
@@ -113,8 +115,8 @@ Type: files; Name: "{app}\.env"
 
 [Run]
 ; 升级链路：
-;   1) [Code] PrepareToInstall → 结束正在运行的 labsentinel-server.exe / go2rtc.exe
-;   2) [Code] ssInstall → labsentinel-server --archive（归档旧版，见 CurStepChanged）
+;   1) [Code] PrepareToInstall → 结束 labsentinel-server.exe，Job Object 回收其 go2rtc
+;   2) [Code] PrepareToInstall → labsentinel-server --archive（归档旧版）
 ;   3) 文件复制（[Files]）
 ;   4) [Code] ssPostInstall → --selftest-http 校验退出码（失败在交互模式下弹窗提示 --rollback）
 Filename: "{app}\labsentinel-server.exe"; \
@@ -149,8 +151,13 @@ begin
   Result := '';
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM labsentinel-server.exe',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM go2rtc.exe',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if FileExists(ExpandConstant('{app}\labsentinel-server.exe')) then
+  begin
+    if (not Exec(ExpandConstant('{app}\labsentinel-server.exe'), '--archive',
+                 ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode))
+      or (ResultCode <> 0) then
+      Result := CustomMessage('ArchiveFailed');
+  end;
 end;
 
 // ---- 快捷方式生成：严格按「选择附加任务」页勾选 ----
@@ -193,18 +200,6 @@ var
   ResultCode: Integer;
   WinSW: String;
 begin
-  // 升级归档：文件复制前归档当前旧版到 versions/<ver>/（回滚点）。
-  // Rust 形态直接用 labsentinel-server --archive（--rollback 可手工恢复）。
-  if CurStep = ssInstall then
-  begin
-    if FileExists(ExpandConstant('{app}\labsentinel-server.exe')) then
-    begin
-      Exec(ExpandConstant('{app}\labsentinel-server.exe'),
-           '--archive', ExpandConstant('{app}'), SW_HIDE,
-           ewWaitUntilTerminated, ResultCode);
-    end;
-  end;
-
   if CurStep = ssPostInstall then
   begin
     CreateShortcuts;

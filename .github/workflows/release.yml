@@ -55,7 +55,7 @@ jobs:
         run: |
           npm ci
           npm run build
-      - name: 准备发行资产（模型/ffmpeg/ffprobe/onnxruntime，哈希校验）
+      - name: 准备发行资产（模型/ffmpeg/ffprobe/onnxruntime/go2rtc，哈希校验）
         run: |
           python scripts/prepare_rust_assets.py
       - name: build_rust --strict --zip
@@ -75,17 +75,36 @@ jobs:
           Get-Item C:\InnoSetup7\ISCC.exe | Select-Object FullName
       - name: 编译 setup.exe（ISCC：deploy/windows/installer.iss）
         run: python scripts/build_setup_exe.py
-      - name: setup.exe 安装→探活→卸载 冒烟（零残留）
+      - name: 安装 Chromium 播放验收依赖
+        working-directory: web
+        run: npx playwright install chromium --only-shell
+      - name: setup.exe 安装→升级→回滚→探活→卸载
         shell: pwsh
         run: |
           $setup = Get-ChildItem Resources/dist/LabSentinel-setup-*.exe |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          $dir = Join-Path $env:RUNNER_TEMP "ls-setup-smoke"
-          Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+          $dir = Join-Path $env:RUNNER_TEMP ("ls-setup-smoke-" + [Guid]::NewGuid())
+          $old = Join-Path $env:RUNNER_TEMP "LabSentinel-setup-0.5.0.exe"
+          Invoke-WebRequest -Uri "https://github.com/windyxyz/LabSentinel/releases/download/v0.5.0/LabSentinel-setup-0.5.0.exe" -OutFile $old
+          if ((Get-FileHash $old).Hash -ne '3e7472c44798a216641478a5c238a70aa149bd4fbd297d6de15beef72f4ff83b') { throw "旧版安装器校验失败" }
+          $installArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$dir`""
+          $oldInstall = Start-Process -FilePath $old -Wait -PassThru -ArgumentList $installArgs
+          if ($oldInstall.ExitCode -ne 0) { throw "旧版安装失败：rc=$($oldInstall.ExitCode)" }
           $p = Start-Process -FilePath $setup.FullName -Wait -PassThru -ArgumentList `
-            "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$dir`""
+            $installArgs
           if ($p.ExitCode -ne 0) { throw "静默安装失败：rc=$($p.ExitCode)" }
-          foreach ($f in @("labsentinel-server.exe", "VERSION", "web\index.html", "models\yolo11n.onnx", "models\yolo11n_ppe.onnx", "models\yolo11n_ppe.classes.txt", "onnxruntime.dll", "tools\ffmpeg\ffmpeg.exe")) {
+          $want = (Get-Content VERSION -Raw).Trim()
+          if ((Get-Content (Join-Path $dir VERSION) -Raw).Trim() -ne $want) { throw "升级版本不正确" }
+          $userData = Join-Path $dir 'data\preserve.txt'
+          New-Item -ItemType Directory -Path (Split-Path $userData) -Force | Out-Null
+          'test-user-state' | Set-Content -LiteralPath $userData
+          $rv = Start-Process -FilePath (Join-Path $dir 'labsentinel-server.exe') -ArgumentList '--rollback' -WorkingDirectory $dir -Wait -PassThru
+          if ($rv.ExitCode -ne 0 -or (Get-Content (Join-Path $dir VERSION) -Raw).Trim() -ne '0.5.0' -or !(Test-Path $userData)) {
+            throw "首次覆盖升级后回滚失败：rc=$($rv.ExitCode)"
+          }
+          $p = Start-Process -FilePath $setup.FullName -Wait -PassThru -ArgumentList $installArgs
+          if ($p.ExitCode -ne 0) { throw "重新升级失败：rc=$($p.ExitCode)" }
+          foreach ($f in @("labsentinel-server.exe", "VERSION", "web\index.html", "models\yolo11n.onnx", "models\yolo11n_ppe.onnx", "models\yolo11n_ppe.classes.txt", "onnxruntime.dll", "tools\ffmpeg\ffmpeg.exe", "tools\go2rtc.exe", "tools\go2rtc-LICENSE.txt")) {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "安装缺文件：$f" }
           }
           $group = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\LabSentinel"
@@ -93,6 +112,8 @@ jobs:
           $st = Start-Process -FilePath (Join-Path $dir "labsentinel-server.exe") `
             -ArgumentList "--selftest-http" -WorkingDirectory $dir -Wait -PassThru
           if ($st.ExitCode -ne 0) { throw "安装后 --selftest-http 失败：rc=$($st.ExitCode)" }
+          node web/scripts/smoke_webrtc.mjs $dir
+          if ($LASTEXITCODE -ne 0) { throw "安装版 RTSP / WebRTC 冒烟失败" }
           $u = Start-Process -FilePath (Join-Path $dir "unins000.exe") -Wait -PassThru `
             -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
           if ($u.ExitCode -ne 0) { throw "静默卸载失败：rc=$($u.ExitCode)" }
@@ -110,6 +131,11 @@ jobs:
           $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           python scripts/smoke_rust.py --zip $zip.FullName --timeout 90
+          if ($LASTEXITCODE -ne 0) { throw "便携包启动冒烟失败" }
+          $portable = Join-Path $env:RUNNER_TEMP ("ls-portable-playback-" + [Guid]::NewGuid())
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $portable
+          node web/scripts/smoke_webrtc.mjs $portable
+          if ($LASTEXITCODE -ne 0) { throw "便携版 RTSP / WebRTC 冒烟失败" }
       - name: SHA256SUMS（zip + setup.exe）
         shell: pwsh
         run: |

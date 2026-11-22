@@ -20,4 +20,15 @@
 | LS-055 | v0.5.0 · 推理引擎新架构升级（NMS-free RT-DETR/YOLO26/YOLO12 + 动态尺寸/FP16 + 灰度 CLAHE）+ 模型 A/B 对比评测 | P1 | DONE | 2026-11-22 | 真实双模型 ONNX Runtime CPU 运行、FP16 I/O 与单测通过，见 `progress.md` |
 | LS-056 | v0.5.0 · 多源公开数据集聚合下载（HF 镜像免 Key）+ 统一清洗合并 + 灰度/远景增强混合训练与自动评测（`tools/`） | P1 | DONE | 2026-11-22 | 数据清洗与混合的离线单测及语法编译通过，见 `progress.md` |
 | LS-057 | v0.5.0 · 全量验收、版本同步（`0.5.0`）、`CHANGELOG.md` 与本机双产物打包冒烟实证 | P0 | DONE | 2026-11-22 | `git log -1 --stat`；双产物、SHA256 与冒烟结果见 `progress.md` |
+| LS-058 | v0.5.0 接手、全仓复审与正式产物独立验收 | P1 | DONE | 2026-11-22 | `rg -n 'LS-058-0[1-6]' findings.md`；按发布影响确定下一修复批 |
+| LS-059 | 稳定性修复、后续功能、UI 与高性能版本规划 | P1 | DONE | 2026-11-22 | `rg -n '^### LS-060' task_plan.md`，进入下一个实施任务 |
+| LS-060 | v0.6.0 · 正式包与值守修复，含播放、回滚、局域网、分享吊销和 CI | P0 | DONE | 2026-11-23 | `LS-068` 执行 Windows 发布流水线的安装器和 ZIP 冒烟 |
+| LS-061 | 首页状态、Release 入口、报表文案与告警布局 | P1 | ACTIVE | 2026-11-23 | `rg -n 'checkUpdate|gpuHint|操作审计|class="card channel"' web/src` |
+| LS-062 | 本机与局域网访问密码、浏览器会话和令牌迁移 | P1 | READY | 2026-11-22 | `rg -n 'check_read_token|provided_token|LS_ADMIN_TOKEN' engine-rs/crates/ls-server/src` |
+| LS-063 | 浏览器设备配对、相机范围授权与撤销 | P1 | READY | 2026-11-22 | `rg -n 'create_pairing|claim_pairing|revoke_device' engine-rs/crates/ls-server/src/handlers/pairing.rs` |
+| LS-064 | 1／4／9 路性能、稳定性和识别质量基线 | P1 | READY | 2026-11-22 | `rg -n 'analysis_fps|evidence_fps|MotionGate' engine-rs/crates/ls-server/src/worker.rs` |
+| LS-065 | 有界采集与推理、模型格式适配、媒体与前端提速 | P1 | READY | 2026-11-22 | 先读 `LS-064` 基准结果，再锁定影响最大的热路径 |
+| LS-066 | 人脸关闭／本地／API、模型管理与人员录入 | P1 | READY | 2026-11-22 | `rg -n 'FaceClient|face_guard' engine-rs/crates/ls-server/src` |
+| LS-067 | 告警投递与值班交接、合规报表、小样本训练预检 | P2 | READY | 2026-11-22 | `rg -n 'LS-058-(07|08|11|12)' findings.md` |
+| LS-068 | v0.6.0 · 全量验收、版本同步与 GitHub 正式发布 | P0 | READY | 2026-11-22 | 核对 `LS-060`～`LS-067` 证据，再执行 `python -X utf8 scripts/bump_version.py 0.6.0` |
 | LS-900 | 代码签名证书（T-403）与 GitHub uploads 网络通道（S302）处理 | P3 | BLOCKED | 2026-11-22 | 人工事项：待证书到位或用户调整本机网络/hosts |

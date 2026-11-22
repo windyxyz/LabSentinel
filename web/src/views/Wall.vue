@@ -6,7 +6,7 @@
     <header>
       <h2>LabSentinel 值班大屏</h2>
       <div class="hud">
-        <span class="stat">今日合规率 <b>{{ complianceText }}</b></span>
+        <span class="stat">今日警告及严重事件 <b>{{ violationsToday }}</b></span>
         <span class="stat">在场 <b>{{ inFrame }}</b> 人</span>
         <span class="clock">{{ now }}</span>
         <select v-model.number="grid" aria-label="宫格切换" class="ghost-select">
@@ -22,9 +22,7 @@
     </header>
     <div class="grid" :style="{ gridTemplateColumns: `repeat(${cols}, 1fr)` }">
       <div v-for="c in visibleCameras" :key="c.id" class="cell">
-        <WebrtcPlayer v-if="liveModes[c.id] === 'webrtc'" :ws-url="`/ws/webrtc/${c.id}`" :label="c.name" />
-        <img v-else-if="snapshots[c.id]" :src="snapshots[c.id]" :alt="c.name" class="snapshot" />
-        <div v-else class="placeholder">{{ c.name }} · {{ c.type === 'folder' ? '图片文件夹' : '等待画面' }}</div>
+        <CameraPreview class="camera-preview" :camera-id="c.id" :camera-type="c.type" :name="c.name" />
         <VideoOverlayCanvas v-if="c.type !== 'folder'" :camera-id="c.id" :visible="overlay"
           @tracks="n => tracks[c.id] = n" />
         <button v-if="!readonly && c.type !== 'folder'" class="ghost capture" @click="capture(c.id)">抓拍入池</button>
@@ -53,14 +51,12 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { api, connectEvents, fetchBinary, TYPE_TEXT } from '../api'
-import WebrtcPlayer from '../components/WebrtcPlayer.vue'
+import { api, connectEvents, TYPE_TEXT } from '../api'
+import CameraPreview from '../components/CameraPreview.vue'
 import VideoOverlayCanvas from '../components/VideoOverlayCanvas.vue'
 
 const cameras = ref([])
 defineProps({ readonly: Boolean })
-const liveModes = ref({})
-const snapshots = ref({})
 const tracks = ref({})
 const events = ref([])
 const now = ref('')
@@ -70,57 +66,24 @@ const muted = ref(true)      // 默认静音（浏览器自动播放策略；用
 const notifications = ref(false)
 const isFullscreen = ref(false)
 const toast = ref(null)
-const totalToday = ref(0)
-const compliantToday = ref(0)
+const violationsToday = ref('—')
 
 let clockTimer = null
 let camTimer = null
 let stopWs = null
 let audioCtx = null
 let toastTimer = null
-let snapshotTimer = null
 let disposed = false
-let snapshotBusy = false
 
 const cols = computed(() => (grid.value >= 9 ? 3 : grid.value >= 4 ? 2 : 1))
 const visibleCameras = computed(() => cameras.value.slice(0, grid.value))
 const inFrame = computed(() => visibleCameras.value.reduce((n, c) => n + (tracks.value[c.id] || 0), 0))
-const complianceText = computed(() => {
-  if (!totalToday.value) return '—'
-  return `${Math.round((compliantToday.value / totalToday.value) * 100)}%`
-})
 
 async function loadCameras() {
   try {
     const cs = await api.cameras()
     cameras.value = Array.isArray(cs) ? cs : []
-    const modes = await Promise.all(cameras.value.filter(c => c.type === 'rtsp').map(async c => {
-      try { return [c.id, (await api.cameraWebrtc(c.id))?.mode] } catch { return [c.id, 'snapshot'] }
-    }))
-    liveModes.value = Object.fromEntries(modes)
   } catch { /* 忽略：下一轮 */ }
-}
-
-async function loadSnapshots() {
-  if (snapshotBusy || disposed) return
-  snapshotBusy = true
-  const active = visibleCameras.value.filter(c => c.type !== 'folder' && liveModes.value[c.id] !== 'webrtc')
-  try {
-    await Promise.all(active.map(async c => {
-      try {
-        const blob = await fetchBinary(`/api/cameras/${c.id}/snapshot`)
-        if (disposed || !visibleCameras.value.some(entry => entry.id === c.id)) return
-        if (snapshots.value[c.id]) URL.revokeObjectURL(snapshots.value[c.id])
-        snapshots.value[c.id] = URL.createObjectURL(blob)
-      } catch { /* 尚无快照，下一轮重试 */ }
-    }))
-    for (const [id, url] of Object.entries(snapshots.value)) {
-      if (!active.some(c => String(c.id) === id)) {
-        URL.revokeObjectURL(url)
-        delete snapshots.value[id]
-      }
-    }
-  } finally { snapshotBusy = false }
 }
 
 async function capture(id) {
@@ -136,8 +99,7 @@ async function loadStats() {
   try {
     const s = await api.statsDaily({ days: 1 })
     const day = Array.isArray(s?.days) ? s.days[0] : null
-    totalToday.value = Number(day?.total) || 0
-    compliantToday.value = Number(day?.l1) || 0
+    if (day) violationsToday.value = (Number(day.l2) || 0) + (Number(day.l3) || 0)
   } catch { /* 旧服务端无字段：保持 — */ }
 }
 
@@ -213,15 +175,11 @@ onMounted(async () => {
     now.value = new Date().toLocaleString('zh-CN', { hour12: false })
   }, 1000)
   camTimer = setInterval(() => { loadCameras(); loadStats() }, 30000)
-  loadSnapshots()
-  snapshotTimer = setInterval(loadSnapshots, 2000)
   document.addEventListener('fullscreenchange', onFsChange)
 })
 
 onBeforeUnmount(() => {
   disposed = true
-  clearInterval(snapshotTimer)
-  Object.values(snapshots.value).forEach(url => URL.revokeObjectURL(url))
   if (audioCtx) audioCtx.close()
   if (clockTimer) clearInterval(clockTimer)
   if (camTimer) clearInterval(camTimer)
@@ -247,10 +205,9 @@ h2 { margin: 0; font-size: 20px; }
 .grid { display: grid; gap: 8px; padding: 8px; overflow: auto; }
 .cell { position: relative; background: #101821; border: 1px solid #1c2733; border-radius: 6px;
         min-height: 200px; display: flex; align-items: center; justify-content: center; }
-.snapshot { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.camera-preview { position: absolute; inset: 0; }
 .capture { position: absolute; bottom: 6px; right: 6px; z-index: 3; }
-.placeholder { color: #5a6f84; font-size: 13px; }
-.meta { position: absolute; left: 8px; bottom: 6px; font-size: 12px; color: #8fa3b8; z-index: 3; }
+.meta { position: absolute; left: 8px; top: 6px; font-size: 12px; color: var(--text-primary); background: var(--bg-base); border-radius: 4px; padding: 2px 6px; z-index: 3; }
 aside { border-left: 1px solid #1c2733; padding: 10px; overflow: auto; }
 aside h3 { margin: 4px 0 10px; font-size: 15px; }
 aside ul { list-style: none; margin: 0; padding: 0; }

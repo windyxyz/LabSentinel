@@ -100,10 +100,12 @@ impl Ingest {
             if self.cfg.rtsp_transport_tcp {
                 c.arg("-rtsp_transport").arg("tcp");
             }
-            // LS-043：RTSP 读写超时 10s，防止网络拔线半开连接永久阻塞 read_frame
-            c.args(["-rw_timeout", "10000000"]);
-        }
-        if self.cfg.file_loop {
+            // The RTSP demuxer exposes timeout (microseconds), not the generic protocol option.
+            c.args(["-timeout", "10000000"]);
+        } else if self.cfg.file_loop
+            && !self.cfg.source.starts_with("video=")
+            && !self.cfg.source.starts_with("/dev/video")
+        {
             c.arg("-stream_loop").arg("-1");
         }
         // USB(dshow)：source 形如 `video=<设备名>`（list_usb_devices 产出的标准

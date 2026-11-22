@@ -21,6 +21,8 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
+from prepare_rust_assets import GO2RTC, valid_go2rtc
+
 ROOT = Path(__file__).resolve().parent.parent
 ENGINE_RS = ROOT / "engine-rs"
 DIST = ROOT / "Resources" / "dist" / "rust" / "labsentinel-server"
@@ -108,13 +110,12 @@ def assemble(strict: bool = False) -> None:
     else:
         missing.append("tools/onnxruntime/onnxruntime.dll（运行 scripts/prepare_rust_assets.py）")
         print(f"[警告] 缺少 {ort_src}/onnxruntime.dll（推理将无法加载）")
-    g2 = ROOT / "tools" / "go2rtc.exe"
-    if g2.exists():
+    if valid_go2rtc(GO2RTC):
         (DIST / "tools").mkdir(exist_ok=True)
-        shutil.copy2(g2, DIST / "tools" / "go2rtc.exe")
-    gy = ROOT / "tools" / "go2rtc.yaml"
-    if gy.exists():
-        shutil.copy2(gy, DIST / "tools" / "go2rtc.yaml")
+        shutil.copy2(GO2RTC, DIST / "tools" / "go2rtc.exe")
+        shutil.copy2(ROOT / "docs" / "licenses" / "go2rtc-MIT.txt", DIST / "tools" / "go2rtc-LICENSE.txt")
+    else:
+        missing.append("tools/go2rtc.exe（缺失或校验失败，请运行 scripts/prepare_rust_assets.py）")
     notice = ROOT / "NOTICE"
     if notice.exists():
         shutil.copy2(notice, DIST / "NOTICE.txt")
@@ -153,7 +154,7 @@ def assemble(strict: bool = False) -> None:
         "  LS_MODEL_PATH=models/yolo11n.onnx  LS_PPE_MODEL=models/yolo11n_ppe.onnx\n"
         "  LS_FFMPEG / LS_FFPROBE 覆盖外部二进制路径（默认 tools/ffmpeg/）\n"
         "\n包内：web/（前端）models/（检测模型）tools/ffmpeg（取流）tools/onnxruntime（推理）\n"
-        "      tools/go2rtc.exe（实时画面，可选）\n", encoding="utf-8")
+        "      tools/go2rtc.exe（RTSP 实时画面）\n", encoding="utf-8")
     (DIST / ".env.example").write_text(
         "# LabSentinel 最小配置（重命名 .env 生效；全部可省略）\n"
         "LS_PORT=8000\n"

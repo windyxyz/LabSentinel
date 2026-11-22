@@ -245,7 +245,7 @@ fn ws_origin_ok(origin: Option<&str>, host: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|o| o == origin)
 }
 
-fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
+pub(super) fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
     // 令牌来源优先级：子协议 bearer.<token> → Authorization: Bearer
     let protos = headers
         .get("sec-websocket-protocol")
@@ -256,8 +256,30 @@ fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
             return Some(t.to_string());
         }
     }
-    let auth = headers.get("authorization").and_then(|v| v.to_str().ok())?;
-    auth.strip_prefix("Bearer ").map(|s| s.to_string())
+    crate::middleware::provided_token(headers)
+}
+
+pub(super) async fn socket_revoked(st: &Shared, token: Option<&str>) {
+    let Some(token) = token else {
+        return std::future::pending().await;
+    };
+    if !st.read_protected && !crate::middleware::share_device(st, token) {
+        return std::future::pending().await;
+    }
+    let token = token.to_string();
+    loop {
+        let st = st.clone();
+        let token = token.clone();
+        if !tokio::task::spawn_blocking(move || {
+            crate::middleware::check_read_token(&st, Some(&token))
+        })
+        .await
+        .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 pub(crate) async fn ws_events(
@@ -269,14 +291,17 @@ pub(crate) async fn ws_events(
     if !ws_origin_ok(origin, &headers_host(&headers), &st.allowed_origins) {
         return (StatusCode::FORBIDDEN, "WS Origin 校验失败").into_response();
     }
-    if st.read_protected {
-        let ok = crate::middleware::check_read_token(&st, ws_token(&headers).as_deref());
-        if !ok {
-            return (StatusCode::UNAUTHORIZED, "WS 读令牌校验失败").into_response();
-        }
+    if !ws_read_allowed(&st, &headers) {
+        return (StatusCode::UNAUTHORIZED, "WS 读令牌校验失败").into_response();
     }
+    let token = ws_token(&headers);
     ws.protocols(["labsentinel"])
-        .on_upgrade(move |socket| handle_ws(socket, st.events_tx.subscribe()))
+        .on_upgrade(move |socket| async move {
+            tokio::select! {
+                _ = handle_ws(socket, st.events_tx.subscribe()) => {},
+                _ = socket_revoked(&st, token.as_deref()) => {},
+            }
+        })
 }
 
 fn headers_host(headers: &axum::http::HeaderMap) -> String {
@@ -289,9 +314,13 @@ fn headers_host(headers: &axum::http::HeaderMap) -> String {
 
 pub(super) fn ws_read_allowed(st: &Shared, headers: &axum::http::HeaderMap) -> bool {
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
+    let token = ws_token(headers);
+    let needs_token = st.read_protected
+        || token
+            .as_deref()
+            .is_some_and(|t| crate::middleware::share_device(st, t));
     ws_origin_ok(origin, &headers_host(headers), &st.allowed_origins)
-        && (!st.read_protected
-            || crate::middleware::check_read_token(st, ws_token(headers).as_deref()))
+        && (!needs_token || crate::middleware::check_read_token(st, token.as_deref()))
 }
 
 /// LS-051：`/ws/detections/:cid` 实时检测元数据广播（受 trusted_hosts + 读令牌守卫，
@@ -307,14 +336,19 @@ pub(crate) async fn ws_detections(
     if !ws_origin_ok(origin, &headers_host(&headers), &st.allowed_origins) {
         return (StatusCode::FORBIDDEN, "WS Origin 校验失败").into_response();
     }
-    if st.read_protected && !crate::middleware::check_read_token(&st, ws_token(&headers).as_deref())
-    {
+    if !ws_read_allowed(&st, &headers) {
         return (StatusCode::UNAUTHORIZED, "WS 读令牌校验失败").into_response();
     }
     // 只订阅本路相机：broadcast 全量帧，客户端按 camera_id 过滤（实现简单、零锁竞争）
     let rx = st.detections_tx.subscribe();
+    let token = ws_token(&headers);
     ws.protocols(["labsentinel"])
-        .on_upgrade(move |socket| handle_detections_ws(socket, rx, cid))
+        .on_upgrade(move |socket| async move {
+            tokio::select! {
+                _ = handle_detections_ws(socket, rx, cid) => {},
+                _ = socket_revoked(&st, token.as_deref()) => {},
+            }
+        })
 }
 
 async fn handle_detections_ws(

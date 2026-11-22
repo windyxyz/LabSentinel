@@ -172,6 +172,7 @@ pub(crate) async fn samples_capture(
         .lock()
         .ok()
         .and_then(|g| g.clone())
+        .map(|frame| frame.jpeg)
         .unwrap_or_default();
     if jpeg.is_empty() {
         return detail_err(StatusCode::CONFLICT, "暂无可用画面（等待抽帧）").into_response();

@@ -119,11 +119,6 @@ pub(crate) async fn go2rtc_configure(
         return server_err();
     }
     st.go2rtc.set_enabled(enabled);
-    if enabled {
-        let state = st.clone();
-        let _ =
-            tokio::task::spawn_blocking(move || state.go2rtc.sync_cameras(&state.db_path)).await;
-    }
     Json(json!({"ok": true, "status": st.go2rtc.status()})).into_response()
 }
 
@@ -229,26 +224,23 @@ pub(crate) async fn reports_send_now(State(st): State<Shared>) -> Response {
     .into_response()
 }
 
-fn env_path(_st: &Shared) -> std::path::PathBuf {
-    crate::deploy::default_install_root().join(".env")
-}
-
-pub(crate) async fn network_get(State(_st): State<Shared>) -> Response {
-    let path = env_path(&_st);
+pub(crate) async fn network_get(State(st): State<Shared>) -> Response {
+    let path = crate::envfile::network_path(&st.data_dir);
     let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let host = crate::envfile::get_key(&content, "LS_HOST").unwrap_or_else(|| "127.0.0.1".into());
-    let port = crate::envfile::get_key(&content, "LS_PORT")
+    let get = |key| crate::envfile::get_key(&content, key).or_else(|| std::env::var(key).ok());
+    let host = get("LS_HOST").unwrap_or_else(|| "127.0.0.1".into());
+    let port = get("LS_PORT")
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(8000);
-    let trusted = crate::envfile::get_key(&content, "LS_TRUSTED_HOSTS").unwrap_or_default();
+    let trusted = get("LS_TRUSTED_HOSTS").unwrap_or_default();
     let token_set = crate::envfile::get_key(&content, "LS_ADMIN_TOKEN")
         .map(|v| !v.trim().is_empty())
-        .unwrap_or(!_st.admin_token.is_empty());
+        .unwrap_or(!st.admin_token.is_empty());
     Json(json!({
-        "lan": host == "0.0.0.0",
+        "lan": !crate::is_loopback_host(&host),
         "host": host, "port": port,
         "trusted_hosts": trusted,
-        "read_protected": crate::envfile::get_key(&content, "LS_AUTH_READ_PROTECTED").map_or(_st.read_protected, |v| v == "1" || v.eq_ignore_ascii_case("true")),
+        "read_protected": crate::envfile::get_key(&content, "LS_AUTH_READ_PROTECTED").map_or(st.read_protected, |v| v == "1" || v.eq_ignore_ascii_case("true")),
         "admin_token_set": token_set,
         "env_path": path.to_string_lossy(),
     }))
@@ -259,7 +251,7 @@ pub(crate) async fn network_get(State(_st): State<Shared>) -> Response {
 pub(crate) async fn network_put(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
     static NET_CONFIG: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = NET_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    let path = env_path(&st);
+    let path = crate::envfile::network_path(&st.data_dir);
     let mut content = std::fs::read_to_string(&path).unwrap_or_default();
     let lan = body.get("lan").and_then(|v| v.as_bool());
     let port = body.get("port").and_then(|v| v.as_u64());
@@ -341,6 +333,8 @@ pub(crate) async fn network_put(State(st): State<Shared>, Json(body): Json<Value
 
 /// POST /api/system/restart——拉起新进程后优雅退出旧进程（.env 已落盘）。
 pub(crate) async fn system_restart(State(st): State<Shared>) -> Response {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RESTARTING: AtomicBool = AtomicBool::new(false);
     let exe = std::env::current_exe()
         .unwrap_or_else(|_| std::path::PathBuf::from("labsentinel-server.exe"));
     let args: Vec<String> = std::env::args()
@@ -355,20 +349,28 @@ pub(crate) async fn system_restart(State(st): State<Shared>) -> Response {
     cmd.args(&args)
         .arg("--wait-for-old-port")
         .arg(old_port.to_string());
-    let content = std::fs::read_to_string(env_path(&st)).unwrap_or_default();
-    for key in [
-        "LS_HOST",
-        "LS_PORT",
-        "LS_TRUSTED_HOSTS",
-        "LS_ADMIN_TOKEN",
-        "LS_AUTH_READ_PROTECTED",
-    ] {
+    let content =
+        std::fs::read_to_string(crate::envfile::network_path(&st.data_dir)).unwrap_or_default();
+    let host = crate::envfile::get_key(&content, "LS_HOST")
+        .or_else(|| std::env::var("LS_HOST").ok())
+        .unwrap_or_else(|| "127.0.0.1".into());
+    let port = crate::envfile::get_key(&content, "LS_PORT")
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(old_port);
+    if port != old_port && std::net::TcpListener::bind((host.as_str(), port)).is_err() {
+        return detail_err(
+            StatusCode::CONFLICT,
+            "新端口不可用，当前服务继续运行。请换一个端口后重试。",
+        )
+        .into_response();
+    }
+    if RESTARTING.swap(true, Ordering::AcqRel) {
+        return detail_err(StatusCode::CONFLICT, "服务正在重启").into_response();
+    }
+    for key in crate::envfile::NETWORK_KEYS {
         if let Some(value) = crate::envfile::get_key(&content, key) {
             cmd.env(key, value);
         }
-    }
-    if let Some(dir) = exe.parent() {
-        cmd.current_dir(dir);
     }
     #[cfg(windows)]
     {
@@ -376,6 +378,7 @@ pub(crate) async fn system_restart(State(st): State<Shared>) -> Response {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     if cmd.spawn().is_err() {
+        RESTARTING.store(false, Ordering::Release);
         return detail_err(StatusCode::INTERNAL_SERVER_ERROR, "无法启动新服务进程").into_response();
     }
     let st2 = Arc::clone(&st);

@@ -60,8 +60,10 @@ def main() -> int:
         exe = pkg / "labsentinel-server.exe"
         if not exe.is_file():
             exe = pkg / "labsentinel-server"
-        ok1 = exe.is_file()
-        print(f"[{'PASS' if ok1 else 'FAIL'}] 1 解包 —— exe={'有' if ok1 else '缺失'}")
+        required = [exe, pkg / "tools" / "go2rtc.exe", pkg / "tools" / "go2rtc-LICENSE.txt"]
+        missing = [p.relative_to(pkg).as_posix() for p in required if not p.is_file()]
+        ok1 = not missing
+        print(f"[{'PASS' if ok1 else 'FAIL'}] 1 解包 —— {', '.join(missing) if missing else '服务与流媒体网关齐备'}")
         ok_all &= ok1
         if not ok1:
             return 1

@@ -278,7 +278,7 @@ fn share_read_path(path: &str) -> bool {
             .is_some_and(|id| id.parse::<i64>().is_ok())
 }
 
-fn share_device(st: &Shared, token: &str) -> bool {
+pub(crate) fn share_device(st: &Shared, token: &str) -> bool {
     if !st.admin_token.is_empty() && ct_eq(token, &st.admin_token) {
         return false;
     }

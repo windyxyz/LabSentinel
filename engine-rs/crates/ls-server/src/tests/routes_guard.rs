@@ -200,6 +200,66 @@ async fn detections_socket_enforces_host_and_read_token_and_delivers_frames() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn revoking_a_share_ends_an_open_events_socket() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("share-ws.db");
+    let st = test_state_cfg(db.to_str().unwrap(), "test-admin", true);
+    let store = ls_store::Store::open(&st.db_path).unwrap();
+    store.ensure_schema().unwrap();
+    let token = "revocable-share";
+    let hash = crate::util::sha256_hex(token.as_bytes());
+    let id = store
+        .add_share_link(
+            "wall",
+            &hash,
+            24,
+            "2026-01-01T00:00:00",
+            "2099-01-01T00:00:00",
+        )
+        .unwrap();
+    store.add_device("wall", "share", &hash).unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let mut request = format!("ws://{}/ws/events", listener.local_addr().unwrap())
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        "labsentinel, bearer.revocable-share".parse().unwrap(),
+    );
+    let app = build_router(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while st.events_tx.receiver_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    st.events_tx.send("before revocation".into()).unwrap();
+    let normal = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .unwrap();
+    assert!(matches!(normal, Some(Ok(Message::Text(_)))));
+
+    store.revoke_share_link(id).unwrap();
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+        .await
+        .unwrap();
+    assert!(matches!(
+        closed,
+        None | Some(Ok(Message::Close(_))) | Some(Err(_))
+    ));
+    server.abort();
+}
+
 #[tokio::test]
 
 async fn live_and_system_contract() {

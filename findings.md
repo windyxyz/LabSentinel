@@ -39,3 +39,37 @@
 - 随包 FFmpeg 读取 JPEG 存证帧序列时显式指定 MJPEG 解码器，避免短图像序列探测失败。
 - 诊断包按允许列表导出配置项，并保留日志时间和级别。日志正文可携带第三方端点凭证及用户输入，因此统一脱敏。
 - 只读值守分享需要先启用管理令牌和读取保护。模板数据与真实现场样本应分开验证，工业 PPE 数据的类别覆盖与实验室现场不同。
+
+## 5. LS-058 v0.5.0 正式发布复审
+
+审查基线为 `main` 和 `v0.5.0` 共同指向的 `a992a42`。发布内容与复验记录见 `progress.md`。[GitHub Release](https://github.com/windyxyz/LabSentinel/releases/tag/v0.5.0) · [发布 CI](https://github.com/windyxyz/LabSentinel/actions/runs/45010145971)
+
+| 编号 | 优先级 | 指向 | 影响与验收条件 |
+|---|---|---|---|
+| LS-058-01 | P1 | `scripts/prepare_rust_assets.py:129`、`scripts/build_rust.py:111`、`.github/workflows/release.yml:88` | 实测 GitHub 正式 ZIP 缺 `tools/go2rtc.exe`，本机同名 ZIP 有该文件。CI 只准备模型、FFmpeg 和 ORT，严格打包也允许缺 go2rtc。安装器使用同一 staging。修复后应校验 go2rtc 来源及哈希，检查双产物内容，并用正式包验证 RTSP 播放。 |
+| LS-058-02 | P1 | `web/src/components/WebrtcPlayer.vue:164`、`web/src/views/Wall.vue:25`、`web/src/views/Cameras.vue:413` | 实测 go2rtc 1.9.15 拒绝当前格式的 offer。播放器发出 base64 字符串，上游同名协议要求 SDP 对象。播放器在两个视图握手失败后继续重连，快照分支没有接管。使用上游真实协议做回归，覆盖握手、首帧、失败降级和恢复。[go2rtc 1.9.15 信令实现](https://github.com/AlexxIT/go2rtc/blob/v1.9.15/internal/webrtc/webrtc.go#L127-L142) |
+| LS-058-03 | P1 | `deploy/windows/installer.iss:198`、`engine-rs/crates/ls-server/src/deploy.rs:116` | 正式二进制隔离复现。先归档 `0.4.0` 返回 0，模拟复制新版后 `--rollback` 返回 2。`VERSION` 为 `0.5.0`，`current.txt` 仍为 `0.4.0`，唯一可用归档被过滤。有更旧归档时可能跳过正确的回滚点。验收需覆盖从单一前版覆盖升级并恢复。 |
+| LS-058-04 | P1 | `engine-rs/crates/ls-server/src/handlers/events.rs:263`、`engine-rs/crates/ls-server/src/handlers/cameras.rs:285`、`web/src/App.vue:105` | 源码显示分享期限和吊销只在 WebSocket 握手时检查。正常页面每 15 秒复查分享状态，服务端没有在授权失效后主动关闭现有会话。验收需确认已有事件、检测数据和视频会话随吊销或到期停止。 |
+| LS-058-05 | P1 | `engine-rs/crates/ls-infer/src/yolo.rs:381`、`engine-rs/crates/ls-infer/src/yolo.rs:517`、`engine-rs/crates/ls-infer/src/post.rs:50` | 源码显示 Rust 把所有末维为 6 的输出当成 YOLO 像素角点。Ultralytics RT-DETR 的六列输出可为归一化中心框，预处理也不同。统一按模型格式定义预处理和解码，使用真实导出模型检查框位置、类别和置信度。[Ultralytics RT-DETR 参考实现](https://github.com/ultralytics/ultralytics/blob/main/ultralytics/models/rtdetr/predict.py) |
+| LS-058-06 | P1 | `deploy/windows/installer.iss:135`、`engine-rs/crates/ls-server/src/handlers/misc_status.rs:232` | 全用户模式默认装到 Program Files。网页保存局域网配置时写安装根 `.env`，标准用户在默认权限下无法保存。把可写配置纳入用户数据路径并兼容已有部署配置，使用标准账户验收保存、重启、恢复。 |
+| LS-058-07 | P2 | `engine-rs/crates/ls-server/src/handlers/dataset.rs:407`、`tools/merge_datasets.py:208` | 正式 ZIP 中单个已核验样本导出 HTTP 200，全部进 `val`，训练集为空。Python 合并器用合成图实测 1～4 张全部进 `train`，同时仍生成指向空验证集的 YAML。明确小样本行为，并覆盖 1、2、4、5 张以及缺图场景。 |
+| LS-058-08 | P2 | `web/src/views/Wall.vue:88`、`web/src/views/Wall.vue:135` | 大屏把 L1 事件数除以总事件数当作合规率。事件级别描述严重度，当前数据无法提供合规检查的总次数。例如当天只有一条 L1 提示时会显示 100%。验收需定义分子、分母和无观测时的显示。 |
+| LS-058-09 | P2 | `engine-rs/crates/ls-server/src/go2rtc.rs:59`、`engine-rs/crates/ls-server/src/go2rtc.rs:190` | 30 秒是重复调用的限频，启动后缺少周期监管。子进程意外退出后，普通摄像头启动和预览路径不会重新启动它并恢复 RTSP 流表。用隔离子进程测试自动恢复和流表重建。 |
+| LS-058-10 | P2 | `.github/workflows/rust.yml:71` | Linux 步骤未显式设置 shell，默认 `bash -e`。在 `python ... | tee` 中，覆盖率脚本退出 1 可能被 `tee` 的成功状态覆盖。CI 报告本次确实为 106/106。负向验收需让低于阈值时整个步骤失败。[GitHub Actions shell 语义](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsshell) |
+| LS-058-11 | P2 | `engine-rs/crates/ls-jobs/src/lib.rs:518`、`engine-rs/crates/ls-jobs/src/lib.rs:662` | 首次发送会根据渠道和设置携带证据图，后台和手工重试只传文本。出现临时投递失败时，成功重试可能丢失现场证据。用支持图片的通道验证失败后重试的正文和截图。 |
+| LS-058-12 | P2 | `scripts/acceptance_vlm.py:204`、`Resources/acceptance/imgs/empty-frame.jpg` | 验收脚本把画面中可见实验人员的图片当作空场景。正式包用该素材时 mock 调用由 2 增至 3，随即把下一张的复核挡在冷却期内。替换临时素材为合成无人图后，空场景计数保持 `2→2`，补入有人帧后 `2→3`，脚本通过。应使用符合断言的固定素材。 |
+
+其它核验结果：当前 DirectML 会话创建、运行和析构均有进程级 `dml_lock()`，Windows 测试通过锁串行用例。正式包内置 PPE 模型通过 CPU 评测，安全区和排班单测、只读分享守卫单测与工具清洗用例通过。路由报告为 106/106，并列出 46 条 OpenAPI 清单外的路由。前端构建通过，Vitest 提示 `Events.vue` 表格缺少行分组包装，且 jsdom 未提供 Canvas 上下文。正式安装器 Authenticode 状态为 `NotSigned`，签名证书继续在 `LS-900` 跟踪。`NOTICE` 记载的 ONNX Runtime 版本 `1.24.4` 与实际准备脚本固定的 `1.20.1` 有出入。
+
+## 6. LS-059 后续迭代的现状核对
+
+- 首页 `Dashboard.vue` 把 Rust 后端和 GPU 提示放在首张卡片。实际模型状态已有 `gpu_active` 与 `gpu_pref` 可用。默认正式包实测 `GET /api/update/check?refresh=1` 返回 `enabled=false`、`current=0.5.0`、`latest=null`、`url=null`。接口依赖环境变量清单，发布流水线只上传 ZIP、安装器与哈希，现有生成脚本的产物链接在 `platforms` 中，接口读取顶层链接。默认更新入口统一走官方 Release。 [最新正式发布](https://github.com/windyxyz/LabSentinel/releases/latest)
+- 告警截图对应 `AlertSettings.vue` 的 SMTP 和 Webhook 表单。当前 flex 布局按每行最高卡片决定下一行位置，字段数量不同造成空档。适配窄屏时卡片最小宽度为 360 px。其它可见残留包括报表标题「任务87」、侧栏「M1」、过时的令牌指引和手动启动 go2rtc 提示。
+- 「管理令牌」当前保存浏览器本地副本，服务端令牌由运行配置决定。设备页能创建一次性码、列表和吊销，仓库 Web 没有常用的浏览器配对认领入口。人脸目前依赖 CompreFace 环境变量，支持名单登记与删除。待新增的会话、设备范围和人脸模型能力见 `task_plan.md`。
+- 参考文件 `0.4.0_x64.exe` 的产品名为 `facewinunlock-tauri`、版本 `0.4.0`、Authenticode `NotSigned`。本机 SHA-256 为 `c5d157b3e1f771357a988d013947ef58dc3cd07e4c3f717123c103cf5366f99c`，与官方发布的 `0.4.0_x64-setup.exe` 一致。此次依据文件元数据和公开介绍做交互参考。 [官方发布](https://github.com/zs1083339604/FaceWinUnlock-Tauri/releases/tag/0.4.0)
+
+## 7. v0.6.0 统一范围与发版
+
+- 用户确认全部后续任务进入 `v0.6.0`，规划后直接执行，完成后走 GitHub 正式发布。`LS-060`～`LS-067` 为实施范围，`LS-068` 负责验收与发布。旧三版本建议仅为历史讨论。
+- 安装目录 Program Files 不应承载运行账户写入的配置。回滚选择依据当前已安装文件版本，历史 `current.txt` 可能指向旧版归档。RTC、密码和设备迁移均需使用既有数据及实际会话进行回归。
+- `LS-060` 浏览器实测已收到 WebRTC 首帧，同时分析 worker 未取得快照。随包 FFmpeg 对同一 RTSP 流返回 `Option rw_timeout not found`，其 RTSP 解复用器提供的是 `-timeout`。将分析取帧作为正式包播放验收的一部分。

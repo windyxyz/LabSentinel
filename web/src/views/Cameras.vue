@@ -1,7 +1,7 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api, mediaUrl } from '../api'
-import WebrtcPlayer from '../components/WebrtcPlayer.vue'
+import CameraPreview from '../components/CameraPreview.vue'
 import VideoOverlayCanvas from '../components/VideoOverlayCanvas.vue'
 import AsyncState from '../components/AsyncState.vue'
 import FsPicker from '../components/FsPicker.vue'
@@ -41,8 +41,7 @@ async function loadUsb(refresh = false) {
 }
 watch(() => form.value.type, t => { if (t === 'usb') loadUsb() })
 const snap = ref({})  // id -> timestamp (用于强制刷新 img)
-const live = ref(null)   // { id, name, wsUrl? , poll? } 正在观看实时画面的摄像头
-const pollSnap = ref(Date.now())  // USB 快照轮播的时间戳参数
+const live = ref(null)
 const liveErr = ref('')
 // RA5-UX：截图文件夹目录选择器（图片文件夹接入用）
 const fsPick = ref(null)
@@ -219,43 +218,10 @@ async function del(id) {
   busyCam.value = null
 }
 
-async function watchLive(cam) {
+function watchLive(cam) {
   liveErr.value = ''
-  // USB(dshow) 源：go2rtc 不支持 dshow 输入（Python 时代 USB 也不进 go2rtc）
-  // → 快照轮播降级（~500ms/帧，analysis_fps=5 与分析帧率一致）
-  if (cam.type === 'usb') {
-    live.value = { id: cam.id, name: cam.name, poll: true }
-    return
-  }
-  try {
-    const r = await api.cameraWebrtc(cam.id)
-    if (r?.mode === 'snapshot') {
-      live.value = { id: cam.id, name: cam.name, poll: true }
-    } else {
-      live.value = { id: cam.id, name: cam.name, wsUrl: r.ws_url }
-    }
-  } catch {
-    live.value = { id: cam.id, name: cam.name, poll: true }
-  }
+  live.value = cam
 }
-// USB 轮播定时器（弹窗关闭/组件卸载清理）
-let pollTimer = null
-function startPoll(id) {
-  stopPoll()
-  pollTimer = setInterval(() => {
-    pollSnap.value = Date.now()
-  }, 500)
-}
-function stopPoll() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-}
-watch(live, (v) => {
-  if (v && v.poll) startPoll(v.id)
-  else stopPoll()
-})
-
-// 弹窗快照轮播：组件卸载时清定时器（防泄漏）
-onBeforeUnmount(stopPoll)
 </script>
 
 <template>
@@ -403,19 +369,17 @@ onBeforeUnmount(stopPoll)
         </td>
       </tr>
     </table>
-    <p v-if="liveErr" class="muted" style="margin-top:6px">{{ liveErr }}（需先启动 tools/go2rtc.exe，见 scripts/start-all.bat）</p>
+    <p v-if="liveErr" class="muted" style="margin-top:6px">{{ liveErr }}</p>
     </AsyncState>
   </div>
 
   <div v-if="live" style="position:fixed; inset:0; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="live = null">
     <div style="width:min(92vw, 960px); cursor:default" @click.stop>
-      <div style="position:relative">
-        <WebrtcPlayer v-if="!live.poll" :ws-url="live.wsUrl" :label="live.name" />
-        <img v-else :src="mediaUrl(`/api/cameras/${live.id}/snapshot?t=${pollSnap}`)"
-             alt="USB 摄像头实时画面" style="width:100%; max-height:70vh; object-fit:contain; background:#000; border-radius:8px" />
+      <div style="position:relative; height:min(70vh, 54vw)">
+        <CameraPreview :camera-id="live.id" :camera-type="live.type" :name="live.name" />
         <VideoOverlayCanvas :camera-id="live.id" />
       </div>
-      <p class="muted" style="text-align:center; margin-top:8px">{{ live.poll ? '实时画面（快照轮播 · USB 摄像头）' : '实时画面（WebRTC，延迟约 1s）' }} · 点击空白处关闭</p>
+      <p class="muted" style="text-align:center; margin-top:8px">{{ live.name }} · 点击空白处关闭</p>
     </div>
   </div>
   <FsPicker ref="fsPick" :title="fsPickTitle" @pick="onPicked" />

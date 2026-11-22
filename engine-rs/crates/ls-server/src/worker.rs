@@ -317,12 +317,18 @@ pub struct WorkerHandle {
     pub stop: Arc<AtomicBool>,
     pub ffmpeg: ls_ingest::ChildSlot,
     /// 最新抽帧 JPEG（camera_snapshot 用；evidence stride 命中时更新）
-    pub latest_jpeg: Mutex<Option<Vec<u8>>>,
+    pub latest_jpeg: Mutex<Option<Snapshot>>,
     /// RA1.3：folder worker 立即扫描唤醒（POST /folders/{cid}/scan）
     pub wake: Arc<AtomicBool>,
     /// LS-050：Motion Gate 统计（跳过帧数 / 总帧数），供 /api/system 读取
     pub motion_skipped: Arc<AtomicU64>,
     pub motion_total: Arc<AtomicU64>,
+}
+
+#[derive(Clone)]
+pub struct Snapshot {
+    pub jpeg: axum::body::Bytes,
+    pub captured_at_ms: u128,
 }
 
 /// 全局 worker 注册表（AppState.workers）。
@@ -481,12 +487,7 @@ impl WorkerConfig {
             .map(PathBuf::from);
         // UX（2026-11-21）：推理设备偏好（app_settings runtime.ep；默认 dml=GPU，
         // DML 初始化失败 ls-infer 自动回落 CPU——任意厂商 GPU 鲁棒）
-        detector.use_gpu = s
-            .setting_get("runtime.ep")
-            .ok()
-            .flatten()
-            .map(|v| v.trim().eq_ignore_ascii_case("dml") || v.trim().is_empty())
-            .unwrap_or(true);
+        detector.use_gpu = crate::detect::runtime_ep_pref(s) == "dml";
         // RA2-S1 / LS-041：PPE 级联优先级与 ppe_status 对齐：
         // LS_PPE_MODEL 环境变量 → app_settings["ppe_model"]（网页上传/下载）→ 随包 models/yolo11n_ppe.onnx。
         let ppe_raw = std::env::var("LS_PPE_MODEL")
@@ -589,7 +590,7 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
     });
     st.workers.insert(cid, Arc::clone(&handle));
     if cfg.spec.type_ == "rtsp" {
-        st.go2rtc.sync_camera(cid, Some(&cfg.spec.source));
+        st.go2rtc.refresh();
     }
     let st2 = Arc::clone(st);
     let is_folder = cfg.spec.type_ == "folder";
@@ -863,9 +864,15 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         )
                         .unwrap_or_default()
                     });
-                    if let Some(j) = &ev_snapshot {
+                    if let Some(j) = ev_snapshot.as_ref().filter(|jpeg| !jpeg.is_empty()) {
                         if let Ok(mut slot) = handle.latest_jpeg.lock() {
-                            *slot = Some(j.clone());
+                            *slot = Some(Snapshot {
+                                jpeg: j.clone().into(),
+                                captured_at_ms: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis(),
+                            });
                         }
                     }
                     // LS-050 Motion Gate：每秒刷新配置（网页开关/阈值即时生效）；

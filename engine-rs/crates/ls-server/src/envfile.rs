@@ -7,6 +7,18 @@
 
 use std::path::{Path, PathBuf};
 
+pub const NETWORK_KEYS: [&str; 5] = [
+    "LS_HOST",
+    "LS_PORT",
+    "LS_TRUSTED_HOSTS",
+    "LS_ADMIN_TOKEN",
+    "LS_AUTH_READ_PROTECTED",
+];
+
+pub fn network_path(data_dir: &str) -> PathBuf {
+    Path::new(data_dir).join("network.env")
+}
+
 /// 设置/更新一个键（存在则替换该行，不存在则追加）。
 /// 返回新内容（便于单测）；不直接落盘。
 pub fn set_key(content: &str, key: &str, value: &str) -> String {
@@ -54,6 +66,9 @@ pub fn get_key(content: &str, key: &str) -> Option<String> {
 
 /// 原子写 .env（内容先写 .env.tmp 再 rename）。
 pub fn write_env(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
     let tmp = PathBuf::from(format!(
         "{}.{}.tmp",
         path.display(),

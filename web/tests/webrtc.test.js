@@ -43,13 +43,13 @@ class FakePC {
   addTransceiver() {}
   createOffer() { return Promise.resolve({ type: 'offer', sdp: 'OFFER-SDP' }) }
   setLocalDescription(desc) { this.setLocalCalls.push(desc); return Promise.resolve() }
-  setRemoteDescription(desc) { this.setRemoteCalls.push(desc); return Promise.resolve() }
+  setRemoteDescription(desc) { this.setRemoteCalls.push(desc); this.remoteDescription = desc; return Promise.resolve() }
   addIceCandidate(c) { this.addIceCalls.push(c); return Promise.resolve() }
   close() { this.closed = true }
 }
 
 async function mountPlayer(wsUrl = '/ws/webrtc/1') {
-  const w = mount(WebrtcPlayer, { props: { wsUrl, label: 'cam1' } })
+  const w = mount(WebrtcPlayer, { props: { wsUrl } })
   await flushPromises()
   return w
 }
@@ -61,8 +61,6 @@ beforeEach(() => {
   FakePC.created = []
   vi.stubGlobal('WebSocket', FakeWebSocket)
   vi.stubGlobal('RTCPeerConnection', FakePC)
-  vi.stubGlobal('btoa', (s) => Buffer.from(s, 'binary').toString('base64'))
-  vi.stubGlobal('atob', (s) => Buffer.from(s, 'base64').toString('binary'))
   // jsdom 的 HTMLMediaElement.play 未实现（返回 undefined），ontrack 里 .catch 会炸——桩成 Promise
   window.HTMLMediaElement.prototype.play = () => Promise.resolve()
   adminToken.set('adm')
@@ -89,36 +87,39 @@ describe('WebrtcPlayer.vue（R2-502 收口）', () => {
     expect(FakeWebSocket.created[0].protocols).toBeUndefined()
   })
 
-  it('信令 offer：onopen 后 createOffer→setLocalDescription→发送 {type:webrtc,value:base64(sdp)}', async () => {
+  it('用 go2rtc 原始 SDP 格式发送 offer 和 ICE 候选', async () => {
     await mountPlayer()
     latestWs().instance.open()
     await flushPromises()
     const pc = FakePC.created[0]
     expect(pc.setLocalCalls).toHaveLength(1)
+    pc.onicecandidate({ candidate: { candidate: 'host-candidate' } })
     expect(latestWs().instance.sent).toEqual([
-      { type: 'webrtc', value: Buffer.from('OFFER-SDP', 'binary').toString('base64') },
+      { type: 'webrtc/offer', value: 'OFFER-SDP' },
+      { type: 'webrtc/candidate', value: 'host-candidate' },
     ])
   })
 
-  it('answer 处理：base64 sdp → setRemoteDescription({type:answer})；ontrack → 已连接 + attempts 清零', async () => {
+  it('处理原始 answer 和早到的 ICE；实际播放首帧后才报告就绪', async () => {
     vi.useFakeTimers()
     const w = await mountPlayer()
     latestWs().instance.open()
     await flushPromises()
-    latestWs().instance.message({ type: 'webrtc', value: Buffer.from('ANSWER-SDP', 'binary').toString('base64') })
+    latestWs().instance.message({ type: 'webrtc/candidate', value: 'remote-candidate' })
+    latestWs().instance.message({ type: 'webrtc/answer', value: 'ANSWER-SDP' })
     await flushPromises()
     const pc = FakePC.created[0]
     expect(pc.setRemoteCalls).toEqual([{ type: 'answer', sdp: 'ANSWER-SDP' }])
-    expect(w.text()).not.toContain('已连接')
-    // ontrack：真正拿到流才算连接成功（DOM 更新异步，先 flush 再断言）
+    expect(pc.addIceCalls).toEqual([{ candidate: 'remote-candidate', sdpMid: '0' }])
+    expect(w.emitted('ready')).toBeUndefined()
     const stream = { id: 's1' }
-    pc.ontrack({ streams: [stream], track: {} })
-    await flushPromises()
-    expect(w.text()).toContain('已连接')
-    // 连接成功后断开 → 退避计数已清零，首次重连仍是 500ms 基数
+    pc.ontrack({ streams: [stream], track: { kind: 'video' } })
+    expect(w.emitted('ready')).toBeUndefined()
+    Object.defineProperty(w.get('video').element, 'readyState', { value: 2 })
+    await w.get('video').trigger('playing')
+    expect(w.emitted('ready')).toEqual([[true]])
     latestWs().instance.fail()
-    await flushPromises()
-    expect(w.text()).toContain('重连中(第1次)')
+    expect(w.emitted('ready')).toEqual([[true], [false]])
     vi.advanceTimersByTime(500)
     expect(FakeWebSocket.created).toHaveLength(2)
   })
@@ -137,12 +138,14 @@ describe('WebrtcPlayer.vue（R2-502 收口）', () => {
     expect(FakeWebSocket.created).toHaveLength(3)
   })
 
-  it('OFFER_TIMEOUT_MS：发出 offer 后 10s 未收到 answer → 退避重连', async () => {
+  it('远端回复后 12 秒没有首帧会回到快照并重连', async () => {
     vi.useFakeTimers()
     await mountPlayer()
     latestWs().instance.open()
     await flushPromises()
-    vi.advanceTimersByTime(9999)
+    latestWs().instance.message({ type: 'webrtc/answer', value: 'ANSWER-SDP' })
+    await flushPromises()
+    vi.advanceTimersByTime(11999)
     expect(FakeWebSocket.created).toHaveLength(1)
     vi.advanceTimersByTime(1)      // 超时到点 → scheduleReconnect（先退避 500ms 再 connect）
     expect(FakeWebSocket.created).toHaveLength(1)
@@ -181,6 +184,8 @@ describe('WebrtcPlayer.vue（R2-502 收口）', () => {
     vi.useFakeTimers()
     const w = await mountPlayer()
     const first = latestWs().instance
+    first.open()
+    await flushPromises()
     w.unmount()
     expect(first.closed).toBe(true)
     expect(FakePC.created[0].closed).toBe(true)

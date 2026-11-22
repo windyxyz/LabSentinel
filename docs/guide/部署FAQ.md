@@ -37,7 +37,7 @@ supervision 固定 0.25.1。详见 [tools/README.md](../../tools/README.md)。
 ## 3. 运行与端口
 
 **Q：端口被占用启动失败**
-→ `scripts\start-all.bat` 会自动检测 1984/8000/5173 并**跳过**被占用组件；手工排查：
+→ `scripts\start-all.bat` 会检测开发端口 8000 和 5173。实时画面网关由服务端托管，其端口冲突在网页摄像头页查看。手工排查：
 ```bash
 netstat -ano | findstr ":8000" | findstr "LISTENING"   # 最后一列是 PID
 taskkill /PID <pid> /F

@@ -4,7 +4,7 @@
 //! 布局：安装根（portable 为 `LabSentinel/`，Inno 为安装目录）
 //! - `app/VERSION`（优先）或 `VERSION` 记录当前版本
 //! - `versions/<ver>/` 存放升级前归档树（排除 data/versions/缓存）
-//! - `current.txt` 记录当前已安装版本（回滚时跳过它，选择次新归档）
+//! - 回滚时从已安装的 `VERSION` 判断当前版本，`current.txt` 兼容旧版展示。
 //!
 //! 安全锚点：版本名必须是单一路径分量（拒绝 `/ \ ..`），归档目标必须是
 //! `<install>/versions` 的直接子目录；复制不跟随符号链接，避免归档逃逸。
@@ -74,7 +74,7 @@ pub fn read_version(install: &Path) -> String {
 /// 版本名只允许单一路径分量（防穿越）。
 fn safe_component(v: &str) -> Option<&str> {
     let v = v.trim();
-    if v.is_empty() || v == "." || v == ".." || v.contains('/') || v.contains('\\') {
+    if v.is_empty() || v.starts_with('.') || v.contains(['/', '\\', ':']) {
         return None;
     }
     Some(v)
@@ -110,16 +110,31 @@ pub fn archive(install: &Path) -> Result<PathBuf, String> {
         return Err("归档目标越出 versions/ 目录".into());
     }
     fs::create_dir_all(&versions).map_err(|e| format!("创建 versions/ 失败: {e}"))?;
-    if dest.exists() {
-        fs::remove_dir_all(&dest).map_err(|e| format!("清理旧归档失败: {e}"))?;
+    let stage = versions.join(format!(".stage-{}", crate::util::uuid_like()));
+    let previous = versions.join(format!(".previous-{}", crate::util::uuid_like()));
+    let result = (|| -> io::Result<()> {
+        copy_tree(install, &stage, false)?;
+        if dest.exists() {
+            fs::rename(&dest, &previous)?;
+        }
+        if let Err(err) = fs::rename(&stage, &dest) {
+            if previous.exists() {
+                fs::rename(&previous, &dest)?;
+            }
+            return Err(err);
+        }
+        let _ = fs::remove_dir_all(&previous);
+        Ok(())
+    })();
+    if let Err(err) = result {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(format!("归档复制失败: {err}"));
     }
-    copy_tree(install, &dest, false).map_err(|e| format!("归档复制失败: {e}"))?;
-    // LS-045：写 current.txt 记录当前版本（供后续 rollback 准确排除当前版本）
     let _ = fs::write(install.join(CURRENT_MARK), name);
     Ok(dest)
 }
 
-/// 回滚到 `versions/` 中除 `current.txt` 之外的最新一版（数据目录不动）。
+/// 回滚到 `versions/` 中除已安装版本之外的最新一版（数据目录不动）。
 /// 返回已恢复的归档目录。
 pub fn rollback(install: &Path) -> Result<PathBuf, String> {
     if !install.is_dir() {
@@ -129,13 +144,11 @@ pub fn rollback(install: &Path) -> Result<PathBuf, String> {
     if !versions.is_dir() {
         return Err("无版本归档（versions/ 不存在），无法回滚".into());
     }
-    let current = fs::read_to_string(install.join(CURRENT_MARK))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+    let current = read_version(install);
     let mut cands: Vec<String> = fs::read_dir(&versions)
         .map_err(|e| format!("读取 versions/ 失败: {e}"))?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
+        .filter(|e| e.file_type().is_ok_and(|kind| kind.is_dir()))
         .filter_map(|e| e.file_name().to_str().map(String::from))
         .filter(|n| safe_component(n).is_some() && n != &current)
         .collect();
@@ -162,16 +175,16 @@ fn copy_tree(src: &Path, dst: &Path, overwrite: bool) -> io::Result<()> {
         let name_lower = name_str.to_ascii_lowercase();
         let from = entry.path();
         let to = dst.join(&name);
-        let meta = entry.metadata()?;
-        if meta.file_type().is_symlink() {
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
             continue;
         }
-        if meta.is_dir() {
+        if kind.is_dir() {
             if IGNORED_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
             copy_tree(&from, &to, overwrite)?;
-        } else if meta.is_file() {
+        } else if kind.is_file() {
             if name_lower.ends_with(".pyc")
                 || name_lower.ends_with(".old")
                 || name_lower.starts_with("unins")
@@ -275,5 +288,27 @@ mod tests {
         write(&root.join("app/VERSION"), "1.0.0");
         assert!(rollback(&root).is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rollback_after_first_upgrade_uses_installed_version() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write(&root.join("VERSION"), "0.5.0");
+        write(&root.join("web/index.html"), "previous");
+        write(&root.join("data/labsentinel.db"), "persist");
+        archive(root).unwrap();
+        write(&root.join("VERSION"), "0.6.0");
+        write(&root.join("web/index.html"), "new");
+        assert_eq!(rollback(root).unwrap(), root.join("versions/0.5.0"));
+        assert_eq!(read_version(root), "0.5.0");
+        assert_eq!(
+            fs::read_to_string(root.join("web/index.html")).unwrap(),
+            "previous"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("data/labsentinel.db")).unwrap(),
+            "persist"
+        );
     }
 }

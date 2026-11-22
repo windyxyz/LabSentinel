@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""RA4.2：准备 Rust 发行包所需资产（模型 / ffmpeg / ffprobe / onnxruntime）。
+"""准备 Rust 发行包所需资产（模型 / ffmpeg / ffprobe / onnxruntime / go2rtc）。
 
 用途：本地与 CI 的 `scripts/build_rust.py --strict --zip` 前置步骤。
 幂等：目标已存在即跳过；下载走 `scripts/fetch_assets.py`（哈希锁校验）。
@@ -13,6 +13,8 @@ import gzip
 import shutil
 import sys
 import tarfile
+import tempfile
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,10 +25,35 @@ MODELS = ROOT / "m0-spike"
 FFDIR = ROOT / "tools" / "ffmpeg"
 ORTDIR = ROOT / "tools" / "onnxruntime"
 MODEL_ASSETS = ("yolo11n.onnx", "yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt")
+GO2RTC = ROOT / "tools" / "go2rtc.exe"
+GO2RTC_ARCHIVE = "go2rtc_win64.zip"
 
 
 def log(msg: str) -> None:
     print(f"[prepare] {msg}", flush=True)
+
+
+def valid_go2rtc(path: Path) -> bool:
+    spec = fetch_assets.load_lock()[GO2RTC_ARCHIVE]
+    return path.is_file() and fetch_assets.verify(path, spec["binary_sha256"], spec["binary_size"])
+
+
+def ensure_go2rtc(force: bool) -> None:
+    if not force and valid_go2rtc(GO2RTC):
+        log("go2rtc.exe 已存在，SHA256 一致")
+        return
+    GO2RTC.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=GO2RTC.parent) as work:
+        archive = Path(work) / GO2RTC_ARCHIVE
+        if fetch_assets.download(GO2RTC_ARCHIVE, archive) != 0:
+            raise SystemExit("[失败] go2rtc 下载失败")
+        binary = Path(work) / GO2RTC.name
+        with zipfile.ZipFile(archive) as package, package.open(GO2RTC.name) as src, binary.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        if not valid_go2rtc(binary):
+            raise SystemExit("[失败] go2rtc.exe 哈希或大小不符")
+        binary.replace(GO2RTC)
+    log("go2rtc.exe 已验证并就绪")
 
 
 def ensure_models(force: bool) -> None:
@@ -107,9 +134,7 @@ def ensure_ort(force: bool) -> None:
         log(f"onnxruntime.dll 哈希不符（旧 CPU 版?）——重取 DML 版: {got[:16]}…")
     # 下载 nuget（zip）→ 解压 win-x64 native onnxruntime.dll → 校验哈希 → 落盘
     import hashlib
-    import tempfile
     import urllib.request
-    import zipfile
     with tempfile.TemporaryDirectory() as td:
         pkg = Path(td) / "ortdml.nupkg"
         log(f"下载 onnxruntime-directml nuget ← {NUGET_URL}")
@@ -133,6 +158,7 @@ def main() -> int:
     ensure_models(a.force)
     ensure_ffmpeg(a.force)
     ensure_ort(a.force)
+    ensure_go2rtc(a.force)
     return 0
 
 

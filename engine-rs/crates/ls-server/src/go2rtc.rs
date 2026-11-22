@@ -7,6 +7,8 @@
 //! - 开关配置存 app_settings `go2rtc.enabled`（默认开，缺失二进制优雅降级）；
 //! - 状态供 `/api/system` 与 `GET /api/go2rtc/status` 读取。
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,10 +16,13 @@ use std::time::{Duration, Instant};
 use ls_ingest::child_guard::ChildGuard;
 
 /// go2rtc API 默认地址（与 handlers/cameras.rs::go2rtc_reachable 同口径）。
-pub const DEFAULT_API: &str = "http://127.0.0.1:1984";
+const DEFAULT_PORT: u16 = 1984;
 
 pub struct Go2rtcSupervisor {
     inner: Mutex<Inner>,
+    wake: tokio::sync::Notify,
+    external: Option<String>,
+    address: SocketAddr,
 }
 
 struct Inner {
@@ -25,17 +30,32 @@ struct Inner {
     last_attempt: Option<Instant>,
     last_error: String,
     enabled: bool,
+    stopped: bool,
+    registered: HashMap<i64, String>,
 }
 
 impl Go2rtcSupervisor {
     pub fn new(enabled: bool) -> Self {
+        let port = std::env::var("LS_GO2RTC_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|&port| port > 0)
+            .unwrap_or(DEFAULT_PORT);
         Self {
             inner: Mutex::new(Inner {
                 child: None,
                 last_attempt: None,
                 last_error: String::new(),
                 enabled,
+                stopped: false,
+                registered: HashMap::new(),
             }),
+            wake: tokio::sync::Notify::new(),
+            external: std::env::var("LS_GO2RTC_ADDR")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            address: SocketAddr::from(([127, 0, 0, 1], port)),
         }
     }
 
@@ -54,13 +74,13 @@ impl Go2rtcSupervisor {
         p.is_file().then_some(p)
     }
 
-    /// 尝试确保 go2rtc 运行（幂等）；首次调用或每隔 30 秒重试一次。
+    /// 尝试确保 go2rtc 运行（幂等），启动失败时限频重试。
     /// 返回是否处于运行状态。二进制缺失 / 启动失败都优雅降级（仅记录 last_error）。
     pub fn ensure_running(&self, install_root: &Path, api_base: &str) -> bool {
         let Ok(mut inner) = self.inner.lock() else {
             return false;
         };
-        if !inner.enabled {
+        if !inner.enabled || inner.stopped {
             return false;
         }
         if let Some(c) = inner.child.as_mut() {
@@ -68,10 +88,11 @@ impl Go2rtcSupervisor {
                 return true;
             }
             inner.child = None; // 进程已退出，准备重启
+            inner.registered.clear();
         }
         if inner
             .last_attempt
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(5))
         {
             return false;
         }
@@ -87,9 +108,16 @@ impl Go2rtcSupervisor {
             .split('/')
             .next()
             .unwrap_or("127.0.0.1:1984");
+        if api_host.parse::<SocketAddr>().is_ok_and(api_reachable) {
+            inner.last_error = "go2rtc 本地端口已被占用".into();
+            return false;
+        }
         let mut cmd = std::process::Command::new(&bin);
-        let config =
-            serde_json::json!({"api": {"listen": api_host}, "rtsp": {"listen": "127.0.0.1:8554"}});
+        let config = serde_json::json!({
+            "api": {"listen": api_host},
+            "rtsp": {"listen": std::env::var("LS_GO2RTC_RTSP_LISTEN").unwrap_or_else(|_| "127.0.0.1:8554".into())},
+            "webrtc": {"listen": std::env::var("LS_GO2RTC_WEBRTC_LISTEN").unwrap_or_else(|_| ":8555".into())}
+        });
         cmd.arg("-c").arg(config.to_string());
         cmd.current_dir(bin.parent().unwrap_or(install_root));
         match ChildGuard::spawn(cmd) {
@@ -114,20 +142,25 @@ impl Go2rtcSupervisor {
                     c.stop();
                 }
                 inner.child = None;
+                inner.registered.clear();
             } else {
                 inner.last_attempt = None; // 允许立即重试
             }
         }
+        self.refresh();
     }
 
     /// 显式停止（graceful_shutdown 调用）。
     pub fn stop(&self) {
         if let Ok(mut inner) = self.inner.lock() {
+            inner.stopped = true;
             if let Some(c) = inner.child.as_mut() {
                 c.stop();
             }
             inner.child = None;
+            inner.registered.clear();
         }
+        self.refresh();
     }
 
     /// 状态摘要（供 API/系统状态）。
@@ -139,6 +172,8 @@ impl Go2rtcSupervisor {
                 "running": running,
                 "pid": inner.child.as_ref().and_then(|c| c.pid()).filter(|_| running),
                 "last_error": inner.last_error,
+                "registered_streams": inner.registered.len(),
+                "external": self.external.is_some(),
             })
         } else {
             serde_json::json!({"enabled": false, "running": false, "last_error": "state poisoned"})
@@ -187,40 +222,105 @@ impl Go2rtcSupervisor {
         }
     }
 
-    pub fn sync_cameras(&self, db_path: &str) {
-        if !self.ensure_running(&crate::deploy::default_install_root(), DEFAULT_API) {
+    pub fn refresh(&self) {
+        self.wake.notify_one();
+    }
+
+    pub fn start(self: &Arc<Self>, db_path: String, install_root: PathBuf) {
+        let supervisor = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let task = Arc::clone(&supervisor);
+                let path = db_path.clone();
+                let root = install_root.clone();
+                if tokio::task::spawn_blocking(move || task.sync_cameras(&path, &root))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if supervisor.inner.lock().map_or(true, |state| state.stopped) {
+                    break;
+                }
+                tokio::select! {
+                    _ = supervisor.wake.notified() => {},
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {},
+                }
+            }
+        });
+    }
+
+    fn sync_cameras(&self, db_path: &str, install_root: &Path) {
+        if self.external.is_some() {
             return;
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !api_reachable() {
-            if Instant::now() >= deadline {
+        let base = format!("http://{}", self.address);
+        if !self.ensure_running(install_root, &base) || !api_reachable(self.address) {
+            return;
+        }
+        let Ok(cameras) = ls_store::Store::open(db_path).and_then(|s| s.cameras()) else {
+            return;
+        };
+        let desired: HashMap<_, _> = cameras
+            .into_iter()
+            .filter(|c| c.type_ == "rtsp")
+            .map(|c| (c.id, c.source))
+            .collect();
+        let (pid, registered) = match self.inner.lock() {
+            Ok(inner) => (
+                inner.child.as_ref().and_then(ChildGuard::pid),
+                inner.registered.clone(),
+            ),
+            Err(_) => return,
+        };
+        let changes = desired
+            .iter()
+            .filter(|(id, source)| registered.get(id) != Some(source))
+            .map(|(&id, source)| (id, Some(source.as_str())))
+            .chain(
+                registered
+                    .keys()
+                    .filter(|id| !desired.contains_key(id))
+                    .map(|&id| (id, None)),
+            );
+        for (id, source) in changes {
+            let result = Self::apply_stream(&base, &format!("cam_{id}"), source);
+            let Ok(mut inner) = self.inner.lock() else {
+                return;
+            };
+            if pid.is_none() || inner.child.as_ref().and_then(ChildGuard::pid) != pid {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if let Ok(cameras) = ls_store::Store::open(db_path).and_then(|s| s.cameras()) {
-            for c in cameras.into_iter().filter(|c| c.type_ == "rtsp") {
-                self.sync_camera(c.id, Some(&c.source));
+            match result {
+                Ok(()) => match source {
+                    Some(url) => {
+                        inner.registered.insert(id, url.to_string());
+                    }
+                    None => {
+                        inner.registered.remove(&id);
+                    }
+                },
+                Err(err) => inner.last_error = format!("相机 #{id}: {err}"),
             }
         }
     }
 
-    pub fn sync_camera(&self, id: i64, source: Option<&str>) {
-        if self.status()["running"] != true {
-            return;
+    pub fn address_for_camera(&self, id: i64) -> Option<String> {
+        let mut inner = self.inner.lock().ok()?;
+        if !inner.enabled || inner.stopped {
+            return None;
         }
-        if let Err(e) = Self::apply_stream(DEFAULT_API, &format!("cam_{id}"), source) {
-            crate::logger::warn(&format!("[go2rtc] 相机 #{id}: {e}"));
+        if let Some(address) = &self.external {
+            return Some(address.clone());
         }
+        (inner.registered.contains_key(&id)
+            && inner.child.as_mut().is_some_and(ChildGuard::is_running))
+        .then(|| self.address.to_string())
     }
 }
 
-fn api_reachable() -> bool {
-    std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], 1984)),
-        Duration::from_millis(80),
-    )
-    .is_ok()
+fn api_reachable(address: SocketAddr) -> bool {
+    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(80)).is_ok()
 }
 
 /// 最小百分号编码（流名进 query）。
@@ -273,7 +373,7 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let sup = Go2rtcSupervisor::new(true);
-        assert!(!sup.ensure_running(root.path(), DEFAULT_API));
+        assert!(!sup.ensure_running(root.path(), "http://127.0.0.1:1984"));
         let status = sup.status();
         assert_eq!(status["enabled"], true);
         assert_eq!(status["running"], false);
@@ -311,5 +411,51 @@ mod tests {
         assert!(streams.get("cam_42").is_none());
         sup.stop();
         assert_eq!(sup.status()["running"], false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn supervised_gateway_recovers_existing_streams() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        if !root.join("tools/go2rtc.exe").is_file() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("go2rtc.db");
+        let db = db.to_str().unwrap();
+        let store = ls_store::Store::open(db).unwrap();
+        store.ensure_schema().unwrap();
+        let cid = store
+            .conn_add_camera("test", "rtsp://127.0.0.1:1/fixture", "rtsp")
+            .unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let sup = Go2rtcSupervisor {
+            address,
+            external: None,
+            ..Go2rtcSupervisor::new(true)
+        };
+        let wait_for_registration = || {
+            for _ in 0..60 {
+                sup.sync_cameras(db, &root);
+                if let Some(address) = sup.address_for_camera(cid) {
+                    return address;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            panic!("stream registry never became ready: {}", sup.status());
+        };
+        assert_eq!(wait_for_registration(), address.to_string());
+        let pid = sup.status()["pid"].clone();
+        {
+            let mut inner = sup.inner.lock().unwrap();
+            inner.child.as_mut().unwrap().stop();
+            inner.last_attempt = None;
+        }
+        assert!(sup.address_for_camera(cid).is_none());
+        assert_eq!(wait_for_registration(), address.to_string());
+        assert_ne!(sup.status()["pid"], pid);
+        sup.stop();
     }
 }

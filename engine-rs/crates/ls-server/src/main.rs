@@ -138,8 +138,27 @@ async fn main() {
     if std::env::args().any(|x| x == "--console") {
         crate::wincon::attach_parent_console();
     }
-    // LS-045：读取安装根或当前目录下的 .env（不覆盖显式环境变量）
-    load_dotenv(&deploy::default_install_root());
+    let install_root = deploy::default_install_root();
+    let explicit_network = envfile::NETWORK_KEYS.map(|key| std::env::var_os(key).is_some());
+    load_dotenv(&install_root);
+    let dist_layout = install_root.join("web").join("index.html").is_file();
+    let env_path = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+    let data_dir = env_path("LS_DATA_DIR").unwrap_or_else(|| {
+        if dist_layout {
+            deploy::default_data_dir(&install_root)
+        } else {
+            "data".into()
+        }
+    });
+    if let Ok(content) = std::fs::read_to_string(envfile::network_path(&data_dir)) {
+        for (key, explicit) in envfile::NETWORK_KEYS.into_iter().zip(explicit_network) {
+            if !explicit {
+                if let Some(value) = envfile::get_key(&content, key) {
+                    std::env::set_var(key, value);
+                }
+            }
+        }
+    }
     let wait_port = std::env::args()
         .skip_while(|arg| arg != "--wait-for-old-port")
         .nth(1)
@@ -193,7 +212,7 @@ async fn main() {
             std::process::exit(0);
         }
     }
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).filter(|arg| arg != "--console");
     if let Some(a) = args.next() {
         if a == "--healthcheck" {
             let db = args.next().unwrap_or_else(|| "data/labsentinel.db".into());
@@ -261,16 +280,6 @@ async fn main() {
     //   /api/health/ready=503）；源码开发形态沿用 data/（仓库相对）。
     // - 前端目录：LS_WEB_DIST 优先；发行形态用 <安装根>/web（包内布局），
     //   源码开发用 web/dist——此前安装版根路径 404 即因默认 web/dist 不存在。
-    let install_root = deploy::default_install_root();
-    let dist_layout = install_root.join("web").join("index.html").is_file();
-    let env_path = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
-    let data_dir = env_path("LS_DATA_DIR").unwrap_or_else(|| {
-        if dist_layout {
-            deploy::default_data_dir(&install_root)
-        } else {
-            "data".into()
-        }
-    });
     let db_path = env_path("LS_DB_PATH").unwrap_or_else(|| {
         std::path::Path::new(&data_dir)
             .join("labsentinel.db")
@@ -410,9 +419,6 @@ async fn main() {
         .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
         .unwrap_or(true);
     st.go2rtc.set_enabled(go2rtc_enabled);
-    if go2rtc_enabled {
-        st.go2rtc.sync_cameras(&st.db_path);
-    }
     // RA2 反思修正：launch 模式下端口试探与 bind 之间存在 TOCTOU 窗口——
     // bind 失败不再 unwrap panic（会崩进程），优雅提示后退出
     let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
@@ -438,6 +444,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    st.go2rtc.start(st.db_path.clone(), install_root);
     println!("labsentinel-server READY port={port}");
     // UX4：系统托盘（唯一常驻 UI；--tray 开启，安装器快捷方式 = --launch --tray）。
     // 创建失败只 warn 降级，不影响服务。

@@ -541,7 +541,14 @@ pub fn runtime_ep_pref(s: &ls_store::Store) -> String {
         .flatten()
         .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| v == "dml" || v == "cpu")
-        .unwrap_or_else(|| "dml".into())
+        .unwrap_or_else(|| {
+            if std::env::var("LS_GPU").as_deref() == Ok("0") {
+                "cpu"
+            } else {
+                "dml"
+            }
+            .into()
+        })
 }
 
 /// PUT /api/detect/config——增量写（缺字段/空串=不变更；api_key 仅在给出非
@@ -1126,7 +1133,7 @@ pub(crate) async fn detect_test(State(st): State<Shared>, Json(body): Json<Value
         .and_then(|cid| st.workers.get(cid))
         .and_then(|h| {
             let g = h.latest_jpeg.lock().ok()?;
-            g.clone()
+            g.as_ref().map(|frame| frame.jpeg.to_vec())
         });
     let jpeg = match jpeg {
         Some(j) if !j.is_empty() => j,

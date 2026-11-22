@@ -10,12 +10,16 @@ export const adminToken = {
 
 export const requestToken = () => sessionStorage.getItem('ls_readonly_token') || adminToken.get()
 
-export async function fetchBinary(path) {
+export async function fetchMedia(path, signal) {
   const token = requestToken()
   const headers = token ? { 'X-Admin-Token': token } : {}
-  const response = await fetch(path, { headers, cache: 'no-store' })
-  if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`)
-  return response.blob()
+    const response = await fetch(path, { headers, cache: 'no-store', signal })
+    if (!response.ok) throw Object.assign(new Error(`下载失败（HTTP ${response.status}）`), { status: response.status })
+    return response
+}
+
+export async function fetchBinary(path) {
+  return (await fetchMedia(path)).blob()
 }
 
 export async function downloadBinary(path, filename) {

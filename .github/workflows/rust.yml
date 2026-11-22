@@ -69,6 +69,7 @@ jobs:
         working-directory: engine-rs
         run: cargo build -p ls-server
       - name: route coverage report (R2-307)
+        shell: bash
         run: |
           python -I scripts/rust_route_coverage.py \
             --exe engine-rs/target/debug/labsentinel-server --fail-under 95 | tee route-coverage.txt
