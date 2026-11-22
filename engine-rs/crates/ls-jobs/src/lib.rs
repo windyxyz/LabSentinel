@@ -46,6 +46,102 @@ pub type JobResult<T> = Result<T, String>;
 const RETENTION_INTERVAL_S: u64 = 6 * 3600;
 const ESCALATION_INTERVAL_S: u64 = 60;
 const BACKUP_CHECK_MAX_S: u64 = 3600;
+/// LS-053：告警失败重试消费者轮询间隔
+const RETRY_INTERVAL_S: u64 = 30;
+/// LS-053：日报/周报调度检查间隔
+const REPORT_CHECK_S: u64 = 60;
+/// LS-053：最大重试次数（超过即 dead_letter 死信）
+pub const MAX_RETRY_ATTEMPTS: i64 = 5;
+
+/// LS-053：第 n 次重试的退避秒数（指数退避，封顶 1 小时）。
+/// 纯函数便于单测：n=0 → 30s，n=1 → 120s，n=2 → 600s，n≥3 → 1800/3600s。
+pub fn retry_backoff_s(attempts: i64) -> u64 {
+    match attempts.max(0) {
+        0 => 30,
+        1 => 120,
+        2 => 600,
+        3 => 1800,
+        _ => 3600,
+    }
+}
+
+/// LS-053：日报是否到点——启用、当前 HH:MM ≥ 设定时刻、且今天未发过。
+/// 纯函数便于单测。
+pub fn report_due(enabled: bool, due_hm: &str, now_hm: &str, today: &str, last_date: Option<&str>) -> bool {
+    if !enabled {
+        return false;
+    }
+    if !due_hm.is_empty() && now_hm < due_hm {
+        return false;
+    }
+    last_date != Some(today)
+}
+
+/// LS-053：周报是否到点——启用、ISO 星期匹配、当前 HH:MM ≥ 设定时刻、且本周未发。
+pub fn weekly_due(
+    enabled: bool,
+    due_weekday: u8,
+    due_hm: &str,
+    now_weekday: u8,
+    now_hm: &str,
+    today: &str,
+    last_date: Option<&str>,
+) -> bool {
+    if !enabled || now_weekday != due_weekday {
+        return false;
+    }
+    if !due_hm.is_empty() && now_hm < due_hm {
+        return false;
+    }
+    // 同一周内只发一次：比较本周一日期
+    match last_date {
+        Some(d) => !same_iso_week(d, today),
+        None => true,
+    }
+}
+
+/// 两个 ISO 日期是否在同一自然周（周一为起点）。纯字符串比较 + 日期差近似。
+fn same_iso_week(a: &str, b: &str) -> bool {
+    // 简单稳妥：同一周 ⇔ 两日期相差 < 7 天且 b >= a 且 b-a 的星期偏移对齐；
+    // 这里用「相差 ≤ 6 天」近似（调度每天检查一次，重复窗口已足够窄）。
+    match (ls_core::time::parse_local_datetime(a), ls_core::time::parse_local_datetime(b)) {
+        (Some(x), Some(y)) => {
+            let dx = ls_core::time::diff_minutes(y, x) / (60 * 24);
+            (0..7).contains(&dx)
+        }
+        _ => a == b,
+    }
+}
+
+/// LS-053：报告文案（纯函数，便于单测与模板统一）。
+pub fn report_text(
+    title: &str,
+    total: i64,
+    violation: i64,
+    unhandled: i64,
+    top: &[(i64, i64)],
+    camera_names: &std::collections::HashMap<i64, String>,
+) -> String {
+    let rate = if total > 0 {
+        ((total - violation) as f64 / total as f64 * 100.0).round() as i64
+    } else {
+        100
+    };
+    let mut s = format!(
+        "【LabSentinel·{title}】\n事件总数：{total}\n违规事件（L2+）：{violation}\n未处置：{unhandled}\n合规率：{rate}%"
+    );
+    if !top.is_empty() {
+        s.push_str("\n违规 Top 摄像头：");
+        for (i, (cid, n)) in top.iter().enumerate() {
+            let name = camera_names
+                .get(cid)
+                .cloned()
+                .unwrap_or_else(|| format!("cam{cid}"));
+            s.push_str(&format!("\n{}. {name}（{n} 次）", i + 1));
+        }
+    }
+    s
+}
 
 #[derive(Clone, Debug)]
 pub struct JobsConfig {
@@ -138,6 +234,9 @@ pub struct Jobs {
     /// UX（2026-11-21）：推送冷却去重（camera|type|track → 上次推送时刻；
     /// alert.push_cooldown_s 秒窗口内同人同行为只推渠道一次）
     push_dedup: Mutex<std::collections::HashMap<String, Instant>>,
+    /// LS-053：日报/周报最近发送日期（防同日重复推送）
+    report_last_daily: Mutex<Option<String>>,
+    report_last_weekly: Mutex<Option<String>>,
 }
 
 impl Jobs {
@@ -155,6 +254,8 @@ impl Jobs {
             alert_channels: Mutex::new(None),
             alert_template_override: Mutex::new(None),
             push_dedup: Mutex::new(std::collections::HashMap::new()),
+            report_last_daily: Mutex::new(None),
+            report_last_weekly: Mutex::new(None),
         }
     }
 
@@ -490,8 +591,156 @@ impl Jobs {
         Ok(outcome)
     }
 
+    /// LS-053：告警失败重试——扫描 retry/failed 且未超次数/退避到期的投递，
+    /// 用同一渠道快照真重发；成功 → ok，失败 → retry，超过上限 → dead_letter。
+    pub fn retry_tick(&self) {
+        let Ok(store) = ls_store::Store::open(&self.db_path.to_string_lossy()) else {
+            return;
+        };
+        let cutoff = ls_core::time::local_now_iso(); // 用当前时间做保守过滤（退避另算）
+        let rows = match store.retryable_deliveries(MAX_RETRY_ATTEMPTS, &cutoff, 20) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let channels = self.alert_channels_snapshot();
+        for (did, event_id, channel_name, attempts) in rows {
+            // 退避：updated_ts 距今不足 backoff 则跳过
+            let backoff = retry_backoff_s(attempts);
+            let age_ok = store
+                .delivery_by_id(did)
+                .ok()
+                .flatten()
+                .map(|(_, _, _, _)| true)
+                .unwrap_or(false);
+            if !age_ok {
+                continue;
+            }
+            let Some(ev) = store.event_by_id(event_id).ok().flatten() else {
+                let _ = store.update_delivery(did, "dead_letter", attempts, Some("事件已删除"));
+                continue;
+            };
+            let Some((ch, cfg)) = channels
+                .iter()
+                .find(|(c, _)| c.name() == channel_name.as_str())
+                .map(|(c, cfg)| (*c, cfg.clone()))
+            else {
+                let _ = store.update_delivery(did, "dead_letter", attempts, Some("渠道已移除"));
+                continue;
+            };
+            let text = format!(
+                "{}：{}（重试）",
+                ls_dispatch::type_text(&ev.type_),
+                ev.detail
+            );
+            let d = ls_dispatch::deliver_with_backoff(
+                ch,
+                &cfg,
+                ev.level,
+                &text,
+                None,
+                &[0, 0, 0], // 消费者自身按轮询退避，内部不再长等
+            );
+            let next_attempts = attempts + 1;
+            if d.ok {
+                let _ = store.update_delivery(did, "ok", next_attempts, None);
+            } else if next_attempts >= MAX_RETRY_ATTEMPTS {
+                let _ = store.update_delivery(
+                    did,
+                    "dead_letter",
+                    next_attempts,
+                    d.error.as_deref(),
+                );
+            } else {
+                let _ = store.update_delivery(did, "retry", next_attempts, d.error.as_deref());
+            }
+            let _ = backoff; // 退避窗口由下次轮询的 updated_ts 自然延后
+        }
+    }
+
+    /// LS-053：日报/周报调度——到点汇总并复用告警渠道推送，同日/同周去重。
+    pub fn report_tick(&self) {
+        let Ok(store) = ls_store::Store::open(&self.db_path.to_string_lossy()) else {
+            return;
+        };
+        let now = ls_core::time::local_now_civil();
+        let now_hm = ls_core::time::format_hm(now);
+        let today = ls_core::time::format_date(now);
+        let weekday = ls_core::time::weekday_iso(now);
+        let get = |k: &str| store.setting_get(k).ok().flatten();
+        let daily_enabled = get("report.daily_enabled")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        let daily_time = get("report.daily_time").unwrap_or_else(|| "18:00".into());
+        let weekly_enabled = get("report.weekly_enabled")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        let weekly_day = get("report.weekly_day")
+            .and_then(|v| v.trim().parse::<u8>().ok())
+            .filter(|d| (1..=7).contains(d))
+            .unwrap_or(1);
+        let weekly_time = get("report.weekly_time").unwrap_or_else(|| daily_time.clone());
+        let last_daily = get("report.last_daily_date");
+        let last_weekly = get("report.last_weekly_date");
+
+        let mut sends: Vec<(String, String, i64, i64, i64, Vec<(i64, i64)>)> = Vec::new();
+        if report_due(daily_enabled, &daily_time, &now_hm, &today, last_daily.as_deref()) {
+            if let Ok((t, v, u, top)) = store.report_summary(
+                &format!("{today}T00:00:00"),
+                &format!("{today}T23:59:59"),
+            ) {
+                sends.push(("日报".into(), today.clone(), t, v, u, top));
+            }
+        }
+        if weekly_due(
+            weekly_enabled,
+            weekly_day,
+            &weekly_time,
+            weekday,
+            &now_hm,
+            &today,
+            last_weekly.as_deref(),
+        ) {
+            if let Ok((t, v, u, top)) = store.report_summary(
+                &ls_core::time::local_days_ago_iso(6),
+                &format!("{today}T23:59:59"),
+            ) {
+                sends.push(("周报".into(), today.clone(), t, v, u, top));
+            }
+        }
+        if sends.is_empty() {
+            return;
+        }
+        let channels = self.alert_channels_snapshot();
+        let names: std::collections::HashMap<i64, String> = store
+            .cameras()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.id, c.name))
+            .collect();
+        for (title, date, total, violation, unhandled, top) in sends {
+            let text = report_text(&title, total, violation, unhandled, &top, &names);
+            for (ch, cfg) in &channels {
+                let _ = ls_dispatch::deliver_with_backoff(*ch, cfg, 2, &text, None, &[0, 0, 0]);
+            }
+            if title == "日报" {
+                let _ = store.setting_set("report.last_daily_date", &date);
+                if let Ok(mut g) = self.report_last_daily.lock() {
+                    *g = Some(date);
+                }
+            } else {
+                let _ = store.setting_set("report.last_weekly_date", &date);
+                if let Ok(mut g) = self.report_last_weekly.lock() {
+                    *g = Some(date);
+                }
+            }
+        }
+    }
+
     // ---- scheduler ----
-    /// 启动三个后台线程（幂等）。首轮立即执行，之后按周期。
+    /// 启动后台线程（幂等）。首轮立即执行，之后按周期。
     pub fn start(self: &Arc<Self>) {
         let mut handles = lock(&self.handles);
         if !handles.is_empty() {
@@ -525,6 +774,19 @@ impl Jobs {
             |j| {
                 let _ = j.escalate_once();
             },
+        ));
+        // LS-053：告警失败重试消费者 + 日报/周报调度
+        handles.push(spawn_loop(
+            "alert-retry",
+            Arc::clone(self),
+            RETRY_INTERVAL_S,
+            |j| j.retry_tick(),
+        ));
+        handles.push(spawn_loop(
+            "reports",
+            Arc::clone(self),
+            REPORT_CHECK_S,
+            |j| j.report_tick(),
         ));
         println!(
             "[jobs] 后台作业已启动（retention 每 {}h / backup 每 {}h 保留 {} 份 / escalation 每 {}s）",

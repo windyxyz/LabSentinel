@@ -19,6 +19,15 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/system"),
     ("GET", "/api/go2rtc/status"),   // LS-051
     ("PUT", "/api/go2rtc/config"),   // LS-051
+    // ---- LS-053：日报/周报、局域网配置、开机自启 ----
+    ("GET", "/api/reports/schedule"),
+    ("PUT", "/api/reports/schedule"),
+    ("POST", "/api/reports/send-now"),
+    ("GET", "/api/system/network"),
+    ("PUT", "/api/system/network"),
+    ("POST", "/api/system/restart"),
+    ("GET", "/api/system/autostart"),
+    ("PUT", "/api/system/autostart"),
     ("GET", "/api/events"),
     ("POST", "/api/events/:id/status"),
     ("GET", "/api/cameras"),
@@ -169,6 +178,18 @@ pub fn build_router(state: Shared) -> Router {
         .route("/system", get(system))
         .route("/go2rtc/status", get(go2rtc_status))
         .route("/go2rtc/config", put(go2rtc_configure))
+        // LS-053
+        .route(
+            "/reports/schedule",
+            get(reports_schedule_get).put(reports_schedule_put),
+        )
+        .route("/reports/send-now", post(reports_send_now))
+        .route("/system/network", get(network_get).put(network_put))
+        .route("/system/restart", post(system_restart))
+        .route(
+            "/system/autostart",
+            get(autostart_get).put(autostart_put),
+        )
         .route("/events", get(events))
         .route("/events/:id/status", post(set_status))
         .route("/events/bulk-status", post(bulk_event_status))

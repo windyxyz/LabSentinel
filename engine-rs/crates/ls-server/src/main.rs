@@ -30,6 +30,7 @@ use tower_http::services::{ServeDir, ServeFile};
 
 // ---- 2026-11-12 批次 A：按功能域拆分（结构化重构，机械搬移零逻辑改动）----
 // 原 middleware::{self,..} 导入已改 `middleware::Next`（根 `mod middleware` 让名）。
+mod envfile;
 mod face;
 mod genai;
 mod go2rtc;

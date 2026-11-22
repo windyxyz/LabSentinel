@@ -87,6 +87,15 @@ export const api = {
   // LS-051：go2rtc 托管状态 / 开关
   go2rtcStatus: () => req('GET', '/api/go2rtc/status'),
   go2rtcConfig: (enabled) => req('PUT', '/api/go2rtc/config', { enabled }),
+  // LS-053：日报/周报、局域网配置、开机自启、重启
+  reportSchedule: () => req('GET', '/api/reports/schedule'),
+  saveReportSchedule: (d) => req('PUT', '/api/reports/schedule', d),
+  reportSendNow: () => req('POST', '/api/reports/send-now', {}),
+  networkConfig: () => req('GET', '/api/system/network'),
+  saveNetworkConfig: (d) => req('PUT', '/api/system/network', d),
+  autostartStatus: () => req('GET', '/api/system/autostart'),
+  setAutostart: (enabled) => req('PUT', '/api/system/autostart', { enabled }),
+  restartServer: () => req('POST', '/api/system/restart', {}),
   eventsTimeline: (params = {}) => req('GET', '/api/events/timeline?' + new URLSearchParams(params)),
   setCameraAnalyzer: (id, analyzer) => req('PUT', `/api/cameras/${id}/analyzer`, { analyzer }),
   startCamera: (id) => req('POST', `/api/cameras/${id}/start`),

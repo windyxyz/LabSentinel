@@ -20,6 +20,7 @@ const sections = [
   { id: 'face', label: '人脸识别', kw: '人脸 名册 注册 同意 合规 陌生人 删除', icon: '<circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 13.8c.9-2.7 3-4 5.5-4s4.6 1.3 5.5 4"/>' },
   { id: 'data', label: '数据管理', kw: '导入 导出 备份 配置 json 迁移', icon: '<path d="M3 5.5C3 4.1 5.2 3 8 3s5 1.1 5 2.5S10.8 8 8 8 3 6.9 3 5.5z"/><path d="M3 5.5v5C3 11.9 5.2 13 8 13s5-1.1 5-2.5v-5"/>' },
   { id: 'plugins', label: '插件', kw: '插件 外挂 zip 上传 启用 日志 扩展', icon: '<path d="M6 2.5h4v2.2a1.6 1.6 0 1 0 2.2 2.2H14v4h-1.8a1.6 1.6 0 1 1 0 2.2H14v1.4H2v-1.4h1.8a1.6 1.6 0 1 0-2.2-2.2H2v-4h2.2A1.6 1.6 0 1 0 6 4.7z"/>' },
+  { id: 'network', label: '网络与运维', kw: '局域网 端口 令牌 开机自启 日报 周报 定时 报告 重启', icon: '<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c2 1.8 2 9.2 0 11M8 2.5c-2 1.8-2 9.2 0 11"/>' },
   { id: 'service', label: '服务控制', kw: '停止 服务 重启 退出 关机 日志 尾部', icon: '<path d="M8 2.5v5.5"/><path d="M4.6 4.8a4.8 4.8 0 1 0 6.8 0"/>' },
 ]
 const visibleSections = computed(() => {
@@ -256,6 +257,86 @@ const go2rtcBusy = ref(false)
 async function loadGo2rtc() {
   try { go2rtc.value = await api.go2rtcStatus() } catch { /* 旧服务端无此端点：静默 */ }
 }
+
+// LS-053：网络与运维（局域网/自启/日报/周报）
+const net = ref(null)
+const autostart = ref(null)
+const reports = ref(null)
+const netBusy = ref(false)
+const netMsg = ref('')
+const newToken = ref('')
+async function loadNetwork() {
+  try { net.value = await api.networkConfig() } catch { /* 静默 */ }
+  try { autostart.value = await api.autostartStatus() } catch { /* 静默 */ }
+  try { reports.value = await api.reportSchedule() } catch { /* 静默 */ }
+}
+async function saveNetwork() {
+  if (!net.value) return
+  netBusy.value = true; netMsg.value = ''
+  try {
+    const r = await api.saveNetworkConfig({
+      lan: net.value.lan,
+      port: net.value.port,
+      trusted_hosts: net.value.trusted_hosts,
+      generate_token: net.value.generate_token === true,
+    })
+    if (r.token) newToken.value = r.token
+    await loadNetwork()
+    netMsg.value = '已写入 .env（重启服务后生效）'
+  } catch (e) { netMsg.value = String(e.message || e) }
+  netBusy.value = false
+}
+async function genToken() {
+  if (!net.value) return
+  netBusy.value = true; netMsg.value = ''
+  try {
+    const r = await api.saveNetworkConfig({ generate_token: true })
+    newToken.value = r.token || ''
+    await loadNetwork()
+    netMsg.value = '已生成强随机管理令牌（请妥善保存）'
+  } catch (e) { netMsg.value = String(e.message || e) }
+  netBusy.value = false
+}
+async function saveReports() {
+  if (!reports.value) return
+  netBusy.value = true; netMsg.value = ''
+  try {
+    await api.saveReportSchedule({
+      daily_enabled: reports.value.daily_enabled,
+      daily_time: reports.value.daily_time,
+      weekly_enabled: reports.value.weekly_enabled,
+      weekly_day: Number(reports.value.weekly_day),
+      weekly_time: reports.value.weekly_time,
+    })
+    netMsg.value = '日报/周报调度已保存'
+  } catch (e) { netMsg.value = String(e.message || e) }
+  netBusy.value = false
+}
+async function sendReportNow() {
+  netBusy.value = true; netMsg.value = ''
+  try {
+    const r = await api.reportSendNow()
+    netMsg.value = `已发送 ${r.sent}/${r.channels} 个渠道` + (r.errors?.length ? `；失败：${r.errors.join('；')}` : '')
+  } catch (e) { netMsg.value = String(e.message || e) }
+  netBusy.value = false
+}
+async function toggleAutostart() {
+  if (!autostart.value?.supported) return
+  netBusy.value = true
+  try {
+    await api.setAutostart(!autostart.value.enabled)
+    await loadNetwork()
+    netMsg.value = autostart.value.enabled ? '已开启开机自启' : '已关闭开机自启'
+  } catch (e) { netMsg.value = String(e.message || e) }
+  netBusy.value = false
+}
+async function restartServer() {
+  if (!confirm('立即重启服务？当前分析与页面会短暂中断。')) return
+  netBusy.value = true
+  try { await api.restartServer(); netMsg.value = '正在重启，稍后刷新页面…' }
+  catch (e) { netMsg.value = String(e.message || e) }
+  netBusy.value = false
+}
 async function toggleGo2rtc() {
   if (!go2rtc.value) return
   go2rtcBusy.value = true
@@ -350,7 +431,7 @@ async function loadCams() {
   try { cams.value = await api.cameras() } catch { /* 服务未就绪时静默 */ }
 }
 onMounted(() => {
-  loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadGo2rtc()
+  loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadGo2rtc(); loadNetwork()
   // UX1：hash 深链分区（#/settings/face 等，App.vue 旧路由重定向后落到这里）
   const sub = window.location.hash.split('/')[2]
   if (sections.some((s) => s.id === sub)) active.value = sub
@@ -552,6 +633,53 @@ onMounted(() => {
     <p class="muted" style="font-size:12px; margin:6px 0 0">
       含 <b style="color:#dc2626">write</b> 权限的插件启用后将获得管理员令牌；未配置鉴权时插件以无令牌运行（内网使用）。</p>
       </section>
+      <section v-show="show('network')" class="panel">
+        <h3 style="margin:14px 0 10px">网络与运维</h3>
+        <template v-if="net">
+          <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
+            <label class="muted"><input type="checkbox" v-model="net.lan" /> 允许局域网访问</label>
+            <label class="muted">端口 <input v-model.number="net.port" type="number" min="1" max="65535" style="width:90px" /></label>
+            <label class="muted">信任主机 <input v-model="net.trusted_hosts" placeholder="可选，逗号分隔" style="width:200px" /></label>
+            <span class="muted" style="font-size:12px">令牌：{{ net.admin_token_set ? '已设置' : '未设置' }}</span>
+            <button class="ghost" :disabled="netBusy" @click="genToken">生成强随机令牌</button>
+            <button :disabled="netBusy" @click="saveNetwork">保存网络配置</button>
+            <button class="ghost" :disabled="netBusy" @click="restartServer">立即重启生效</button>
+          </div>
+          <p v-if="newToken" class="muted" style="font-size:12px; word-break:break-all">新令牌：<code>{{ newToken }}</code>（只显示一次，请妥善保存）</p>
+          <p class="muted" style="font-size:12px">开启局域网访问前必须设置管理令牌；保存写入安装目录 .env，重启后生效。</p>
+        </template>
+        <hr style="border:none;border-top:1px solid var(--divider);margin:12px 0" />
+        <template v-if="reports">
+          <b>定时日报 / 周报</b>
+          <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px;margin-top:6px">
+            <label class="muted"><input type="checkbox" v-model="reports.daily_enabled" /> 每日
+              <input v-model="reports.daily_time" type="time" style="width:110px" /></label>
+            <label class="muted"><input type="checkbox" v-model="reports.weekly_enabled" /> 每周
+              <select v-model.number="reports.weekly_day" style="width:90px">
+                <option :value="1">周一</option><option :value="2">周二</option><option :value="3">周三</option>
+                <option :value="4">周四</option><option :value="5">周五</option><option :value="6">周六</option>
+                <option :value="7">周日</option>
+              </select>
+              <input v-model="reports.weekly_time" type="time" style="width:110px" /></label>
+            <button :disabled="netBusy" @click="saveReports">保存调度</button>
+            <button class="ghost" :disabled="netBusy" @click="sendReportNow">立即发送测试</button>
+          </div>
+          <p class="muted" style="font-size:12px">复用已配置的告警渠道；同日/同周自动去重。上次日报：{{ reports.last_daily_date || '—' }}。</p>
+        </template>
+        <template v-if="autostart">
+          <div class="row" style="align-items:center;gap:8px;margin-top:8px">
+            <b>开机自启</b>
+            <span v-if="!autostart.supported" class="muted">（当前平台不支持）</span>
+            <template v-else>
+              <span :class="autostart.enabled ? 'st-ok' : 'st-idle'">{{ autostart.enabled ? '已开启' : '已关闭' }}</span>
+              <button class="ghost" :disabled="netBusy" @click="toggleAutostart">
+                {{ autostart.enabled ? '关闭' : '开启' }}</button>
+            </template>
+          </div>
+        </template>
+        <p v-if="netMsg" class="muted" style="margin-top:8px">{{ netMsg }}</p>
+      </section>
+
       <section v-show="show('service')" class="panel">
     <h3 style="margin:14px 0 10px">服务控制</h3>
     <div class="row" style="align-items:center">

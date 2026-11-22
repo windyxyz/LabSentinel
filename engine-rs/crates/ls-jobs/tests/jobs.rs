@@ -468,3 +468,46 @@ fn jobs_scheduler_starts_and_stops() {
     // 首轮 retention 已执行（空库 → 统计存在）
     assert!(jobs.retention_last().is_some());
 }
+
+// ---- LS-053：重试退避 / 日报调度纯函数 ----
+
+#[test]
+fn retry_backoff_is_exponential_and_capped() {
+    assert_eq!(ls_jobs::retry_backoff_s(0), 30);
+    assert_eq!(ls_jobs::retry_backoff_s(1), 120);
+    assert_eq!(ls_jobs::retry_backoff_s(2), 600);
+    assert_eq!(ls_jobs::retry_backoff_s(3), 1800);
+    assert_eq!(ls_jobs::retry_backoff_s(4), 3600);
+    assert_eq!(ls_jobs::retry_backoff_s(99), 3600);
+}
+
+#[test]
+fn report_due_respects_time_and_same_day_dedup() {
+    assert!(!ls_jobs::report_due(false, "18:00", "19:00", "2026-11-22", None));
+    assert!(!ls_jobs::report_due(true, "18:00", "17:59", "2026-11-22", None));
+    assert!(ls_jobs::report_due(true, "18:00", "18:00", "2026-11-22", None));
+    assert!(ls_jobs::report_due(true, "18:00", "19:00", "2026-11-22", Some("2026-11-21")));
+    assert!(!ls_jobs::report_due(true, "18:00", "19:00", "2026-11-22", Some("2026-11-22")));
+}
+
+#[test]
+fn weekly_due_checks_weekday_and_same_week_dedup() {
+    // 周一=1；今天周三=3
+    assert!(!ls_jobs::weekly_due(true, 1, "09:00", 3, "10:00", "2026-11-25", None));
+    assert!(!ls_jobs::weekly_due(true, 1, "09:00", 1, "08:59", "2026-11-23", None));
+    assert!(ls_jobs::weekly_due(true, 1, "09:00", 1, "09:00", "2026-11-23", None));
+    // 同周已发（周一发过，周三再检查也不发）
+    assert!(!ls_jobs::weekly_due(true, 1, "09:00", 3, "10:00", "2026-11-25", Some("2026-11-23")));
+}
+
+#[test]
+fn report_text_contains_metrics_and_top_cameras() {
+    let mut names = std::collections::HashMap::new();
+    names.insert(1, "试剂区".to_string());
+    let text = ls_jobs::report_text("日报", 10, 3, 2, &[(1, 3)], &names);
+    assert!(text.contains("事件总数：10"));
+    assert!(text.contains("违规事件（L2+）：3"));
+    assert!(text.contains("未处置：2"));
+    assert!(text.contains("合规率：70%"));
+    assert!(text.contains("试剂区（3 次）"));
+}

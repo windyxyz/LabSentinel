@@ -1006,6 +1006,76 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// LS-053：取待重试投递（status IN retry/failed、attempts < max、且
+    /// updated_ts 早于 cutoff）。返回 (delivery_id, event_id, channel, attempts)。
+    pub fn retryable_deliveries(
+        &self,
+        max_attempts: i64,
+        cutoff_ts: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(i64, i64, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,event_id,channel,attempts FROM alert_deliveries \
+             WHERE COALESCE(status,'pending') IN ('retry','failed') \
+               AND attempts < ? AND updated_ts <= ? ORDER BY id ASC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![max_attempts, cutoff_ts, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        rows.collect()
+    }
+
+    /// LS-053：单条投递详情（重试消费者回写用）。
+    pub fn delivery_by_id(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<(i64, String, i64, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, COALESCE(status,'pending'), attempts, last_error \
+             FROM alert_deliveries WHERE id=?",
+        )?;
+        let mut rows = stmt.query_map(params![id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// LS-053：日报汇总——指定时间窗内事件总数/违规数/未处置数/Top3 摄像头。
+    /// 返回 (total, violation, unhandled, [(camera_id, count)])。
+    pub fn report_summary(
+        &self,
+        start_ts: &str,
+        end_ts: &str,
+    ) -> rusqlite::Result<(i64, i64, i64, Vec<(i64, i64)>)> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE ts >= ? AND ts <= ?",
+            params![start_ts, end_ts],
+            |r| r.get(0),
+        )?;
+        let violation: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE ts >= ? AND ts <= ? AND level >= 2",
+            params![start_ts, end_ts],
+            |r| r.get(0),
+        )?;
+        let unhandled: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE ts >= ? AND ts <= ? AND COALESCE(status,'new')='new'",
+            params![start_ts, end_ts],
+            |r| r.get(0),
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT camera_id, COUNT(*) AS n FROM events WHERE ts >= ? AND ts <= ? \
+             AND level >= 2 GROUP BY camera_id ORDER BY n DESC LIMIT 3",
+        )?;
+        let rows = stmt.query_map(params![start_ts, end_ts], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        let top: Vec<(i64, i64)> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((total, violation, unhandled, top))
+    }
+
     // ---- 告警静默（任务81） ----
     pub fn silences(&self) -> rusqlite::Result<Vec<Silence>> {
         let mut stmt = self.conn.prepare(

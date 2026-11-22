@@ -9,6 +9,7 @@ use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 pub(crate) async fn health_live() -> Json<Value> {
     Json(json!({"status": "ok"}))
@@ -119,6 +120,268 @@ pub(crate) async fn go2rtc_configure(
         let _ = st.go2rtc.ensure_running(&install, crate::go2rtc::DEFAULT_API);
     }
     Json(json!({"ok": true, "status": st.go2rtc.status()})).into_response()
+}
+
+// ---- LS-053：日报/周报调度、局域网配置、开机自启 ----
+
+pub(crate) async fn reports_schedule_get(State(st): State<Shared>) -> Response {
+    with_store(&st, |s| {
+        let get = |k: &str| s.setting_get(k).ok().flatten().unwrap_or_default();
+        Ok(Json(json!({
+            "daily_enabled": matches!(get("report.daily_enabled").trim(), "1"|"true"|"yes"|"on"),
+            "daily_time": if get("report.daily_time").is_empty() { "18:00".to_string() } else { get("report.daily_time") },
+            "weekly_enabled": matches!(get("report.weekly_enabled").trim(), "1"|"true"|"yes"|"on"),
+            "weekly_day": get("report.weekly_day").parse::<u8>().ok().filter(|d| (1..=7).contains(d)).unwrap_or(1),
+            "weekly_time": if get("report.weekly_time").is_empty() { "18:00".to_string() } else { get("report.weekly_time") },
+            "last_daily_date": get("report.last_daily_date"),
+            "last_weekly_date": get("report.last_weekly_date"),
+        })).into_response())
+    })
+}
+
+pub(crate) async fn reports_schedule_put(
+    State(st): State<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
+    let hm_ok = |v: &str| {
+        let mut it = v.split(':');
+        let h = it.next().and_then(|x| x.parse::<u8>().ok());
+        let m = it.next().and_then(|x| x.parse::<u8>().ok());
+        it.next().is_none() && h.is_some_and(|h| h < 24) && m.is_some_and(|m| m < 60)
+    };
+    for key in ["daily_time", "weekly_time"] {
+        if let Some(v) = body.get(key).and_then(|x| x.as_str()) {
+            if !hm_ok(v) {
+                return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "时间格式必须 HH:MM")
+                    .into_response();
+            }
+        }
+    }
+    if let Some(d) = body.get("weekly_day").and_then(|x| x.as_u64()) {
+        if !(1..=7).contains(&d) {
+            return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "weekly_day 必须在 1~7")
+                .into_response();
+        }
+    }
+    with_store(&st, |s| {
+        if let Some(v) = body.get("daily_enabled").and_then(|x| x.as_bool()) {
+            s.setting_set("report.daily_enabled", if v { "1" } else { "0" })?;
+        }
+        if let Some(v) = body.get("daily_time").and_then(|x| x.as_str()) {
+            s.setting_set("report.daily_time", v)?;
+        }
+        if let Some(v) = body.get("weekly_enabled").and_then(|x| x.as_bool()) {
+            s.setting_set("report.weekly_enabled", if v { "1" } else { "0" })?;
+        }
+        if let Some(v) = body.get("weekly_day").and_then(|x| x.as_u64()) {
+            s.setting_set("report.weekly_day", &v.to_string())?;
+        }
+        if let Some(v) = body.get("weekly_time").and_then(|x| x.as_str()) {
+            s.setting_set("report.weekly_time", v)?;
+        }
+        Ok(Json(json!({"ok": true})).into_response())
+    })
+}
+
+/// POST /api/reports/send-now——立即汇总今日并推送（测试日报配置）。
+pub(crate) async fn reports_send_now(State(st): State<Shared>) -> Response {
+    let Ok(store) = ls_store::Store::open(&st.db_path) else {
+        return server_err();
+    };
+    let today = ls_core::time::local_today_iso();
+    let Ok((total, violation, unhandled, top)) = store.report_summary(
+        &format!("{today}T00:00:00"),
+        &format!("{today}T23:59:59"),
+    ) else {
+        return server_err();
+    };
+    let names: std::collections::HashMap<i64, String> = store
+        .cameras()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| (c.id, c.name))
+        .collect();
+    let text = ls_jobs::report_text("日报", total, violation, unhandled, &top, &names);
+    let channels = st.jobs.alert_channels_snapshot();
+    let mut sent = 0;
+    let mut errors = Vec::new();
+    for (ch, cfg) in &channels {
+        let d = ls_dispatch::deliver_with_backoff(*ch, cfg, 2, &text, None, &[0, 0, 0]);
+        if d.ok {
+            sent += 1;
+        } else if let Some(e) = d.error {
+            errors.push(format!("{}: {e}", ch.name()));
+        }
+    }
+    Json(json!({"ok": sent > 0 || channels.is_empty(), "sent": sent,
+                "channels": channels.len(), "errors": errors, "text": text}))
+    .into_response()
+}
+
+fn env_path(_st: &Shared) -> std::path::PathBuf {
+    crate::deploy::default_install_root().join(".env")
+}
+
+pub(crate) async fn network_get(State(_st): State<Shared>) -> Response {
+    let path = env_path(&_st);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let host = crate::envfile::get_key(&content, "LS_HOST").unwrap_or_else(|| "127.0.0.1".into());
+    let port = crate::envfile::get_key(&content, "LS_PORT")
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(8000);
+    let trusted = crate::envfile::get_key(&content, "LS_TRUSTED_HOSTS").unwrap_or_default();
+    let token_set = crate::envfile::get_key(&content, "LS_ADMIN_TOKEN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    Json(json!({
+        "lan": host == "0.0.0.0",
+        "host": host, "port": port,
+        "trusted_hosts": trusted,
+        "admin_token_set": token_set,
+        "env_path": path.to_string_lossy(),
+    }))
+    .into_response()
+}
+
+/// PUT /api/system/network——写 .env（保留旧键/注释），lan=true 强制要求非空令牌。
+pub(crate) async fn network_put(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
+    let path = env_path(&st);
+    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+    let lan = body.get("lan").and_then(|v| v.as_bool());
+    let port = body.get("port").and_then(|v| v.as_u64());
+    if let Some(p) = port {
+        if !(1..=65535).contains(&p) {
+            return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "端口必须在 1~65535")
+                .into_response();
+        }
+    }
+    let mut token = body
+        .get("admin_token")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if body.get("generate_token").and_then(|v| v.as_bool()).unwrap_or(false) {
+        token = Some(crate::envfile::random_token());
+    }
+    let existing_token = crate::envfile::get_key(&content, "LS_ADMIN_TOKEN")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if lan == Some(true) && token.is_none() && existing_token.is_empty() {
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "开启局域网访问前必须设置管理令牌（可点「生成强随机令牌」）",
+        )
+        .into_response();
+    }
+    if let Some(t) = &token {
+        if t.len() < 16 || t.contains(['\n', '\r']) {
+            return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "管理令牌至少 16 字符且不含换行")
+                .into_response();
+        }
+    }
+    if let Some(l) = lan {
+        content = crate::envfile::set_key(&content, "LS_HOST", if l { "0.0.0.0" } else { "127.0.0.1" });
+    }
+    if let Some(p) = port {
+        content = crate::envfile::set_key(&content, "LS_PORT", &p.to_string());
+    }
+    if let Some(t) = body.get("trusted_hosts").and_then(|v| v.as_str()) {
+        content = crate::envfile::set_key(&content, "LS_TRUSTED_HOSTS", t.trim());
+    }
+    if let Some(t) = &token {
+        content = crate::envfile::set_key(&content, "LS_ADMIN_TOKEN", t);
+    }
+    if let Err(e) = crate::envfile::write_env(&path, &content) {
+        return detail_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("写入 .env 失败: {e}"),
+        )
+        .into_response();
+    }
+    Json(json!({"ok": true, "token": token, "env_path": path.to_string_lossy()}))
+        .into_response()
+}
+
+/// POST /api/system/restart——拉起新进程后优雅退出旧进程（.env 已落盘）。
+pub(crate) async fn system_restart(State(st): State<Shared>) -> Response {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("labsentinel-server.exe"));
+    let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--console").collect();
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(&args);
+    if let Some(dir) = exe.parent() {
+        cmd.current_dir(dir);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let spawned = cmd.spawn().is_ok();
+    let st2 = Arc::clone(&st);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        crate::graceful_shutdown(&st2, "网页重启服务");
+    });
+    Json(json!({"ok": true, "spawned": spawned})).into_response()
+}
+
+/// Windows 开机自启：HKCU\...\Run\LabSentinel（免管理员，reg.exe + CREATE_NO_WINDOW）。
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const AUTOSTART_NAME: &str = "LabSentinel";
+
+fn reg_run(args: &[&str]) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("reg");
+    cmd.args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().map_err(|e| format!("reg.exe 启动失败: {e}"))?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+pub(crate) async fn autostart_get() -> Response {
+    #[cfg(windows)]
+    {
+        let key = format!("{AUTOSTART_KEY}\\{AUTOSTART_NAME}");
+        let out = reg_run(&["query", &key]).unwrap_or_default();
+        let enabled = out.to_ascii_lowercase().contains("labsentinel");
+        return Json(json!({"supported": true, "enabled": enabled})).into_response();
+    }
+    #[cfg(not(windows))]
+    {
+        Json(json!({"supported": false, "enabled": false})).into_response()
+    }
+}
+
+pub(crate) async fn autostart_put(Json(body): Json<Value>) -> Response {
+    let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) else {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "enabled 必须是布尔值")
+            .into_response();
+    };
+    #[cfg(windows)]
+    {
+        let key = format!("{AUTOSTART_KEY}\\{AUTOSTART_NAME}");
+        let res = if enabled {
+            let exe = std::env::current_exe()
+                .unwrap_or_else(|_| std::path::PathBuf::from("labsentinel-server.exe"));
+            let val = format!("\"{}\" --launch --tray", exe.display());
+            reg_run(&["add", &key, "/v", "", "/t", "REG_SZ", "/d", &val, "/f"])
+        } else {
+            reg_run(&["delete", &key, "/f"])
+        };
+        return match res {
+            Ok(_) => Json(json!({"supported": true, "enabled": enabled})).into_response(),
+            Err(e) => detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response(),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Json(json!({"supported": false, "enabled": false})).into_response()
+    }
 }
 
 pub(crate) async fn metrics(State(st): State<Shared>) -> Response {

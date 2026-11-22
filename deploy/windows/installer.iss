@@ -125,6 +125,10 @@ Filename: "{app}\labsentinel-server.exe"; \
 ; 直接 Exec 会挂住卸载器且文件被锁）。taskkill /F：进程不存在返回 1，Inno 忽略。
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM labsentinel-server.exe"; \
   Flags: runhidden; RunOnceId: "StopLabSentinel"
+; LS-053：清理网页端开启的 HKCU 开机自启（免管理员写入的 Run 值），保证卸载零残留
+Filename: "{sys}\reg.exe"; \
+  Parameters: "delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v LabSentinel /f"; \
+  Flags: runhidden; RunOnceId: "CleanAutostart"
 
 [Code]
 // 双模式默认目录：管理员（为所有用户）→ {autopf}\LabSentinel；仅为我 → {localappdata}\Programs
