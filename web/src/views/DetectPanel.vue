@@ -103,9 +103,9 @@ async function load() {
     const d = await api.detectConfig()
     mode.value = d.mode
     cfg.value = d
-    trigger.value = d.cascade.trigger
-    dailyBudget.value = d.cascade.daily_budget
-    onNegative.value = d.cascade.on_negative
+    trigger.value = d.cascade?.trigger || 'both'
+    dailyBudget.value = d.cascade?.daily_budget ?? 200
+    onNegative.value = d.cascade?.on_negative || 'keep'
     usage.value = d.usage
     runtimeEp.value = d.runtime?.ep || 'dml'
     vlmPrompt.value = d.vlm_prompt || ''
@@ -116,8 +116,8 @@ async function load() {
     try {
       pf = await api.detectProfiles()
     } catch { /* 回退到旧配置视图 */ }
-    profiles.value = pf.profiles || []
-    activeId.value = pf.active || ''
+    profiles.value = Array.isArray(pf?.profiles) ? pf.profiles : []
+    activeId.value = pf?.active || ''
     if (profiles.value.length) {
       // 编辑当前启用档案；若之前正在编辑另一个则保持选择
       const keep = profiles.value.find((p) => p.id === editId.value)
@@ -379,6 +379,7 @@ onMounted(load)
           <span v-if="runtimeEp === 'dml'" class="muted" style="font-size:12px">
             GPU 初始化失败会自动回落 CPU（看服务日志）</span>
         </div>
+        <p class="muted">最近加载的推理设备 {{ cfg?.runtime?.last_loaded_ep || '尚无会话数据' }}</p>
         <Models />
       </div>
 

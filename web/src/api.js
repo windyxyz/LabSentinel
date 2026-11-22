@@ -79,8 +79,8 @@ async function req(method, path, body) {
   if (!r.ok) {
     let msg = `${method} ${path} -> ${r.status}`
     try { msg = (await r.json()).detail || msg } catch {}
-    if (r.status === 401) msg = '需要管理令牌：请在「设置 → 管理令牌」填写管理令牌后重试。' + msg
-    throw new Error(msg)
+    if (r.status === 401) msg = '需要管理令牌。请在「设置 → 管理令牌」填写后重试。'
+    throw Object.assign(new Error(msg), { status: r.status })
   }
   return r.json()
 }
@@ -95,7 +95,6 @@ export const api = {
   bulkCameras: (ids, action) => req('POST', '/api/cameras/bulk', { ids, action }),
   discoverCameras: (params = {}) => req('GET', '/api/discovery/cameras?' + new URLSearchParams(params)),
   probeHost: (d) => req('POST', '/api/discovery/probe', d),
-  updateCheck: (params = {}) => req('GET', '/api/update/check?' + new URLSearchParams(params)),
   pluginsList: () => req('GET', '/api/plugins'),
   pluginAction: (id, action) => req('POST', `/api/plugins/${id}/${action}`),
   pluginLogs: (id, tail = 200) => req('GET', `/api/plugins/${id}/logs?tail=${tail}`),

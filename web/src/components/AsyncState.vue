@@ -18,7 +18,6 @@ defineEmits(['retry'])
   <div v-else-if="error" class="as-error" role="alert">
     <span class="as-error-msg">{{ error }}</span>
     <button class="ghost" @click="$emit('retry')">重试</button>
-    <span v-if="/401|令牌/.test(error)" class="as-error-hint">（401：到「摄像头」页顶部填写管理令牌）</span>
   </div>
   <div v-else-if="empty" class="as-empty">{{ emptyText }}</div>
   <template v-else>
@@ -36,7 +35,6 @@ defineEmits(['retry'])
   font-size: 13px;
 }
 .as-error-msg { word-break: break-all; }
-.as-error-hint { color: var(--text-secondary, #6b7280); }
 .as-empty { color: var(--text-secondary, #6b7280); padding: 14px 0; }
 .as-notice {
   color: var(--text-secondary, #6b7280); font-size: 12px;

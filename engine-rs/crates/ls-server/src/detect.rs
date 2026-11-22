@@ -510,7 +510,7 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
                       "budget": usage.budget, "exhausted": usage.exhausted()},
             // UX（2026-11-21）：推理设备（DirectML——DX12 统一层，N/A/Intel 卡
             // 与核显全通吃；dml 初始化失败自动回落 CPU）
-            "runtime": {"ep": runtime_ep_pref(s)},
+            "runtime": {"ep": runtime_ep_pref(s), "last_loaded_ep": ls_infer::yolo::ep_used()},
         }))
         .into_response())
     })

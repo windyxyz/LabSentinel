@@ -21,35 +21,24 @@ function toggleNotify() {
   notifOn.value = !notifOn.value
 }
 
-// 任务117：版本更新检查（未配置/失败静默，不打扰）
-const upd = ref(null)
-const updIgnored = ref(localStorage.getItem('LS_UPDATE_IGNORE') || '')
-
-async function checkUpdate() {
-  try {
-    upd.value = await api.updateCheck({ refresh: 1 })
-  } catch { upd.value = { error: '检查失败' } }
-}
-function ignoreUpdate() {
-  if (upd.value?.latest) {
-    localStorage.setItem('LS_UPDATE_IGNORE', upd.value.latest)
-    updIgnored.value = upd.value.latest
-  }
-}
-onMounted(() => { checkUpdate() })
+const releaseUrl = 'https://github.com/windyxyz/LabSentinel/releases/latest'
 const sys = ref(null)
-// R2-303：GPU 加速状态（依据 /api/system.providers，onnxruntime 构建内建 EP）
-const gpuOn = computed(() => (sys.value?.providers || []).includes('DmlExecutionProvider'))
-const gpuHint = computed(() => {
-  const providers = sys.value?.providers || []
-  const gpu = providers.filter((p) => !/CPU|Azure/i.test(p))
-  // UX（2026-11-21）：gpu_active = 实际生效设备（DML 失败自动回落 CPU 时如实显示）
-  const active = sys.value?.gpu_active
-  if (active && /DirectML/i.test(active)) return `GPU 加速：已启用（${active}）`
-  if (active && /CPU/i.test(active)) return '推理设备：CPU（GPU 初始化失败已自动回落；可在 设置→模型与检测 切换）'
-  return gpu.length
-    ? 'GPU 加速：已配置（DirectML）——启动相机后生效'
-    : '推理设备：CPU（可在 设置→模型与检测 切换 GPU）'
+const monitoring = computed(() => {
+  const counts = { total: 0, running: 0, starting: 0, stopped: 0, offline: 0 }
+  const cameras = sys.value?.cameras
+  if (!Array.isArray(cameras)) return null
+  for (const camera of cameras) {
+    if (!camera || typeof camera.id !== 'number' || camera.type === 'folder') continue
+    counts.total++
+    switch (camera.status) {
+      case 'running': counts.running++; break
+      case 'starting':
+      case 'reconnecting': counts.starting++; break
+      case 'stopped': counts.stopped++; break
+      default: counts.offline++
+    }
+  }
+  return counts
 })
 const feed = ref([])
 const loading = ref(true)
@@ -95,29 +84,26 @@ onUnmounted(() => clearInterval(pollTimer))
 <template>
   <AsyncState :loading="loading" :error="error" :notice="notice" @retry="reload">
     <div class="cards" v-if="sys">
-      <div class="card" :title="`onnxruntime providers: ${(sys.providers || []).join(', ') || '探测失败'}`">
-        <div class="muted">后端</div>
-        <div class="num" style="padding-right:10px">{{ sys.backend }}</div>
-        <div class="muted" style="font-size:12px; margin-top:4px">{{ gpuHint }}</div>
+      <div class="card monitor-card">
+        <div class="muted">监控状态</div>
+        <template v-if="monitoring?.total">
+          <div class="num">{{ monitoring.running }} / {{ monitoring.total }}<span class="muted stat-unit">路运行</span></div>
+          <div class="muted stat-detail">
+            {{ monitoring.starting }} 路连接中 · {{ monitoring.offline }} 路离线 · {{ monitoring.stopped }} 路停止
+          </div>
+        </template>
+        <p v-else class="muted stat-detail">{{ monitoring ? '尚未添加摄像头' : '暂时无法读取摄像头状态' }}</p>
+        <a href="#/sources/cams" class="stat-link">{{ monitoring?.total === 0 ? '添加摄像头' : '查看摄像头' }}</a>
       </div>
       <div class="card"><div class="muted">今日事件</div><div class="num">{{ Object.values(sys.today_counts || {}).reduce((a, b) => a + b, 0) }}</div></div>
       <div class="card"><div class="muted">未处置</div><div class="num" :style="{ color: sys.unhandled_today > 0 ? 'var(--l2)' : undefined }">{{ sys.unhandled_today ?? 0 }}</div></div>
       <div class="card"><div class="muted">警告(L2)</div><div class="num">{{ sys.today_counts?.['2'] || 0 }}</div></div>
       <div class="card"><div class="muted">严重(L3)</div><div class="num">{{ sys.today_counts?.['3'] || 0 }}</div></div>
       <div class="card"><div class="muted">实时通道</div><div class="num" :style="{ fontSize: '18px', paddingTop: '6px' }">{{ wsState }}</div></div>
-      <div v-if="upd" class="card" :title="upd.error || '只提示新版本，不自动下载安装'">
-        <div class="muted">版本</div>
-        <div style="padding-top:6px; font-size:14px">
-          {{ upd.current || '-' }}
-          <button class="ghost" style="font-size:12px" @click="checkUpdate">检查更新</button>
-          <div v-if="upd.update_available && upd.latest !== updIgnored" class="muted"
-               style="font-size:12px; margin-top:4px">
-            发现新版本 {{ upd.latest }}<span v-if="upd.channel">（{{ upd.channel }}）</span>
-            <a v-if="upd.url" :href="upd.url" target="_blank" rel="noopener">查看</a> ·
-            <a href="#" @click.prevent="ignoreUpdate">忽略此版本</a>
-          </div>
-          <div v-else-if="upd.error" class="muted" style="font-size:12px">检查失败（不打扰）</div>
-        </div>
+      <div class="card">
+        <div class="muted">当前版本</div>
+        <div class="num version">{{ sys.version || '—' }}</div>
+        <a class="stat-link" :href="releaseUrl" target="_blank" rel="noopener noreferrer">查看更新</a>
       </div>
       <div class="card" :title="`通知权限：${notifPerm}；页面在后台时 L2/L3 弹桌面通知`">
         <div class="muted">桌面通知</div>
@@ -140,15 +126,17 @@ onUnmounted(() => clearInterval(pollTimer))
   </AsyncState>
 
   <div class="panel">
-    <h3 style="margin-bottom:10px">实时事件流（WebSocket）</h3>
+    <h3 style="margin-bottom:10px">实时事件</h3>
     <table v-if="feed.length">
-      <tr v-for="(e, i) in feed" :key="e.id ?? i" :class="{ 'new-item': i === 0 }">
-        <td>{{ e.ts }}</td>
-        <td>摄像头#{{ e.camera_id }}</td>
-        <td>{{ TYPE_TEXT[e.type] || e.type }}</td>
-        <td><span :class="'lv' + e.level">L{{ e.level }}</span></td>
-        <td class="muted">{{ e.detail }}</td>
-      </tr>
+      <tbody>
+        <tr v-for="(e, i) in feed" :key="e.id ?? i" :class="{ 'new-item': i === 0 }">
+          <td>{{ e.ts }}</td>
+          <td>摄像头#{{ e.camera_id }}</td>
+          <td>{{ TYPE_TEXT[e.type] || e.type }}</td>
+          <td><span :class="'lv' + e.level">L{{ e.level }}</span></td>
+          <td class="muted">{{ e.detail }}</td>
+        </tr>
+      </tbody>
     </table>
     <p v-else-if="sys" class="muted">暂无实时事件 —— 去摄像头页添加/启动摄像头，触发行为会实时出现在这里</p>
     <p v-else class="muted">等待事件…（配置安全区与规则后，触发行为会实时出现在这里）</p>
@@ -159,6 +147,11 @@ onUnmounted(() => clearInterval(pollTimer))
 /* 任务17B：375px 小屏适配（scoped，不动全局样式） */
 .cards { flex-wrap: wrap; }
 .card { min-width: 140px; }
+.monitor-card { flex: 1.6 1 210px; }
+.stat-unit { font-size: 13px; font-weight: 400; margin-left: 5px; }
+.stat-detail { font-size: 12px; margin-top: 4px; }
+.stat-link { display: inline-block; margin-top: 6px; color: var(--accent-strong); }
+.card .version { font-size: 20px; }
 .panel { overflow-x: auto; }
 button { min-height: 40px; }
 </style>

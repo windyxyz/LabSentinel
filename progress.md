@@ -2,10 +2,18 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID / Task-Name**：`LS-061`（`ACTIVE`）/ 首页状态、Release 入口、报表文案与告警布局。
-- **基线**：`main`，`LS-060` 本机验收已通过。GitHub 默认分支为 `main`，当前公开 Release 为 `v0.5.0`。
+- **Task-ID / Task-Name**：`LS-062`（`ACTIVE`）/ 本机与局域网访问密码、浏览器会话和令牌迁移。
+- **基线**：`main`，`LS-060`、`LS-061` 已通过本机验收。当前 GitHub 公开 Release 为 `v0.5.0`。
 - **范围**：用户指示全部作为 `v0.6.0`，计划后直接实施，全部验收通过后发布 GitHub。任务 `LS-060`～`LS-068` 逐项推进。
-- **Next First Command**：`rg -n 'checkUpdate|gpuHint|操作审计|class="card channel"' web/src`。
+- **Next First Command**：`rg -n 'check_read_token|provided_token|LS_ADMIN_TOKEN' engine-rs/crates/ls-server/src`。
+
+---
+
+## Previous Handoff Snapshot · LS-061
+
+- **界面**。首页展示运行、连接、离线和停止相机数，当前版本读 `/api/system`，更新入口直达 GitHub Release。模型与检测设置显示最近加载的推理设备，报表和侧栏移除了遗留标签。告警配置采用渠道列表与同位置编辑器，SMTP 并排字段、Webhook 行内开关、各渠道草稿与测试状态独立。
+- **门禁**。Windows GNU Rust 三连退出 0，共 187 项。`npx.cmd vitest run` 16 文件、94 项通过，`npm.cmd run build` 退出 0。`python -X utf8 scripts/contract_audit.py` 为 116/155 全匹配。
+- **Chromium**。隔离的 Rust 服务运行前端生产构建，375、768、1440 px 均覆盖浅色和深色。SMTP 字段位置、Webhook 开关、键盘焦点、保存后草稿、无页面横溢出、版本外链与摄像头入口通过。实际发送测试消息使用 `LS-067` 的受控投递场景。
 
 ---
 

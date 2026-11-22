@@ -124,8 +124,6 @@ onBeforeUnmount(() => {
              stroke-linecap="round" stroke-linejoin="round" v-html="t.icon"></svg>
         <span>{{ t.label }}</span>
       </a>
-      <div style="flex:1"></div>
-      <div class="muted" style="padding:10px 12px;font-size:12px">实验室哨兵 · M1</div>
     </nav>
     <main>
       <!-- 显式分支渲染（生产构建动态组件切换空渲染规避，2026-11-21） -->

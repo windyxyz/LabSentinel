@@ -16,10 +16,10 @@ describe('AsyncState（任务66/133）', () => {
     expect(w.find('.content').exists()).toBe(false)
   })
 
-  it('error：红字 + 重试按钮 + 401 提示 + 发出 retry', async () => {
-    const w = mountState({ loading: false, error: 'GET /x -> 401' })
-    expect(w.text()).toContain('GET /x -> 401')
-    expect(w.text()).toContain('填写管理令牌')
+  it('显示调用方提供的错误并允许重试', async () => {
+    const error = '需要管理令牌。请在「设置 → 管理令牌」填写后重试。'
+    const w = mountState({ loading: false, error })
+    expect(w.get('.as-error-msg').text()).toBe(error)
     await w.find('button').trigger('click')
     expect(w.emitted('retry')).toHaveLength(1)
   })

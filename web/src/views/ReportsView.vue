@@ -295,7 +295,7 @@ function barGeom(h) {
     </AsyncState>
 
     <details class="panel" style="margin-top:10px">
-      <summary style="cursor:pointer"><b>操作审计（最近写操作，任务87）</b></summary>
+      <summary style="cursor:pointer"><b>操作审计</b></summary>
       <div class="row" style="margin-top:8px">
         <select v-model="auditActor" aria-label="操作者筛选">
           <option value="">全部操作者</option>
@@ -305,7 +305,7 @@ function barGeom(h) {
         <button class="ghost" @click="loadAudit">加载</button>
       </div>
       <AsyncState :loading="auditLoading" :error="auditError" :empty="!auditItems.length"
-                  empty-text="暂无写操作" @retry="loadAudit">
+                  empty-text="暂无操作记录" @retry="loadAudit">
         <table style="margin-top:8px">
           <tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>状态码</th><th>request_id</th></tr>
           <tr v-for="a in auditItems" :key="a.id">
