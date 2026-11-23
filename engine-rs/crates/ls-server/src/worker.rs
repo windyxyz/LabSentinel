@@ -931,6 +931,17 @@ fn worker_detector(
                 "[ls-worker] cam-{} 人员模型加载失败: {error}",
                 cfg.camera_id
             ));
+            if cfg.spec.type_ == "file" && !cfg.spec.file_loop {
+                let _ = st.workers.with_current(cfg.camera_id, handle, || {
+                    store.add_check_event(
+                        cfg.camera_id,
+                        "video_check",
+                        "视频检查失败。人员模型无法加载，请检查所选模型与诊断日志。",
+                        &crate::util::iso_now(),
+                        None,
+                    )
+                });
+            }
             st.workers
                 .remove_and_stop(Some(store), cfg.camera_id, Some(handle), "model_error");
             None
@@ -1159,7 +1170,12 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         break 'outer;
                     }
                     if !running_marked {
-                        if set_status("running").is_none() {
+                        let status = if consecutive_failures >= 3 {
+                            "model_error"
+                        } else {
+                            "running"
+                        };
+                        if set_status(status).is_none() {
                             break 'outer;
                         }
                         running_marked = true;

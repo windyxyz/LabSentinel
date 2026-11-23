@@ -24,6 +24,7 @@
 
 - PaddleDetection 官方 PP-LCNet 人员属性标签包含通用长外套 `LongCoat`。可供服装特征参考。直接用于实验服判定缺少对应类别。 [官方标签表](https://github.com/PaddlePaddle/PaddleDetection/blob/release/2.9/docs/advanced_tutorials/customization/pphuman_attribute.md)
 - 从本地 LAB PPE 测试集的标注框切出 10 个实验服与 7 个未穿样本，把裁剪边长限制为 256 后输入现有 640 像素 YOLOE。仅确认 1/10 实验服，另有 1/7 未穿样本误确认，中位 CPU 推理 116.13 ms。源图裁剪边长上限 640 的对照为 0/10 正确确认、1/7 误确认、107.48 ms。以上为小样本推理对照，256 指裁剪采样，模型输入仍为 640。该裁剪方案留在实验范围。
+- 另将本地 `m0-spike/yolo11n_ppe.pt` 转为原生 256 ONNX（opset 17、IR 8），采用上身与长衣双窗，不训练。对 14 个能唯一匹配实验服标注的人框，随包 640 模型单次全帧判定 12 个正确，原生 256 对 10 个正确，两者其余均为未知。随包模型未知的两例未被补出。Python ORT 的单次全帧与逐人双窗中位耗时为 143.68 ms、41.30 ms，运行环境不同于发行包。原生 256 方案暂留在本地实验，继续验证其他可用权重。
 
 ## LS-074 检测权重随包约束
 

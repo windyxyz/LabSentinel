@@ -2,11 +2,13 @@
 
 ## Latest Handoff Snapshot
 
-- **当前任务**。`LS-080`，文件检测、规则修复与 PPE 底座。总目标为完成 `LS-080` 至 `LS-083` 并推送 `v0.6.2` 主线，后续版本暂停 GitHub Release。
+- **当前任务**。`LS-081`，规则生效、告警恢复与值守基础。总目标为完成 `LS-080` 至 `LS-083` 并推送 `v0.6.2` 主线，后续版本暂停 GitHub Release。
 - **已验证的第一批实现**。修复照片人数规则的区域、排班和等级判定，视频区分推理失败和有效零检测，PPE 状态与分析共用模型选择。抽出推理后端接口，增加同次 COCO 上下文取框、PPE 唯一归属、YOLOE 正负复核、灰度裁剪增强和遮挡断轨。
 - **验证**。使用本地发行目录 ONNX Runtime 1.20.1 执行 Rust fmt、Clippy 和工作区全特性测试，205 项通过、4 项忽略。默认安装环境的旧 ONNX Runtime 首次拒绝 IR 10，切换随包 DLL 后通过。重新构建 `ls-server`，在临时安装布局运行 `python -X utf8 -B scripts/smoke_rust.py --install-dir <临时目录> --timeout 45`，照片规则、视频完成与推理失败对照、事件预览及退出清理通过。
-- **模型试验**。已有 640 YOLOE 的 256 源图裁剪方案仍有白大褂误判，保持实验状态。见 [裁剪候选](findings.md#ls-080-裁剪候选第一轮验证)。没有训练模型。
-- **Next First Command**。`git status --short --branch`，继续寻找可验证的 256 原生推理方案，完成 `LS-080` 模型对照后接续 `LS-081` 的规则生效和事件统计。
+- **GitHub**。首批修复 `55ec098` 已直连推送，`git ls-remote --heads origin main` 已确认远端提交。版本号仍为 0.6.0，推送限主线。
+- **补充验收**。Rust 三连复验通过。扩展临时安装目录的 `smoke_rust.py`，实测自定义 PPE 文件丢失后随包模型真正加载，人员模型完全缺失及逐帧失败均留下检查记录和错误终态。
+- **模型试验**。已有 YOLOE 的裁剪方案仍有误判。原生 256 双窗导出及 CPU 对照成功，14 个人框中确认 10 个，随包方案确认 12 个，双窗未补出额外结果。候选权重和一次性实验环境位于忽略的 `Resources/runs/ls080-native-crop/`，开发始终采用推理和导出。见 [裁剪候选](findings.md#ls-080-裁剪候选第一轮验证)。
+- **Next First Command**。`git status --short --branch` 后接续 `LS-081` 的规则生效和事件统计。达到使用门槛的 256 候选仍待核验，可与其他基础修复独立推进。
 
 ## Previous Handoff Snapshot · LS-076
 

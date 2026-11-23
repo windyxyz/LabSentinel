@@ -82,7 +82,23 @@ def check_file_detection(base: str, pkg: Path, sandbox: Path, timeout: int) -> t
     if not json.loads(sample_response).get("sample", {}).get("id"):
         return False, "图片检查记录无法加入标注池"
 
-    check_photo_rules(base, sandbox, sample, timeout)
+    with closing(sqlite3.connect(sandbox / "data" / "labsentinel.db")) as db:
+        with db:
+            db.execute(
+                "INSERT INTO app_settings(key,value,updated_ts) VALUES('ppe_model',?,datetime('now'))",
+                (str(sandbox / "removed-custom-ppe.onnx"),),
+            )
+        try:
+            _, body = http_get(f"{base}/api/models/ppe/status")
+            previous = json.loads(body)
+            check_photo_rules(base, sandbox, sample, timeout)
+            _, body = http_get(f"{base}/api/models/ppe/status")
+            after = json.loads(body)
+            if after["source"] != "bundled" or after["loaded_sources"] <= previous["loaded_sources"] or not after["warning"]:
+                raise ValueError("自定义文件缺失后，随包 PPE 未真实接管或状态未显示回退")
+        finally:
+            with db:
+                db.execute("DELETE FROM app_settings WHERE key='ppe_model'")
 
     ffmpeg = pkg / "tools" / "ffmpeg" / "ffmpeg.exe"
     clip = sandbox / "发布验收视频.mp4"
@@ -190,8 +206,6 @@ def check_photo_rules(base: str, sandbox: Path, sample: Path, timeout: int) -> N
 
 
 def check_failed_detection(base: str, pkg: Path, sandbox: Path, clip: Path, timeout: int) -> None:
-    import re
-
     fixture = pkg / "models" / "face_detection_yunet_2023mar.onnx"
     # 这是兼容 RGB 输入的随包人脸模型，输出不符合人员检测器契约。
     with closing(sqlite3.connect(sandbox / "data" / "labsentinel.db")) as db:
@@ -201,28 +215,37 @@ def check_failed_detection(base: str, pkg: Path, sandbox: Path, clip: Path, time
                 (str(fixture),),
             )
         try:
-            _, body = http_post(f"{base}/api/cameras", {
-                "name": "推理失败验收", "type": "file", "source": str(clip), "autostart": False,
-            })
-            cid = json.loads(body)["id"]
-            http_post(f"{base}/api/cameras/{cid}/start", {})
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                _, body = http_get(f"{base}/api/cameras/{cid}/status")
-                state = json.loads(body)["status"]
-                if state in ("completed", "model_error"):
-                    raise ValueError(f"视频推理失败被标记为 {state}")
-                if state == "error":
-                    _, body = http_get(f"{base}/api/events?camera_id={cid}&category=check")
-                    events = json.loads(body)
-                    if len(events) != 1 or not re.search(r"已处理 0 帧.*[1-9]\d* 帧人员推理失败", events[0]["detail"]):
-                        raise ValueError("视频未明确留下全帧推理失败记录")
-                    return
-                time.sleep(0.25)
-            raise ValueError("视频推理失败未进入异常终态")
+            check_video_failure(base, clip, timeout, "error", r"已处理 0 帧.*[1-9]\d* 帧人员推理失败")
+            with db:
+                db.execute("UPDATE app_settings SET value=? WHERE key='model.active'", (str(sandbox / "missing-person.onnx"),))
+            check_video_failure(base, clip, timeout, "model_error", "人员模型无法加载")
         finally:
             with db:
                 db.execute("DELETE FROM app_settings WHERE key='model.active'")
+
+
+def check_video_failure(base: str, clip: Path, timeout: int, expected: str, detail: str) -> None:
+    import re
+
+    _, body = http_post(f"{base}/api/cameras", {
+        "name": f"视频失败验收-{expected}", "type": "file", "source": str(clip), "autostart": False,
+    })
+    cid = json.loads(body)["id"]
+    http_post(f"{base}/api/cameras/{cid}/start", {})
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _, body = http_get(f"{base}/api/cameras/{cid}/status")
+        state = json.loads(body)["status"]
+        if state in ("completed", "model_error", "error"):
+            if state != expected:
+                raise ValueError(f"视频失败预期状态 {expected}，实际 {state}")
+            _, body = http_get(f"{base}/api/events?camera_id={cid}&category=check")
+            events = json.loads(body)
+            if len(events) != 1 or not re.search(detail, events[0]["detail"]):
+                raise ValueError(f"视频未留下 {expected} 对应的检查记录")
+            return
+        time.sleep(0.25)
+    raise ValueError(f"视频未进入 {expected} 终态")
 
 
 def check_close_mask(base: str, pkg: Path, sandbox: Path, fixture: Path, timeout: int) -> None:
