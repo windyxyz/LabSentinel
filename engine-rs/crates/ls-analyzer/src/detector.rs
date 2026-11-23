@@ -8,7 +8,15 @@ use std::path::{Path, PathBuf};
 use ls_infer::yolo::YoloModel;
 use ls_ingest::Frame;
 
-use crate::pipeline::{Detector, NullDetector, PersonDetection, PpeStatus};
+use crate::pipeline::{Detector, NullDetector, PersonDetection, PpeStatus, SceneObject};
+
+const COCO_CONTEXT: [(usize, f32, f32); 4] = [
+    (39, 0.40, 0.0),
+    (40, 0.40, 0.0),
+    (41, 0.40, 0.0),
+    (67, 0.40, 0.0),
+];
+const COCO_LABELS: [&str; 4] = ["bottle", "wine_glass", "cup", "cell_phone"];
 
 /// 检测器配置（进程级；RA1.2 起不再隐式读 env——组装方负责）。
 #[derive(Debug, Clone)]
@@ -22,6 +30,7 @@ pub struct DetectorConfig {
     /// UX（2026-11-21）：GPU 推理（DirectML——DX12 统一层，N/A/Intel 卡与核显
     /// 全通吃）。默认 true；DML 初始化失败时 ls-infer 自动回落 CPU。
     pub use_gpu: bool,
+    pub coco_context: bool,
 }
 
 impl Default for DetectorConfig {
@@ -35,6 +44,7 @@ impl Default for DetectorConfig {
             iou: 0.50,
             min_area: 1200.0,
             use_gpu: true,
+            coco_context: false,
         }
     }
 }
@@ -52,6 +62,7 @@ impl DetectorConfig {
             use_gpu: std::env::var("LS_GPU")
                 .map(|v| v.trim() != "0")
                 .unwrap_or(true),
+            coco_context: false,
         }
     }
 }
@@ -86,24 +97,54 @@ pub fn anchor_model_file(raw: &Path) -> Option<PathBuf> {
 /// YOLO 检测器（tract/ort 双后端）。
 pub struct YoloDetector {
     model: YoloModel,
+    coco_context: bool,
+    objects: Vec<SceneObject>,
 }
 
 impl Detector for YoloDetector {
     fn detect(&mut self, frame: &Frame) -> Vec<PersonDetection> {
-        match self.model.detect(&frame.data, frame.width, frame.height) {
-            Ok(dets) => dets
-                .into_iter()
-                .map(|d| PersonDetection {
-                    box_: d.box_,
-                    score: d.score,
-                    ppe: PpeStatus::Unknown,
-                })
-                .collect(),
-            Err(e) => {
-                eprintln!("[ls-analyzer] 推理失败（本帧跳过）: {e}");
-                Vec::new()
-            }
-        }
+        self.try_detect(frame).unwrap_or_else(|error| {
+            eprintln!("[ls-analyzer] 推理失败（本帧跳过）: {error}");
+            Vec::new()
+        })
+    }
+
+    fn try_detect(&mut self, frame: &Frame) -> Result<Vec<PersonDetection>, String> {
+        self.objects.clear();
+        let detections =
+            if self.coco_context {
+                let (people, objects) = self.model.detect_with_context(
+                    &frame.data,
+                    frame.width,
+                    frame.height,
+                    &COCO_CONTEXT,
+                )?;
+                self.objects
+                    .extend(COCO_LABELS.into_iter().zip(objects).flat_map(
+                        |(label, detections)| {
+                            detections.into_iter().map(move |detection| SceneObject {
+                                label,
+                                bbox: detection.box_,
+                                confidence: detection.score,
+                            })
+                        },
+                    ));
+                people
+            } else {
+                self.model.detect(&frame.data, frame.width, frame.height)?
+            };
+        Ok(detections
+            .into_iter()
+            .map(|d| PersonDetection {
+                box_: d.box_,
+                score: d.score,
+                ppe: PpeStatus::Unknown,
+            })
+            .collect())
+    }
+
+    fn objects(&self) -> &[SceneObject] {
+        &self.objects
     }
 }
 
@@ -135,5 +176,9 @@ pub fn load_detector(cfg: &DetectorConfig) -> Result<Box<dyn Detector>, String> 
         cfg.conf,
         cfg.iou,
     );
-    Ok(Box::new(YoloDetector { model }))
+    Ok(Box::new(YoloDetector {
+        model,
+        coco_context: cfg.coco_context,
+        objects: Vec::new(),
+    }))
 }

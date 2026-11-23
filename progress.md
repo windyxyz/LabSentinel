@@ -2,6 +2,24 @@
 
 ## Latest Handoff Snapshot
 
+- **当前任务**。`LS-080`，文件检测、规则修复与 PPE 底座。总目标为完成 `LS-080` 至 `LS-083` 并推送 `v0.6.2` 主线，后续版本暂停 GitHub Release。
+- **已验证的第一批实现**。修复照片人数规则的区域、排班和等级判定，视频区分推理失败和有效零检测，PPE 状态与分析共用模型选择。抽出推理后端接口，增加同次 COCO 上下文取框、PPE 唯一归属、YOLOE 正负复核、灰度裁剪增强和遮挡断轨。
+- **验证**。使用本地发行目录 ONNX Runtime 1.20.1 执行 Rust fmt、Clippy 和工作区全特性测试，205 项通过、4 项忽略。默认安装环境的旧 ONNX Runtime 首次拒绝 IR 10，切换随包 DLL 后通过。重新构建 `ls-server`，在临时安装布局运行 `python -X utf8 -B scripts/smoke_rust.py --install-dir <临时目录> --timeout 45`，照片规则、视频完成与推理失败对照、事件预览及退出清理通过。
+- **模型试验**。已有 640 YOLOE 的 256 源图裁剪方案仍有白大褂误判，保持实验状态。见 [裁剪候选](findings.md#ls-080-裁剪候选第一轮验证)。没有训练模型。
+- **Next First Command**。`git status --short --branch`，继续寻找可验证的 256 原生推理方案，完成 `LS-080` 模型对照后接续 `LS-081` 的规则生效和事件统计。
+
+## Previous Handoff Snapshot · LS-076
+
+- **Task-ID / Task-Name**。`LS-076`（`DONE`），`v0.6.0` 基线缺陷审查与 1.0.0 路线图补充。本地 `main @ 8dca517`，产品基线 `2fef1b4`。
+- **交付**。在 [正式路线图 §1.3](docs/plan/v1.0.0-roadmap.md#13-ls-076-缺陷与发布验收) 登记 9 项缺陷，写入修复归属和发布验收条件。[缺陷证据](findings.md#ls-076-v060-基线缺陷审查) 包含代码位置和实测结果。开始新模型对照前，先完成 `LS-080` 的文件推理、规则和 PPE 状态回归。`LS-081` 处理规则热生效、投递恢复、统计以及双产物验收。
+- **实测**。执行 `python -X utf8 -B "$env:LOCALAPPDATA/Temp/labsentinel-ls076-audit.py" baseline`、同脚本 `video` 和 `delivery` 三个子运行。均以回环服务、临时库和项目验收素材复现预期缺陷。正常模型 15 帧均检到人员，输出不兼容的模型 15 帧推理均失败仍显示完成。照片忽略区域、排班和等级。新增规则至重启才生效，删除后仍触发。另复现 PPE 状态误报、AI 复核不可见、检查留痕污染处置计数和遗留 `pending` 行的手动重试 404。
+- **发行核验**。以 Python 临时文件调用 `prepare_person_model(..., force=False)`，无效缓存被接受。通过 ZIP 清单和 SHA-256 核对，实测二进制与 ZIP 一致，当前人员模型符合锁定值，便携包及安装器来源目录缺少 WinSW。源码另确认告警事件及投递写入间隔内的崩溃窗口。
+- **文档核验**。`git diff --check` 通过。路线图与发现表的 9 个编号一致，任务表中 `LS-076` 为 `DONE`，22 个实施任务为 `READY`。
+- **范围**。本轮只更新本地规划与交接文档。复现采用已有二进制和 CPU。现场相机、DirectML 长稳、外部渠道与交互安装保留到对应任务验收。实现、打包、训练和 GitHub 操作暂停。
+- **Next First Command**。待用户恢复后执行 `git status --short --branch`，再按路线图 §1.3 复现 `LS-076-01/03/04` 并锁定 `LS-080`。`LS-080`～`LS-101` 当前为 `READY`。
+
+## Previous Handoff Snapshot · 1.0.0 规划入库
+
 - **Task-ID / Task-Name**：`v0.6.x → v1.0.0 GA` 长线规划入库（`LS-080` ～ `LS-101` 登记为 `READY`；现网基线维持 `v0.6.0` / `LS-075` `DONE`）。`main`，本地工作区。
 - **本轮交付**：完成 18 个指定项目/论文/文章 + 15+ 全网顶级标杆（Frigate v0.18、AmberSight、Moonfire/Retina、Construction-Hazard-Detection、YOLO26/YOLOE/PP-LCNet、Qwen3-VL/SmolVLM2、`sqlite-vec`）的深度对标；经 Swarm 三轨架构规划与实码核验，正式入库 [docs/plan/v1.0.0-roadmap.md](docs/plan/v1.0.0-roadmap.md)（9 个渐进版本 `v0.6.1 → v1.0.0 GA`、22 项任务 `LS-080`～`LS-101`、SQLite `v22 → v32`）、[docs/adr/0012-unified-vulkan-gpu.md](docs/adr/0012-unified-vulkan-gpu.md)（`Proposed`），并同步更新 `task_plan.md` 与 `task_registry.md`。
 - **已锁定方向**：无 PDCA 隐患工单；统一推进 Vulkan GPU（CV + 离线托管 `llama-server.exe` VLM，保留 `DirectML + dml_lock → CPU` 回退）；细粒度逐工具可配高权限本地 MCP；性价比带识图 AI 辅助报告/多轮问答历史（DeepSeek/Qwen-VL-Flash 等）；现成合规权重拿来即验 + 7 大训练配方（严禁 SH17 等 NC 进随包权重）。

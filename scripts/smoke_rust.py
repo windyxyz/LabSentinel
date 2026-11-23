@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from contextlib import closing
 
@@ -81,6 +82,8 @@ def check_file_detection(base: str, pkg: Path, sandbox: Path, timeout: int) -> t
     if not json.loads(sample_response).get("sample", {}).get("id"):
         return False, "图片检查记录无法加入标注池"
 
+    check_photo_rules(base, sandbox, sample, timeout)
+
     ffmpeg = pkg / "tools" / "ffmpeg" / "ffmpeg.exe"
     clip = sandbox / "发布验收视频.mp4"
     subprocess.run(
@@ -142,11 +145,84 @@ def check_file_detection(base: str, pkg: Path, sandbox: Path, timeout: int) -> t
             _, body = http_get(f"{base}/api/events?camera_id={video_id}&category=alert")
             if {event["type"] for event in json.loads(body)} != {"enter"}:
                 return False, "告警分类混入检查结果"
-            return True, "照片和视频有检查记录，视频可预览，规则另生成进入事件"
+            check_failed_detection(base, pkg, sandbox, clip, timeout)
+            return True, "检查留痕、视频预览、照片规则和推理失败对照通过"
         if state in ("error", "model_error"):
             return False, f"视频检查失败，状态 {state}"
         time.sleep(0.5)
     return False, f"视频未到达检查完成状态，最后状态 {state}"
+
+
+def check_photo_rules(base: str, sandbox: Path, sample: Path, timeout: int) -> None:
+    folder = sandbox / "photo-rule"
+    folder.mkdir()
+    shutil.copyfile(sample, folder / "person.jpg")
+    _, body = http_post(f"{base}/api/cameras", {
+        "name": "照片规则验收", "type": "folder", "source": str(folder), "autostart": False,
+    })
+    cid = json.loads(body)["id"]
+    _, body = http_post(f"{base}/api/zones", {
+        "camera_id": cid, "name": "画面外区域",
+        "polygon": [[5000, 5000], [5100, 5000], [5100, 5100], [5000, 5100]],
+    })
+    zone = json.loads(body)["id"]
+    common = {"camera_id": cid, "behavior": "occupancy_over", "threshold": 0}
+    for fields in (
+        {"zone_id": zone, "level": 1},
+        {"days_of_week": str(datetime.now().isoweekday() % 7 + 1), "level": 1},
+        {"enabled": False, "level": 1},
+        {"level": 3},
+    ):
+        http_post(f"{base}/api/rules", {**common, **fields})
+    http_post(f"{base}/api/cameras/{cid}/start", {})
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _, body = http_get(f"{base}/api/folder-images?camera_id={cid}&limit=1")
+        items = json.loads(body)["items"]
+        if items and items[0]["event_id"]:
+            _, body = http_get(f"{base}/api/events?camera_id={cid}&category=alert")
+            hits = [(event["type"], event["level"]) for event in json.loads(body)]
+            if hits != [("occupancy_over", 3)]:
+                raise ValueError(f"照片规则区域、排班、启停或等级不符：{hits}")
+            return
+        time.sleep(0.25)
+    raise ValueError("配置的有效照片规则未产生告警")
+
+
+def check_failed_detection(base: str, pkg: Path, sandbox: Path, clip: Path, timeout: int) -> None:
+    import re
+
+    fixture = pkg / "models" / "face_detection_yunet_2023mar.onnx"
+    # 这是兼容 RGB 输入的随包人脸模型，输出不符合人员检测器契约。
+    with closing(sqlite3.connect(sandbox / "data" / "labsentinel.db")) as db:
+        with db:
+            db.execute(
+                "INSERT INTO app_settings(key,value,updated_ts) VALUES('model.active',?,datetime('now'))",
+                (str(fixture),),
+            )
+        try:
+            _, body = http_post(f"{base}/api/cameras", {
+                "name": "推理失败验收", "type": "file", "source": str(clip), "autostart": False,
+            })
+            cid = json.loads(body)["id"]
+            http_post(f"{base}/api/cameras/{cid}/start", {})
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                _, body = http_get(f"{base}/api/cameras/{cid}/status")
+                state = json.loads(body)["status"]
+                if state in ("completed", "model_error"):
+                    raise ValueError(f"视频推理失败被标记为 {state}")
+                if state == "error":
+                    _, body = http_get(f"{base}/api/events?camera_id={cid}&category=check")
+                    events = json.loads(body)
+                    if len(events) != 1 or not re.search(r"已处理 0 帧.*[1-9]\d* 帧人员推理失败", events[0]["detail"]):
+                        raise ValueError("视频未明确留下全帧推理失败记录")
+                    return
+                time.sleep(0.25)
+            raise ValueError("视频推理失败未进入异常终态")
+        finally:
+            with db:
+                db.execute("DELETE FROM app_settings WHERE key='model.active'")
 
 
 def check_close_mask(base: str, pkg: Path, sandbox: Path, fixture: Path, timeout: int) -> None:

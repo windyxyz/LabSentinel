@@ -4,7 +4,7 @@
 //! - 区域锚点 = 检测框底边中点（`(x1+x2)/2, y2` 取整）；`point_in_polygon` 边界算内；
 //! - 每帧对每个 zone 更新 `ZoneState`（enter/exit 帧数可配）；无检出帧对全部在内 track
 //!   补离场观测（避免单帧遮挡导致 exit 永不触发）；
-//! - `occupancy_over` 按区去重人数；rule.zone_id=0 用"任一区去重人数"（画面口径）；
+//! - `occupancy_over` 按区去重人数；rule.zone_id=0 统计整帧活跃人员；
 //! - 冷却键 (rule_id, track_id)，以分析帧序号为单调时钟（与 Python 确定性模式一致）；
 //! - 时段（支持跨午夜）/ weekday（"1-5" 或 "1,2,3"）/ 日历例外（holiday/workday）。
 //!
@@ -76,11 +76,19 @@ pub struct PersonDetection {
     pub ppe: PpeStatus,
 }
 
+#[derive(serde::Serialize)]
+pub struct SceneObject {
+    pub label: &'static str,
+    pub bbox: [f32; 4],
+    pub confidence: f32,
+}
+
 pub struct LiveTrack {
     pub id: i64,
     pub bbox: [f32; 4],
     pub ppe: PpeStatus,
     pub confidence: f32,
+    pub occluded: bool,
 }
 
 #[derive(Default)]
@@ -94,6 +102,14 @@ pub struct PpeSample {
 pub trait Detector: Send {
     /// 检测一帧（BGR raw），返回人员框 + 实验服状态。
     fn detect(&mut self, frame: &ls_ingest::Frame) -> Vec<PersonDetection>;
+
+    fn try_detect(&mut self, frame: &ls_ingest::Frame) -> Result<Vec<PersonDetection>, String> {
+        Ok(self.detect(frame))
+    }
+
+    fn objects(&self) -> &[SceneObject] {
+        &[]
+    }
 }
 
 /// 无推理后端：保留管线/事件通道，不产事件（T-325 前）。
@@ -134,6 +150,7 @@ pub struct CameraPipeline {
     /// LS-051：上一帧活跃轨迹 `(track_id, tlbr, PPE 状态)`，供实时检测框广播。
     /// 用 Box 存以让新字段不影响现有栈上构造大小敏感路径。
     last_tracks: Vec<LiveTrack>,
+    occluded_tracks: Vec<([f32; 4], i64)>,
     last_ppe_sample: PpeSample,
     frame_index: u64,
     /// L1 对齐诊断：true 时每帧记录 ByteTrack 激活轨迹 (track_id, tlbr)
@@ -207,6 +224,7 @@ impl CameraPipeline {
             solo_since: HashMap::new(),
             last_active_count: 0,
             last_tracks: Vec::new(),
+            occluded_tracks: Vec::new(),
             last_ppe_sample: PpeSample::default(),
             frame_index: 0,
             log_tracks: false,
@@ -264,6 +282,37 @@ impl CameraPipeline {
         let now = parse_ts(frame_ts).unwrap_or_else(ls_time::local_now_civil);
         let mut out = Vec::new();
 
+        let occluded: Vec<_> = dets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, det)| {
+                dets.iter()
+                    .enumerate()
+                    .any(|(j, other)| {
+                        i != j && crate::ppe::overlapping_people(det.box_, other.box_)
+                    })
+                    .then_some(det.box_)
+            })
+            .collect();
+        let retired: HashSet<_> = self
+            .occluded_tracks
+            .iter()
+            .filter_map(|(bounds, id)| {
+                (!occluded
+                    .iter()
+                    .any(|current| crate::ppe::overlapping_people(*bounds, *current)))
+                .then_some(*id)
+            })
+            .collect();
+        if !retired.is_empty() {
+            self.tracker.forget(&retired);
+            for state in self.zone_states.values_mut() {
+                state.forget(&retired);
+            }
+            self.solo_since.retain(|_, (id, _)| !retired.contains(id));
+        }
+        self.occluded_tracks.clear();
+
         // 与 Python `_analyze` 对齐：空检测帧**不调 ByteTrack**（track 状态冻结，
         // lost_time 不累积、frame_id 不推进），只对在场 track 补离场观测并回收状态。
         if dets.is_empty() {
@@ -299,6 +348,12 @@ impl CameraPipeline {
             })
             .collect();
         let active = self.tracker.update(&track_dets);
+        self.occluded_tracks.extend(
+            active
+                .iter()
+                .copied()
+                .filter(|(bounds, _)| occluded.contains(bounds)),
+        );
         self.last_active_count = active.len();
         if self.log_tracks {
             self.track_log
@@ -334,6 +389,12 @@ impl CameraPipeline {
                 }
             }
         }
+        for (bounds, id) in &self.occluded_tracks {
+            without_mask.remove(id);
+            if let Some(index) = dets.iter().position(|d| d.box_ == *bounds) {
+                det_ppe[index] = PpeStatus::Unknown;
+            }
+        }
         if sample_ppe {
             for (bbox, _) in &active {
                 let Some(index) = dets.iter().position(|d| d.box_ == *bbox) else {
@@ -353,7 +414,8 @@ impl CameraPipeline {
             .map(|(b, id)| {
                 let detected = dets.iter().position(|d| d.box_ == *b);
                 let ppe = detected.map_or(PpeStatus::Unknown, |i| det_ppe[i]);
-                let ppe = if ppe == PpeStatus::Unknown {
+                let occluded = occluded.contains(b);
+                let ppe = if ppe == PpeStatus::Unknown && !occluded {
                     self.last_tracks
                         .iter()
                         .find(|t| t.id == *id)
@@ -366,6 +428,7 @@ impl CameraPipeline {
                     bbox: *b,
                     ppe,
                     confidence: detected.map_or(0., |i| dets[i].score),
+                    occluded,
                 }
             })
             .collect();
@@ -516,7 +579,6 @@ impl CameraPipeline {
             .filter(|r| r.enabled && r.behavior == "occupancy_over")
             .cloned()
             .collect();
-        let any_zone: HashSet<i64> = occ.values().flatten().copied().collect();
         for rule in occ_rules {
             let zid = if rule.zone_id == 0 {
                 None
@@ -524,21 +586,24 @@ impl CameraPipeline {
                 Some(rule.zone_id)
             };
             let n = match zid {
-                None => any_zone.len(),
+                None => active_ids.len(),
                 Some(z) => occ.get(&z).map(|s| s.len()).unwrap_or(0),
             };
-            if rule.threshold > 0 && n as i64 > rule.threshold {
+            if rule.threshold >= 0
+                && n as i64 > rule.threshold
+                && rule_active_at(&rule, frame_ts, &self.calendar)
+            {
                 let where_ = zid
                     .map(|z| format!("「{}」", self.zone_name(z)))
                     .unwrap_or_else(|| "画面".to_string());
                 let detail = format!("{where_}在场人数 {n} 超过阈值 {}", rule.threshold);
-                self.try_fire(
+                self.try_fire_rule(
+                    &rule,
                     zid,
                     "occupancy_over",
                     0,
                     &detail,
                     rule.level,
-                    &now,
                     frame_ts,
                     &mut out,
                 );
@@ -865,6 +930,37 @@ mod tests {
             score: 0.9,
             ppe: PpeStatus::Unknown,
         }
+    }
+
+    #[test]
+    fn separation_restarts_occluded_tracks_without_ppe_history() {
+        let ts = "2026-11-23T12:00:00";
+        let mut pipeline = CameraPipeline::new(camera(), vec![], vec![], HashMap::new(), 1, 1);
+        let overlapping = [
+            PersonDetection {
+                ppe: PpeStatus::Wearing,
+                ..det([0., 0., 100., 180.])
+            },
+            det([30., 0., 130., 180.]),
+        ];
+        pipeline.process(&overlapping, ts);
+        let previous: HashSet<_> = pipeline
+            .last_tracks()
+            .iter()
+            .map(|track| track.id)
+            .collect();
+        assert_eq!(previous.len(), 2);
+        assert!(pipeline
+            .last_tracks()
+            .iter()
+            .all(|track| track.occluded && track.ppe == PpeStatus::Unknown));
+        let separated = [det([0., 0., 100., 180.]), det([130., 0., 230., 180.])];
+        pipeline.process(&separated, ts);
+        pipeline.process(&separated, ts);
+        assert_eq!(pipeline.last_tracks().len(), 2);
+        assert!(pipeline.last_tracks().iter().all(|track| {
+            !track.occluded && !previous.contains(&track.id) && track.ppe == PpeStatus::Unknown
+        }));
     }
 
     #[test]

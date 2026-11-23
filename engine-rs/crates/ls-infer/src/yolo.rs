@@ -225,35 +225,141 @@ fn model_format_override(path: &Path) -> Result<Option<OutputFormat>, String> {
     })
 }
 
-/// YOLO11 ONNX 会话（后端无关；`person_class` 由 model.json 角色声明，缺省 0）。
+/// Run a prepared RGB NCHW tensor and return the first model output.
+pub trait InferBackend: Send {
+    fn run(
+        &mut self,
+        data: Vec<f32>,
+        width: u32,
+        height: u32,
+    ) -> Result<(Vec<usize>, Vec<f32>), String>;
+}
+
+#[cfg(feature = "tract")]
+struct TractBackend {
+    model: std::sync::Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>,
+}
+
+#[cfg(feature = "tract")]
+impl InferBackend for TractBackend {
+    fn run(
+        &mut self,
+        data: Vec<f32>,
+        width: u32,
+        height: u32,
+    ) -> Result<(Vec<usize>, Vec<f32>), String> {
+        let input = tract_ndarray::Array4::<f32>::from_shape_vec(
+            (1, 3, height as usize, width as usize),
+            data,
+        )
+        .map_err(|e| format!("输入张量形状错误: {e}"))?;
+        let run_started = std::time::Instant::now();
+        let outputs = self
+            .model
+            .run(tvec!(input.into_tvalue()))
+            .map_err(|e| format!("推理失败: {e}"))?;
+        INFERENCE_TIMINGS.with(|metrics| {
+            let mut totals = metrics.get();
+            totals.run += run_started.elapsed();
+            totals.calls += 1;
+            metrics.set(totals);
+        });
+        let view = outputs
+            .first()
+            .ok_or("模型无输出")?
+            .to_plain_array_view::<f32>()
+            .map_err(|e| format!("输出类型错误: {e}"))?;
+        Ok((view.shape().to_vec(), view.iter().copied().collect()))
+    }
+}
+
+#[cfg(feature = "ort")]
+struct OrtBackend {
+    session: Option<Session>,
+    is_dml: bool,
+    fp16: bool,
+}
+
+#[cfg(feature = "ort")]
+impl Drop for OrtBackend {
+    fn drop(&mut self) {
+        if self.is_dml && self.session.is_some() {
+            let _guard = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
+            self.session.take();
+        }
+    }
+}
+
+#[cfg(feature = "ort")]
+impl InferBackend for OrtBackend {
+    fn run(
+        &mut self,
+        data: Vec<f32>,
+        width: u32,
+        height: u32,
+    ) -> Result<(Vec<usize>, Vec<f32>), String> {
+        let session = self.session.as_mut().ok_or("ORT 会话未初始化")?;
+        let dims = [1usize, 3, height as usize, width as usize];
+        let tensor = if self.fp16 {
+            let data = data
+                .into_iter()
+                .map(half::f16::from_f32)
+                .collect::<Vec<_>>();
+            ort::value::Tensor::from_array((dims, data)).map(|tensor| tensor.into_dyn())
+        } else {
+            ort::value::Tensor::from_array((dims, data)).map(|tensor| tensor.into_dyn())
+        }
+        .map_err(|e| format!("输入张量创建失败: {e}"))?;
+        // 事故 A1 防护：DirectML 推理必须跨线程串行；CPU 推理不加锁。
+        let waiting_since = std::time::Instant::now();
+        let _dml_guard = if self.is_dml {
+            Some(dml_lock().lock().unwrap_or_else(|e| e.into_inner()))
+        } else {
+            None
+        };
+        let run_started = std::time::Instant::now();
+        let outputs = session.run(ort::inputs![tensor]);
+        INFERENCE_TIMINGS.with(|metrics| {
+            let mut totals = metrics.get();
+            totals.run += run_started.elapsed();
+            if self.is_dml {
+                totals.directml_wait += run_started - waiting_since;
+                totals.directml_calls += 1;
+            }
+            totals.calls += 1;
+            metrics.set(totals);
+        });
+        let outputs = outputs.map_err(|e| format!("推理失败: {e}"))?;
+        // YOLO 单输出：取首个输出（SessionOutputs 可迭代，取第一个键值对）
+        let (_name, v) = outputs.iter().next().ok_or("模型无输出")?;
+        let result = if let Ok((shape, flat)) = v.try_extract_tensor::<f32>() {
+            (shape.iter().map(|&d| d as usize).collect(), flat.to_vec())
+        } else {
+            let (shape, flat) = v
+                .try_extract_tensor::<half::f16>()
+                .map_err(|e| format!("输出类型错误: {e}"))?;
+            (
+                shape.iter().map(|&d| d as usize).collect(),
+                flat.iter().map(|v| v.to_f32()).collect(),
+            )
+        };
+        drop(v);
+        drop(outputs);
+        drop(_dml_guard);
+        Ok(result)
+    }
+}
+
+/// YOLO11 ONNX 会话（后端无关，`person_class` 由 model.json 角色声明，缺省 0）。
 pub struct YoloModel {
-    backend: Backend,
+    backend: Box<dyn InferBackend>,
     output_format: OutputFormat,
-    #[cfg(feature = "tract")]
-    tract_model: Option<std::sync::Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>>,
-    #[cfg(feature = "ort")]
-    ort_session: Option<Session>,
-    /// 当前会话是否运行在 DirectML(GPU)——用于触发进程级串行锁（防事故 A1 整机死机）。
-    ep_is_dml: bool,
     input_w: u32,
     input_h: u32,
-    #[cfg(feature = "ort")]
-    ort_fp16: bool,
     person_class: usize,
     conf: f32,
     iou: f32,
     min_box_area: f32,
-}
-
-#[cfg(feature = "ort")]
-impl Drop for YoloModel {
-    fn drop(&mut self) {
-        if self.ep_is_dml && self.ort_session.is_some() {
-            // 事故 A1 防护：DirectML 会话析构也纳入进程级串行锁，避免软重启时与另一线程 run 并发
-            let _guard = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
-            self.ort_session.take();
-        }
-    }
 }
 
 /// 进程级 DirectML 串行锁（事故 A1 防护：AMD/DX12 驱动下 ORT DirectML
@@ -356,93 +462,108 @@ impl YoloModel {
             .ok_or("无可用推理后端（tract/ort feature 均未启用）")?;
         let fallback = read_model_imgsz(path).unwrap_or(imgsz);
         let format_override = model_format_override(path)?;
-        let mut model = YoloModel {
+        let (backend, (input_w, input_h), output_format): (Box<dyn InferBackend>, _, _) =
+            match backend {
+                #[cfg(feature = "tract")]
+                Backend::Tract => {
+                    let mut graph = tract_onnx::onnx()
+                        .model_for_path(path)
+                        .map_err(|e| format!("加载模型失败: {e}"))?;
+                    let fact = graph.input_fact(0).map_err(|e| e.to_string())?;
+                    let dims = fact.shape.as_concrete_finite().map_err(|e| e.to_string())?;
+                    let shape = if let Some(dims) = dims {
+                        let dims: Vec<_> = dims.iter().map(|&d| d as i64).collect();
+                        input_size(&dims, fallback)?
+                    } else {
+                        graph
+                            .set_input_fact(
+                                0,
+                                InferenceFact::dt_shape(
+                                    f32::datum_type(),
+                                    tvec!(1, 3, fallback as usize, fallback as usize),
+                                ),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        (fallback, fallback)
+                    };
+                    let m = graph
+                        .into_optimized()
+                        .map_err(|e| format!("模型优化失败: {e}"))?
+                        .into_runnable()
+                        .map_err(|e| format!("模型编译失败: {e}"))?;
+                    set_ep_used("CPU(tract)");
+                    (
+                        Box::new(TractBackend { model: m }),
+                        shape,
+                        format_override.unwrap_or(OutputFormat::Yolo),
+                    )
+                }
+                #[cfg(not(feature = "tract"))]
+                Backend::Tract => return Err("tract feature 未启用".into()),
+                #[cfg(feature = "ort")]
+                Backend::Ort => {
+                    let (session, is_dml) = load_ort_session(path, use_gpu)?;
+                    let ep_used = if is_dml { "DirectML(GPU)" } else { "CPU" };
+                    println!("[ls-infer] ORT 推理设备: {ep_used}");
+                    let mut runtime = OrtBackend {
+                        session: Some(session),
+                        is_dml,
+                        fp16: false,
+                    };
+                    let session = runtime.session.as_ref().ok_or("ORT 会话未初始化")?;
+                    let output_format = match format_override {
+                        Some(format) => format,
+                        None => OutputFormat::from_metadata(session)?,
+                    };
+                    let input = session.inputs().first().ok_or("ORT 模型无输入")?;
+                    let ValueType::Tensor { ty, shape, .. } = input.dtype() else {
+                        return Err("ORT 模型输入必须是图像张量".into());
+                    };
+                    runtime.fp16 = match ty {
+                        TensorElementType::Float16 => true,
+                        TensorElementType::Float32 => false,
+                        _ => return Err(format!("不支持的输入类型: {ty:?}")),
+                    };
+                    let shape = input_size(shape, fallback)?;
+                    set_ep_used(ep_used);
+                    (Box::new(runtime), shape, output_format)
+                }
+                #[cfg(not(feature = "ort"))]
+                Backend::Ort => return Err("ort feature 未启用".into()),
+            };
+        Ok(YoloModel {
             backend,
-            output_format: format_override.unwrap_or(OutputFormat::Yolo),
-            #[cfg(feature = "tract")]
-            tract_model: None,
-            #[cfg(feature = "ort")]
-            ort_session: None,
-            ep_is_dml: false,
-            input_w: fallback,
-            input_h: fallback,
-            #[cfg(feature = "ort")]
-            ort_fp16: false,
-            // T-334/Q-14：模型角色声明（同目录 model.json 的 roles.person_class）。
-            // 缺省 0 = COCO person 通道，旧模型无声明时行为不变。
+            output_format,
+            input_w,
+            input_h,
             person_class: read_model_roles(path)
                 .get("person_class")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize)
-                .unwrap_or(0),
+                .and_then(|value| value.as_u64())
+                .map_or(0, |value| value as usize),
             conf,
             iou,
             min_box_area,
-        };
-        match backend {
-            #[cfg(feature = "tract")]
-            Backend::Tract => {
-                let mut graph = tract_onnx::onnx()
-                    .model_for_path(path)
-                    .map_err(|e| format!("加载模型失败: {e}"))?;
-                let fact = graph.input_fact(0).map_err(|e| e.to_string())?;
-                let dims = fact.shape.as_concrete_finite().map_err(|e| e.to_string())?;
-                if let Some(dims) = dims {
-                    let dims: Vec<_> = dims.iter().map(|&d| d as i64).collect();
-                    (model.input_w, model.input_h) = input_size(&dims, fallback)?;
-                } else {
-                    graph
-                        .set_input_fact(
-                            0,
-                            InferenceFact::dt_shape(
-                                f32::datum_type(),
-                                tvec!(1, 3, fallback as usize, fallback as usize),
-                            ),
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-                let m = graph
-                    .into_optimized()
-                    .map_err(|e| format!("模型优化失败: {e}"))?
-                    .into_runnable()
-                    .map_err(|e| format!("模型编译失败: {e}"))?;
-                set_ep_used("CPU(tract)");
-                model.tract_model = Some(m);
-            }
-            #[cfg(not(feature = "tract"))]
-            Backend::Tract => return Err("tract feature 未启用".into()),
-            #[cfg(feature = "ort")]
-            Backend::Ort => {
-                let (session, is_dml) = load_ort_session(path, use_gpu)?;
-                let ep_used = if is_dml { "DirectML(GPU)" } else { "CPU" };
-                println!("[ls-infer] ORT 推理设备: {ep_used}");
-                model.ep_is_dml = is_dml;
-                model.ort_session = Some(session);
-                let session = model.ort_session.as_ref().ok_or("ORT 会话未初始化")?;
-                if format_override.is_none() {
-                    model.output_format = OutputFormat::from_metadata(session)?;
-                }
-                let input = session.inputs().first().ok_or("ORT 模型无输入")?;
-                let ValueType::Tensor { ty, shape, .. } = input.dtype() else {
-                    return Err("ORT 模型输入必须是图像张量".into());
-                };
-                model.ort_fp16 = match ty {
-                    TensorElementType::Float16 => true,
-                    TensorElementType::Float32 => false,
-                    _ => return Err(format!("不支持的输入类型: {ty:?}")),
-                };
-                (model.input_w, model.input_h) = input_size(shape, fallback)?;
-                set_ep_used(ep_used);
-            }
-            #[cfg(not(feature = "ort"))]
-            Backend::Ort => return Err("ort feature 未启用".into()),
-        }
-        Ok(model)
+        })
     }
 
     /// 对一帧 BGR raw 做检测，返回原图坐标 xyxy（已 NMS + 最小面积过滤）。
     pub fn detect(&mut self, bgr: &[u8], w: u32, h: u32) -> Result<Vec<Det>, String> {
         self.detect_class(bgr, w, h, self.person_class, self.conf, self.min_box_area)
+    }
+
+    /// Decode people and the requested context categories from one forward pass.
+    pub fn detect_with_context(
+        &mut self,
+        bgr: &[u8],
+        w: u32,
+        h: u32,
+        context: &[(usize, f32, f32)],
+    ) -> Result<(Vec<Det>, Vec<Vec<Det>>), String> {
+        let mut specs = vec![(self.person_class, self.conf, self.min_box_area)];
+        specs.extend_from_slice(context);
+        let mut groups = self.detect_classes(bgr, w, h, &specs)?.into_iter();
+        let people = groups.next().unwrap_or_default();
+        Ok((people, groups.collect()))
     }
 
     /// T-325/Q-14：按**类别索引 + 独立阈值**检测（单类便捷入口）。
@@ -481,91 +602,7 @@ impl YoloModel {
                 BoxGeometry::Normalized { w, h },
             ),
         };
-        let (shape, flat): (Vec<usize>, Vec<f32>) = match self.backend {
-            #[cfg(feature = "tract")]
-            Backend::Tract => {
-                let input = tract_ndarray::Array4::<f32>::from_shape_vec(
-                    (1, 3, self.input_h as usize, self.input_w as usize),
-                    data,
-                )
-                .map_err(|e| format!("输入张量形状错误: {e}"))?;
-                let run_started = std::time::Instant::now();
-                let outputs = self
-                    .tract_model
-                    .as_ref()
-                    .ok_or("tract 会话未初始化")?
-                    .run(tvec!(input.into_tvalue()))
-                    .map_err(|e| format!("推理失败: {e}"))?;
-                INFERENCE_TIMINGS.with(|metrics| {
-                    let mut totals = metrics.get();
-                    totals.run += run_started.elapsed();
-                    totals.calls += 1;
-                    metrics.set(totals);
-                });
-                let view = outputs
-                    .first()
-                    .ok_or("模型无输出")?
-                    .to_plain_array_view::<f32>()
-                    .map_err(|e| format!("输出类型错误: {e}"))?;
-                (view.shape().to_vec(), view.iter().copied().collect())
-            }
-            #[cfg(not(feature = "tract"))]
-            Backend::Tract => return Err("tract feature 未启用".into()),
-            #[cfg(feature = "ort")]
-            Backend::Ort => {
-                let session = self.ort_session.as_mut().ok_or("ORT 会话未初始化")?;
-                let dims = [1usize, 3, self.input_h as usize, self.input_w as usize];
-                let tensor = if self.ort_fp16 {
-                    let data = data
-                        .into_iter()
-                        .map(half::f16::from_f32)
-                        .collect::<Vec<_>>();
-                    ort::value::Tensor::from_array((dims, data)).map(|tensor| tensor.into_dyn())
-                } else {
-                    ort::value::Tensor::from_array((dims, data)).map(|tensor| tensor.into_dyn())
-                }
-                .map_err(|e| format!("输入张量创建失败: {e}"))?;
-                // 事故 A1 防护：DirectML 推理必须跨线程串行；CPU 推理不加锁。
-                let waiting_since = std::time::Instant::now();
-                let _dml_guard = if self.ep_is_dml {
-                    Some(dml_lock().lock().unwrap_or_else(|e| e.into_inner()))
-                } else {
-                    None
-                };
-                let run_started = std::time::Instant::now();
-                let outputs = session.run(ort::inputs![tensor]);
-                INFERENCE_TIMINGS.with(|metrics| {
-                    let mut totals = metrics.get();
-                    totals.run += run_started.elapsed();
-                    if self.ep_is_dml {
-                        totals.directml_wait += run_started - waiting_since;
-                        totals.directml_calls += 1;
-                    }
-                    totals.calls += 1;
-                    metrics.set(totals);
-                });
-                let outputs = outputs.map_err(|e| format!("推理失败: {e}"))?;
-                // YOLO 单输出：取首个输出（SessionOutputs 可迭代，取第一个键值对）
-                let (_name, v) = outputs.iter().next().ok_or("模型无输出")?;
-                let result = if let Ok((shape, flat)) = v.try_extract_tensor::<f32>() {
-                    (shape.iter().map(|&d| d as usize).collect(), flat.to_vec())
-                } else {
-                    let (shape, flat) = v
-                        .try_extract_tensor::<half::f16>()
-                        .map_err(|e| format!("输出类型错误: {e}"))?;
-                    (
-                        shape.iter().map(|&d| d as usize).collect(),
-                        flat.iter().map(|v| v.to_f32()).collect(),
-                    )
-                };
-                drop(v);
-                drop(outputs);
-                drop(_dml_guard);
-                result
-            }
-            #[cfg(not(feature = "ort"))]
-            Backend::Ort => return Err("ort feature 未启用".into()),
-        };
+        let (shape, flat) = self.backend.run(data, self.input_w, self.input_h)?;
         let rows = OutputRows::new(self.output_format, &shape, &flat)?;
         Ok(specs
             .iter()

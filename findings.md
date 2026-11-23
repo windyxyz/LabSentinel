@@ -2,6 +2,29 @@
 
 > 2026-11-22 四线全仓只读审阅基线：`main @ 10e7006`（`v0.4.0`）。每条均经源码逐行核验。
 
+## LS-076 v0.6.0 基线缺陷审查
+
+2026-11-23 接续实施从 `LS-080` 开始。GitHub `main` 使用直连推送，后续版本暂停发布标签及 GitHub Release。本机模型工作限验证和推理。
+
+产品源码基线 `2fef1b4`，路线图提交 `8dca517`。实测使用本地发行暂存目录的 `v0.6.0` 可执行文件、回环地址和独立临时数据库。图片为项目的 `Resources/acceptance/imgs/person-frame.jpg`，视频由随包 FFmpeg 从同一素材生成。模型测试使用 CPU。任务分配和通过条件见 [1.0.0 路线图 §1.3](docs/plan/v1.0.0-roadmap.md#13-ls-076-缺陷与发布验收)。
+
+| 缺陷 | 验证与定位 |
+|---|---|
+| `LS-076-01` | **隔离复现**。照片检出 1 人，配置区域内 0 人，且不在规则星期范围内，仍产生 `occupancy_over`。配置 L3 写成 L2。**源码确认**。未穿实验服只判断区内检测结果，未查适用的 `enter_no_ppe` 规则。见 [worker.rs](engine-rs/crates/ls-server/src/worker.rs#L2094) 的照片分支。 |
+| `LS-076-02` | **隔离复现**。目录运行后新增人数规则，下一张图片检查成功，告警 0 条。手动重启后下一张触发 1 条。运行中删除同一规则后再扫一张，累计告警增至 2 条。保存接口写数据库，分析任务持有启动时副本。见 [规则写入](engine-rs/crates/ls-server/src/handlers/zones_rules.rs#L139) 和 [分析配置](engine-rs/crates/ls-server/src/worker.rs#L895)。 |
+| `LS-076-03` | **隔离复现**。同一段 3 秒视频，随包人员模型在 15 帧均检出人员。给测试进程指定输入可加载、输出与人员检测不兼容的 ONNX 后，日志有 15 次推理失败，状态仍为 `completed`，检查事件显示处理 15 帧且 0 帧检出人员。见 [detector.rs](engine-rs/crates/ls-analyzer/src/detector.rs#L92) 和 [worker.rs](engine-rs/crates/ls-server/src/worker.rs#L1464)。 |
+| `LS-076-04` | **隔离复现**。在临时库记录一个已丢失的 PPE 文件路径，状态接口仍返回 `source=bundled`、`active=true`。新来源完成了一张照片的人员检测，日志未出现 PPE 加载，对照来源有 PPE 模型加载记录。见 [状态选择](engine-rs/crates/ls-server/src/handlers/misc_status.rs#L1381) 与 [推理配置](engine-rs/crates/ls-server/src/worker.rs#L555)。 |
+| `LS-076-05` | **隔离复现**。用临时投递行模拟发送中断，重启后旧 `pending` 仍挂起，手动重试返回 HTTP 404。**源码确认**。后台重试只查 `retry` 和 `failed`，事件落库先于独立建投递行，进程中断可能留下无投递记录的事件。见 [事件入库](engine-rs/crates/ls-server/src/worker.rs#L150)、[投递写入](engine-rs/crates/ls-jobs/src/lib.rs#L507) 和 [重试查询](engine-rs/crates/ls-store/src/lib.rs#L1369)。 |
+| `LS-076-06` | **隔离复现**。5 条正常检查、3 条待处置告警、0 条已处置告警。首页接口返回待处置 8，报表按总数减待处置显示已处置 5。见 [首页统计](engine-rs/crates/ls-server/src/handlers/misc_status.rs#L46)、[报表聚合](engine-rs/crates/ls-server/src/handlers/stats.rs#L213) 和 [已处置卡片](web/src/views/ReportsView.vue#L184)。 |
+| `LS-076-07` | **隔离复现**。按后台复核的字段写入一条 `likely_false` 样本。事件接口仍返回空，且从疑似误报筛选消失、混入未复核。**源码确认**。报表 AI 小计为常量。见 [后台回写](engine-rs/crates/ls-server/src/genai.rs#L142)、[事件输出](engine-rs/crates/ls-server/src/handlers/events.rs#L74)、[筛选查询](engine-rs/crates/ls-store/src/lib.rs#L904) 和 [报表小计](engine-rs/crates/ls-server/src/handlers/stats.rs#L333)。 |
+| `LS-076-08` | **脚本与 ZIP 核验**。给准备函数传入临时目录的无效 `yolo11n.onnx`，函数返回并显示「使用已准备的模型」。构建代码对该文件允许仅凭存在就打包。此次暂存目录和本地 ZIP 中的实际人员权重均匹配转换后的锁定哈希与大小。见 [准备脚本](scripts/prepare_rust_assets.py#L65) 和 [构建脚本](scripts/build_rust.py#L89)。 |
+| `LS-076-09` | **源码与产物核验**。Inno 安装器全用户模式提供安装为 Windows 服务，代码寻找 `tools/winsw.exe`。安装器复制的暂存目录及 ZIP 均无该文件和服务配置。验收采用目录清单，交互安装列入后续验证。见 [任务选项](deploy/windows/installer.iss#L91) 和 [执行分支](deploy/windows/installer.iss#L226)。 |
+
+## LS-080 裁剪候选第一轮验证
+
+- PaddleDetection 官方 PP-LCNet 人员属性标签包含通用长外套 `LongCoat`。可供服装特征参考。直接用于实验服判定缺少对应类别。 [官方标签表](https://github.com/PaddlePaddle/PaddleDetection/blob/release/2.9/docs/advanced_tutorials/customization/pphuman_attribute.md)
+- 从本地 LAB PPE 测试集的标注框切出 10 个实验服与 7 个未穿样本，把裁剪边长限制为 256 后输入现有 640 像素 YOLOE。仅确认 1/10 实验服，另有 1/7 未穿样本误确认，中位 CPU 推理 116.13 ms。源图裁剪边长上限 640 的对照为 0/10 正确确认、1/7 误确认、107.48 ms。以上为小样本推理对照，256 指裁剪采样，模型输入仍为 640。该裁剪方案留在实验范围。
+
 ## LS-074 检测权重随包约束
 
 - 仅采纳可核验来源、明确允许随包分发且实测具备使用场景的权重。口罩和实验服各自验证。人脸不可见或证据不足保留未知。

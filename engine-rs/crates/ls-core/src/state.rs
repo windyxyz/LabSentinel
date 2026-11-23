@@ -83,6 +83,10 @@ impl ZoneState {
             .collect()
     }
 
+    pub fn forget(&mut self, ids: &std::collections::HashSet<i64>) {
+        self.state.retain(|id, _| !ids.contains(id));
+    }
+
     /// 内存回收：删除"非活跃且已判离场"的轨迹；超 cap 按插入序淘汰非活跃项。
     /// 语义与 Python `retain` 一致（在场项即使消失也保留，等待离场去抖完成）。
     pub fn retain(&mut self, active: &[i64], max_size: Option<usize>) -> usize {

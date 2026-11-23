@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use ls_infer::face::FaceMaskModel;
+use ls_infer::post::Det;
 use ls_infer::yolo::{OutputFormat, YoloModel};
 
 use crate::pipeline::{PpeObservation, PpeRunner, PpeStatus};
@@ -70,6 +71,23 @@ impl Default for PpeConfig {
             coat_confirmation: None,
         }
     }
+}
+
+impl PpeConfig {
+    pub fn supports_labels(&self, labels: &[String]) -> bool {
+        class_index(labels, &self.violation_class_name).is_some()
+            && self
+                .wearing_class_names
+                .iter()
+                .any(|name| class_index(labels, name).is_some())
+    }
+}
+
+fn class_index(labels: &[String], name: &str) -> Option<usize> {
+    let name = name.trim().replace(['_', '-'], " ");
+    labels
+        .iter()
+        .position(|label| label.replace(['_', '-'], " ").eq_ignore_ascii_case(&name))
 }
 
 /// 模型目录内锚点校验：目标必须是 dir 的直接子文件（拒绝 ../、绝对路径、分隔符）。
@@ -144,21 +162,19 @@ struct CoatConfirmation {
 fn apply_coat_confirmation(
     statuses: &mut [PpeStatus],
     people: &[[f32; 4]],
-    detections: &[[f32; 4]],
+    detections: &[Vec<Det>],
 ) {
-    let mut confirmed = vec![false; people.len()];
-    for [x1, y1, x2, y2] in detections {
-        let (x, y) = ((x1 + x2) * 0.5, (y1 + y2) * 0.5);
-        let mut owners = people.iter().enumerate().filter(|(_, b)| {
-            let height = b[3] - b[1];
-            x >= b[0] && x <= b[2] && y >= b[1] + 0.10 * height && y <= b[1] + 0.92 * height
-        });
-        if let (Some((owner, _)), None) = (owners.next(), owners.next()) {
-            confirmed[owner] = true;
+    let mut evidence = vec![[0.0_f32; 2]; people.len()];
+    for (class, boxes) in detections.iter().enumerate() {
+        for detection in boxes {
+            if let Some(owner) = coat_owner(detection.box_, people) {
+                let score = &mut evidence[owner][usize::from(class != 0)];
+                *score = score.max(detection.score);
+            }
         }
     }
-    for (status, confirmed) in statuses.iter_mut().zip(confirmed) {
-        if *status == PpeStatus::Wearing && !confirmed {
+    for (status, [positive, negative]) in statuses.iter_mut().zip(evidence) {
+        if *status == PpeStatus::Wearing && positive <= negative {
             *status = PpeStatus::Unknown;
         }
     }
@@ -217,25 +233,43 @@ fn supplement_masks(
     }
 }
 
-/// LS-043：升级框归属判定——要求交集占较小框面积 ≥ 0.20 或 PPE 框中心落入人框内，
-/// 消除密集场景下 1 像素擦边误判。
-fn boxes_overlap(ppe_box: [f32; 4], person_box: [f32; 4]) -> bool {
-    let ix1 = ppe_box[0].max(person_box[0]);
-    let iy1 = ppe_box[1].max(person_box[1]);
-    let ix2 = ppe_box[2].min(person_box[2]);
-    let iy2 = ppe_box[3].min(person_box[3]);
-    if ix2 <= ix1 || iy2 <= iy1 {
-        return false;
+fn area(bounds: [f32; 4]) -> f32 {
+    (bounds[2] - bounds[0]).max(0.0) * (bounds[3] - bounds[1]).max(0.0)
+}
+
+fn intersection(a: [f32; 4], b: [f32; 4]) -> f32 {
+    area([
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].min(b[3]),
+    ])
+}
+
+pub(crate) fn overlapping_people(a: [f32; 4], b: [f32; 4]) -> bool {
+    let overlap = intersection(a, b);
+    overlap > 0.0 && overlap >= 0.35 * (area(a) + area(b) - overlap)
+}
+
+fn coat_owner(coat: [f32; 4], people: &[[f32; 4]]) -> Option<usize> {
+    let coat_area = area(coat);
+    if coat_area <= 0.0 || !coat_area.is_finite() {
+        return None;
     }
-    let cx = (ppe_box[0] + ppe_box[2]) * 0.5;
-    let cy = (ppe_box[1] + ppe_box[3]) * 0.5;
-    if cx >= person_box[0] && cx <= person_box[2] && cy >= person_box[1] && cy <= person_box[3] {
-        return true;
+    let mut best = (0, 0.0);
+    let mut second = 0.0_f32;
+    for (index, person) in people.iter().enumerate() {
+        let mut body = *person;
+        body[1] += 0.10 * (body[3] - body[1]);
+        let coverage = intersection(coat, body) / coat_area;
+        if coverage > best.1 {
+            second = best.1;
+            best = (index, coverage);
+        } else {
+            second = second.max(coverage);
+        }
     }
-    let inter = (ix2 - ix1) * (iy2 - iy1);
-    let area_ppe = ((ppe_box[2] - ppe_box[0]) * (ppe_box[3] - ppe_box[1])).max(1.0);
-    let area_per = ((person_box[2] - person_box[0]) * (person_box[3] - person_box[1])).max(1.0);
-    inter / area_ppe.min(area_per) >= 0.20
+    (best.1 >= 0.60 && best.1 - second >= 0.15).then_some(best.0)
 }
 
 /// 裁切 BGR 子图（带 15% padding），用于远景/灰度监控图人框 ROI 二次精检。
@@ -350,18 +384,34 @@ impl PpeRunner for YoloPpeRunner {
                 supplement_masks(model, bgr, w, h, person_boxes, &mut masks);
             }
         }
+        let mut coat_hits = vec![(false, false); person_boxes.len()];
+        for bounds in no_boxes {
+            if let Some(owner) = coat_owner(bounds, person_boxes) {
+                coat_hits[owner].0 = true;
+            }
+        }
+        for bounds in wear_boxes {
+            if let Some(owner) = coat_owner(bounds, person_boxes) {
+                coat_hits[owner].1 = true;
+            }
+        }
         let mut coats: Vec<_> = person_boxes
             .iter()
-            .map(|pb| {
-                if no_boxes.iter().any(|nb| boxes_overlap(*nb, *pb)) {
-                    return PpeStatus::NoPpe;
-                }
-                if wear_boxes.iter().any(|wb| boxes_overlap(*wb, *pb)) {
-                    return PpeStatus::Wearing;
+            .enumerate()
+            .map(|(index, pb)| {
+                match coat_hits[index] {
+                    (true, false) => return PpeStatus::NoPpe,
+                    (false, true) => return PpeStatus::Wearing,
+                    (true, true) => return PpeStatus::Unknown,
+                    (false, false) => (),
                 }
                 // LS-043：远景/灰度图整图无检出时，对较小人框裁切 ROI 二次精检（提升远景召回率）
                 let box_area = ((pb[2] - pb[0]).max(0.0)) * ((pb[3] - pb[1]).max(0.0));
-                if box_area / frame_area < 0.35 {
+                let occluded = person_boxes
+                    .iter()
+                    .enumerate()
+                    .any(|(other, bounds)| index != other && overlapping_people(*pb, *bounds));
+                if !occluded && box_area / frame_area < 0.35 {
                     if let Some((roi, rw, rh)) = crop_bgr_roi(bgr, w, h, *pb) {
                         // LS-055：灰度/低照度 ROI 先做 CLAHE 增强（仅灰度图触发，避免彩色失真）
                         let roi = if self.clahe_enabled
@@ -382,12 +432,11 @@ impl PpeRunner for YoloPpeRunner {
                         {
                             let has_no = roi_dets.first().is_some_and(|v| !v.is_empty());
                             let has_wear = roi_dets.iter().skip(1).any(|v| !v.is_empty());
-                            if has_no {
-                                return PpeStatus::NoPpe;
-                            }
-                            if has_wear {
-                                return PpeStatus::Wearing;
-                            }
+                            return match (has_no, has_wear) {
+                                (true, false) => PpeStatus::NoPpe,
+                                (false, true) => PpeStatus::Wearing,
+                                _ => PpeStatus::Unknown,
+                            };
                         }
                     }
                 }
@@ -401,13 +450,20 @@ impl PpeRunner for YoloPpeRunner {
                     .as_mut()
                     .and_then(|model| {
                         model
-                            .detect_classes(bgr, w, h, &[(0, COAT_CONFIRMATION_CONF, 0.0)])
+                            .detect_classes(
+                                bgr,
+                                w,
+                                h,
+                                &[
+                                    (0, COAT_CONFIRMATION_CONF, 0.0),
+                                    (1, COAT_CONFIRMATION_CONF, 0.0),
+                                    (2, COAT_CONFIRMATION_CONF, 0.0),
+                                ],
+                            )
                             .ok()
                     })
-                    .and_then(|classes| classes.into_iter().next())
                     .unwrap_or_default();
-                let boxes: Vec<_> = detections.into_iter().map(|d| d.box_).collect();
-                apply_coat_confirmation(&mut coats, person_boxes, &boxes);
+                apply_coat_confirmation(&mut coats, person_boxes, &detections);
             }
         }
         coats
@@ -428,12 +484,7 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
         );
         return None;
     }
-    let find = |name: &str| -> Option<usize> {
-        names.iter().position(|n| {
-            n.replace(['_', '-'], " ")
-                .eq_ignore_ascii_case(&name.trim().replace(['_', '-'], " "))
-        })
-    };
+    let find = |name: &str| class_index(&names, name);
     let Some(violation_class) = find(&cfg.violation_class_name) else {
         println!(
             "[ls-analyzer] PPE 违规类 {} 不在类表 {:?}",
@@ -563,12 +614,43 @@ mod tests {
         apply_coat_confirmation(
             &mut status,
             &people,
-            &[[10.0, 35.0, 45.0, 135.0], [60.0, 40.0, 90.0, 150.0]],
+            &[vec![
+                Det {
+                    box_: [10.0, 35.0, 45.0, 135.0],
+                    score: 0.9,
+                },
+                Det {
+                    box_: [60.0, 40.0, 90.0, 150.0],
+                    score: 0.9,
+                },
+            ]],
         );
         assert_eq!(
             status,
             [PpeStatus::Wearing, PpeStatus::Unknown, PpeStatus::NoPpe]
         );
+    }
+
+    #[test]
+    fn stronger_alternative_garment_leaves_coat_unknown() {
+        let bounds = [10.0, 35.0, 45.0, 135.0];
+        let people = [[0.0, 0.0, 100.0, 200.0]];
+        let mut status = [PpeStatus::Wearing];
+        apply_coat_confirmation(
+            &mut status,
+            &people,
+            &[
+                vec![Det {
+                    box_: bounds,
+                    score: 0.64,
+                }],
+                vec![Det {
+                    box_: bounds,
+                    score: 0.82,
+                }],
+            ],
+        );
+        assert_eq!(status, [PpeStatus::Unknown]);
     }
 
     #[test]

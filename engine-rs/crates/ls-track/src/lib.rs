@@ -459,6 +459,13 @@ impl ByteTrack {
         (snap(&self.tracked), snap(&self.lost), snap(&unconf))
     }
 
+    pub fn forget(&mut self, ids: &std::collections::HashSet<i64>) {
+        self.tracked
+            .retain(|track| !ids.contains(&track.external_track_id));
+        self.lost
+            .retain(|track| !ids.contains(&track.external_track_id));
+    }
+
     /// 输入一批检测（tlbr+score），返回激活轨迹 [(tlbr, external_id)]。
     pub fn update(&mut self, detections: &[Detection]) -> Vec<([f32; 4], i64)> {
         self.frame_id += 1;

@@ -1380,65 +1380,26 @@ fn redact_line(line: &str) -> String {
 
 pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
     with_store(&st, |s| {
-        // ppe_model 优先级：env > app_settings（下载写入）> 随包 models/
-        // 2026-11-21（用户指令「随包发布」）：发行包内置 yolo11n_ppe.onnx，
-        // 安装即有实验服检测，不再要求网页端确认许可后下载。
-        let env_ppe = std::env::var("LS_PPE_MODEL").ok().filter(|v| !v.is_empty());
-        let db_ppe = s.setting_get("ppe_model").ok().flatten();
-        let bundled = crate::deploy::default_install_root().join("models/yolo11n_ppe.onnx");
-        let bundled = bundled
-            .is_file()
-            .then(|| bundled.to_string_lossy().into_owned());
-        let model_path = env_ppe
-            .filter(|p| std::path::Path::new(p).is_file())
-            .or_else(|| db_ppe.filter(|p| std::path::Path::new(p).is_file()))
-            .or_else(|| bundled.clone());
+        let selection = crate::worker::resolve_ppe_model(s);
+        let model_path = selection.path;
         let installed = model_path.is_some();
-        // 0.4.0：启停开关（默认开）。关闭后 worker 不装配 PPE，仅人员检测。
-        let enabled = s
-            .setting_get("ppe.enabled")
-            .ok()
-            .flatten()
-            .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
-            .unwrap_or(true);
-        let source = if std::env::var("LS_PPE_MODEL")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some_and(|p| std::path::Path::new(&p).is_file())
-        {
-            "env"
-        } else if s
-            .setting_get("ppe_model")
-            .ok()
-            .flatten()
-            .is_some_and(|p| std::path::Path::new(&p).is_file())
-        {
-            "custom"
-        } else if bundled.is_some() {
-            "bundled"
-        } else {
-            "none"
-        };
-        // 展示实际文件的大小与 SHA256（按 path+len+mtime 缓存，避免高频轮询反复读盘阻塞）
+        let enabled = selection.enabled;
+        let source = selection.source;
+        let warning = selection.warning;
         let (size_bytes, sha256) = model_path
-            .as_ref()
-            .and_then(|p| cached_file_sha256(std::path::Path::new(p)))
+            .as_deref()
+            .and_then(cached_file_sha256)
             .unwrap_or((-1, String::new()));
-        let classes: Vec<String> = model_path
-            .as_ref()
-            .map(|p| ls_analyzer::ppe::load_class_names(std::path::Path::new(p)))
+        let classes = model_path
+            .as_deref()
+            .map(ls_analyzer::ppe::load_class_names)
             .unwrap_or_default();
-        let warning: Option<String> = if source == "env"
-            && s.setting_get("ppe_model")
-                .ok()
-                .flatten()
-                .is_some_and(|p| !p.trim().is_empty())
-        {
-            Some("当前由环境变量 LS_PPE_MODEL 覆盖，网页上传的自定义模型暂未生效".into())
-        } else if installed && enabled && classes.is_empty() {
-            Some("模型缺少配套 .classes.txt 类名表，已自动退化为仅人员检测".into())
+        let (loaded, failed) = st.workers.ppe_runtime_counts();
+        let active = installed && enabled && (loaded > 0 || failed == 0);
+        let warning = if enabled && failed > 0 {
+            Some(format!("{failed} 路来源加载 PPE 模型失败，使用人员检测"))
         } else {
-            None
+            warning
         };
         let coat_confirmation = model_path
             .as_ref()
@@ -1454,13 +1415,15 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
             "close_mask_enabled": crate::worker::close_mask_enabled(s),
             "output_format": s.setting_get("ppe.output_format")?.unwrap_or_else(|| "auto".into()),
             "source": source,
-            "bundled": bundled.is_some(),
-            "mode": if installed && enabled && !classes.is_empty() { "ppe" } else { "person_only" },
-            "active": installed && enabled && !classes.is_empty(),
+            "bundled": selection.bundled,
+            "mode": if active { "ppe" } else { "person_only" },
+            "active": active,
+            "loaded_sources": loaded,
+            "failed_sources": failed,
             "classes": classes,
             "warning": warning,
             "license_confirmed_required": !installed,
-            "license_notice": if bundled.is_some() {
+            "license_notice": if selection.bundled {
                 "实验服模型已随安装包提供（权重由 Roboflow 训练数据集派生，数据集许可 CC BY 4.0，署名见 NOTICE）。已默认启用，可随时关闭或替换。"
             } else {
                 "实验服模型权重由 Roboflow 训练数据集派生，具体许可仍待确认（Q-08）。下载即表示你已阅读并接受该数据集的用途限制。"
@@ -1473,6 +1436,10 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
             }),
             "note": if !installed {
                 "安装包未内置实验服模型；可上传自定义 ONNX 或更新到随包版本"
+            } else if enabled && failed > 0 {
+                "部分来源 PPE 加载失败，请查看诊断日志"
+            } else if active && loaded == 0 {
+                "已配置实验服模型，分析来源启动时加载"
             } else if enabled {
                 "实验服模型已启用"
             } else {
