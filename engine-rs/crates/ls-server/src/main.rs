@@ -41,6 +41,7 @@ mod middleware;
 mod performance;
 mod plugins;
 mod router;
+mod spatial;
 mod state;
 mod util;
 mod vlm;

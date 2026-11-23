@@ -6,11 +6,61 @@ use crate::util::*;
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use ls_core::{AnchorMode, ZoneSpatial};
 use serde_json::{json, Value};
 
-pub(crate) fn zone_json(t: &(i64, i64, String, String)) -> Value {
-    let polygon = serde_json::from_str::<Value>(&t.3).unwrap_or(Value::String(t.3.clone()));
-    json!({"id": t.0, "camera_id": t.1, "name": t.2, "polygon": polygon})
+pub(crate) fn zone_json(zone: &ls_store::StoredZone) -> Value {
+    let mut result = json!(zone.spatial);
+    result["id"] = json!(zone.id);
+    result["camera_id"] = json!(zone.camera_id);
+    result["name"] = json!(zone.name);
+    result["polygon"] = serde_json::from_str(&zone.polygon).unwrap_or_else(|_| json!(zone.polygon));
+    result
+}
+
+#[derive(Default, serde::Deserialize)]
+pub(crate) struct ZonePatch {
+    anchor_mode: Option<AnchorMode>,
+    margin_px: Option<u32>,
+    leave_grace_frames: Option<u32>,
+}
+
+impl ZonePatch {
+    pub(crate) fn parse(body: &Value) -> Result<Self, &'static str> {
+        let patch: Self = serde_json::from_value(body.clone())
+            .map_err(|_| "请输入有效的区域锚点、边界像素和离场帧数")?;
+        if patch.margin_px.is_some_and(|v| v > 128) {
+            return Err("边界宽容须在 0 至 128 像素内");
+        }
+        if patch.leave_grace_frames.is_some_and(|v| v > 120) {
+            return Err("离场宽限须在 0 至 120 帧内");
+        }
+        Ok(patch)
+    }
+
+    pub(crate) fn apply(self, defaults: ZoneSpatial) -> ZoneSpatial {
+        ZoneSpatial {
+            anchor_mode: self.anchor_mode.unwrap_or(defaults.anchor_mode),
+            margin_px: self.margin_px.unwrap_or(defaults.margin_px),
+            leave_grace_frames: self
+                .leave_grace_frames
+                .unwrap_or(defaults.leave_grace_frames),
+        }
+    }
+}
+
+pub(crate) fn valid_zone_polygon(polygon: &Value) -> bool {
+    polygon.as_array().is_some_and(|vertices| {
+        (3..=256).contains(&vertices.len())
+            && vertices.iter().all(|vertex| {
+                vertex.as_array().is_some_and(|xy| {
+                    xy.len() == 2
+                        && xy
+                            .iter()
+                            .all(|v| v.as_i64().is_some_and(|p| i32::try_from(p).is_ok()))
+                })
+            })
+    })
 }
 
 pub(crate) async fn zones_list(
@@ -19,12 +69,7 @@ pub(crate) async fn zones_list(
 ) -> Response {
     let cid: Option<i64> = q.get("camera_id").and_then(|v| v.parse().ok());
     with_store(&st, |s| {
-        let all = s.zones_all()?;
-        let rows: Vec<Value> = all
-            .iter()
-            .filter(|z| cid.map(|c| z.1 == c).unwrap_or(true))
-            .map(zone_json)
-            .collect();
+        let rows: Vec<Value> = s.zones_spatial(cid)?.iter().map(zone_json).collect();
         Ok(Json(rows))
     })
 }
@@ -37,23 +82,33 @@ pub(crate) async fn add_zone(State(st): State<Shared>, Json(body): Json<Value>) 
         .unwrap_or("")
         .to_string();
     let polygon = body.get("polygon").cloned().unwrap_or(Value::Null);
-    if !polygon.is_array() || name.is_empty() {
+    if !valid_zone_polygon(&polygon) || name.is_empty() {
         return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "name 与 polygon(数组) 必填",
+            "请输入区域名称和 3 至 256 个整数坐标顶点",
         )
         .into_response();
     }
+    let spatial = match ZonePatch::parse(&body) {
+        Ok(patch) => patch.apply(ZoneSpatial::NEW_ZONE),
+        Err(error) => return detail_err(StatusCode::UNPROCESSABLE_ENTITY, error).into_response(),
+    };
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
             return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
-        let zid = s.add_zone(cid, &name, &polygon.to_string())?;
+        let polygon = polygon.to_string();
+        let zid = s.add_zone_spatial(cid, &name, &polygon, spatial)?;
         let revision = st.workers.notify_policy_changed();
-        Ok(
-            Json(json!({"id": zid, "camera_id": cid, "name": name, "polygon": polygon, "policy_revision": revision}))
-                .into_response(),
-        )
+        let mut response = zone_json(&ls_store::StoredZone {
+            id: zid,
+            camera_id: cid,
+            name,
+            polygon,
+            spatial,
+        });
+        response["policy_revision"] = json!(revision);
+        Ok(Json(response).into_response())
     })
 }
 
@@ -74,24 +129,36 @@ pub(crate) async fn update_zone(
     AxPath(zid): AxPath<i64>,
     Json(body): Json<Value>,
 ) -> Response {
-    let polygon = body.get("polygon").cloned().unwrap_or(Value::Null);
-    let valid = polygon
-        .as_array()
-        .map(|a| {
-            a.len() >= 3
-                && a.iter()
-                    .all(|p| p.as_array().is_some_and(|xy| xy.len() >= 2))
-        })
-        .unwrap_or(false);
-    if !valid {
+    let polygon = body.get("polygon");
+    if polygon.is_some_and(|value| !valid_zone_polygon(value)) {
         return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "polygon 必须为 ≥3 个 [x,y] 顶点的数组",
+            "polygon 必须为 3 至 256 个整数坐标顶点的数组",
         )
         .into_response();
     }
+    let patch = match ZonePatch::parse(&body) {
+        Ok(patch) => patch,
+        Err(error) => return detail_err(StatusCode::UNPROCESSABLE_ENTITY, error).into_response(),
+    };
+    if polygon.is_none()
+        && patch.anchor_mode.is_none()
+        && patch.margin_px.is_none()
+        && patch.leave_grace_frames.is_none()
+    {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "请选择要修改的区域设置")
+            .into_response();
+    }
+    let polygon_json = polygon.map(Value::to_string);
     with_store(&st, |s| {
-        if s.update_zone_polygon(zid, &polygon.to_string())? > 0 {
+        if s.update_zone_spatial(
+            zid,
+            polygon_json.as_deref(),
+            patch.anchor_mode,
+            patch.margin_px,
+            patch.leave_grace_frames,
+        )? > 0
+        {
             let revision = st.workers.notify_policy_changed();
             Ok(Json(
                 json!({"ok": true, "id": zid, "polygon": polygon, "policy_revision": revision}),

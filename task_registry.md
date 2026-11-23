@@ -41,8 +41,8 @@
 | LS-076 | v0.6.0 基线缺陷审查与 1.0.0 路线图补充 | P0 | DONE | 2026-11-23 | 查 `docs/plan/v1.0.0-roadmap.md` §1.3 的 9 项发现与验收。待用户恢复后锁定 `LS-080`。 |
 | LS-080 | v0.6.1 · `InferBackend` 抽象 + 现成权重对照整合（YOLOE 正负对照/`PP-LCNet`）+ 256×256 上身 PPE 精判/唯一归属/遮挡断轨/COCO 互证 | P0 | READY | 2026-11-23 | 文件检测和首批后端改动已验证。原生 256 候选未提升覆盖，待进一步对照可用权重。 |
 | LS-081 | v0.6.1 · 并发流硬上限（≤5）+ WS `?since=` 断线重放 + 分阶段耗时 HUD + 敏感度三档预设 | P0 | DONE | 2026-11-24 | 值守功能和基线缺陷通过定向验证，见 `progress.md`。 |
-| LS-082 | v0.6.2 · 空间智能防误报（4 锚点/死区/12 帧离场宽限/Motion+Filter 双遮罩/静止降频/一键记住误报点/抑制审计） | P0 | ACTIVE | 2026-11-24 | 优先实施区域锚点、边界迟滞和双遮罩，见路线图 `LS-082`（Schema `v23`）。 |
-| LS-083 | v0.6.2 · 共享 `GpuScheduler` + Vulkan 物理设备枚举 + 干净 WebP 叠框 + Debug 叠层/Digital PTZ | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-083`（Schema `v24`） |
+| LS-082 | v0.6.2 · 空间智能防误报（4 锚点/死区/12 帧离场宽限/Motion+Filter 双遮罩/静止降频/一键记住误报点/抑制审计） | P0 | DONE | 2026-11-24 | 旧库迁移、遮罩心跳、规则与误报点 API 及前端定向验证通过。 |
+| LS-083 | v0.6.2 · 共享 `GpuScheduler` + Vulkan 物理设备枚举 + 干净 WebP 叠框 + Debug 叠层/Digital PTZ | P0 | ACTIVE | 2026-11-24 | 从 `ls-infer` 的 DirectML 会话创建、推理与销毁入口收口。 |
 | LS-084 | v0.7.0 · 违规事件段聚合（`duration_s`/峰值截图）+ 两级宽限倒计时 + 合规恢复自动消警（`alert_resolved`） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-084`（Schema `v25`） |
 | LS-085 | v0.7.0 · 统一 AI Review 可解释性抽屉与抑制审视面板 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-085` |
 | LS-086 | v0.7.0 · 统一 Vulkan CV 引擎选型 Spike（`ncnn-vulkan` vs `ort-webgpu` vs `wgpu`）& 真机对比基准 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-086` 与 `docs/adr/0012-unified-vulkan-gpu.md` |

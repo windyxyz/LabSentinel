@@ -4,17 +4,29 @@
 //! `migrate` 幂等推进存量库（v13→v14 起）。v14 = UX2 cascade（events 加
 //! vlm_verdict/vlm_ts/vlm_suppressed 三列）。
 
+use ls_core::{AnchorMode, ZoneSpatial};
 use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
 mod faces;
 mod operations;
+mod spatial;
 pub use faces::{FacePerson, FaceTemplate};
 pub use operations::{ComplianceCounts, DeliveryWithHistory, EventNote};
+pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 22;
+pub const SCHEMA_VERSION_LATEST: i64 = 23;
+
+#[derive(Debug)]
+pub struct StoredZone {
+    pub id: i64,
+    pub camera_id: i64,
+    pub name: String,
+    pub polygon: String,
+    pub spatial: ZoneSpatial,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
@@ -149,14 +161,16 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(22, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(23, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
                analyzer TEXT DEFAULT 'default', analysis_source TEXT NOT NULL DEFAULT '', \
                analysis_shared INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS zones(\
-               id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
+               id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT, \
+               anchor_mode TEXT NOT NULL DEFAULT 'bottom_center', margin_px INTEGER NOT NULL DEFAULT 0, \
+               leave_grace_frames INTEGER NOT NULL DEFAULT 12);
              CREATE TABLE IF NOT EXISTS rules(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, zone_id INTEGER, \
                behavior TEXT, level INTEGER, cooldown_s INTEGER, \
@@ -218,6 +232,7 @@ impl Store {
         )?;
         self.conn.execute_batch(faces::SCHEMA)?;
         self.conn.execute_batch(operations::SCHEMA)?;
+        self.conn.execute_batch(spatial::SCHEMA)?;
         Ok(true)
     }
 
@@ -371,6 +386,30 @@ impl Store {
                 [],
             )?;
         }
+        let zone_columns = tx
+            .prepare("PRAGMA table_info(zones)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        for (name, definition) in [
+            ("anchor_mode", "TEXT NOT NULL DEFAULT 'bottom_center'"),
+            ("margin_px", "INTEGER NOT NULL DEFAULT 0"),
+            ("leave_grace_frames", "INTEGER NOT NULL DEFAULT 12"),
+        ] {
+            if !zone_columns.contains(name) {
+                tx.execute(
+                    &format!("ALTER TABLE zones ADD COLUMN {name} {definition}"),
+                    [],
+                )?;
+                if name == "leave_grace_frames" {
+                    tx.execute("UPDATE zones SET leave_grace_frames=0", [])?;
+                }
+            }
+        }
+        tx.execute_batch(spatial::SCHEMA)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(23, 'rust-ls082-spatial-policy')",
+            [],
+        )?;
         tx.commit()?;
         self.schema_version()
     }
@@ -970,6 +1009,10 @@ impl Store {
         self.conn
             .execute("DELETE FROM zones WHERE camera_id=?", params![id])?;
         self.conn
+            .execute("DELETE FROM camera_masks WHERE camera_id=?", [id])?;
+        self.conn
+            .execute("DELETE FROM fp_spots WHERE camera_id=?", [id])?;
+        self.conn
             .execute("DELETE FROM cameras WHERE id=?", params![id])
     }
 
@@ -1009,9 +1052,49 @@ impl Store {
         name: &str,
         polygon_json: &str,
     ) -> rusqlite::Result<i64> {
+        self.add_zone_spatial(camera_id, name, polygon_json, ZoneSpatial::NEW_ZONE)
+    }
+
+    pub fn zones_spatial(&self, camera_id: Option<i64>) -> rusqlite::Result<Vec<StoredZone>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,camera_id,name,polygon,anchor_mode,margin_px,leave_grace_frames
+             FROM zones WHERE (?1 IS NULL OR camera_id=?1) ORDER BY camera_id,id",
+        )?;
+        let rows = stmt.query_map([camera_id], |row| {
+            let anchor: String = row.get(4)?;
+            Ok(StoredZone {
+                id: row.get(0)?,
+                camera_id: row.get(1)?,
+                name: row.get(2)?,
+                polygon: row.get(3)?,
+                spatial: ZoneSpatial {
+                    anchor_mode: AnchorMode::from_name(&anchor).unwrap_or_default(),
+                    margin_px: row.get(5)?,
+                    leave_grace_frames: row.get(6)?,
+                },
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn add_zone_spatial(
+        &self,
+        camera_id: i64,
+        name: &str,
+        polygon_json: &str,
+        spatial: ZoneSpatial,
+    ) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO zones(camera_id,name,polygon) VALUES(?,?,?)",
-            params![camera_id, name, polygon_json],
+            "INSERT INTO zones(camera_id,name,polygon,anchor_mode,margin_px,leave_grace_frames)
+             VALUES(?,?,?,?,?,?)",
+            params![
+                camera_id,
+                name,
+                polygon_json,
+                spatial.anchor_mode.as_str(),
+                spatial.margin_px,
+                spatial.leave_grace_frames
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -1021,11 +1104,18 @@ impl Store {
             .execute("DELETE FROM zones WHERE id=?", params![id])
     }
 
-    /// LS-052：更新安全区多边形（拖拽顶点后保存；名称不变）。
-    pub fn update_zone_polygon(&self, id: i64, polygon_json: &str) -> rusqlite::Result<usize> {
+    pub fn update_zone_spatial(
+        &self,
+        id: i64,
+        polygon: Option<&str>,
+        anchor: Option<AnchorMode>,
+        margin_px: Option<u32>,
+        leave_grace_frames: Option<u32>,
+    ) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "UPDATE zones SET polygon=? WHERE id=?",
-            params![polygon_json, id],
+            "UPDATE zones SET polygon=COALESCE(?,polygon),anchor_mode=COALESCE(?,anchor_mode),
+             margin_px=COALESCE(?,margin_px),leave_grace_frames=COALESCE(?,leave_grace_frames) WHERE id=?",
+            params![polygon, anchor.map(AnchorMode::as_str), margin_px, leave_grace_frames, id],
         )
     }
 
@@ -2187,6 +2277,8 @@ impl Store {
     pub fn clear_config(&self) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM rules", [])?;
         self.conn.execute("DELETE FROM zones", [])?;
+        self.conn.execute("DELETE FROM camera_masks", [])?;
+        self.conn.execute("DELETE FROM fp_spots", [])?;
         self.conn.execute("DELETE FROM cameras", [])?;
         Ok(())
     }
@@ -2653,6 +2745,7 @@ mod tests {
             CREATE TABLE cameras(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
               status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', analyzer TEXT DEFAULT 'python'); \
             CREATE TABLE zones(id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT); \
+            INSERT INTO zones(camera_id,name,polygon) VALUES(1,'legacy','[[0,0],[10,0],[10,10]]'); \
             CREATE TABLE rules(id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, zone_id INTEGER, \
               behavior TEXT, level INTEGER, cooldown_s INTEGER, time_start TEXT, time_end TEXT, \
               threshold INTEGER, enabled INTEGER, days_of_week TEXT, holiday_only INTEGER); \
@@ -2665,6 +2758,15 @@ mod tests {
         assert_eq!(s.migrate().unwrap(), SCHEMA_VERSION_LATEST);
         assert_eq!(s.migrate().unwrap(), SCHEMA_VERSION_LATEST); // 二次调用不炸
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION_LATEST);
+        assert_eq!(
+            s.zones_spatial(Some(1)).unwrap()[0].spatial,
+            ZoneSpatial::default()
+        );
+        s.add_zone(1, "new", "[[0,0],[10,0],[10,10]]").unwrap();
+        assert_eq!(
+            s.zones_spatial(Some(1)).unwrap()[1].spatial,
+            ZoneSpatial::NEW_ZONE
+        );
         let eid = s
             .add_event(&NewEvent {
                 camera_id: 1,

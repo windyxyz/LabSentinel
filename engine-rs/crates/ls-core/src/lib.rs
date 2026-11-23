@@ -13,7 +13,7 @@ pub mod state;
 pub mod time;
 pub mod zones;
 
-pub use zones::point_in_polygon;
+pub use zones::{point_in_polygon, AnchorMode, ZoneSpatial};
 
 /// 整数点（检测锚点/多边形顶点，与 Python 端 int 坐标一致）。
 pub type Point = (i64, i64);

@@ -43,6 +43,7 @@ fn golden_pipeline(camera_id: i64, fps: f32) -> CameraPipeline {
             camera_id,
             name: "全画幅".into(),
             points: FULL_ZONE.to_vec(),
+            spatial: Default::default(),
         }],
         vec![
             golden_rule(1, "enter"),

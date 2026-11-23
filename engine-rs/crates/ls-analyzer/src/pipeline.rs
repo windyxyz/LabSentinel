@@ -1,7 +1,7 @@
 //! 单路分析管线（T-331 数据面）：检测 → ByteTrack → 区域迟滞 → 规则/冷却 → 事件候选。
 //!
 //! 与 Python `pipeline.py::_analyze` + `rules.py::RuleEngine` 对齐：
-//! - 区域锚点 = 检测框底边中点（`(x1+x2)/2, y2` 取整）；`point_in_polygon` 边界算内；
+//! - 区域使用各自的锚点、边界宽容和进出迟滞设置。
 //! - 每帧对每个 zone 更新 `ZoneState`（enter/exit 帧数可配）；无检出帧对全部在内 track
 //!   补离场观测（避免单帧遮挡导致 exit 永不触发）；
 //! - `occupancy_over` 按区去重人数；rule.zone_id=0 统计整帧活跃人员；
@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use ls_core::state::ZoneState;
 use ls_core::time::{self as ls_time, DateTime};
-use ls_core::{point_in_polygon, ZoneChange};
+use ls_core::{ZoneChange, ZoneSpatial};
 use ls_track::{ByteTrack, ByteTrackConfig, Detection as TrackDetection};
 
 #[derive(Clone, Debug)]
@@ -34,6 +34,7 @@ pub struct ZoneSpec {
     pub camera_id: i64,
     pub name: String,
     pub points: Vec<(i64, i64)>,
+    pub spatial: ZoneSpatial,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,7 +211,7 @@ impl CameraPipeline {
         };
         let mut zone_states = HashMap::new();
         for z in &zones {
-            zone_states.insert(z.id, ZoneState::new(hysteresis));
+            zone_states.insert(z.id, ZoneState::new(z.spatial.hysteresis(hysteresis)));
         }
         Self {
             camera,
@@ -248,9 +249,9 @@ impl CameraPipeline {
         let unchanged_zones: HashSet<_> = zones
             .iter()
             .filter(|zone| {
-                self.zones
-                    .iter()
-                    .any(|old| old.id == zone.id && old.points == zone.points)
+                self.zones.iter().any(|old| {
+                    old.id == zone.id && old.points == zone.points && old.spatial == zone.spatial
+                })
             })
             .map(|zone| zone.id)
             .collect();
@@ -259,7 +260,7 @@ impl CameraPipeline {
         for zone in zones {
             self.zone_states
                 .entry(zone.id)
-                .or_insert_with(|| ZoneState::new(self.hysteresis));
+                .or_insert_with(|| ZoneState::new(zone.spatial.hysteresis(self.hysteresis)));
         }
         let unchanged_rules: HashSet<_> = rules
             .iter()
@@ -495,22 +496,41 @@ impl CameraPipeline {
             self.zones.iter().map(|z| (z.id, HashSet::new())).collect();
         let mut changes: Vec<(i64, i64, ZoneChange, PpeStatus)> = Vec::new();
         for (bbox, tid) in &active {
-            let anchor = (((bbox[0] + bbox[2]) / 2.0) as i64, (bbox[3]) as i64);
-            let inside: HashSet<i64> = self
-                .zones
+            let ppe = dets
                 .iter()
-                .filter(|z| point_in_polygon(&z.points, anchor))
-                .map(|z| z.id)
-                .collect();
+                .position(|d| d.box_ == *bbox)
+                .map(|i| det_ppe[i])
+                .unwrap_or(PpeStatus::Unknown);
+            let mut inside = Vec::new();
+            for z in &self.zones {
+                let Some(state) = self.zone_states.get_mut(&z.id) else {
+                    continue;
+                };
+                match z.spatial.observe(&z.points, *bbox) {
+                    Some(observed) => {
+                        if observed {
+                            inside.push(z.id);
+                        }
+                        if let Some(change) = state.update(*tid, observed) {
+                            changes.push((z.id, *tid, change, ppe));
+                        }
+                    }
+                    None => {
+                        state.hold(*tid);
+                        if state.is_inside(*tid) {
+                            inside.push(z.id);
+                        }
+                    }
+                }
+            }
             for zid in &inside {
                 if let Some(s) = occ.get_mut(zid) {
                     s.insert(*tid);
                 }
             }
             if without_mask.contains(tid) {
-                let mut zone_ids: Vec<_> = inside.iter().copied().collect();
-                zone_ids.sort_unstable();
-                for zone_id in zone_ids.into_iter().map(Some).chain(std::iter::once(None)) {
+                inside.sort_unstable();
+                for zone_id in inside.into_iter().map(Some).chain(std::iter::once(None)) {
                     if self.try_fire(
                         zone_id,
                         "no_mask",
@@ -523,20 +543,6 @@ impl CameraPipeline {
                     ) {
                         break;
                     }
-                }
-            }
-            let ppe = dets
-                .iter()
-                .position(|d| d.box_ == *bbox)
-                .map(|i| det_ppe[i])
-                .unwrap_or(PpeStatus::Unknown);
-            for z in &self.zones {
-                if let Some(change) = self
-                    .zone_states
-                    .get_mut(&z.id)
-                    .and_then(|st| st.update(*tid, inside.contains(&z.id)))
-                {
-                    changes.push((z.id, *tid, change, ppe));
                 }
             }
         }
@@ -831,12 +837,11 @@ fn needs_ppe(
     active: &[([f32; 4], i64)],
 ) -> bool {
     active.iter().any(|(bbox, tid)| {
-        let anchor = (((bbox[0] + bbox[2]) / 2.0) as i64, (bbox[3]) as i64);
         zones.iter().any(|z| {
-            point_in_polygon(&z.points, anchor)
+            z.spatial.observe(&z.points, *bbox) == Some(true)
                 && zone_states
                     .get(&z.id)
-                    .map(|st| !st.inside_ids().contains(tid))
+                    .map(|st| !st.is_inside(*tid))
                     .unwrap_or(true)
         })
     })
@@ -942,6 +947,7 @@ mod tests {
             camera_id: 1,
             name: "A 区".into(),
             points: vec![(0, 0), (1000, 0), (1000, 1000), (0, 1000)],
+            spatial: ZoneSpatial::default(),
         }
     }
 

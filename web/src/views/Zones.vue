@@ -11,6 +11,13 @@ const cams = ref([])
 const camId = ref(null)
 const zones = ref([])
 const rules = ref([])
+const masks = ref([])
+const fpSpots = ref([])
+const drawKind = ref('zone')
+const maskKinds = { motion: '运动遮罩', object_filter: '目标过滤遮罩' }
+const maskColors = { motion: '#38bdf8', object_filter: '#fb923c' }
+const drawingBusy = ref(false)
+const spatialError = ref('')
 const drawing = ref([])      // 正在绘制的顶点（显示坐标）
 const snapT = ref(0)
 const snapshotError = ref(false)
@@ -85,6 +92,7 @@ watch(camId, () => {
   snapshotError.value = false
   snapT.value = camId.value ? Date.now() : 0
   load()
+  loadSpatial()
 }, { immediate: true })
 watch(camId, (id, _, onCleanup) => {
   policyMessage.value = ''
@@ -169,17 +177,47 @@ async function delTemplate(id) {
   await api.delRuleTemplate(id).then(loadTpls)
 }
 async function load() {
-  if (!camId.value) return
+  const id = camId.value
+  if (!id) return
   // 防御：接口异常形状不得让整页渲染崩溃（历史 bug：undefined.length → 闪黑/空白）
-  const zs = await api.zones(camId.value)
+  const [zs, rs] = await Promise.all([api.zones(id), api.rules(id)])
+  if (camId.value !== id) return
   zones.value = Array.isArray(zs) ? zs : []
-  const rs = await api.rules(camId.value)
   rules.value = Array.isArray(rs) ? rs : []
   drawing.value = []
   undoStack.value = []
   redoStack.value = []
   await nextTick()
   draw()
+}
+
+async function loadSpatial() {
+  const id = camId.value
+  spatialError.value = ''
+  masks.value = []
+  fpSpots.value = []
+  if (!id) return
+  try {
+    const result = await api.spatialSettings(id)
+    if (camId.value !== id) return
+    masks.value = Array.isArray(result?.masks) ? result.masks : []
+    fpSpots.value = Array.isArray(result?.spots) ? result.spots : []
+    await nextTick()
+    draw()
+  } catch (error) {
+    if (camId.value === id) spatialError.value = error.message
+  }
+}
+
+async function removeSpatial(id, kind) {
+  const camera = camId.value
+  try {
+    if (kind === 'spot') await api.deleteFpSpot(camera, id)
+    else await api.deleteCameraMask(camera, id)
+    if (camId.value === camera) await loadSpatial()
+  } catch (error) {
+    if (camId.value === camera) spatialError.value = error.message
+  }
 }
 
 // LS-052：安全区高对比区分色板（浅/深主题均可见）
@@ -195,6 +233,31 @@ function pushUndo(entry = { points: drawing.value.map(p => [...p]) }) {
 }
 const editError = ref('')
 const savingPolygon = ref(false)
+const spatialSaving = ref(false)
+const anchorModes = {
+  bottom_center: '脚下',
+  body_center: '身体中心',
+  upper_body: '上身',
+  four_point_any: '四点任一入区',
+}
+
+async function saveSpatial(zone) {
+  const id = camId.value
+  spatialSaving.value = true
+  editError.value = ''
+  try {
+    await api.updateZoneSpatial(zone.id, {
+      anchor_mode: zone.anchor_mode,
+      margin_px: zone.margin_px,
+      leave_grace_frames: zone.leave_grace_frames,
+    })
+    if (camId.value === id) editError.value = '区域判定已保存'
+  } catch (error) {
+    if (camId.value === id) editError.value = error.message
+  } finally {
+    spatialSaving.value = false
+  }
+}
 async function moveHistory(from, to) {
   if (!from.value.length || savingPolygon.value) return
   const entry = from.value.at(-1)
@@ -261,7 +324,7 @@ function onCanvasClick(e) {
   draw()
 }
 function onMouseDown(e) {
-  if (savingPolygon.value) return
+  if (savingPolygon.value || drawKind.value !== 'zone') return
   const hit = findVertex(canvasPos(e))
   if (hit) {
     drag.value = { ...hit, original: zones.value[hit.zoneIndex].polygon.map(point => [...point]) }
@@ -294,10 +357,32 @@ async function onMouseUp() {
     }
   }
 }
-function onDblClick() {
-  if (drawing.value.length >= 3 && zname.value) {
-    const polygon = drawing.value.map(([x, y]) => [Math.round(x / SCALE), Math.round(y / SCALE)])
-    api.addZone({ camera_id: camId.value, name: zname.value, polygon }).then(load)
+async function onDblClick() {
+  const id = camId.value
+  const name = zname.value.trim()
+  if (!id || !name || drawing.value.length < 3 || drawingBusy.value) return
+  const polygon = drawing.value.map(([x, y]) => [Math.round(x / SCALE), Math.round(y / SCALE)])
+    .filter(([x, y], i, points) => i === 0 || x !== points[i - 1][0] || y !== points[i - 1][1])
+  if (polygon.length < 3) return
+  drawingBusy.value = true
+  editError.value = ''
+  try {
+    if (drawKind.value === 'zone') {
+      await api.addZone({ camera_id: id, name, polygon })
+      if (camId.value === id) await load()
+    } else {
+      await api.addCameraMask(id, { name, kind: drawKind.value, polygon })
+      if (camId.value === id) {
+        drawing.value = []
+        undoStack.value = []
+        redoStack.value = []
+        await loadSpatial()
+      }
+    }
+  } catch (error) {
+    if (camId.value === id) editError.value = error.message
+  } finally {
+    drawingBusy.value = false
   }
 }
 function refreshBase() {
@@ -340,6 +425,19 @@ function draw() {
       ctx.textAlign = 'start'
     }
   })
+  for (const mask of masks.value) {
+    if (!Array.isArray(mask.polygon)) continue
+    ctx.setLineDash([6, 4])
+    paint(mask.polygon.map(([x, y]) => [x * SCALE, y * SCALE]),
+      maskColors[mask.kind] || maskColors.motion, true, true)
+  }
+  ctx.setLineDash([])
+  for (const spot of fpSpots.value) {
+    if (!Array.isArray(spot.bbox) || spot.bbox.length !== 4) continue
+    const [x1, y1, x2, y2] = spot.bbox
+    ctx.strokeStyle = '#f472b6'
+    ctx.strokeRect(x1 * SCALE, y1 * SCALE, (x2 - x1) * SCALE, (y2 - y1) * SCALE)
+  }
   paint(drawing.value, '#f5c518', drawing.value.length >= 3, drawing.value.length >= 3)
   // 悬停顶点高亮
   if (hoverVertex.value) {
@@ -377,7 +475,11 @@ async function addRule(zoneId) {
         <option v-for="c in cams" :key="c.id" :value="c.id">{{ c.name }}</option>
       </select>
       <span v-if="policyMessage" class="muted" role="status">{{ policyMessage }}</span>
-      <input v-model="zname" placeholder="新安全区名称（先填再画）" style="width:180px" />
+      <select v-model="drawKind" aria-label="绘制类型">
+        <option value="zone">安全区</option>
+        <option v-for="(label, kind) in maskKinds" :key="kind" :value="kind">{{ label }}</option>
+      </select>
+      <input v-model="zname" :placeholder="drawKind === 'zone' ? '新安全区名称' : '新遮罩名称'" style="width:180px" aria-label="绘制名称" />
       <button class="ghost" @click="pushUndo(); drawing = []; draw()">清除未保存顶点</button>
       <button class="ghost" :disabled="!undoStack.length" title="Ctrl+Z" @click="undo">撤销</button>
       <button class="ghost" :disabled="!redoStack.length" title="Ctrl+Y" @click="redo">重做</button>
@@ -397,14 +499,52 @@ async function addRule(zoneId) {
     <p v-if="editError" role="status">{{ editError }}</p>
   </div>
 
+  <div v-if="camId" class="panel">
+    <h3>遮罩与误报点</h3>
+    <p class="muted">运动遮罩用于性能设置中的运动预筛。目标过滤遮罩用于区域进入、未穿实验服和未戴口罩告警。</p>
+    <p v-if="spatialError" role="status">{{ spatialError }}</p>
+    <div v-for="mask in masks" :key="'mask-' + mask.id" class="row">
+      <span>{{ maskKinds[mask.kind] }} · {{ mask.name }}</span>
+      <button class="ghost" @click="removeSpatial(mask.id, 'mask')">移除</button>
+    </div>
+    <div v-for="spot in fpSpots" :key="'spot-' + spot.id" class="row">
+      <span>误报点 · 事件 #{{ spot.event_id }} · {{ spot.created_at }}</span>
+      <button class="ghost" @click="removeSpatial(spot.id, 'spot')">移除</button>
+    </div>
+  </div>
+
   <div class="panel">
     <h3 style="margin-bottom:10px">已配置安全区</h3>
     <table>
-      <tr><th>ID</th><th>名称</th><th>顶点数</th><th></th></tr>
+      <thead>
+      <tr><th>ID</th><th>名称</th><th>顶点数</th><th>入区判定</th><th></th></tr>
+      </thead>
+      <tbody>
       <tr v-for="z in zones" :key="z.id">
         <td>{{ z.id }}</td><td>{{ z.name }}</td><td>{{ Array.isArray(z.polygon) ? z.polygon.length : 0 }}</td>
+        <td>
+          <details>
+            <summary>{{ anchorModes[z.anchor_mode] || anchorModes.bottom_center }}</summary>
+            <form class="zone-spatial" @submit.prevent="saveSpatial(z)">
+              <label>区域锚点
+                <select v-model="z.anchor_mode">
+                  <option v-for="(label, value) in anchorModes" :key="value" :value="value">{{ label }}</option>
+                </select>
+              </label>
+              <label>边界宽容（像素）
+                <input v-model.number="z.margin_px" type="number" min="0" max="128" required>
+              </label>
+              <label>离场宽限（分析帧）
+                <input v-model.number="z.leave_grace_frames" type="number" min="0" max="120" required>
+              </label>
+              <small>边界宽容越大，越能容忍检测框抖动。离场宽限为 0 时沿用全局设置。</small>
+              <button class="ghost" :disabled="spatialSaving">保存判定</button>
+            </form>
+          </details>
+        </td>
         <td><button class="ghost" @click="api.delZone(z.id).then(load)">删除</button></td>
       </tr>
+      </tbody>
     </table>
 
     <h3 style="margin:14px 0 10px">告警规则</h3>
@@ -521,4 +661,6 @@ async function addRule(zoneId) {
 /* 任务17B：375px 小屏适配（scoped） */
 .panel { overflow-x: auto; }
 button { min-height: 40px; }
+.zone-spatial { display: grid; gap: 8px; max-width: 18rem; padding-block: 8px; }
+.zone-spatial label { display: grid; gap: 4px; }
 </style>

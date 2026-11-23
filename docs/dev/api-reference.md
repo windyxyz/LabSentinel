@@ -66,8 +66,15 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | /api/zones?camera_id= | `Zone[]`（camera_id 可省略=全部） |
-| POST | /api/zones | body `ZoneCreate`，顶点 <3 返回 400 |
+| POST | /api/zones | 新建区域，提供名称、监控源和 3–256 个整数坐标顶点。新区域默认 12 帧离场宽限 |
+| PUT | /api/zones/{id} | 部分更新 `polygon`、`anchor_mode`、`margin_px` 或 `leave_grace_frames`。帧数 0 表示沿用全局 |
 | DELETE | /api/zones/{id} | 删除 |
+| GET | /api/cameras/{id}/spatial | 读取该来源的两类遮罩和误报点 |
+| POST | /api/cameras/{id}/masks | 用 `name`、`kind`（`motion` 或 `object_filter`）及 `polygon` 新建遮罩 |
+| DELETE | /api/cameras/{id}/masks/{mask_id} | 移除遮罩 |
+| POST | /api/events/{id}/remember-spot | 将已标为误报且有单检测框的事件记为误报点 |
+| DELETE | /api/cameras/{id}/fp-spots/{spot_id} | 移除误报点 |
+| GET | /api/review/suppressions | 抑制记录，支持 `camera_id`、`before_id`、`limit`。同来源、原因和规则的记录按 30 秒聚合 |
 
 `Zone`: `{id, camera_id, name, polygon: [[x,y],...]}`（1280×720 像素坐标）
 

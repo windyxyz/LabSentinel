@@ -26,7 +26,7 @@ pub(crate) async fn config_export(
         let cams = s.cameras()?;
         let cname: std::collections::HashMap<i64, String> =
             cams.iter().map(|c| (c.id, c.name.clone())).collect();
-        let zones = s.zones_all()?;
+        let zones = s.zones_spatial(None)?;
         let rules = s.rules_all()?;
         let cameras: Vec<Value> = cams
             .iter()
@@ -49,14 +49,20 @@ pub(crate) async fn config_export(
         let zones_out: Vec<Value> = zones
             .iter()
             .map(|z| {
-                let polygon =
-                    serde_json::from_str::<Value>(&z.3).unwrap_or(Value::String(z.3.clone()));
-                json!({"camera_name": cname.get(&z.1).cloned().unwrap_or(format!("#{}", z.1)),
-                       "name": z.2, "polygon": polygon})
+                let mut zone = super::zones_rules::zone_json(z);
+                zone["camera_name"] = json!(cname
+                    .get(&z.camera_id)
+                    .cloned()
+                    .unwrap_or(format!("#{}", z.camera_id)));
+                zone.as_object_mut().expect("zone JSON object").remove("id");
+                zone.as_object_mut()
+                    .expect("zone JSON object")
+                    .remove("camera_id");
+                zone
             })
             .collect();
         let zname: std::collections::HashMap<i64, String> =
-            zones.iter().map(|z| (z.0, z.2.clone())).collect();
+            zones.iter().map(|z| (z.id, z.name.clone())).collect();
         let rules_out: Vec<Value> = rules
             .iter()
             .map(|r| {
@@ -199,7 +205,7 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                 continue;
             };
             let polygon = z.get("polygon").cloned().unwrap_or(Value::Null);
-            if !polygon.is_array() || name.is_empty() {
+            if !super::zones_rules::valid_zone_polygon(&polygon) || name.is_empty() {
                 skipped_zone.push(format!("{cname}/{name}"));
                 continue;
             }
@@ -208,7 +214,14 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                 skipped_zone.push(format!("{cname}/{name}"));
                 continue;
             }
-            let zid = s.add_zone(cid, name, &polygon.to_string())?;
+            let spatial = match super::zones_rules::ZonePatch::parse(z) {
+                Ok(patch) => patch.apply(ls_core::ZoneSpatial::default()),
+                Err(error) => {
+                    skipped_zone.push(format!("{cname}/{name}（{error}）"));
+                    continue;
+                }
+            };
+            let zid = s.add_zone_spatial(cid, name, &polygon.to_string(), spatial)?;
             zone_id_by_name.insert(key, zid);
             created.1 += 1;
         }

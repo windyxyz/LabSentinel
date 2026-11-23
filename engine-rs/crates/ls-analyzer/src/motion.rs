@@ -58,6 +58,8 @@ pub struct MotionGate {
     prev: Option<[u8; DW * DH]>,
     since_full: u64,
     stats: MotionStats,
+    ignored: Option<Box<[bool; DW * DH]>>,
+    masked_skip: bool,
 }
 
 impl MotionGate {
@@ -67,6 +69,8 @@ impl MotionGate {
             prev: None,
             since_full: 0,
             stats: MotionStats::default(),
+            ignored: None,
+            masked_skip: false,
         }
     }
 
@@ -88,10 +92,32 @@ impl MotionGate {
         &self.stats
     }
 
+    pub fn set_masks<'a>(&mut self, polygons: impl IntoIterator<Item = &'a [ls_core::Point]>) {
+        let mut ignored = Box::new([false; DW * DH]);
+        for polygon in polygons {
+            for (cell, masked) in ignored.iter_mut().enumerate() {
+                let x = ((cell % DW) * 2 + 1) * 1280 / (DW * 2);
+                let y = ((cell / DW) * 2 + 1) * 720 / (DH * 2);
+                *masked |= ls_core::point_in_polygon(polygon, (x as i64, y as i64));
+            }
+        }
+        let ignored = ignored.iter().any(|masked| *masked).then_some(ignored);
+        if self.ignored != ignored {
+            self.ignored = ignored;
+            self.prev = None;
+            self.mark_full();
+        }
+    }
+
+    pub fn masked_skip(&self) -> bool {
+        self.masked_skip
+    }
+
     /// 判定当前帧是否可跳过推理。调用方须在 `has_active_tracks=true` 时
     /// 直接全检（本方法亦内置该守卫，双保险）。
     pub fn should_skip(&mut self, bgr: &[u8], w: u32, h: u32, has_active_tracks: bool) -> bool {
         self.stats.total_frames += 1;
+        self.masked_skip = false;
 
         if !self.cfg.enabled || has_active_tracks {
             // 活跃跟踪或停用时清空旧参考帧，避免人离开后拿数分钟前的旧帧误判静止
@@ -102,8 +128,25 @@ impl MotionGate {
         let gray = downsample_gray(bgr, w, h);
         let skip = match self.prev {
             Some(prev) => {
-                let diff = mean_abs_diff(&prev, &gray);
-                diff < self.cfg.threshold && self.since_full < self.cfg.heartbeat_frames
+                let raw = mean_abs_diff(&prev, &gray);
+                let diff = self.ignored.as_ref().map_or(raw, |ignored| {
+                    let (sum, count) = prev
+                        .iter()
+                        .zip(&gray)
+                        .zip(ignored.iter())
+                        .filter(|(_, masked)| !**masked)
+                        .fold((0u32, 0u32), |(sum, count), ((a, b), _)| {
+                            (sum + u32::from(a.abs_diff(*b)), count + 1)
+                        });
+                    if count == 0 {
+                        0.0
+                    } else {
+                        sum as f32 / count as f32
+                    }
+                });
+                let skip = diff < self.cfg.threshold && self.since_full < self.cfg.heartbeat_frames;
+                self.masked_skip = skip && raw >= self.cfg.threshold;
+                skip
             }
             None => false, // 首帧永远全检
         };
@@ -262,5 +305,26 @@ mod tests {
         gate.set_config(cfg());
         // 重开后第一帧应全检（prev 被清空）
         assert!(!gate.should_skip(&f, 64, 36, false));
+    }
+
+    #[test]
+    fn motion_mask_ignores_screen_flash_but_keeps_analysis_heartbeat() {
+        let mut gate = MotionGate::new(cfg());
+        let mask = [(0, 0), (640, 0), (640, 720), (0, 720)];
+        gate.set_masks([mask.as_slice()]);
+        let dark = solid(64, 36, 0, 0, 0);
+        let mut left_bright = dark.clone();
+        for row in left_bright.as_chunks_mut::<{ 64 * 3 }>().0 {
+            row[..32 * 3].fill(255);
+        }
+        assert!(!gate.should_skip(&dark, 64, 36, false));
+        assert!(gate.should_skip(&left_bright, 64, 36, false));
+        assert!(gate.masked_skip());
+        assert!(gate.should_skip(&left_bright, 64, 36, false));
+        assert!(gate.should_skip(&left_bright, 64, 36, false));
+        assert!(!gate.should_skip(&left_bright, 64, 36, false));
+        let bright = solid(64, 36, 255, 255, 255);
+        assert!(!gate.should_skip(&bright, 64, 36, false));
+        assert!(!gate.should_skip(&left_bright, 64, 36, true));
     }
 }

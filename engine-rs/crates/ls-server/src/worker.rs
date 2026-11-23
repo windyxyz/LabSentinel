@@ -119,6 +119,16 @@ impl EventSink {
         snapshot_jpeg: Option<&[u8]>,
         dispatch: bool,
     ) -> Result<Option<i64>, String> {
+        self.record_located(cand, snapshot_jpeg, dispatch, None)
+    }
+
+    fn record_located(
+        &self,
+        cand: &ls_analyzer::pipeline::Candidate,
+        snapshot_jpeg: Option<&[u8]>,
+        dispatch: bool,
+        bbox: Option<[f32; 4]>,
+    ) -> Result<Option<i64>, String> {
         {
             let mut d = self.dedup.lock().map_err(|_| "dedup poison")?;
             let key = Self::dedup_key(cand);
@@ -147,7 +157,11 @@ impl EventSink {
             snapshot: snapshot.as_deref(),
             ts: &cand.ts_iso,
         };
-        let eid = store.add_event(&ev).map_err(|e| e.to_string())?;
+        let eid = match bbox.filter(|_| crate::spatial::spatial_rule(&cand.behavior)) {
+            Some(bounds) => store.add_located_event(&ev, bounds),
+            None => store.add_event(&ev),
+        }
+        .map_err(|e| e.to_string())?;
         // RA2-S5：AI 复核入队（默认 provider=none 零开销；只写 ai_review 标记）
         let _ = st
             .genai
@@ -495,6 +509,7 @@ struct CameraPolicy {
     zones: Vec<ls_analyzer::pipeline::ZoneSpec>,
     rules: Vec<ls_analyzer::pipeline::RuleSpec>,
     calendar: HashMap<String, String>,
+    spatial: crate::spatial::SpatialPolicy,
 }
 
 fn read_camera_policy(s: &ls_store::Store, cid: i64) -> Result<CameraPolicy, String> {
@@ -503,16 +518,16 @@ fn read_camera_policy(s: &ls_store::Store, cid: i64) -> Result<CameraPolicy, Str
         .unchecked_transaction()
         .map_err(|error| error.to_string())?;
     let zones = s
-        .zones_all()
+        .zones_spatial(Some(cid))
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter(|(_, zcid, ..)| *zcid == cid)
-        .filter_map(|(id, _, name, poly)| {
-            parse_polygon(&poly).map(|points| ls_analyzer::pipeline::ZoneSpec {
-                id,
+        .filter_map(|zone| {
+            parse_polygon(&zone.polygon).map(|points| ls_analyzer::pipeline::ZoneSpec {
+                id: zone.id,
                 camera_id: cid,
-                name,
+                name: zone.name,
                 points,
+                spatial: zone.spatial,
             })
         })
         .filter(|z| z.points.len() >= 3)
@@ -546,11 +561,13 @@ fn read_camera_policy(s: &ls_store::Store, cid: i64) -> Result<CameraPolicy, Str
         .into_iter()
         .map(|c| (c.date, c.mode))
         .collect();
+    let spatial = crate::spatial::SpatialPolicy::read(s, cid).map_err(|error| error.to_string())?;
     tx.commit().map_err(|error| error.to_string())?;
     Ok(CameraPolicy {
         zones,
         rules,
         calendar,
+        spatial,
     })
 }
 
@@ -1056,6 +1073,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             .unwrap_or(ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD),
         heartbeat_frames: ls_analyzer::motion::DEFAULT_HEARTBEAT_FRAMES,
     });
+    policy.spatial.apply_motion_masks(&mut motion_gate);
+    let mut stationary = crate::spatial::StationaryTracks::default();
+    let mut stationary_only = false;
     let mut motion_cfg_stamp = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     // LS-051：实时检测元数据广播节流（≤5Hz），慢客户端由 WS Lagged 丢弃
     let mut last_det_broadcast = std::time::Instant::now() - std::time::Duration::from_secs(3600);
@@ -1228,6 +1248,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         changed_camera_policy(&st, &store, cid, &handle)
                     {
                         pipe.replace_policy(&updated.zones, &updated.rules, &updated.calendar);
+                        updated.spatial.apply_motion_masks(&mut motion_gate);
+                        stationary = Default::default();
+                        stationary_only = false;
                         policy = updated;
                         handle
                             .applied_policy_revision
@@ -1300,14 +1323,29 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             heartbeat_frames: ls_analyzer::motion::DEFAULT_HEARTBEAT_FRAMES,
                         });
                     }
-                    let motion_skip = live_capture
+                    let mut motion_skip = live_capture
                         && consecutive_failures == 0
                         && motion_gate.should_skip(
                             &frame.data,
                             frame.width,
                             frame.height,
-                            pipe.active_track_count() > 0,
+                            pipe.active_track_count() > 0 && !stationary_only,
                         );
+                    let ts = ls_core::time::format_system_time_local_iso(captured.timestamp);
+                    if motion_skip && (stationary_only || motion_gate.masked_skip()) {
+                        motion_skip = crate::spatial::audit(
+                            &store,
+                            cid,
+                            if stationary_only {
+                                "stationary"
+                            } else {
+                                "motion_mask"
+                            },
+                            0,
+                            "person_inference",
+                            &ts,
+                        );
+                    }
                     handle.motion_total.fetch_add(1, Ordering::Relaxed);
                     let detect_start = std::time::Instant::now();
                     let dets = if motion_skip {
@@ -1344,7 +1382,6 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         checked_frames += 1;
                         person_frames += u64::from(!dets.is_empty());
                     }
-                    let ts = ls_core::time::format_system_time_local_iso(captured.timestamp);
                     let rules_start = std::time::Instant::now();
                     let sample_ppe = live_capture
                         && mode != "api"
@@ -1353,12 +1390,33 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             captured.arrived.saturating_duration_since(last)
                                 >= COMPLIANCE_SAMPLE_INTERVAL
                         });
-                    let cands = pipe.process_with_ppe_sample(
-                        &dets,
-                        &ts,
-                        Some((&frame.data, frame.width, frame.height)),
-                        sample_ppe,
-                    );
+                    let mut cands = if motion_skip && stationary_only {
+                        // Keep existing tracks until an observed frame resumes analysis.
+                        Vec::new()
+                    } else {
+                        pipe.process_with_ppe_sample(
+                            &dets,
+                            &ts,
+                            Some((&frame.data, frame.width, frame.height)),
+                            sample_ppe,
+                        )
+                    };
+                    if live_capture && !motion_skip {
+                        stationary_only = stationary.update(&policy.spatial, pipe.last_tracks());
+                    }
+                    let tracked_box = |id| {
+                        pipe.last_tracks()
+                            .iter()
+                            .find(|track| track.id == id && !track.occluded)
+                            .map(|track| track.bbox)
+                    };
+                    cands.retain(|cand| {
+                        tracked_box(cand.track_id).is_none_or(|bbox| {
+                            !policy
+                                .spatial
+                                .suppress(&store, cid, &cand.behavior, bbox, &ts)
+                        })
+                    });
                     if !motion_skip
                         && !dets.is_empty()
                         && last_face_sample.is_none_or(|t| {
@@ -1471,7 +1529,12 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             .unwrap_or_default(),
                         };
                         for cand in cands {
-                            match sink.record_ext(&cand, Some(&snap), dispatch_now) {
+                            match sink.record_located(
+                                &cand,
+                                Some(&snap),
+                                dispatch_now,
+                                tracked_box(cand.track_id),
+                            ) {
                                 Ok(Some(eid)) => {
                                     if video_file {
                                         alert_events += 1;
@@ -2324,7 +2387,28 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     }
                 }
             }
-            // 区域锚点 = 人框底边中点（与 pipeline.rs 同口径）；逐区统计
+            let cid = cfg.camera_id;
+            let uncoated: HashSet<_> = dets
+                .iter()
+                .enumerate()
+                .filter_map(|(index, det)| {
+                    (det.ppe == ls_analyzer::pipeline::PpeStatus::NoPpe
+                        && !policy.spatial.suppress(
+                            &store,
+                            cid,
+                            "enter_no_ppe",
+                            det.box_,
+                            &processed_ts,
+                        ))
+                    .then_some(index)
+                })
+                .collect();
+            unmasked.retain(|&index| {
+                !policy
+                    .spatial
+                    .suppress(&store, cid, "no_mask", dets[index].box_, &processed_ts)
+            });
+            // 照片按与视频相同的区域锚点判定；单帧没有历史在场状态。
             let mut zone_hits: Vec<serde_json::Value> = Vec::new();
             let mut in_zone_ids: std::collections::HashSet<usize> = Default::default();
             let ppe_no = dets
@@ -2336,21 +2420,17 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 .filter(|d| d.ppe == ls_analyzer::pipeline::PpeStatus::Wearing)
                 .count() as i64;
             let mut violations: Vec<String> = Vec::new();
-            let mut unmasked_zones = std::collections::HashSet::new();
             let mut occupancy = std::collections::HashMap::new();
-            let mut uncoated_zones = std::collections::HashSet::new();
+            let mut zone_members = std::collections::HashMap::<_, HashSet<_>>::new();
             for z in &policy.zones {
                 let mut zone_person = 0i64;
                 let mut zone_no = 0i64;
                 let mut zone_wear = 0i64;
                 for (di, d) in dets.iter().enumerate() {
-                    let anchor = (((d.box_[0] + d.box_[2]) / 2.0) as i64, d.box_[3] as i64);
-                    if ls_core::point_in_polygon(&z.points, anchor) {
+                    if z.spatial.observe(&z.points, d.box_) == Some(true) {
                         zone_person += 1;
                         in_zone_ids.insert(di);
-                        if unmasked.contains(&di) {
-                            unmasked_zones.insert(z.id);
-                        }
+                        zone_members.entry(z.id).or_default().insert(di);
                         match d.ppe {
                             ls_analyzer::pipeline::PpeStatus::NoPpe => {
                                 zone_no += 1;
@@ -2368,14 +2448,11 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         "zone_id": z.id, "name": z.name,
                         "persons": zone_person, "no": zone_no, "wearing": zone_wear,
                     }));
-                    if zone_no > 0 {
-                        uncoated_zones.insert(z.id);
-                    }
                 }
             }
             let persons = dets.len() as i64;
             let in_zone = in_zone_ids.len() as i64;
-            if ppe_no > 0 {
+            if !uncoated.is_empty() {
                 violations.push("enter_no_ppe".into());
             }
             if !unmasked.is_empty() {
@@ -2392,20 +2469,27 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     let zone_id = (rule.zone_id != 0).then_some(rule.zone_id);
                     let count =
                         zone_id.map_or(persons, |id| occupancy.get(&id).copied().unwrap_or(0));
-                    let hit = match rule.behavior.as_str() {
-                        "enter_no_ppe" => zone_id.map_or(!uncoated_zones.is_empty(), |id| {
-                            uncoated_zones.contains(&id)
-                        }),
-                        "no_mask" => {
-                            zone_id.map_or(!unmasked.is_empty(), |id| unmasked_zones.contains(&id))
+                    let hits = match rule.behavior.as_str() {
+                        "enter_no_ppe" => &uncoated,
+                        "no_mask" => &unmasked,
+                        "occupancy_over" => {
+                            return (rule.threshold >= 0 && count > rule.threshold)
+                                .then_some((rule, zone_id, count, None))
                         }
-                        "occupancy_over" => rule.threshold >= 0 && count > rule.threshold,
-                        _ => false,
+                        _ => return None,
                     };
-                    hit.then_some((rule, zone_id, count))
+                    let members = zone_id.and_then(|id| zone_members.get(&id));
+                    let mut targets = hits.iter().filter(|index| {
+                        zone_id.is_none()
+                            && (rule.behavior != "enter_no_ppe" || in_zone_ids.contains(index))
+                            || members.is_some_and(|people| people.contains(index))
+                    });
+                    let first = *targets.next()?;
+                    let target = targets.next().is_none().then_some(dets[first].box_);
+                    Some((rule, zone_id, count, target))
                 })
                 .collect();
-            for (rule, _, _) in &matches {
+            for (rule, _, _, _) in &matches {
                 violations.push(rule.behavior.clone());
             }
             violations.sort();
@@ -2450,7 +2534,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             // UX2 cascade：suppress 策略下先不派发，VLM 复核后放行/抑制
             let dispatch_now = !cascade_suppress;
             let mut ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)> = Vec::new();
-            for (rule, zone_id, count) in matches {
+            for (rule, zone_id, count, target) in matches {
                 let zone = policy.zones.iter().find(|zone| Some(zone.id) == zone_id);
                 let behavior = &rule.behavior;
                 let cand = ls_analyzer::pipeline::Candidate {
@@ -2477,7 +2561,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     evidence_key: format!("folder:{iid}:{}", rule.id),
                 };
                 if let Ok(Some(eid)) =
-                    sink.record_ext(&cand, snapshot_jpeg.as_deref(), dispatch_now)
+                    sink.record_located(&cand, snapshot_jpeg.as_deref(), dispatch_now, target)
                 {
                     let _ = store.set_folder_image_event(iid, eid);
                     ev_round.push((eid, cand));

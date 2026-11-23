@@ -483,6 +483,7 @@ impl Analyzer for AnalyzerImpl {
                 camera_id: z.camera_id,
                 name: z.name.clone(),
                 points: z.points.iter().map(|p| (p.x, p.y)).collect(),
+                spatial: Default::default(),
             })
             .filter(|z| z.points.len() >= 3)
             .collect();
@@ -1160,6 +1161,7 @@ mod tests {
             camera_id: 1,
             name: "全画幅".into(),
             points: vec![(0, 0), (1280, 0), (1280, 719), (0, 719)],
+            spatial: Default::default(),
         }];
         let rules = ["enter", "exit", "enter_no_ppe"]
             .iter()

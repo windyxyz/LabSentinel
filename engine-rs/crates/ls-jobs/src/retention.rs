@@ -328,6 +328,9 @@ pub fn run_cleanup_with(
     let conn = store.conn();
     let mut stats = CleanupStats::default();
     let cutoff = cutoff_iso(cfg.retention_events_days);
+    store
+        .delete_suppressions_older_than(&cutoff)
+        .map_err(|error| error.to_string())?;
 
     // 1) 过期事件：先删文件再删行
     loop {

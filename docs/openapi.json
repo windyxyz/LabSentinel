@@ -2353,6 +2353,28 @@
       }
     },
     "/api/zones/{zid}": {
+      "put": {
+        "summary": "Update a zone polygon or its spatial settings",
+        "parameters": [{"name": "zid", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "polygon": {"type": "array", "minItems": 3, "maxItems": 256, "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer"}}},
+                  "anchor_mode": {"type": "string", "enum": ["bottom_center", "body_center", "upper_body", "four_point_any"]},
+                  "margin_px": {"type": "integer", "minimum": 0, "maximum": 128},
+                  "leave_grace_frames": {"type": "integer", "minimum": 0, "maximum": 120}
+                },
+                "minProperties": 1
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Saved"}, "404": {"description": "Zone not found"}, "422": {"description": "Invalid spatial settings"}}
+      },
       "delete": {
         "summary": "Delete Zone",
         "operationId": "delete_zone_api_zones__zid__delete",
@@ -2387,6 +2409,70 @@
             }
           }
         }
+      }
+    },
+    "/api/cameras/{cid}/spatial": {
+      "parameters": [{"name": "cid", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "get": {
+        "summary": "List motion masks, object filters and remembered false-positive spots",
+        "responses": {"200": {"description": "Masks and spots"}, "404": {"description": "Camera not found"}}
+      }
+    },
+    "/api/cameras/{cid}/masks": {
+      "parameters": [{"name": "cid", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "post": {
+        "summary": "Add a motion or object filter mask",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {
+            "type": "object",
+            "required": ["name", "kind", "polygon"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1, "maxLength": 80},
+              "kind": {"type": "string", "enum": ["motion", "object_filter"]},
+              "polygon": {"type": "array", "minItems": 3, "maxItems": 256, "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer"}}}
+            }
+          }}}
+        },
+        "responses": {"200": {"description": "Saved"}, "404": {"description": "Camera not found"}, "422": {"description": "Invalid mask"}}
+      }
+    },
+    "/api/cameras/{cid}/masks/{id}": {
+      "parameters": [
+        {"name": "cid", "in": "path", "required": true, "schema": {"type": "integer"}},
+        {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}
+      ],
+      "delete": {
+        "summary": "Remove a camera mask",
+        "responses": {"200": {"description": "Removed"}, "404": {"description": "Mask not found"}}
+      }
+    },
+    "/api/cameras/{cid}/fp-spots/{id}": {
+      "parameters": [
+        {"name": "cid", "in": "path", "required": true, "schema": {"type": "integer"}},
+        {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}
+      ],
+      "delete": {
+        "summary": "Remove a remembered false-positive spot",
+        "responses": {"200": {"description": "Removed"}, "404": {"description": "Spot not found"}}
+      }
+    },
+    "/api/events/{eid}/remember-spot": {
+      "parameters": [{"name": "eid", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "post": {
+        "summary": "Remember a located event marked as a false positive",
+        "responses": {"200": {"description": "Spot saved"}, "422": {"description": "The event cannot be used as a spot"}}
+      }
+    },
+    "/api/review/suppressions": {
+      "get": {
+        "summary": "List spatial suppression and motion gate audit records",
+        "parameters": [
+          {"name": "camera_id", "in": "query", "schema": {"type": "integer"}},
+          {"name": "before_id", "in": "query", "schema": {"type": "integer"}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}}
+        ],
+        "responses": {"200": {"description": "Audit records, newest ID first"}}
       }
     },
     "/api/rules": {

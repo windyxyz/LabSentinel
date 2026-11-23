@@ -11,6 +11,7 @@ pub(crate) mod misc_status;
 pub(crate) mod ops;
 pub(crate) mod pairing;
 pub(crate) mod setup;
+pub(crate) mod spatial;
 pub(crate) mod stats;
 pub(crate) mod zones_rules;
 
@@ -26,5 +27,6 @@ pub(crate) use misc_status::*;
 pub(crate) use ops::*;
 pub(crate) use pairing::*;
 pub(crate) use setup::*;
+pub(crate) use spatial::*;
 pub(crate) use stats::*;
 pub(crate) use zones_rules::*;

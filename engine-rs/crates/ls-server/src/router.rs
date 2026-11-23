@@ -83,6 +83,12 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/zones"),
     ("DELETE", "/api/zones/:zid"),
     ("PUT", "/api/zones/:zid"), // LS-052 拖拽顶点保存
+    ("GET", "/api/cameras/:cid/spatial"),
+    ("POST", "/api/cameras/:cid/masks"),
+    ("DELETE", "/api/cameras/:cid/masks/:id"),
+    ("POST", "/api/events/:eid/remember-spot"),
+    ("DELETE", "/api/cameras/:cid/fp-spots/:id"),
+    ("GET", "/api/review/suppressions"),
     ("GET", "/api/rules"),
     ("POST", "/api/rules"),
     ("DELETE", "/api/rules/:rid"),
@@ -268,6 +274,15 @@ pub fn build_router(state: Shared) -> Router {
         .route("/cameras/usb-devices", get(usb_devices))
         .route("/zones", get(zones_list).post(add_zone))
         .route("/zones/:zid", delete(delete_zone).put(update_zone))
+        .route("/cameras/:cid/spatial", get(spatial_settings))
+        .route("/cameras/:cid/masks", post(create_camera_mask))
+        .route("/cameras/:cid/masks/:id", delete(remove_camera_mask))
+        .route("/events/:eid/remember-spot", post(remember_event_spot))
+        .route(
+            "/cameras/:cid/fp-spots/:id",
+            delete(remove_false_positive_spot),
+        )
+        .route("/review/suppressions", get(suppressions_list))
         .route("/rules", get(rules_list).post(add_rule))
         .route("/rules/:rid", delete(delete_rule))
         .route("/rule-templates", get(templates_list).post(add_template))

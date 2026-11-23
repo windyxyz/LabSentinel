@@ -83,6 +83,17 @@ impl ZoneState {
             .collect()
     }
 
+    pub fn is_inside(&self, track_id: i64) -> bool {
+        self.state.get(&track_id).is_some_and(|s| s.inside)
+    }
+
+    pub fn hold(&mut self, track_id: i64) {
+        if let Some(state) = self.state.get_mut(&track_id) {
+            state.streak = 0;
+            state.pending = None;
+        }
+    }
+
     pub fn forget(&mut self, ids: &std::collections::HashSet<i64>) {
         self.state.retain(|id, _| !ids.contains(id));
     }

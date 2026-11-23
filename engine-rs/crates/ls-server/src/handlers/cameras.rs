@@ -736,8 +736,7 @@ pub(crate) async fn copy_camera_config(
             }
         }
         // Python 语义：先全量校验再写库；规则 zone_id 按区域名映射到目标
-        let src_zones = s.zones_all()?;
-        let src_zones: Vec<_> = src_zones.into_iter().filter(|z| z.1 == cid).collect();
+        let src_zones = s.zones_spatial(Some(cid))?;
         let src_rules = s.rules_all()?;
         let src_rules: Vec<_> = src_rules.into_iter().filter(|r| r.1 == cid).collect();
         let mut zones_created = 0i64;
@@ -755,14 +754,14 @@ pub(crate) async fn copy_camera_config(
                 .collect();
             if copy_zones {
                 for z in &src_zones {
-                    let new_name = format!("{}{}", z.2, suffix);
+                    let new_name = format!("{}{}", z.name, suffix);
                     if let Some(existing) = zone_map.get(&new_name) {
-                        zone_map.insert(z.2.clone(), *existing);
+                        zone_map.insert(z.name.clone(), *existing);
                         zones_skipped += 1;
                         continue;
                     }
-                    let zid = s.add_zone(*tid, &new_name, &z.3)?;
-                    zone_map.insert(z.2.clone(), zid);
+                    let zid = s.add_zone_spatial(*tid, &new_name, &z.polygon, z.spatial)?;
+                    zone_map.insert(z.name.clone(), zid);
                     zone_map.insert(new_name, zid);
                     zones_created += 1;
                 }
@@ -772,8 +771,11 @@ pub(crate) async fn copy_camera_config(
             if copy_rules {
                 for r in &src_rules {
                     let zid = r.2.and_then(|zid| {
-                        let src_name = src_zones.iter().find(|z| z.0 == zid).map(|z| z.2.clone());
-                        src_name.and_then(|n| zone_map.get(&n).copied())
+                        let src_name = src_zones
+                            .iter()
+                            .find(|z| z.id == zid)
+                            .map(|z| z.name.as_str());
+                        src_name.and_then(|n| zone_map.get(n).copied())
                     });
                     if r.2.is_some() && zid.is_none() {
                         rules_skipped += 1;

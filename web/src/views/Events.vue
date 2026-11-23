@@ -409,6 +409,20 @@ async function mark(e, status) {
   } catch (err) { alert(String(err.message || err)) }
   busyEvent.value = null
 }
+
+async function rememberSpot(event) {
+  if (busyEvent.value !== null) return
+  busyEvent.value = event.id
+  actionNotice.value = ''
+  try {
+    await api.rememberEventSpot(event.id)
+    actionNotice.value = '已记住误报点。可到该监控源的区域设置中移除。'
+  } catch (error) {
+    actionNotice.value = error.message
+  } finally {
+    busyEvent.value = null
+  }
+}
 </script>
 
 <template>
@@ -596,6 +610,8 @@ async function mark(e, status) {
             <button class="ghost" :disabled="busyEvent !== null" @click="mark(drawer, 'ignored')">忽略</button>
           </div>
           <p v-else-if="drawer.category !== 'check'" class="muted">处理人 {{ actorLabel(drawer.handled_by) }} · {{ drawer.handled_ts || '—' }}</p>
+          <button v-if="drawer.status === 'false_positive' && ['enter', 'enter_no_ppe', 'no_mask'].includes(drawer.type)"
+                  class="ghost" :disabled="busyEvent !== null" @click="rememberSpot(drawer)">记住这个误报点</button>
           <p v-if="actionNotice" class="muted" role="status">{{ actionNotice }}</p>
           <!-- 任务103：单事件证据包（无媒体时仅含 event.json+README，不置灰） -->
           <a class="ghost" :href="mediaUrl(`/api/events/${drawer.id}/evidence.zip`)"

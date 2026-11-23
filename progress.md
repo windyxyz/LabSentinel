@@ -2,8 +2,10 @@
 
 ## Latest Handoff Snapshot
 
-- **当前任务**。`LS-082`，空间防误报与抑制审计。总目标为完成 `LS-080` 至 `LS-083` 并推送 `v0.6.2` 主线，后续版本暂停 GitHub Release。
-- **验证节奏**。`v0.6.2` 按改动运行必要检查和定向验证。从 `v0.7.0` 起，每个大版本集中跑全量回归并做回归审阅。远端主线已确认 `1089ca6`。
+- **当前任务**。`LS-083`，GPU 调度、截图与预览。推进 `v0.6.2`，直连推送 GitHub 主线，暂停 GitHub Release。
+- **验证节奏**。`v0.6.2` 运行必要检查和定向验证。从 `v0.7.0` 起，每个大版本集中跑全量回归并做回归审阅。
+- **LS-082**。照片和视频共用可调整的区域锚点。新区域默认 12 帧离场宽限，历史区域保留全局迟滞。支持画运动遮罩和目标过滤遮罩，从有位置的误报事件记住同类误报点，在区域设置中移除，并提供独立的抑制审计查询。固定遮罩里的静止轨迹降频时仍按运动预筛的心跳重检。
+- **LS-082 验证**。`cargo test -p ls-core spatial_`、`cargo test -p ls-analyzer motion_mask`、旧库往返迁移和四组服务端定向测试通过。相关 Rust crate 的 Clippy、`npx vitest run tests/zones.test.js tests/events_keys.test.js`（9 项）、前端构建和 146 条前端 API 契约检查通过。Vite 配置和 jsdom 的 Canvas 提示仍在。
 - **已验证的第一批实现**。修复照片人数规则的区域、排班和等级判定，视频区分推理失败和有效零检测，PPE 状态与分析共用模型选择。抽出推理后端接口，增加同次 COCO 上下文取框、PPE 唯一归属、YOLOE 正负复核、灰度裁剪增强和遮挡断轨。
 - **验证**。使用本地发行目录 ONNX Runtime 1.20.1 执行 Rust fmt、Clippy 和工作区全特性测试，205 项通过、4 项忽略。默认安装环境的旧 ONNX Runtime 首次拒绝 IR 10，切换随包 DLL 后通过。重新构建 `ls-server`，在临时安装布局运行 `python -X utf8 -B scripts/smoke_rust.py --install-dir <临时目录> --timeout 45`，照片规则、视频完成与推理失败对照、事件预览及退出清理通过。
 - **GitHub**。首批修复 `55ec098` 已直连推送，`git ls-remote --heads origin main` 已确认远端提交。版本号仍为 0.6.0，推送限主线。
@@ -14,7 +16,7 @@
 - **安装器**。Inno Setup 7 从同一临时暂存目录编译通过，退出码 0，验证产物 154.2 MB。交互安装仍在后续验收范围。
 - **投递与处置**。启动时恢复历史的待投递项，保留重试退避和已发送记录。测试检查记录可查、告警统计排除检查、AI 复核的展示与筛选一致。Rust 三连通过（207 项通过、4 项忽略），前端 101 项和构建通过。
 - **值守验收**。前端实时预览共享五个流媒体名额，超额使用快照。断线后按持久化事件 ID 有序重放并去重。大屏可显示各阶段 P95 耗时，三档灵敏度同时调整人员和 PPE 阈值。Rust 路由定向 17 项、前端定向 26 项通过。
-- **Next First Command**。`git status --short --branch`，实施 `LS-082` 的区域锚点、边界迟滞与双遮罩。达到使用门槛的 256 候选仍待核验。
+- **Next First Command**。`rg -n 'dml_lock|load_ort_session' engine-rs/crates/ls-infer/src`，将 YOLO 与人脸的 DirectML 操作绑定到同一专用线程。达到使用门槛的 256 候选仍待核验。
 
 ## Previous Handoff Snapshot · LS-076
 

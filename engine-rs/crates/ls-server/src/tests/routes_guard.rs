@@ -725,6 +725,23 @@ async fn zones_and_rules_crud() {
     assert_eq!(rows.as_array().unwrap().len(), 1);
     assert_eq!(rows[0]["name"], "台面");
     assert!(rows[0]["polygon"].is_array(), "polygon 解析为 JSON 数组");
+    assert_eq!(rows[0]["leave_grace_frames"], 12);
+    let r = req(
+        &app,
+        "PUT",
+        &format!("/api/zones/{zid}"),
+        Some(json!({
+            "anchor_mode": "upper_body", "margin_px": 8, "leave_grace_frames": 5
+        })),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = req(&app, "GET", &format!("/api/zones?camera_id={cid}"), None).await;
+    let rows = body_json(r).await;
+    assert_eq!(rows[0]["anchor_mode"], "upper_body");
+    assert_eq!(rows[0]["margin_px"], 8);
+    assert_eq!(rows[0]["leave_grace_frames"], 5);
+    assert_eq!(rows[0]["polygon"], json!([[0, 0], [100, 0], [100, 100]]));
     let r = req(&app, "DELETE", &format!("/api/zones/{zid}"), None).await;
     assert_eq!(r.status(), StatusCode::OK);
     // 规则：POST/GET/DELETE
@@ -744,6 +761,113 @@ async fn zones_and_rules_crud() {
     assert_eq!(body_json(r).await.as_array().unwrap().len(), 1);
     let r = req(&app, "DELETE", &format!("/api/rules/{rid}"), None).await;
     assert_eq!(r.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn spatial_masks_and_false_positive_spots_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("spatial.db");
+    seed_schema(&db);
+    let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+    let cid = store.conn_add_camera("camera", "x.mp4", "file").unwrap();
+    let second_camera = store.conn_add_camera("other", "y.mp4", "file").unwrap();
+    let app = build_router(test_state(db.to_str().unwrap()));
+    let bounds = [30.0, 35.0, 100.0, 110.0];
+    let eid = store
+        .add_located_event(
+            &ls_store::NewEvent {
+                camera_id: cid,
+                type_: "no_mask",
+                level: 2,
+                track_id: 9,
+                detail: "fixture",
+                snapshot: None,
+                ts: "2026-11-24T12:00:00",
+            },
+            bounds,
+        )
+        .unwrap();
+    let remember = format!("/api/events/{eid}/remember-spot");
+    assert_eq!(
+        req(&app, "POST", &remember, None).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    store
+        .set_event_status(eid, "false_positive", None, None)
+        .unwrap();
+    let first = body_json(req(&app, "POST", &remember, None).await).await;
+    let second = body_json(req(&app, "POST", &remember, None).await).await;
+    let spot_id = first["id"].as_i64().unwrap();
+    assert_eq!(first["id"], second["id"]);
+    let mask = body_json(
+        req(
+            &app,
+            "POST",
+            &format!("/api/cameras/{cid}/masks"),
+            Some(json!({
+                "name": "屏幕", "kind": "motion", "polygon": [[0,0],[150,0],[150,100],[0,100]]
+            })),
+        )
+        .await,
+    )
+    .await;
+    let mask_id = mask["id"].as_i64().unwrap();
+    let rows =
+        body_json(req(&app, "GET", &format!("/api/cameras/{cid}/spatial"), None).await).await;
+    assert_eq!(rows["masks"][0]["kind"], "motion");
+    assert_eq!(rows["spots"][0]["bbox"], json!(bounds));
+    let policy = crate::spatial::SpatialPolicy::read(&store, cid).unwrap();
+    assert!(policy.suppress(&store, cid, "no_mask", bounds, "2026-11-24T12:00:00"));
+    assert!(!policy.suppress(&store, cid, "person_fall", bounds, "2026-11-24T12:00:00"));
+    let audit = body_json(
+        req(
+            &app,
+            "GET",
+            &format!("/api/review/suppressions?camera_id={cid}"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(audit.as_array().unwrap().len(), 1);
+    assert_eq!(audit[0]["reason"], "remembered_spot");
+    assert_eq!(audit[0]["source_id"], spot_id);
+    assert_eq!(
+        req(
+            &app,
+            "DELETE",
+            &format!("/api/cameras/{second_camera}/masks/{mask_id}"),
+            None
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        req(
+            &app,
+            "DELETE",
+            &format!("/api/cameras/{cid}/masks/{mask_id}"),
+            None
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        req(
+            &app,
+            "DELETE",
+            &format!("/api/cameras/{cid}/fp-spots/{spot_id}"),
+            None
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert!(!crate::spatial::SpatialPolicy::read(&store, cid)
+        .unwrap()
+        .suppress(&store, cid, "no_mask", bounds, "2026-11-24T12:00:00"));
 }
 
 #[tokio::test]

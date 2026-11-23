@@ -68,8 +68,7 @@ pub(crate) async fn body_json(resp: Response) -> Value {
     serde_json::from_slice(&b).unwrap()
 }
 
-/// 测试用最小 schema（单条字面量脚本；与 ls-store roundtrip 同口径，
-/// v13 全量列与 Python 权威 schema 一致）。
+/// 测试从历史结构启动，使用与产品相同的迁移补齐当前结构。
 pub(crate) fn seed_schema(path: &std::path::Path) {
     let c = rusqlite::Connection::open(path).unwrap();
     c.execute_batch(
@@ -104,6 +103,9 @@ pub(crate) fn seed_schema(path: &std::path::Path) {
          CREATE TABLE device_access(device_id INTEGER PRIMARY KEY, policy_json TEXT NOT NULL);",
     )
     .unwrap();
+    drop(c);
+    let store = ls_store::Store::open(path.to_str().unwrap()).unwrap();
+    store.migrate().unwrap();
 }
 
 /// 构造请求并直接经 router 发送（oneshot），返回响应。
