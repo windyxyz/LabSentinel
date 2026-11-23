@@ -54,10 +54,6 @@ Name: "chinese"; MessagesFile: "compiler:Default.isl,Languages\ChineseSimplified
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
-chinese.ServiceTask=安装为 Windows 服务（仅 RTSP/文件夹源；需管理员）
-chinese.ServiceOptGroup=可选组件
-chinese.ServiceMissing=未随包携带 winsw.exe：服务模式需手工安装（参见 deploy/windows/labsentinel-service.xml）。
-chinese.ServiceFailed=服务安装失败（WinSW 执行失败）。可在安装目录手工运行 winsw install。
 chinese.StartMenu=创建开始菜单快捷方式
 chinese.Desktop=创建桌面快捷方式
 chinese.ShortcutOptGroup=快捷方式
@@ -67,10 +63,6 @@ chinese.ArchiveFailed=无法归档现有安装。请检查安装目录的写入�
 chinese.Archive=正在归档旧版本…
 chinese.Launch=启动 LabSentinel
 chinese.RemoveUserData=是否同时删除 LabSentinel 的用户数据？%1 包含数据库、事件截图/录像、备份与密钥。选择「否」保留数据，重新安装后可继续使用。
-english.ServiceTask=Install as a Windows service (RTSP/folder sources only; requires admin)
-english.ServiceOptGroup=Optional components
-english.ServiceMissing=winsw.exe is not bundled: install the service manually (see deploy/windows/labsentinel-service.xml).
-english.ServiceFailed=Service installation failed (WinSW error). Run "winsw install" manually in the install directory.
 english.StartMenu=Create a Start Menu shortcut
 english.Desktop=Create a desktop shortcut
 english.ShortcutOptGroup=Shortcuts
@@ -88,8 +80,6 @@ Name: "createshortcut"; Description: "{cm:StartMenu}"; \
   GroupDescription: "{cm:ShortcutOptGroup}"
 Name: "createdesktop"; Description: "{cm:Desktop}"; \
   GroupDescription: "{cm:ShortcutOptGroup}"
-Name: "installservice"; Description: "{cm:ServiceTask}"; \
-  GroupDescription: "{cm:ServiceOptGroup}"; Flags: unchecked;
 
 [Files]
 ; Rust 发行包全树（labsentinel-server.exe、LabSentinel.bat、VERSION、web、models、tools）
@@ -203,7 +193,6 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
-  WinSW: String;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -219,25 +208,6 @@ begin
         if not WizardSilent then
           MsgBox(FmtMessage(CustomMessage('VerifyFailed'), [IntToStr(ResultCode)]),
                  mbError, MB_OK);
-      end;
-    end;
-
-    // 可选服务（Tasks 勾选后；仅 ALLUSERS 模式有意义）
-    if WizardIsTaskSelected('installservice') then
-    begin
-      if not IsAdminInstallMode then
-        MsgBox(CustomMessage('ServiceMissing'), mbInformation, MB_OK)
-      else
-      begin
-        WinSW := ExpandConstant('{app}\tools\winsw.exe');
-        if FileExists(WinSW) then
-        begin
-          if not Exec(WinSW, 'install labsentinel-service.xml',
-                      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-            MsgBox(CustomMessage('ServiceFailed'), mbError, MB_OK);
-        end
-        else
-          MsgBox(CustomMessage('ServiceMissing'), mbInformation, MB_OK);
       end;
     end;
   end;

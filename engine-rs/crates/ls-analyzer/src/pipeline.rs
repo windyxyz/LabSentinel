@@ -36,7 +36,7 @@ pub struct ZoneSpec {
     pub points: Vec<(i64, i64)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuleSpec {
     pub id: i64,
     pub camera_id: i64,
@@ -139,6 +139,7 @@ pub struct CameraPipeline {
     rules: Vec<RuleSpec>,
     calendar: HashMap<String, String>,
     tracker: ByteTrack,
+    hysteresis: ls_core::state::Hysteresis,
     zone_states: HashMap<i64, ZoneState>,
     /// (rule_id, track_id) -> 最近触发帧序号
     last_fire: HashMap<(i64, i64), u64>,
@@ -203,15 +204,13 @@ impl CameraPipeline {
             lost_track_buffer: (fps * 3.0) as u32,
             ..ByteTrackConfig::default()
         });
+        let hysteresis = ls_core::state::Hysteresis {
+            enter_frames,
+            exit_frames,
+        };
         let mut zone_states = HashMap::new();
         for z in &zones {
-            zone_states.insert(
-                z.id,
-                ZoneState::new(ls_core::state::Hysteresis {
-                    enter_frames,
-                    exit_frames,
-                }),
-            );
+            zone_states.insert(z.id, ZoneState::new(hysteresis));
         }
         Self {
             camera,
@@ -219,6 +218,7 @@ impl CameraPipeline {
             rules,
             calendar,
             tracker,
+            hysteresis,
             zone_states,
             last_fire: HashMap::new(),
             solo_since: HashMap::new(),
@@ -237,6 +237,44 @@ impl CameraPipeline {
     /// T-325/Q-14：注入 PPE 检测器（`None` 时保持「仅人员检测」）。
     pub fn set_ppe(&mut self, ppe: Option<Box<dyn PpeRunner>>) {
         self.ppe = ppe;
+    }
+
+    pub fn replace_policy(
+        &mut self,
+        zones: &[ZoneSpec],
+        rules: &[RuleSpec],
+        calendar: &HashMap<String, String>,
+    ) {
+        let unchanged_zones: HashSet<_> = zones
+            .iter()
+            .filter(|zone| {
+                self.zones
+                    .iter()
+                    .any(|old| old.id == zone.id && old.points == zone.points)
+            })
+            .map(|zone| zone.id)
+            .collect();
+        self.zone_states
+            .retain(|id, _| unchanged_zones.contains(id));
+        for zone in zones {
+            self.zone_states
+                .entry(zone.id)
+                .or_insert_with(|| ZoneState::new(self.hysteresis));
+        }
+        let unchanged_rules: HashSet<_> = rules
+            .iter()
+            .filter(|rule| {
+                self.rules.contains(rule)
+                    && (rule.zone_id == 0 || unchanged_zones.contains(&rule.zone_id))
+            })
+            .map(|rule| rule.id)
+            .collect();
+        self.last_fire
+            .retain(|(id, _), _| unchanged_rules.contains(id));
+        self.solo_since.retain(|id, _| unchanged_rules.contains(id));
+        self.zones = zones.to_vec();
+        self.rules = rules.to_vec();
+        self.calendar.clone_from(calendar);
     }
 
     /// LS-050：上一帧活跃 track 数，供 Motion Gate 守卫（>0 禁止跳帧）。

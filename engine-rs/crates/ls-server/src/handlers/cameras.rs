@@ -123,6 +123,16 @@ pub(crate) async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i
         Ok(Some(c)) => {
             let (frame_age, last_frame, reconnects) = capture_health(&st, id);
             let since = s.camera_outage_since(id).ok().flatten();
+            let revision = st
+                .workers
+                .policy_revision
+                .load(std::sync::atomic::Ordering::Acquire);
+            let applied = st.workers.get(id).and_then(|worker| {
+                let value = worker
+                    .applied_policy_revision
+                    .load(std::sync::atomic::Ordering::Acquire);
+                (value != u64::MAX).then_some(value)
+            });
             let processed_frames = (c.type_ == "file")
                 .then(|| {
                     let worker = st.workers.get(id)?;
@@ -133,7 +143,8 @@ pub(crate) async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i
             Json(json!({"id": c.id, "name": c.name, "type": c.type_,
                 "status": c.status, "analyzer": c.analyzer, "fps": null,
                 "offline_since": since, "frame_age_s": frame_age, "last_frame_at": last_frame,
-                "reconnect_count": reconnects, "processed_frames": processed_frames}))
+                "reconnect_count": reconnects, "processed_frames": processed_frames,
+                "policy_revision": revision, "applied_policy_revision": applied}))
             .into_response()
         }
         Ok(None) => detail_err(StatusCode::NOT_FOUND, "camera not found").into_response(),
@@ -734,6 +745,7 @@ pub(crate) async fn copy_camera_config(
         let mut rules_created = 0i64;
         let mut rules_skipped = 0i64;
         let mut warnings: Vec<String> = Vec::new();
+        let tx = s.conn().unchecked_transaction()?;
         for tid in &targets {
             let tgt_zones = s.zones_all()?;
             let mut zone_map: std::collections::HashMap<String, i64> = tgt_zones
@@ -779,7 +791,7 @@ pub(crate) async fn copy_camera_config(
                         rules_skipped += 1;
                         continue;
                     }
-                    s.add_rule(
+                    s.add_rule_with_schedule(
                         *tid,
                         zid,
                         &r.3,
@@ -789,6 +801,8 @@ pub(crate) async fn copy_camera_config(
                         r.7.as_deref(),
                         r.8,
                         r.9 != 0,
+                        r.10.as_deref(),
+                        r.11,
                     )?;
                     rules_created += 1;
                 }
@@ -796,9 +810,14 @@ pub(crate) async fn copy_camera_config(
                 rules_skipped += src_rules.len() as i64;
             }
         }
-        Ok(Json(json!({"ok": true, "zones_created": zones_created,
+        tx.commit()?;
+        let revision =
+            (zones_created + rules_created > 0).then(|| st.workers.notify_policy_changed());
+        Ok(Json(
+            json!({"ok": true, "zones_created": zones_created, "policy_revision": revision,
                        "zones_skipped": zones_skipped, "rules_created": rules_created,
-                       "rules_skipped": rules_skipped, "warnings": warnings}))
+                       "rules_skipped": rules_skipped, "warnings": warnings}),
+        )
         .into_response())
     })
 }

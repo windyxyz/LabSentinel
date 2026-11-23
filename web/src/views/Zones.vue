@@ -15,6 +15,7 @@ const drawing = ref([])      // 正在绘制的顶点（显示坐标）
 const snapT = ref(0)
 const snapshotError = ref(false)
 const selectedCamera = computed(() => cams.value.find(camera => camera.id === camId.value))
+const policyMessage = ref('')
 const snapshotUrl = computed(() => camId.value && snapT.value
   ? mediaUrl(`/api/cameras/${camId.value}/snapshot?t=${snapT.value}${selectedCamera.value?.type === 'file' ? '&preview=1' : ''}`)
   : '')
@@ -84,6 +85,37 @@ watch(camId, () => {
   snapshotError.value = false
   snapT.value = camId.value ? Date.now() : 0
   load()
+}, { immediate: true })
+watch(camId, (id, _, onCleanup) => {
+  policyMessage.value = ''
+  if (!id) return
+  let disposed = false
+  let timer
+  onCleanup(() => {
+    disposed = true
+    clearTimeout(timer)
+  })
+  async function checkPolicy() {
+    try {
+      const status = await api.cameraStatus(id)
+      if (disposed || camId.value !== id) return
+      const revision = status?.policy_revision
+      if (!Number.isSafeInteger(revision)) {
+        policyMessage.value = ''
+      } else if (status.applied_policy_revision === revision) {
+        policyMessage.value = '规则已生效'
+      } else if (['stopped', 'completed', 'error', 'model_error'].includes(status.status)) {
+        policyMessage.value = '规则已保存，启动来源后生效'
+      } else {
+        policyMessage.value = '正在应用规则…'
+      }
+    } catch {
+      if (!disposed) policyMessage.value = '暂时无法确认规则状态'
+    } finally {
+      if (!disposed) timer = setTimeout(checkPolicy, 1500)
+    }
+  }
+  checkPolicy()
 }, { immediate: true })
 onMounted(() => {
   loadCal(); loadTpls() // 任务112/116
@@ -344,6 +376,7 @@ async function addRule(zoneId) {
       <select v-model="camId">
         <option v-for="c in cams" :key="c.id" :value="c.id">{{ c.name }}</option>
       </select>
+      <span v-if="policyMessage" class="muted" role="status">{{ policyMessage }}</span>
       <input v-model="zname" placeholder="新安全区名称（先填再画）" style="width:180px" />
       <button class="ghost" @click="pushUndo(); drawing = []; draw()">清除未保存顶点</button>
       <button class="ghost" :disabled="!undoStack.length" title="Ctrl+Z" @click="undo">撤销</button>

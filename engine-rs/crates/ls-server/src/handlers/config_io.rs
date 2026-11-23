@@ -145,6 +145,7 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
         .into_response();
     }
     with_store(&st, |s| {
+        let tx = s.conn().unchecked_transaction()?;
         if mode == "replace" {
             s.clear_config()?;
         }
@@ -248,6 +249,10 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                     .unwrap_or(false),
             )?;
             created.2 += 1;
+        }
+        tx.commit()?;
+        if mode == "replace" || created.1 + created.2 > 0 {
+            st.workers.notify_policy_changed();
         }
         Ok(Json(json!({"ok": true, "mode": mode,
                        "created": {"cameras": created.0, "zones": created.1, "rules": created.2},

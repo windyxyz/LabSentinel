@@ -332,6 +332,7 @@ pub struct WorkerHandle {
     pub motion_total: Arc<AtomicU64>,
     pub(crate) performance: Mutex<PerformanceWindow>,
     ppe_loaded: OnceLock<bool>,
+    pub(crate) applied_policy_revision: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -345,9 +346,20 @@ pub struct Snapshot {
 #[derive(Default)]
 pub struct Workers {
     map: Mutex<HashMap<i64, Arc<WorkerHandle>>>,
+    pub(crate) policy_revision: AtomicU64,
 }
 
 impl Workers {
+    pub(crate) fn notify_policy_changed(&self) -> u64 {
+        let revision = self.policy_revision.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(map) = self.map.lock() {
+            for worker in map.values() {
+                worker.wake.store(true, Ordering::Release);
+            }
+        }
+        revision
+    }
+
     pub(crate) fn ppe_runtime_counts(&self) -> (usize, usize) {
         self.map.lock().map_or((0, 0), |map| {
             map.values()
@@ -447,9 +459,7 @@ impl Workers {
 pub struct WorkerConfig {
     pub camera_id: i64,
     pub spec: ls_analyzer::pipeline::CameraSpec,
-    pub zones: Vec<ls_analyzer::pipeline::ZoneSpec>,
-    pub rules: Vec<ls_analyzer::pipeline::RuleSpec>,
-    pub calendar: HashMap<String, String>,
+    policy: CameraPolicy,
     /// cameras.analyzer 列原值（python/rust/vlm）——RA5 模型模块化：
     /// "vlm" = 该路强制走外部联网模型判定
     pub analyzer: String,
@@ -480,6 +490,85 @@ fn parse_polygon(polygon_json: &str) -> Option<Vec<(i64, i64)>> {
     )
 }
 
+#[derive(Clone)]
+struct CameraPolicy {
+    zones: Vec<ls_analyzer::pipeline::ZoneSpec>,
+    rules: Vec<ls_analyzer::pipeline::RuleSpec>,
+    calendar: HashMap<String, String>,
+}
+
+fn read_camera_policy(s: &ls_store::Store, cid: i64) -> Result<CameraPolicy, String> {
+    let tx = s
+        .conn()
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let zones = s
+        .zones_all()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|(_, zcid, ..)| *zcid == cid)
+        .filter_map(|(id, _, name, poly)| {
+            parse_polygon(&poly).map(|points| ls_analyzer::pipeline::ZoneSpec {
+                id,
+                camera_id: cid,
+                name,
+                points,
+            })
+        })
+        .filter(|z| z.points.len() >= 3)
+        .collect();
+    let rules = s
+        .rules_all()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|r| r.1 == cid && r.9 != 0)
+        .map(|r| ls_analyzer::pipeline::RuleSpec {
+            id: r.0,
+            camera_id: r.1,
+            zone_id: r.2.unwrap_or(0),
+            behavior: r.3,
+            level: r.4,
+            cooldown_s: r.5,
+            time_start: r.6.unwrap_or_default(),
+            time_end: r.7.unwrap_or_default(),
+            // RA1.1 起 rules_all 携带 days_of_week（CSV "1,2,3,4,5,6,7"）；
+            // RuleSpec.weekdays 口径 = "1-5" 或 "1,2,3"，空=全部；
+            // RA4.2 起 holiday_only 随行读出（节假日限定规则生效）
+            weekdays: r.10.unwrap_or_default(),
+            threshold: r.8,
+            enabled: r.9 != 0,
+            holiday_only: r.11,
+        })
+        .collect();
+    let calendar = s
+        .calendar_exceptions()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|c| (c.date, c.mode))
+        .collect();
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(CameraPolicy {
+        zones,
+        rules,
+        calendar,
+    })
+}
+
+fn changed_camera_policy(
+    st: &Shared,
+    store: &ls_store::Store,
+    cid: i64,
+    handle: &WorkerHandle,
+) -> Option<(u64, CameraPolicy)> {
+    let revision = st.workers.policy_revision.load(Ordering::Acquire);
+    if handle.applied_policy_revision.load(Ordering::Relaxed) == revision {
+        return None;
+    }
+    read_camera_policy(store, cid)
+        .ok()
+        .map(|policy| (revision, policy))
+}
+
 impl WorkerConfig {
     /// 从 DB 组装（cameras/zones/rules/calendar）。全局量（analysis_fps/
     /// file_loop/evidence_fps）与 Python 侧同源：进程 env（LS_ANALYSIS_FPS 等，
@@ -493,50 +582,7 @@ impl WorkerConfig {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let efps = env_f64("LS_EVIDENCE_FPS", 10.0);
-        let zones = s
-            .zones_all()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|(_, zcid, ..)| *zcid == cid)
-            .filter_map(|(id, _, name, poly)| {
-                parse_polygon(&poly).map(|points| ls_analyzer::pipeline::ZoneSpec {
-                    id,
-                    camera_id: cid,
-                    name,
-                    points,
-                })
-            })
-            .filter(|z| z.points.len() >= 3)
-            .collect();
-        let rules = s
-            .rules_all()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|r| r.1 == cid && r.9 != 0)
-            .map(|r| ls_analyzer::pipeline::RuleSpec {
-                id: r.0,
-                camera_id: r.1,
-                zone_id: r.2.unwrap_or(0),
-                behavior: r.3,
-                level: r.4,
-                cooldown_s: r.5,
-                time_start: r.6.unwrap_or_default(),
-                time_end: r.7.unwrap_or_default(),
-                // RA1.1 起 rules_all 携带 days_of_week（CSV "1,2,3,4,5,6,7"）；
-                // RuleSpec.weekdays 口径 = "1-5" 或 "1,2,3"，空=全部；
-                // RA4.2 起 holiday_only 随行读出（节假日限定规则生效）
-                weekdays: r.10.unwrap_or_default(),
-                threshold: r.8,
-                enabled: r.9 != 0,
-                holiday_only: r.11,
-            })
-            .collect();
-        let calendar = s
-            .calendar_exceptions()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|c| (c.date, c.mode))
-            .collect();
+        let policy = read_camera_policy(s, cid)?;
         // 模型路径：进程 env LS_MODEL_PATH（未设 = NullDetector，仅人员检测为空）。
         // RA2 接模型管理（assets.lock/网页端许可确认）后改从 settings 组装。
         let mut detector = ls_analyzer::detector::DetectorConfig::default();
@@ -613,9 +659,7 @@ impl WorkerConfig {
                 analysis_fps: afps,
                 file_loop,
             },
-            zones,
-            rules,
-            calendar,
+            policy,
             detector,
             ppe,
             evidence_fps: efps,
@@ -746,6 +790,7 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         motion_total: Arc::new(AtomicU64::new(0)),
         performance: Mutex::new(PerformanceWindow::default()),
         ppe_loaded: OnceLock::new(),
+        applied_policy_revision: AtomicU64::new(u64::MAX),
     });
     if !st.workers.insert(cid, Arc::clone(&handle)) {
         return Err("已在运行".into());
@@ -976,11 +1021,12 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     }
     let enter = env_f64("LS_ZONE_ENTER_FRAMES", 2.0) as u32;
     let exit = env_f64("LS_ZONE_EXIT_FRAMES", 3.0) as u32;
+    let mut policy = cfg.policy.clone();
     let mut pipe = ls_analyzer::pipeline::CameraPipeline::new(
         cfg.spec.clone(),
-        cfg.zones.clone(),
-        cfg.rules.clone(),
-        cfg.calendar.clone(),
+        policy.zones.clone(),
+        policy.rules.clone(),
+        policy.calendar.clone(),
         enter,
         exit,
     );
@@ -1168,6 +1214,15 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     let received = std::time::Instant::now();
                     if handle.stop.load(Ordering::SeqCst) {
                         break 'outer;
+                    }
+                    if let Some((revision, updated)) =
+                        changed_camera_policy(&st, &store, cid, &handle)
+                    {
+                        pipe.replace_policy(&updated.zones, &updated.rules, &updated.calendar);
+                        policy = updated;
+                        handle
+                            .applied_policy_revision
+                            .store(revision, Ordering::Release);
                     }
                     if !running_marked {
                         let status = if consecutive_failures >= 3 {
@@ -1375,7 +1430,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 })
                             })
                             .collect();
-                        let zones: Vec<serde_json::Value> = cfg
+                        let zones: Vec<serde_json::Value> = policy
                             .zones
                             .iter()
                             .map(|z| serde_json::json!({"id": z.id, "points": z.points}))
@@ -1624,7 +1679,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             "error" => "检查异常",
             _ => "检查已停止",
         };
-        let enabled_rules = cfg.rules.iter().filter(|rule| rule.enabled).count();
+        let enabled_rules = policy.rules.iter().filter(|rule| rule.enabled).count();
         let detail = format!(
             "视频{outcome}。已处理 {checked_frames} 帧，{person_frames} 帧检出人员，{failed_frames} 帧人员推理失败，启用规则 {enabled_rules} 条，已记录规则和模型事件 {alert_events} 条。"
         );
@@ -1969,12 +2024,21 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         return;
     };
     let mut ppe_runner = load_worker_ppe(&cfg, &handle);
+    let mut policy = cfg.policy.clone();
     let sink = EventSink::new(Arc::clone(&st));
     loop {
         if handle.stop.load(Ordering::SeqCst) {
             break;
         }
         handle.wake.store(false, Ordering::SeqCst); // 消费上一轮唤醒
+        if let Some((revision, updated)) =
+            changed_camera_policy(&st, &store, cfg.camera_id, &handle)
+        {
+            policy = updated;
+            handle
+                .applied_policy_revision
+                .store(revision, Ordering::Release);
+        }
         if !root.is_dir() {
             set_status("error"); // Python：目录缺失 → error 状态持续重试
             if !sleep_interruptible_wake(
@@ -1999,6 +2063,14 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         for c in cands.iter() {
             if handle.stop.load(Ordering::SeqCst) || scanned >= max_per_tick {
                 break;
+            }
+            if let Some((revision, updated)) =
+                changed_camera_policy(&st, &store, cfg.camera_id, &handle)
+            {
+                policy = updated;
+                handle
+                    .applied_policy_revision
+                    .store(revision, Ordering::Release);
             }
             let ts = iso_secs(c.mtime_s as u64); // Python：ts=文件 mtime
             let processed_ts = iso_secs(now as u64);
@@ -2258,7 +2330,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             let mut unmasked_zones = std::collections::HashSet::new();
             let mut occupancy = std::collections::HashMap::new();
             let mut uncoated_zones = std::collections::HashSet::new();
-            for z in &cfg.zones {
+            for z in &policy.zones {
                 let mut zone_person = 0i64;
                 let mut zone_no = 0i64;
                 let mut zone_wear = 0i64;
@@ -2300,11 +2372,12 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             if !unmasked.is_empty() {
                 violations.push("no_mask".into());
             }
-            let matches: Vec<_> = cfg
+            let matches: Vec<_> = policy
                 .rules
                 .iter()
                 .filter_map(|rule| {
-                    if !ls_analyzer::pipeline::rule_active_at(rule, &processed_ts, &cfg.calendar) {
+                    if !ls_analyzer::pipeline::rule_active_at(rule, &processed_ts, &policy.calendar)
+                    {
                         return None;
                     }
                     let zone_id = (rule.zone_id != 0).then_some(rule.zone_id);
@@ -2369,7 +2442,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             let dispatch_now = !cascade_suppress;
             let mut ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)> = Vec::new();
             for (rule, zone_id, count) in matches {
-                let zone = cfg.zones.iter().find(|zone| Some(zone.id) == zone_id);
+                let zone = policy.zones.iter().find(|zone| Some(zone.id) == zone_id);
                 let behavior = &rule.behavior;
                 let cand = ls_analyzer::pipeline::Candidate {
                     camera_id: cfg.camera_id,
@@ -2615,16 +2688,19 @@ mod tests {
         assert_eq!(cfg.camera_id, cid);
         assert_eq!(cfg.spec.source, "rtsp://10.0.0.5/stream");
         assert_eq!(cfg.spec.analysis_fps, 5.0, "默认 LS_ANALYSIS_FPS=5.0");
-        assert_eq!(cfg.zones.len(), 1);
-        assert_eq!(cfg.zones[0].points, vec![(0, 0), (100, 0), (100, 100)]);
-        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(cfg.policy.zones.len(), 1);
         assert_eq!(
-            cfg.rules[0].weekdays, "1,2,3,4,5",
+            cfg.policy.zones[0].points,
+            vec![(0, 0), (100, 0), (100, 100)]
+        );
+        assert_eq!(cfg.policy.rules.len(), 1);
+        assert_eq!(
+            cfg.policy.rules[0].weekdays, "1,2,3,4,5",
             "RA1.1 days_of_week 进 RuleSpec"
         );
-        assert_eq!(cfg.rules[0].zone_id, zid);
-        assert_eq!(cfg.rules[0].time_start, "08:00");
-        assert_eq!(cfg.calendar.len(), 0);
+        assert_eq!(cfg.policy.rules[0].zone_id, zid);
+        assert_eq!(cfg.policy.rules[0].time_start, "08:00");
+        assert_eq!(cfg.policy.calendar.len(), 0);
         assert!(cfg.detector.model_path.is_none(), "默认 NullDetector");
         // 不存在的相机 → None
         assert!(WorkerConfig::from_db(&s, 999).unwrap().is_none());

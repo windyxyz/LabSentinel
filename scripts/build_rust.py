@@ -21,7 +21,7 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
-from prepare_rust_assets import CLOSE_MASK_ASSETS, GO2RTC, MODELS, MODEL_ASSETS, valid_model_asset, valid_go2rtc
+from prepare_rust_assets import GO2RTC, MODELS, PORTABLE_MODEL_ASSETS, valid_model_asset, valid_go2rtc
 
 ROOT = Path(__file__).resolve().parent.parent
 ENGINE_RS = ROOT / "engine-rs"
@@ -69,6 +69,10 @@ def build_binary() -> Path:
 
 
 def assemble(strict: bool = False) -> None:
+    invalid_models = {name for name in PORTABLE_MODEL_ASSETS if not valid_model_asset(MODELS / name)}
+    if strict and invalid_models:
+        names = ", ".join(sorted(invalid_models))
+        raise SystemExit(f"[失败] 权重缺失或校验失败 {names}（scripts/prepare_rust_assets.py）")
     # LS-045：先清空 staging 目录再组装，防止历史版本废弃资产残留进新发行包
     if DIST.exists():
         shutil.rmtree(DIST)
@@ -86,12 +90,15 @@ def assemble(strict: bool = False) -> None:
     # RA4.2：基础检测 + PPE 模型（含类别名）随包分发（--strict 缺任一即失败）
     # 2026-11-21（用户指令）：实验服模型改为随包发布——此前 Q-08 只警告，
     # 安装版用户看到「仅人员检测」且下载源 404。
-    for name in ("yolo11n.onnx", *MODEL_ASSETS, *CLOSE_MASK_ASSETS):
+    for name in PORTABLE_MODEL_ASSETS:
         src = MODELS / name
-        if src.is_file() and (name == "yolo11n.onnx" or valid_model_asset(src)):
-            shutil.copy2(src, models / name)
-        else:
-            missing.append(f"模型缺失或校验失败 {src}（scripts/prepare_rust_assets.py）")
+        if name not in invalid_models:
+            target = models / name
+            shutil.copy2(src, target)
+            if valid_model_asset(target):
+                continue
+            target.unlink()
+        missing.append(f"模型缺失或校验失败 {src}（scripts/prepare_rust_assets.py）")
     shutil.copy2(ROOT / "docs/licenses/close-mask-MIT.txt", models / "close-mask-LICENSE.txt")
     # RA4.2：ffmpeg/ffprobe（RTSP/视频取流与存证）与 onnxruntime（ORT_DYLIB_PATH）
     ff_src = ROOT / "tools" / "ffmpeg"

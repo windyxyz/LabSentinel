@@ -2,7 +2,7 @@
 """准备 Rust 发行包所需资产（模型 / ffmpeg / ffprobe / onnxruntime / go2rtc）。
 
 用途：本地与 CI 的 `scripts/build_rust.py --strict --zip` 前置步骤。
-幂等：目标已存在即跳过；下载走 `scripts/fetch_assets.py`（哈希锁校验）。
+幂等：已验证的模型可复用。下载走 `scripts/fetch_assets.py`（哈希锁校验）。
 不含任何 Python 运行时依赖——只服务构建，不进入分发包。
 
 用法：
@@ -26,6 +26,7 @@ FFDIR = ROOT / "tools" / "ffmpeg"
 ORTDIR = ROOT / "tools" / "onnxruntime"
 MODEL_ASSETS = ("yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt", "labcoat-confirm.onnx")
 CLOSE_MASK_ASSETS = ("face_detection_yunet_2023mar.onnx", "mask_detector.onnx")
+PORTABLE_MODEL_ASSETS = ("yolo11n.onnx", *MODEL_ASSETS, *CLOSE_MASK_ASSETS)
 GO2RTC = ROOT / "tools" / "go2rtc.exe"
 GO2RTC_ARCHIVE = "go2rtc_win64.zip"
 
@@ -41,7 +42,9 @@ def valid_go2rtc(path: Path) -> bool:
 
 def valid_model_asset(path: Path) -> bool:
     spec = fetch_assets.load_lock()[path.name]
-    return path.is_file() and fetch_assets.verify(path, spec["sha256"], spec["size"])
+    sha = spec.get("prepared_sha256", spec["sha256"])
+    size = spec.get("prepared_size", spec["size"])
+    return path.is_file() and fetch_assets.verify(path, sha, size)
 
 
 def ensure_go2rtc(force: bool) -> None:
@@ -65,17 +68,16 @@ def ensure_go2rtc(force: bool) -> None:
 def prepare_person_model(out: Path, force: bool) -> None:
     """将签入锁文件的上游模型转换到随包运行库支持的 opset，验证转换后的字节。"""
     spec = fetch_assets.load_lock()[out.name]
-    if out.is_file() and not force:
-        if not fetch_assets.verify(out, spec["sha256"], spec["size"]):
-            log(f"使用已准备的模型: {out.name}。发行冒烟会实测人物检测。")
-            return
+    if not force and valid_model_asset(out):
+        log(f"{out.name} 已转换且哈希一致")
+        return
     try:
         import onnx
     except ImportError as exc:
         raise SystemExit("请在构建环境安装 onnx==1.17.0，以转换随包人员模型") from exc
     with tempfile.TemporaryDirectory(dir=out.parent) as work:
         original = out
-        if force or not out.is_file():
+        if force or not out.is_file() or not fetch_assets.verify(out, spec["sha256"], spec["size"]):
             original = Path(work) / out.name
             if fetch_assets.download(out.name, original) != 0:
                 raise SystemExit("[失败] 人员模型下载失败")

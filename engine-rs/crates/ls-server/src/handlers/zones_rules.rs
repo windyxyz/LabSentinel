@@ -49,8 +49,9 @@ pub(crate) async fn add_zone(State(st): State<Shared>, Json(body): Json<Value>) 
             return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
         let zid = s.add_zone(cid, &name, &polygon.to_string())?;
+        let revision = st.workers.notify_policy_changed();
         Ok(
-            Json(json!({"id": zid, "camera_id": cid, "name": name, "polygon": polygon}))
+            Json(json!({"id": zid, "camera_id": cid, "name": name, "polygon": polygon, "policy_revision": revision}))
                 .into_response(),
         )
     })
@@ -59,7 +60,8 @@ pub(crate) async fn add_zone(State(st): State<Shared>, Json(body): Json<Value>) 
 pub(crate) async fn delete_zone(State(st): State<Shared>, AxPath(zid): AxPath<i64>) -> Response {
     with_store(&st, |s| {
         if s.delete_zone(zid)? > 0 {
-            Ok(Json(json!({"ok": true})).into_response())
+            let revision = st.workers.notify_policy_changed();
+            Ok(Json(json!({"ok": true, "policy_revision": revision})).into_response())
         } else {
             Ok(detail_err(StatusCode::NOT_FOUND, "zone not found").into_response())
         }
@@ -90,7 +92,11 @@ pub(crate) async fn update_zone(
     }
     with_store(&st, |s| {
         if s.update_zone_polygon(zid, &polygon.to_string())? > 0 {
-            Ok(Json(json!({"ok": true, "id": zid, "polygon": polygon})).into_response())
+            let revision = st.workers.notify_policy_changed();
+            Ok(Json(
+                json!({"ok": true, "id": zid, "polygon": polygon, "policy_revision": revision}),
+            )
+            .into_response())
         } else {
             Ok(detail_err(StatusCode::NOT_FOUND, "zone not found").into_response())
         }
@@ -167,14 +173,19 @@ pub(crate) async fn add_rule(State(st): State<Shared>, Json(body): Json<Value>) 
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
         )?;
-        Ok(Json(json!({"id": rid, "camera_id": cid, "behavior": behavior})).into_response())
+        let revision = st.workers.notify_policy_changed();
+        Ok(Json(
+            json!({"id": rid, "camera_id": cid, "behavior": behavior, "policy_revision": revision}),
+        )
+        .into_response())
     })
 }
 
 pub(crate) async fn delete_rule(State(st): State<Shared>, AxPath(rid): AxPath<i64>) -> Response {
     with_store(&st, |s| {
         if s.delete_rule(rid)? > 0 {
-            Ok(Json(json!({"ok": true})).into_response())
+            let revision = st.workers.notify_policy_changed();
+            Ok(Json(json!({"ok": true, "policy_revision": revision})).into_response())
         } else {
             Ok(detail_err(StatusCode::NOT_FOUND, "rule not found").into_response())
         }
@@ -314,23 +325,31 @@ pub(crate) async fn apply_rule_template(
         }
         let mut created = 0i64;
         let mut skipped = 0i64;
+        let tx = s.conn().unchecked_transaction()?;
         for cid in &cam_ids {
             for r in rules {
                 let behavior = r.get("behavior").and_then(|v| v.as_str()).unwrap_or("");
                 let t_start = r.get("time_start").and_then(|v| v.as_str());
                 let t_end = r.get("time_end").and_then(|v| v.as_str());
+                let days = r.get("days_of_week").and_then(|v| v.as_str());
+                let holiday = r
+                    .get("holiday_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let dup = s.rules_all()?.iter().any(|x| {
                     x.1 == *cid
                         && x.2 == zone_id
                         && x.3 == behavior
-                        && x.6 == t_start.map(String::from)
-                        && x.7 == t_end.map(String::from)
+                        && x.6.as_deref() == t_start
+                        && x.7.as_deref() == t_end
+                        && x.10.as_deref() == days
+                        && x.11 == holiday
                 });
                 if dup {
                     skipped += 1;
                     continue;
                 }
-                s.add_rule(
+                s.add_rule_with_schedule(
                     *cid,
                     zone_id,
                     behavior,
@@ -340,10 +359,14 @@ pub(crate) async fn apply_rule_template(
                     t_end,
                     r.get("threshold").and_then(|v| v.as_i64()).unwrap_or(0),
                     r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                    days,
+                    holiday,
                 )?;
                 created += 1;
             }
         }
-        Ok(Json(json!({"ok": true, "created": created, "skipped": skipped})).into_response())
+        tx.commit()?;
+        let revision = (created > 0).then(|| st.workers.notify_policy_changed());
+        Ok(Json(json!({"ok": true, "created": created, "skipped": skipped, "policy_revision": revision})).into_response())
     })
 }

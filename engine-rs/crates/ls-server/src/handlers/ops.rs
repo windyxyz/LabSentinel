@@ -220,6 +220,7 @@ pub(crate) async fn set_calendar(State(st): State<Shared>, Json(body): Json<Valu
     }
     with_store(&st, |s| {
         s.set_calendar_exception(&date, &mode, &note)?;
+        st.workers.notify_policy_changed();
         Ok(Json(json!({"date": date, "mode": mode, "note": note})).into_response())
     })
 }
@@ -230,6 +231,7 @@ pub(crate) async fn delete_calendar(
 ) -> Response {
     with_store(&st, |s| {
         if s.delete_calendar_exception(&d)? {
+            st.workers.notify_policy_changed();
             Ok(Json(json!({"ok": true})).into_response())
         } else {
             Ok(detail_err(StatusCode::NOT_FOUND, "calendar exception not found").into_response())

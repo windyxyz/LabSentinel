@@ -8,7 +8,10 @@
 - **GitHub**。首批修复 `55ec098` 已直连推送，`git ls-remote --heads origin main` 已确认远端提交。版本号仍为 0.6.0，推送限主线。
 - **补充验收**。Rust 三连复验通过。扩展临时安装目录的 `smoke_rust.py`，实测自定义 PPE 文件丢失后随包模型真正加载，人员模型完全缺失及逐帧失败均留下检查记录和错误终态。
 - **模型试验**。已有 YOLOE 的裁剪方案仍有误判。原生 256 双窗导出及 CPU 对照成功，14 个人框中确认 10 个，随包方案确认 12 个，双窗未补出额外结果。候选权重和一次性实验环境位于忽略的 `Resources/runs/ls080-native-crop/`，开发始终采用推理和导出。见 [裁剪候选](findings.md#ls-080-裁剪候选第一轮验证)。
-- **Next First Command**。`git status --short --branch` 后接续 `LS-081` 的规则生效和事件统计。达到使用门槛的 256 候选仍待核验，可与其他基础修复独立推进。
+- **LS-081 已验证**。区域、规则和排班保存后，下次检测使用新版配置。照片目录运行中删除规则后仍留检查记录，新增规则后按新等级生成告警。区域设置页显示分析任务的实际生效状态。已锁定的人员权重通过校验，临时损坏缓存触发重新准备，严格构建在编译前停止。退出正常的临时 ZIP 冒烟包含新前端、PPE 回退、规则热更新和视频失败对照。
+- **验证命令**。Rust 三连通过（205 项通过、4 项忽略）。`npx vitest run` 101 项通过、`npm run build` 通过。`contract_audit.py` 匹配 141 条前端路径，`rust_route_coverage.py --exe C:/Users/User/devtools/ls-target/debug/labsentinel-server.exe --fail-under 100` 为 126/126。前端仍有既有 Vite 配置、表格结构和 jsdom Canvas 提示。
+- **安装器**。Inno Setup 7 从同一临时暂存目录编译通过，退出码 0，验证产物 154.2 MB。交互安装仍在后续验收范围。
+- **Next First Command**。`git status --short --branch` 后处理陈旧待发送告警及正常检查的处置统计，接续 AI 复核和 `LS-081` 的值守交付。达到使用门槛的 256 候选仍待核验。
 
 ## Previous Handoff Snapshot · LS-076
 

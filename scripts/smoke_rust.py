@@ -21,7 +21,7 @@ from contextlib import closing
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
-from prepare_rust_assets import CLOSE_MASK_ASSETS, MODEL_ASSETS, valid_model_asset
+from prepare_rust_assets import PORTABLE_MODEL_ASSETS, valid_model_asset
 
 CREATE_NO_WINDOW = 0x0800_0000 if sys.platform == "win32" else 0
 DEVNULL = subprocess.DEVNULL
@@ -187,22 +187,43 @@ def check_photo_rules(base: str, sandbox: Path, sample: Path, timeout: int) -> N
         {"zone_id": zone, "level": 1},
         {"days_of_week": str(datetime.now().isoweekday() % 7 + 1), "level": 1},
         {"enabled": False, "level": 1},
-        {"level": 3},
     ):
         http_post(f"{base}/api/rules", {**common, **fields})
+    _, body = http_post(f"{base}/api/rules", {**common, "level": 3})
+    rule_id = json.loads(body)["id"]
     http_post(f"{base}/api/cameras/{cid}/start", {})
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        _, body = http_get(f"{base}/api/folder-images?camera_id={cid}&limit=1")
-        items = json.loads(body)["items"]
-        if items and items[0]["event_id"]:
-            _, body = http_get(f"{base}/api/events?camera_id={cid}&category=alert")
-            hits = [(event["type"], event["level"]) for event in json.loads(body)]
-            if hits != [("occupancy_over", 3)]:
-                raise ValueError(f"照片规则区域、排班、启停或等级不符：{hits}")
-            return
-        time.sleep(0.25)
-    raise ValueError("配置的有效照片规则未产生告警")
+
+    def wait_photo(name, expect_alert):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            _, body = http_get(f"{base}/api/folder-images?camera_id={cid}&limit=20")
+            for row in json.loads(body)["items"]:
+                if row["name"] == name and row["width"] and (row["event_id"] or not expect_alert):
+                    if row["error"] or not row["persons"]:
+                        raise ValueError(f"照片 {name} 未正确检出人员")
+                    return
+            time.sleep(0.25)
+        raise ValueError(f"照片 {name} 未产生预期检查结果")
+
+    wait_photo("person.jpg", True)
+    _, body = http_post(f"{base}/api/rules/{rule_id}", {}, method="DELETE")
+    deleted = json.loads(body)["policy_revision"]
+    shutil.copyfile(sample, folder / "after-delete.jpg")
+    http_post(f"{base}/api/folders/{cid}/scan", {})
+    wait_photo("after-delete.jpg", False)
+    _, body = http_post(f"{base}/api/rules", {**common, "level": 2})
+    added = json.loads(body)["policy_revision"]
+    shutil.copyfile(sample, folder / "after-add.jpg")
+    http_post(f"{base}/api/folders/{cid}/scan", {})
+    wait_photo("after-add.jpg", True)
+    _, body = http_get(f"{base}/api/cameras/{cid}/status")
+    state = json.loads(body)
+    if state["status"] != "running" or not deleted < added <= state["applied_policy_revision"]:
+        raise ValueError("运行中的照片规则未应用已保存的版本")
+    _, body = http_get(f"{base}/api/events?camera_id={cid}&category=alert")
+    hits = [(event["type"], event["level"]) for event in json.loads(body)]
+    if hits != [("occupancy_over", 2), ("occupancy_over", 3)]:
+        raise ValueError(f"照片规则区域、排班、启停、等级或热更新不符：{hits}")
 
 
 def check_failed_detection(base: str, pkg: Path, sandbox: Path, clip: Path, timeout: int) -> None:
@@ -328,7 +349,7 @@ def main() -> int:
         required = [exe, pkg / "tools" / "go2rtc.exe", pkg / "tools" / "go2rtc-LICENSE.txt"]
         required.extend((pkg / "LICENSE", pkg / "models" / "close-mask-LICENSE.txt"))
         missing = [p.relative_to(pkg).as_posix() for p in required if not p.is_file()]
-        missing.extend(f"models/{name} 缺失或校验失败" for name in (*MODEL_ASSETS, *CLOSE_MASK_ASSETS)
+        missing.extend(f"models/{name} 缺失或校验失败" for name in PORTABLE_MODEL_ASSETS
                        if not valid_model_asset(pkg / "models" / name))
         ok1 = not missing
         print(f"[{'PASS' if ok1 else 'FAIL'}] 1 产物文件 —— {', '.join(missing) if missing else '服务、流媒体网关及近景口罩模型齐备'}")
