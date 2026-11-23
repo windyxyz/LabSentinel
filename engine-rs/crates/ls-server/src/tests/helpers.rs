@@ -55,7 +55,7 @@ pub(crate) fn test_state_custom(
         plugins: crate::plugins::PluginManager::default(),
         genai: crate::genai::GenAI::from_env(),
         go2rtc: Arc::new(crate::go2rtc::Go2rtcSupervisor::new(false)),
-        detections_tx: broadcast::channel(16).0,
+        detections: Default::default(),
     })
 }
 

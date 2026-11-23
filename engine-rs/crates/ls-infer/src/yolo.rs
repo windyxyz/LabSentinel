@@ -161,9 +161,74 @@ fn read_model_imgsz(model_path: &Path) -> Option<u32> {
     None
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputFormat {
+    Yolo,
+    RtdetrScores,
+    RtdetrTopk,
+}
+
+impl OutputFormat {
+    pub fn parse(value: &str) -> Result<Option<Self>, String> {
+        Ok(match value {
+            "auto" => None,
+            "yolo" => Some(Self::Yolo),
+            "rtdetr_scores" => Some(Self::RtdetrScores),
+            "rtdetr_topk" => Some(Self::RtdetrTopk),
+            _ => return Err(format!("未知的模型输出格式: {value}")),
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Yolo => "yolo",
+            Self::RtdetrScores => "rtdetr_scores",
+            Self::RtdetrTopk => "rtdetr_topk",
+        }
+    }
+
+    #[cfg(feature = "ort")]
+    fn from_metadata(session: &Session) -> Result<Self, String> {
+        let Ok(meta) = session.metadata() else {
+            return Ok(Self::Yolo);
+        };
+        if let Some(format) = meta.custom("labsentinel_output_format") {
+            if let Some(format) = Self::parse(&format)? {
+                return Ok(format);
+            }
+        }
+        if meta.custom("head").as_deref() == Some("RTDETRDecoder") {
+            return Ok(Self::RtdetrTopk);
+        }
+        if meta.custom("description").is_some_and(|description| {
+            let description = description.to_ascii_lowercase();
+            ["ultralytics rtdetr-", "ultralytics rt-detr-"]
+                .iter()
+                .any(|prefix| description.starts_with(prefix))
+        }) {
+            return Ok(Self::RtdetrScores);
+        }
+        Ok(Self::Yolo)
+    }
+}
+
+fn model_format_override(path: &Path) -> Result<Option<OutputFormat>, String> {
+    let text = match std::fs::read_to_string(path.with_extension("model.json")) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("读取模型配置失败: {err}")),
+    };
+    let config: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("模型配置 JSON 无效: {e}"))?;
+    config.get("output_format").map_or(Ok(None), |value| {
+        OutputFormat::parse(value.as_str().ok_or("output_format 必须是字符串")?)
+    })
+}
+
 /// YOLO11 ONNX 会话（后端无关；`person_class` 由 model.json 角色声明，缺省 0）。
 pub struct YoloModel {
     backend: Backend,
+    output_format: OutputFormat,
     #[cfg(feature = "tract")]
     tract_model: Option<std::sync::Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>>,
     #[cfg(feature = "ort")]
@@ -230,6 +295,16 @@ pub fn set_ep_used(val: impl Into<String>) {
 }
 
 impl YoloModel {
+    pub fn use_output_format(&mut self, format: Option<OutputFormat>) {
+        if let Some(format) = format {
+            self.output_format = format;
+        }
+    }
+
+    pub fn output_format(&self) -> OutputFormat {
+        self.output_format
+    }
+
     pub fn input_dimensions(&self) -> (u32, u32) {
         (self.input_w, self.input_h)
     }
@@ -250,8 +325,10 @@ impl YoloModel {
             .or_else(Backend::from_env)
             .ok_or("无可用推理后端（tract/ort feature 均未启用）")?;
         let fallback = read_model_imgsz(path).unwrap_or(imgsz);
+        let format_override = model_format_override(path)?;
         let mut model = YoloModel {
             backend,
+            output_format: format_override.unwrap_or(OutputFormat::Yolo),
             #[cfg(feature = "tract")]
             tract_model: None,
             #[cfg(feature = "ort")]
@@ -345,11 +422,11 @@ impl YoloModel {
                 println!("[ls-infer] ORT 推理设备: {ep_used}");
                 model.ep_is_dml = is_dml;
                 model.ort_session = Some(session);
-                let input = model
-                    .ort_session
-                    .as_ref()
-                    .and_then(|session| session.inputs().first())
-                    .ok_or("ORT 模型无输入")?;
+                let session = model.ort_session.as_ref().ok_or("ORT 会话未初始化")?;
+                if format_override.is_none() {
+                    model.output_format = OutputFormat::from_metadata(session)?;
+                }
+                let input = session.inputs().first().ok_or("ORT 模型无输入")?;
                 let ValueType::Tensor { ty, shape, .. } = input.dtype() else {
                     return Err("ORT 模型输入必须是图像张量".into());
                 };
@@ -398,8 +475,17 @@ impl YoloModel {
         if specs.is_empty() {
             return Ok(Vec::new());
         }
-        let (data, geom) = letterbox_nchw_wh(bgr, w, h, self.input_w, self.input_h)?;
-        match self.backend {
+        let (data, geom) = match self.output_format {
+            OutputFormat::Yolo => {
+                let (data, geom) = letterbox_nchw_wh(bgr, w, h, self.input_w, self.input_h)?;
+                (data, BoxGeometry::Letterbox(geom))
+            }
+            _ => (
+                stretch_nchw(bgr, w, h, self.input_w, self.input_h)?,
+                BoxGeometry::Normalized { w, h },
+            ),
+        };
+        let (shape, flat): (Vec<usize>, Vec<f32>) = match self.backend {
             #[cfg(feature = "tract")]
             Backend::Tract => {
                 let input = tract_ndarray::Array4::<f32>::from_shape_vec(
@@ -407,33 +493,28 @@ impl YoloModel {
                     data,
                 )
                 .map_err(|e| format!("输入张量形状错误: {e}"))?;
+                let run_started = std::time::Instant::now();
                 let outputs = self
                     .tract_model
                     .as_ref()
                     .ok_or("tract 会话未初始化")?
                     .run(tvec!(input.into_tvalue()))
                     .map_err(|e| format!("推理失败: {e}"))?;
+                INFERENCE_TIMINGS.with(|metrics| {
+                    let mut totals = metrics.get();
+                    totals.run += run_started.elapsed();
+                    totals.calls += 1;
+                    metrics.set(totals);
+                });
                 let view = outputs
                     .first()
                     .ok_or("模型无输出")?
                     .to_plain_array_view::<f32>()
                     .map_err(|e| format!("输出类型错误: {e}"))?;
-                let shape: Vec<usize> = view.shape().to_vec();
-                let rows = rows_from_dyn(&shape, &mut |idx| {
-                    view.get(tract_ndarray::IxDyn(idx))
-                        .copied()
-                        .ok_or_else(|| "输出索引越界".to_string())
-                })?;
-                let nms_free = is_nms_free_shape(&shape);
-                specs
-                    .iter()
-                    .map(|&(cid, conf, min_area)| {
-                        Self::decode_static(&rows, &geom, cid, conf, self.iou, min_area, nms_free)
-                    })
-                    .collect()
+                (view.shape().to_vec(), view.iter().copied().collect())
             }
             #[cfg(not(feature = "tract"))]
-            Backend::Tract => Err("tract feature 未启用".into()),
+            Backend::Tract => return Err("tract feature 未启用".into()),
             #[cfg(feature = "ort")]
             Backend::Ort => {
                 let session = self.ort_session.as_mut().ok_or("ORT 会话未初始化")?;
@@ -470,60 +551,30 @@ impl YoloModel {
                 let outputs = outputs.map_err(|e| format!("推理失败: {e}"))?;
                 // YOLO 单输出：取首个输出（SessionOutputs 可迭代，取第一个键值对）
                 let (_name, v) = outputs.iter().next().ok_or("模型无输出")?;
-                let (shape, rows) = if let Ok((shape, flat)) = v.try_extract_tensor::<f32>() {
-                    let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-                    let rows = rows_from_flat(&shape, flat)?;
-                    (shape, rows)
+                let result = if let Ok((shape, flat)) = v.try_extract_tensor::<f32>() {
+                    (shape.iter().map(|&d| d as usize).collect(), flat.to_vec())
                 } else {
                     let (shape, flat) = v
                         .try_extract_tensor::<half::f16>()
                         .map_err(|e| format!("输出类型错误: {e}"))?;
-                    let shape: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-                    let flat: Vec<_> = flat.iter().map(|v| v.to_f32()).collect();
-                    let rows = rows_from_flat(&shape, &flat)?;
-                    (shape, rows)
+                    (
+                        shape.iter().map(|&d| d as usize).collect(),
+                        flat.iter().map(|v| v.to_f32()).collect(),
+                    )
                 };
                 drop(v);
                 drop(outputs);
                 drop(_dml_guard);
-                let nms_free = is_nms_free_shape(&shape);
-                specs
-                    .iter()
-                    .map(|&(cid, conf, min_area)| {
-                        Self::decode_static(&rows, &geom, cid, conf, self.iou, min_area, nms_free)
-                    })
-                    .collect()
+                result
             }
             #[cfg(not(feature = "ort"))]
-            Backend::Ort => Err("ort feature 未启用".into()),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn decode_static(
-        rows: &[Vec<f32>],
-        geom: &LetterboxGeom,
-        person_class: usize,
-        conf: f32,
-        iou: f32,
-        min_box_area: f32,
-        nms_free: bool,
-    ) -> Result<Vec<Det>, String> {
-        // LS-055：端到端 NMS-free 输出 `[1, N, 6]`（RT-DETR / YOLO26 / YOLOv10）
-        // 由调用方按输出 shape 判定（6 列且行数远大于列数），避免与经典 YOLO
-        // nc=2（4+nc=6 列）混淆。
-        if nms_free {
-            let mut dets: Vec<Det> = post::decode_nms_free(rows, conf, geom, Some(person_class))
-                .into_iter()
-                .map(|(d, _)| d)
-                .collect();
-            dets.retain(|d| (d.box_[2] - d.box_[0]) * (d.box_[3] - d.box_[1]) >= min_box_area);
-            // 端到端模型已内置去重，无需再 NMS
-            return Ok(dets);
-        }
-        let mut dets = post::pick_class(rows, &[person_class], conf, geom);
-        dets.retain(|d| (d.box_[2] - d.box_[0]) * (d.box_[3] - d.box_[1]) >= min_box_area);
-        Ok(post::nms(dets, iou))
+            Backend::Ort => return Err("ort feature 未启用".into()),
+        };
+        let rows = OutputRows::new(self.output_format, &shape, &flat)?;
+        Ok(specs
+            .iter()
+            .map(|&(cid, conf, min_area)| rows.decode(&geom, cid, conf, min_area, self.iou))
+            .collect())
     }
 }
 
@@ -544,76 +595,131 @@ fn input_size(shape: &[i64], fallback: u32) -> Result<(u32, u32), String> {
     Ok((dimension(*width)?, dimension(*height)?))
 }
 
-/// LS-055：端到端输出使用 [1, N, 6]，经典双类别模型仍使用 [1, 6, N]。
-fn is_nms_free_shape(shape: &[usize]) -> bool {
-    matches!(shape, [1, _, 6])
+enum BoxGeometry {
+    Letterbox(LetterboxGeom),
+    Normalized { w: u32, h: u32 },
 }
 
-/// 从动态维度视图取行（tract 路径）。
-#[cfg(feature = "tract")]
-fn rows_from_dyn(
-    shape: &[usize],
-    get: &mut dyn FnMut(&[usize]) -> Result<f32, String>,
-) -> Result<Vec<Vec<f32>>, String> {
-    if shape.len() != 3 || shape[0] != 1 {
-        return Err(format!("输出维度异常: {shape:?}"));
-    }
-    let (c_major, channels, anchors) = if !is_nms_free_shape(shape) && shape[1] <= shape[2] {
-        (true, shape[1], shape[2])
-    } else {
-        (false, shape[2], shape[1])
-    };
-    let mut rows = Vec::with_capacity(anchors);
-    for i in 0..anchors {
-        let mut row = Vec::with_capacity(channels);
-        for c in 0..channels {
-            let idx: &[usize] = if c_major { &[0, c, i] } else { &[0, i, c] };
-            row.push(get(idx)?);
-        }
-        rows.push(row);
-    }
-    Ok(rows)
+struct OutputRows<'a> {
+    values: &'a [f32],
+    channels: usize,
+    anchors: usize,
+    channel_major: bool,
+    format: OutputFormat,
+    yolo_nms_free: bool,
 }
 
-/// 从平坦数据 + 形状取行（ort 路径）。
-fn rows_from_flat(shape: &[usize], flat: &[f32]) -> Result<Vec<Vec<f32>>, String> {
-    if shape.len() != 3 || shape[0] != 1 {
-        return Err(format!("输出维度异常: {shape:?}"));
-    }
-    rows_from_shape_dims(shape, |channels, anchors, c_major, i, c| {
-        let idx = if c_major {
-            c * anchors + i
-        } else {
-            i * channels + c
+impl<'a> OutputRows<'a> {
+    fn new(format: OutputFormat, shape: &[usize], values: &'a [f32]) -> Result<Self, String> {
+        let [1, dim1, dim2] = *shape else {
+            return Err(format!("输出维度异常: {shape:?}"));
         };
-        flat.get(idx)
-            .copied()
-            .ok_or_else(|| "输出索引越界".to_string())
-    })
-}
-
-/// (1, C, N) / (1, N, C) 双布局的公共行提取（YOLO 导出通常 (1, 4+classes, anchors)）。
-fn rows_from_shape_dims(
-    shape: &[usize],
-    mut get: impl FnMut(usize, usize, bool, usize, usize) -> Result<f32, String>,
-) -> Result<Vec<Vec<f32>>, String> {
-    if shape.len() != 3 || shape[0] != 1 {
-        return Err(format!("输出维度异常: {shape:?}"));
-    }
-    let (c_major, channels, anchors) = if !is_nms_free_shape(shape) && shape[1] <= shape[2] {
-        (true, shape[1], shape[2])
-    } else {
-        (false, shape[2], shape[1])
-    };
-    let mut rows = Vec::with_capacity(anchors);
-    for i in 0..anchors {
-        let mut row = Vec::with_capacity(channels);
-        for c in 0..channels {
-            row.push(get(channels, anchors, c_major, i, c)?);
+        let yolo_nms_free = format == OutputFormat::Yolo && dim2 == 6;
+        let channel_major = format == OutputFormat::Yolo && !yolo_nms_free && dim1 <= dim2;
+        let (channels, anchors) = if channel_major {
+            (dim1, dim2)
+        } else {
+            (dim2, dim1)
+        };
+        if channels < 5
+            || (format == OutputFormat::RtdetrTopk && channels != 6)
+            || channels.checked_mul(anchors) != Some(values.len())
+        {
+            return Err(format!("输出维度与模型格式 {format:?} 不符: {shape:?}"));
         }
-        rows.push(row);
+        Ok(Self {
+            values,
+            channels,
+            anchors,
+            channel_major,
+            format,
+            yolo_nms_free,
+        })
     }
-    Ok(rows)
+
+    fn get(&self, row: usize, col: usize) -> f32 {
+        let index = if self.channel_major {
+            col * self.anchors + row
+        } else {
+            row * self.channels + col
+        };
+        self.values[index]
+    }
+
+    fn class_score(&self, row: usize, class: usize) -> Option<f32> {
+        if self.yolo_nms_free || self.format == OutputFormat::RtdetrTopk {
+            let id = self.get(row, 5);
+            return (id >= 0.0 && id.is_finite() && id.round() as usize == class)
+                .then(|| self.get(row, 4));
+        }
+        let col = class.checked_add(4).filter(|&c| c < self.channels)?;
+        let score = self.get(row, col);
+        if self.format == OutputFormat::RtdetrScores {
+            // Older Ultralytics RT-DETR assigns each query to its highest scoring class.
+            let higher = (4..self.channels).any(|c| {
+                let other = self.get(row, c);
+                other > score || (other == score && c < col)
+            });
+            if higher {
+                return None;
+            }
+        }
+        Some(score)
+    }
+
+    fn decode(
+        &self,
+        geom: &BoxGeometry,
+        class: usize,
+        conf: f32,
+        min_area: f32,
+        iou: f32,
+    ) -> Vec<Det> {
+        let mut dets = Vec::new();
+        for row in 0..self.anchors {
+            let Some(score) = self
+                .class_score(row, class)
+                .filter(|s| s.is_finite() && *s > conf)
+            else {
+                continue;
+            };
+            let [a, b, c, d] = std::array::from_fn(|col| self.get(row, col));
+            if [a, b, c, d].iter().any(|v| !v.is_finite()) {
+                continue;
+            }
+            let box_ = match geom {
+                BoxGeometry::Letterbox(g) if self.yolo_nms_free => [
+                    (a - g.dx) / g.r,
+                    (b - g.dy) / g.r,
+                    (c - g.dx) / g.r,
+                    (d - g.dy) / g.r,
+                ],
+                BoxGeometry::Letterbox(g) => post::decode_row(a, b, c, d, g),
+                BoxGeometry::Normalized { w, h } => [
+                    ((a - c / 2.0) * *w as f32).clamp(0.0, *w as f32),
+                    ((b - d / 2.0) * *h as f32).clamp(0.0, *h as f32),
+                    ((a + c / 2.0) * *w as f32).clamp(0.0, *w as f32),
+                    ((b + d / 2.0) * *h as f32).clamp(0.0, *h as f32),
+                ],
+            };
+            let width = box_[2] - box_[0];
+            let height = box_[3] - box_[1];
+            if box_.iter().all(|v| v.is_finite())
+                && width > 0.0
+                && height > 0.0
+                && width * height >= min_area
+            {
+                dets.push(Det { box_, score });
+            }
+        }
+        if self.format == OutputFormat::Yolo && !self.yolo_nms_free {
+            return post::nms(dets, iou);
+        }
+        if self.format == OutputFormat::RtdetrScores {
+            dets.sort_by(|a, b| b.score.total_cmp(&a.score));
+        }
+        dets
+    }
 }
 
 /// letterbox + BGR→RGB + /255 + NCHW（与 Python `_letterbox` 同几何）。
@@ -634,6 +740,27 @@ fn letterbox_nchw_wh(
     in_w: u32,
     in_h: u32,
 ) -> Result<(Vec<f32>, LetterboxGeom), String> {
+    validate_image(bgr, w, h, in_w, in_h)?;
+    let g = post::letterbox_geom_wh(w, h, in_w, in_h);
+    let nw = ((w as f32 * g.r).floor() as u32).max(1).min(in_w);
+    let nh = ((h as f32 * g.r).floor() as u32).max(1).min(in_h);
+    let resized = resize_u8_linear_cv2(bgr, w, h, nw, nh, 3);
+    let data = rgb_nchw(
+        &resized,
+        (nw, nh),
+        (in_w, in_h),
+        (g.dx as usize, g.dy as usize),
+    );
+    Ok((data, g))
+}
+
+fn stretch_nchw(bgr: &[u8], w: u32, h: u32, in_w: u32, in_h: u32) -> Result<Vec<f32>, String> {
+    validate_image(bgr, w, h, in_w, in_h)?;
+    let resized = resize_u8_linear_cv2(bgr, w, h, in_w, in_h, 3);
+    Ok(rgb_nchw(&resized, (in_w, in_h), (in_w, in_h), (0, 0)))
+}
+
+fn validate_image(bgr: &[u8], w: u32, h: u32, in_w: u32, in_h: u32) -> Result<(), String> {
     let expect = (w as usize) * (h as usize) * 3;
     if bgr.len() < expect || w == 0 || h == 0 || in_w == 0 || in_h == 0 {
         return Err(format!(
@@ -641,27 +768,41 @@ fn letterbox_nchw_wh(
             bgr.len()
         ));
     }
-    let g = post::letterbox_geom_wh(w, h, in_w, in_h);
-    let nw = ((w as f32 * g.r).floor() as u32).max(1).min(in_w);
-    let nh = ((h as f32 * g.r).floor() as u32).max(1).min(in_h);
+    Ok(())
+}
+
+fn rgb_nchw(
+    resized: &[u8],
+    (nw, nh): (u32, u32),
+    (in_w, in_h): (u32, u32),
+    (dx, dy): (usize, usize),
+) -> Vec<f32> {
     let pad = 114.0f32 / 255.0;
     let plane = (in_w as usize) * (in_h as usize);
     let mut data = vec![pad; plane * 3];
     // cv2.resize(INTER_LINEAR) 定点复刻：Python 先 cv2.resize(uint8) 再 /255，
     // 这里同样先产 uint8 缩放帧，保证逐位一致（±1/255 的浮点差会传播到 conf）。
-    let resized = resize_u8_linear_cv2(bgr, w, h, nw, nh, 3);
-    for y in 0..nh {
-        let py = (g.dy as u32 + y) as usize;
-        for x in 0..nw {
-            let px = (g.dx as u32 + x) as usize;
-            for c in 0..3usize {
-                let v = resized[(y as usize * nw as usize + x as usize) * 3 + c] as f32 / 255.0;
-                let out_c = 2 - c; // BGR → RGB
-                data[out_c * plane + py * in_w as usize + px] = v;
-            }
+    let (red, green_blue) = data.split_at_mut(plane);
+    let (green, blue) = green_blue.split_at_mut(plane);
+    for (y, line) in resized
+        .chunks_exact(nw as usize * 3)
+        .take(nh as usize)
+        .enumerate()
+    {
+        let start = (y + dy) * in_w as usize + dx;
+        let line_out = start..start + nw as usize;
+        let (red, green, blue) = (
+            &mut red[line_out.clone()],
+            &mut green[line_out.clone()],
+            &mut blue[line_out],
+        );
+        for (x, &[b, g, r]) in line.as_chunks::<3>().0.iter().enumerate() {
+            red[x] = f32::from(r) / 255.0;
+            green[x] = f32::from(g) / 255.0;
+            blue[x] = f32::from(b) / 255.0;
         }
     }
-    Ok((data, g))
+    data
 }
 
 /// cv2 `resize(..., INTER_LINEAR)` 对 8U 输入的定点复刻（逐位一致）。
@@ -672,6 +813,10 @@ fn letterbox_nchw_wh(
 /// 像素加权和 `Σ src*coef + 2^21 >> 22`（系数总积 = 2048² = 2²²）。
 /// `rint` 为 cvRound 的 round-half-to-even。输出 uint8（经 saturate）。
 pub fn resize_u8_linear_cv2(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, cn: usize) -> Vec<u8> {
+    let len = dw as usize * dh as usize * cn;
+    if sw == dw && sh == dh {
+        return src[..len].to_vec();
+    }
     const COEF_BITS: i32 = 11;
     const COEF_SCALE: i32 = 1 << COEF_BITS; // 2048
     const SHIFT: i32 = COEF_BITS * 2; // 22
@@ -708,12 +853,12 @@ pub fn resize_u8_linear_cv2(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, cn: 
         let c1 = rint(fy * COEF_SCALE as f32).clamp(0, COEF_SCALE);
         (iy.max(0.0) as usize, COEF_SCALE - c1, c1)
     };
-    let mut dst = vec![0u8; (dw as usize) * (dh as usize) * cn];
+    let horizontal: Vec<_> = (0..dw).map(hcoef).collect();
+    let mut dst = vec![0u8; len];
     for dy in 0..dh {
         let (y0, cy0, cy1) = vcoef(dy);
         let y1 = (y0 + 1).min(sh as usize - 1);
-        for dx in 0..dw {
-            let (x0, cx0, cx1) = hcoef(dx);
+        for (dx, &(x0, cx0, cx1)) in horizontal.iter().enumerate() {
             let x1 = (x0 + 1).min(sw as usize - 1);
             for c in 0..cn {
                 let p00 = src[(y0 * sw as usize + x0) * cn + c] as i32;
@@ -725,7 +870,7 @@ pub fn resize_u8_linear_cv2(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, cn: 
                     + p10 * cy1 * cx0
                     + p11 * cy1 * cx1
                     + (1 << (SHIFT - 1));
-                let di = ((dy as usize * dw as usize) + dx as usize) * cn + c;
+                let di = ((dy as usize * dw as usize) + dx) * cn + c;
                 dst[di] = (v >> SHIFT).clamp(0, 255) as u8;
             }
         }
@@ -752,18 +897,40 @@ mod tests {
     }
 
     #[test]
-    fn rows_from_flat_handles_both_layouts() {
-        // 启发式 shape[1] <= shape[2] → C-major：(1,2,3) channels=2 anchors=3
-        let rows = rows_from_flat(&[1, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], vec![1.0, 4.0]);
-        assert_eq!(rows[1], vec![2.0, 5.0]);
-        assert_eq!(rows[2], vec![3.0, 6.0]);
-        // (1,3,2) → N-major：channels=2 anchors=3
-        let rows = rows_from_flat(&[1, 3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        assert_eq!(rows[0], vec![1.0, 2.0]);
-        assert_eq!(rows[1], vec![3.0, 4.0]);
-        assert_eq!(rows[2], vec![5.0, 6.0]);
+    fn rows_keep_legacy_yolo_layouts() {
+        let values = std::array::from_fn::<_, 42, _>(|i| i as f32);
+        let channel_major = OutputRows::new(OutputFormat::Yolo, &[1, 6, 7], &values).unwrap();
+        assert!(!channel_major.yolo_nms_free);
+        assert_eq!(channel_major.get(1, 4), 29.0);
+        let row_major = OutputRows::new(OutputFormat::Yolo, &[1, 7, 6], &values).unwrap();
+        assert!(row_major.yolo_nms_free);
+        assert_eq!(row_major.get(1, 4), 10.0);
+        let row_major = OutputRows::new(OutputFormat::Yolo, &[1, 7, 5], &values[..35]).unwrap();
+        assert!(!row_major.yolo_nms_free);
+        assert_eq!(row_major.get(1, 4), 9.0);
+    }
+
+    #[test]
+    fn rtdetr_six_columns_use_the_declared_format_and_original_aspect_ratio() {
+        let geometry = BoxGeometry::Normalized { w: 1280, h: 720 };
+        let values = [0.5, 0.5, 0.5, 0.5, 0.75, 1.0];
+        let topk = OutputRows::new(OutputFormat::RtdetrTopk, &[1, 1, 6], &values).unwrap();
+        let legacy = OutputRows::new(OutputFormat::RtdetrScores, &[1, 1, 6], &values).unwrap();
+        for (rows, score) in [(topk, 0.75), (legacy, 1.0)] {
+            assert_eq!(
+                rows.decode(&geometry, 1, 0.5, 0.0, 0.5),
+                [Det {
+                    box_: [320.0, 180.0, 960.0, 540.0],
+                    score
+                }]
+            );
+            assert!(rows.decode(&geometry, 0, 0.5, 0.0, 0.5).is_empty());
+        }
+        let bgr = [0, 64, 128, 0, 64, 128];
+        let tensor = stretch_nchw(&bgr, 2, 1, 2, 4).unwrap();
+        assert_eq!(&tensor[..8], &[128.0 / 255.0; 8]);
+        assert_eq!(&tensor[8..16], &[64.0 / 255.0; 8]);
+        assert_eq!(&tensor[16..], &[0.0; 8]);
     }
 
     #[test]
@@ -771,14 +938,7 @@ mod tests {
         assert_eq!(input_size(&[1, 3, 720, 1280], 640).unwrap(), (1280, 720));
         assert_eq!(input_size(&[-1, 3, -1, 960], 640).unwrap(), (960, 640));
         assert!(input_size(&[1, 720, 1280, 3], 640).is_err());
-        assert!(is_nms_free_shape(&[1, 2, 6]));
-        assert!(!is_nms_free_shape(&[1, 6, 8400]));
-        assert_eq!(
-            rows_from_flat(&[1, 1, 6], &[0., 0., 1., 1., 0.8, 0.])
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(OutputRows::new(OutputFormat::RtdetrTopk, &[1, 6, 8400], &[]).is_err());
     }
 
     #[test]

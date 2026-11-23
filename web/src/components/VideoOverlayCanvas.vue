@@ -20,12 +20,24 @@ const canvasEl = ref(null)
 const emit = defineEmits(['tracks'])
 let ws = null
 let reconnectTimer = null
-let closed = false
+let active = false
+let inViewport = typeof IntersectionObserver === 'undefined'
 let latest = null
-let raf = 0
+let raf = null
+let resizeObserver
+let intersection
+let context
+
+function scheduleDraw() {
+  if (raf !== null || document.hidden) return
+  raf = requestAnimationFrame(() => {
+    raf = null
+    draw()
+  })
+}
 
 function connect() {
-  if (closed) return
+  if (!active || ws) return
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const token = requestToken()
   // 令牌经子协议传递（不落 URL/日志，与 /ws/events 同口径）
@@ -42,15 +54,16 @@ function connect() {
       if (String(d?.camera_id) === String(props.cameraId)) {
         latest = d
         emit('tracks', Array.isArray(d.tracks) ? d.tracks.length : 0)
+        if (props.visible) scheduleDraw()
       }
     } catch { /* 忽略坏帧 */ }
   }
-  ws.onclose = () => { ws = null; latest = null; emit('tracks', 0); scheduleReconnect() }
+  ws.onclose = () => { ws = null; resetOverlay(); scheduleReconnect() }
   ws.onerror = () => { try { ws?.close() } catch { /* ignore */ } }
 }
 
 function scheduleReconnect() {
-  if (closed) return
+  if (!active) return
   clearTimeout(reconnectTimer)
   reconnectTimer = setTimeout(connect, 3000)
 }
@@ -65,7 +78,8 @@ function draw() {
     c.width = dispW
     c.height = dispH
   }
-  const ctx = c.getContext('2d')
+  if (!context && (!latest || !props.visible)) return
+  const ctx = context ||= c.getContext('2d')
   if (!ctx) return // 无 2D 上下文（jsdom/极简浏览器）——静默降级
   ctx.clearRect(0, 0, c.width, c.height)
   if (!latest || !props.visible) return
@@ -104,9 +118,10 @@ function draw() {
   }
 }
 
-function loop() {
-  draw()
-  raf = requestAnimationFrame(loop)
+function resetOverlay() {
+  latest = null
+  emit('tracks', 0)
+  scheduleDraw()
 }
 
 function closeSocket() {
@@ -118,23 +133,49 @@ function closeSocket() {
   }
 }
 
+function syncVisibility() {
+  const next = inViewport && !document.hidden
+  if (active === next) return
+  active = next
+  if (active) connect()
+  else {
+    closeSocket()
+    resetOverlay()
+  }
+}
+
 watch(() => props.cameraId, () => {
   closeSocket()
-  latest = null
+  resetOverlay()
   connect()
 })
+watch(() => [props.visible, props.imgW, props.imgH], scheduleDraw, { flush: 'post' })
 
 onMounted(() => {
-  connect()
-  raf = requestAnimationFrame(loop)
+  const parent = canvasEl.value?.parentElement
+  if (parent && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(scheduleDraw)
+    resizeObserver.observe(parent)
+  } else window.addEventListener('resize', scheduleDraw)
+  if (parent && typeof IntersectionObserver !== 'undefined') {
+    intersection = new IntersectionObserver(([entry]) => {
+      inViewport = !!entry?.isIntersecting
+      syncVisibility()
+    })
+    intersection.observe(parent)
+  }
+  document.addEventListener('visibilitychange', syncVisibility)
+  syncVisibility()
 })
 
 onBeforeUnmount(() => {
-  closed = true
+  active = false
   closeSocket()
-  cancelAnimationFrame(raf)
-  clearTimeout(reconnectTimer)
-  try { ws?.close() } catch { /* ignore */ }
+  if (raf !== null) cancelAnimationFrame(raf)
+  resizeObserver?.disconnect()
+  intersection?.disconnect()
+  window.removeEventListener('resize', scheduleDraw)
+  document.removeEventListener('visibilitychange', syncVisibility)
 })
 </script>
 

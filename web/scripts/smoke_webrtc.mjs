@@ -112,6 +112,20 @@ try {
   })
   const cameraPath = '/api/cameras/' + camera.id
   await until(async () => (await call(cameraPath + '/webrtc')).mode === 'webrtc', 'camera registration')
+  const analysisSource = (mode) => until(async () => {
+    const system = await call('/api/system')
+    return Array.isArray(system.perf?.analysis) && system.perf.analysis.some(
+      level => level.camera_id === camera.id && level.input === mode,
+    )
+  }, 'analysis source ' + mode)
+  await analysisSource('main')
+  await call(cameraPath + '/analysis-source', 'PUT', { mode: 'substream', source: rtsp })
+  await analysisSource('substream')
+  await call(cameraPath + '/analysis-source', 'PUT', { mode: 'substream', source: rtsp + '-missing' })
+  await analysisSource('main')
+  await call(cameraPath + '/analysis-source', 'PUT', { mode: 'relay' })
+  await analysisSource('relay')
+  console.log('PASS · analysis substream, direct fallback and shared relay')
   browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] })
   const admin = await browser.newPage()
   admin.on('console', message => { if (message.type() === 'error') logs.push(message.text()) })
@@ -128,6 +142,7 @@ try {
   console.log('PASS · WebRTC decoded frame')
 
   await call('/api/go2rtc/config', 'PUT', { enabled: false })
+  await analysisSource('main')
   await admin.locator('.camera-preview img').waitFor({ timeout: 15000 })
   assert.ok((await admin.locator('.snapshot-time').textContent()).match(/\d/))
   await call('/api/go2rtc/config', 'PUT', { enabled: true })

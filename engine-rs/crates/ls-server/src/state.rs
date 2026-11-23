@@ -1,5 +1,6 @@
 // 2026-11-12 batch A split: shared state.
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::broadcast;
 
 /// 应用共享状态
@@ -34,7 +35,31 @@ pub struct AppState {
     /// LS-051：go2rtc 进程内托管（CREATE_NO_WINDOW + Job Object 防孤儿）
     pub go2rtc: crate::go2rtc::SharedGo2rtc,
     /// LS-051：实时检测元数据广播（≤5Hz，WS /ws/detections/:cid 消费）
-    pub detections_tx: tokio::sync::broadcast::Sender<String>,
+    pub(crate) detections: DetectionStreams,
+}
+
+#[derive(Default)]
+pub(crate) struct DetectionStreams(Mutex<HashMap<i64, Weak<broadcast::Sender<String>>>>);
+
+impl DetectionStreams {
+    pub fn subscribe(&self, camera: i64) -> Arc<broadcast::Sender<String>> {
+        let mut streams = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        streams.retain(|_, sender| sender.strong_count() > 0);
+        if let Some(sender) = streams.get(&camera).and_then(Weak::upgrade) {
+            return sender;
+        }
+        let sender = Arc::new(broadcast::Sender::new(4));
+        streams.insert(camera, Arc::downgrade(&sender));
+        sender
+    }
+
+    pub fn subscribed(&self, camera: i64) -> Option<Arc<broadcast::Sender<String>>> {
+        let streams = self.0.lock().ok()?;
+        streams
+            .get(&camera)
+            .and_then(Weak::upgrade)
+            .filter(|sender| sender.receiver_count() > 0)
+    }
 }
 
 #[derive(Default)]

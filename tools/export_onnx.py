@@ -11,6 +11,7 @@
 导出成功后可用 tools/quantize_npu.py（npu-venv）进一步做 NPU XINT8 量化。
 """
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -66,6 +67,30 @@ def check_names(names: dict, data_yaml: str):
         print(f"[warn] 类别顺序与 {data_yaml} 不一致！模型: {model_names}  yaml: {yaml_names}")
 
 
+def mark_rtdetr_export(out: Path, nc: int):
+    import onnx
+
+    graph = onnx.load(out)
+    metadata = {entry.key: entry.value for entry in graph.metadata_props}
+    dims = graph.graph.output[0].type.tensor_type.shape.dim
+    if len(dims) != 3:
+        sys.exit(f"[error] RT-DETR 输出必须是 [batch, queries, channels]，实得 {len(dims)} 维")
+    columns = dims[-1].dim_value
+    if columns == 6 and (metadata.get("head") == "RTDETRDecoder" or nc != 2):
+        output_format = "rtdetr_topk"
+    elif columns == 4 + nc:
+        output_format = "rtdetr_scores"
+    else:
+        sys.exit(f"[error] 不支持的 RT-DETR 输出列数 {columns}")
+    metadata["labsentinel_output_format"] = output_format
+    onnx.helper.set_model_props(graph, metadata)
+    onnx.save(graph, out)
+    sidecar = out.with_suffix(".model.json")
+    settings = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+    sidecar.write_text(json.dumps({**settings, "output_format": output_format}, indent=2) + "\n", encoding="utf-8")
+    print(f"[verify] RT-DETR 输出格式: {output_format}")
+
+
 def main():
     args = parse_args()
     weights = Path(args.weights)
@@ -104,7 +129,9 @@ def main():
     elif exported.resolve() != out.resolve():
         shutil.copy2(exported, out)
         print(f"[info] 导出产物 {exported} 已复制到 {out}")
-    # LS-056：导出后同步生成 classes.txt 与 SHA256
+    if args.arch == "rtdetr":
+        mark_rtdetr_export(out, len(names))
+    # 导出后同步生成 classes.txt 与 SHA256
     classes_file = out.with_name(out.stem + ".classes.txt")
     try:
         import hashlib

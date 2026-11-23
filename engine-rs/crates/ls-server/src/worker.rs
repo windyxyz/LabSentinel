@@ -24,6 +24,7 @@ use crate::state::Shared;
 const DEDUP_MAX: usize = 4096;
 
 static SNAP_SEQ: AtomicU64 = AtomicU64::new(0);
+static PREVIEW_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// worker 文件系统布局（data_dir 相对约定；测试可注入隔离目录）。
 #[derive(Debug, Clone)]
@@ -331,6 +332,7 @@ pub struct WorkerHandle {
 pub struct Snapshot {
     pub jpeg: axum::body::Bytes,
     pub captured_at_ms: u128,
+    pub sequence: u64,
 }
 
 /// 全局 worker 注册表（AppState.workers）。
@@ -411,6 +413,8 @@ pub struct WorkerConfig {
     pub ppe: Option<ls_analyzer::ppe::PpeConfig>,
     pub evidence_fps: f64,
     pub max_restarts: u32,
+    pub analysis_source: String,
+    pub analysis_shared: bool,
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
@@ -570,6 +574,9 @@ impl WorkerConfig {
             ls_analyzer::detector::anchor_model_file(&p).map(|model_path| {
                 ls_analyzer::ppe::PpeConfig {
                     model_path,
+                    output_format: s.setting_get("ppe.output_format").ok().flatten().and_then(
+                        |value| ls_infer::yolo::OutputFormat::parse(&value).ok().flatten(),
+                    ),
                     use_gpu: detector.use_gpu,
                     violation_conf: ppe_v_conf,
                     wearing_conf: ppe_w_conf,
@@ -595,6 +602,8 @@ impl WorkerConfig {
             ppe,
             evidence_fps: efps,
             max_restarts: DEFAULT_MAX_RESTARTS,
+            analysis_source: c.analysis_source,
+            analysis_shared: c.analysis_shared,
         }))
     }
 }
@@ -658,7 +667,7 @@ pub fn restart_camera_if_running(st: &Shared, store: &ls_store::Store, cid: i64)
         .camera(cid)
         .ok()
         .flatten()
-        .map(|c| c.status == "running")
+        .map(|c| matches!(c.status.as_str(), "starting" | "running" | "reconnecting"))
         .unwrap_or(false);
     if !was_running {
         return false;
@@ -819,14 +828,15 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     pipe.set_ppe(ppe_runner);
     let evidence = Arc::new(ls_analyzer::evidence::Evidence::default());
     evidence.new_ring(cfg.spec.analysis_fps as f64, cfg.evidence_fps);
-    let mut ing = ls_ingest::Ingest::new(ls_ingest::IngestConfig {
+    let ingest_config = ls_ingest::IngestConfig {
         source: cfg.spec.source.clone(),
         analysis_fps: cfg.spec.analysis_fps,
         width: 1280,
         height: 720,
         file_loop: cfg.spec.file_loop,
         rtsp_transport_tcp: true,
-    });
+    };
+    let live_capture = matches!(cfg.spec.type_.as_str(), "rtsp" | "usb");
     let sink = EventSink::new(Arc::clone(&st));
     // UX2（2026-11-20）：检测模式解析——per-camera analyzer 覆盖全局策略
     // （default=跟随全局 / rust=仅本地 / vlm=仅 API / cascade=协作）。
@@ -848,38 +858,77 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     // LS-043：用 Option<Instant> 替代 `Instant::now() - vlm_interval`，防 Windows 刚开机减法下溢 panic
     let mut last_vlm: Option<std::time::Instant> = None;
     let mut restarts = 0u32;
-    #[allow(unused_assignments)] // 每轮 spawn 成功时重置（None 初始值仅首次可读路径）
-    let mut alive_since: Option<std::time::Instant> = None;
     let mut running_marked = false;
+    let mut live_index = 0;
+    let mut use_main_stream = false;
     'outer: loop {
         if handle.stop.load(Ordering::SeqCst) {
             break;
         }
-        if let Err(e) = ing.spawn_with_slot(Arc::clone(&handle.ffmpeg)) {
-            if let Ok(mut metrics) = handle.performance.lock() {
-                metrics.reconnect();
-            }
-            if !on_restart(&store, &cfg, &mut restarts, None, &format!("spawn: {e}")) {
-                // given_up：error 状态已写；注册表自清理（否则 stop_worker 永远命中不了）
-                if let Ok(mut m) = st.workers.map.lock() {
-                    m.remove(&cfg.camera_id);
+        let mut input = ingest_config.clone();
+        let mut input_kind = "main";
+        if !use_main_stream && cfg.spec.type_ == "rtsp" {
+            if !cfg.analysis_source.is_empty() {
+                input.source.clone_from(&cfg.analysis_source);
+                input_kind = "substream";
+            } else if cfg.analysis_shared {
+                if let Some(source) = st
+                    .go2rtc
+                    .local_analysis_source(cfg.camera_id, &input.source)
+                {
+                    input.source = source;
+                    input_kind = "relay";
                 }
-                return;
             }
-            if !sleep_interruptible(&handle.stop, restart_backoff(restarts)) {
-                break;
-            }
-            continue;
         }
-        alive_since = Some(std::time::Instant::now());
+        let mut reader = match ls_ingest::capture::FrameReader::start(
+            input,
+            Arc::clone(&handle.ffmpeg),
+            live_capture,
+        ) {
+            Ok(reader) => reader,
+            Err(e) => {
+                if let Ok(mut metrics) = handle.performance.lock() {
+                    metrics.reconnect();
+                }
+                if input_kind != "main" {
+                    use_main_stream = true;
+                    continue;
+                }
+                if !on_restart(&store, &cfg, &mut restarts, None, &format!("spawn: {e}")) {
+                    if let Ok(mut m) = st.workers.map.lock() {
+                        if m.get(&cfg.camera_id)
+                            .is_some_and(|cur| Arc::ptr_eq(cur, &handle))
+                        {
+                            m.remove(&cfg.camera_id);
+                        }
+                    }
+                    return;
+                }
+                if !sleep_interruptible(&handle.stop, restart_backoff(restarts)) {
+                    break;
+                }
+                continue;
+            }
+        };
+        let stream_index_base = live_index;
+        let alive_since = Some(std::time::Instant::now());
+        if let Ok(mut metrics) = handle.performance.lock() {
+            metrics.input_kind = input_kind;
+        }
         loop {
             if handle.stop.load(Ordering::SeqCst) {
                 break 'outer;
             }
             let read_started = std::time::Instant::now();
-            match ing.read_frame() {
-                Ok(Some(frame)) => {
+            match reader.read() {
+                Ok(Some(captured)) => {
                     let received = std::time::Instant::now();
+                    let mut frame = captured.frame;
+                    if live_capture {
+                        frame.index = frame.index.saturating_add(stream_index_base);
+                        live_index = frame.index;
+                    }
                     // 存活 >5s 重置重启计数（Python Manager 口径）
                     if alive_since
                         .map(|t| t.elapsed().as_secs() >= RESTART_ALIVE_RESET_S)
@@ -901,10 +950,12 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         if let Ok(mut slot) = handle.latest_jpeg.lock() {
                             *slot = Some(Snapshot {
                                 jpeg: j.clone().into(),
-                                captured_at_ms: std::time::SystemTime::now()
+                                captured_at_ms: captured
+                                    .timestamp
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_millis(),
+                                sequence: PREVIEW_SEQ.fetch_add(1, Ordering::Relaxed),
                             });
                         }
                     }
@@ -949,7 +1000,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     let ts = if cfg.spec.type_ == "file" {
                         ls_analyzer::pipeline::frame_ts_for(frame.index, cfg.spec.analysis_fps)
                     } else {
-                        ls_core::time::local_now_iso()
+                        ls_core::time::format_system_time_local_iso(captured.timestamp)
                     };
                     let rules_start = std::time::Instant::now();
                     let cands = pipe.process_with_frame(
@@ -958,10 +1009,16 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         Some((&frame.data, frame.width, frame.height)),
                     );
                     let rules_elapsed = rules_start.elapsed();
-                    let analysis_elapsed = received.elapsed();
+                    let analyzed = std::time::Instant::now();
+                    let analysis_elapsed = analyzed - received;
                     let inference = ls_infer::yolo::take_inference_timings();
                     // LS-051：≤5Hz 推送实时检测框元数据（tracks + zones）到 WS 订阅者
-                    if last_det_broadcast.elapsed() >= std::time::Duration::from_millis(200) {
+                    let broadcast_due =
+                        last_det_broadcast.elapsed() >= std::time::Duration::from_millis(200);
+                    if let Some(detections) = broadcast_due
+                        .then(|| st.detections.subscribed(cfg.camera_id))
+                        .flatten()
+                    {
                         last_det_broadcast = std::time::Instant::now();
                         let tracks: Vec<serde_json::Value> = pipe
                             .last_tracks()
@@ -994,7 +1051,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             "tracks": tracks,
                             "zones": zones,
                         });
-                        let _ = st.detections_tx.send(payload.to_string());
+                        let _ = detections.send(payload.to_string());
                     }
                     // UX2 cascade：suppress 策略下本地事件先不派发（复核肯定补投递）
                     let dispatch_now = !cascade_suppress;
@@ -1113,10 +1170,6 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                         .unwrap_or_default();
                                     let summary = v["summary"].as_str().unwrap_or("").to_string();
                                     let persons = v["persons"].as_i64().unwrap_or(0);
-                                    let ts = ls_analyzer::pipeline::frame_ts_for(
-                                        frame.index,
-                                        cfg.spec.analysis_fps,
-                                    );
                                     // 违规截图：证据环尾帧（最新画面）
                                     let jpeg = ring_frames.last().cloned().unwrap_or_default();
                                     for behavior in &violations {
@@ -1150,6 +1203,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     if let Ok(mut metrics) = handle.performance.lock() {
                         metrics.record(FrameTiming {
                             read_wait: received.saturating_duration_since(read_started),
+                            queue_wait: received.saturating_duration_since(captured.arrived),
+                            analysis_age: analyzed.saturating_duration_since(captured.arrived),
+                            overwritten: captured.overwritten,
                             jpeg: jpeg_elapsed,
                             detection: detection_elapsed,
                             rules: rules_elapsed,
@@ -1172,7 +1228,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 }
             }
         }
-        ing.stop();
+        drop(reader);
         if handle.stop.load(Ordering::SeqCst) {
             break;
         }
@@ -1187,6 +1243,11 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         if let Ok(mut metrics) = handle.performance.lock() {
             metrics.reconnect();
         }
+        if input_kind != "main" {
+            use_main_stream = true;
+            continue;
+        }
+        use_main_stream = false;
         if !on_restart(&store, &cfg, &mut restarts, alive_since, "stream ended") {
             evidence.flush();
             if let Ok(mut m) = st.workers.map.lock() {
@@ -1202,7 +1263,6 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             break;
         }
     }
-    ing.stop();
     evidence.flush();
     // given_up 路径已写 error；其余（stop/stop 打断）写 stopped
     let _ = store.set_camera_status(cfg.camera_id, "stopped");

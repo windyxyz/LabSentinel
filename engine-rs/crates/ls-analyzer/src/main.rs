@@ -194,6 +194,7 @@ fn make_ppe_runner() -> Option<Box<dyn pipeline::PpeRunner>> {
     };
     let cfg = ppe::PpeConfig {
         model_path: path,
+        output_format: None,
         imgsz: env_u32("LS_IMGSZ", 640),
         iou: env_f32("LS_IOU_THRES", 0.50),
         violation_conf: env_f32("LS_PPE_CONF", 0.30),

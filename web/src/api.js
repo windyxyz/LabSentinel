@@ -13,15 +13,16 @@ export const setBrowserSessionMode = enabled => { browserSessionMode = enabled }
 export const requestToken = () => sessionStorage.getItem('ls_readonly_token') || (browserSessionMode ? '' : adminToken.get())
 export const accessChanged = () => window.dispatchEvent(new Event('ls-access-changed'))
 
-export async function fetchMedia(path, signal) {
+export async function fetchMedia(path, signal, etag) {
   const token = requestToken()
   const headers = token ? { 'X-Admin-Token': token } : {}
-    const response = await fetch(path, { headers, cache: 'no-store', signal })
-    if (!response.ok) {
-      if (response.status === 401 && browserSessionMode) accessChanged()
-      throw Object.assign(new Error(`下载失败（HTTP ${response.status}）`), { status: response.status })
-    }
-    return response
+  if (etag) headers['If-None-Match'] = etag
+  const response = await fetch(path, { headers, cache: 'no-store', signal })
+  if (!response.ok && !(etag && response.status === 304)) {
+    if (response.status === 401 && browserSessionMode) accessChanged()
+    throw Object.assign(new Error(`下载失败（HTTP ${response.status}）`), { status: response.status })
+  }
+  return response
 }
 
 export async function fetchBinary(path) {
@@ -72,7 +73,7 @@ export function mediaUrl(path) {
   return ''
 }
 
-async function req(method, path, body) {
+async function req(method, path, body, signal) {
   const isForm = body instanceof FormData
   const headers = body && !isForm ? { 'Content-Type': 'application/json' } : {}
   const token = requestToken()
@@ -81,6 +82,7 @@ async function req(method, path, body) {
     method,
     headers,
     body: body ? (isForm ? body : JSON.stringify(body)) : undefined,
+    signal,
   })
   if (!r.ok) {
     let msg = `${method} ${path} -> ${r.status}`
@@ -113,6 +115,7 @@ export const api = {
   addCamera: (d) => req('POST', '/api/cameras', d),
   cameraGroups: () => req('GET', '/api/camera-groups'),
   setCameraGroup: (id, name) => req('PUT', `/api/cameras/${id}/group`, { group_name: name }),
+  setAnalysisSource: (id, body) => req('PUT', `/api/cameras/${id}/analysis-source`, body),
   bulkCameras: (ids, action) => req('POST', '/api/cameras/bulk', { ids, action }),
   discoverCameras: (params = {}) => req('GET', '/api/discovery/cameras?' + new URLSearchParams(params)),
   probeHost: (d) => req('POST', '/api/discovery/probe', d),
@@ -211,7 +214,8 @@ export const api = {
   },
   ppeReset: () => req('POST', '/api/models/ppe/reset', {}),
   // LS-055：模型 A/B 对比评测
-  ppeBenchmark: (candidate_path, activate = false) => req('POST', '/api/models/ppe/benchmark', { candidate_path, activate }),
+  ppeBenchmark: (candidate_path, activate = false, candidate_format = 'auto') =>
+    req('POST', '/api/models/ppe/benchmark', { candidate_path, activate, candidate_format }),
   // 0.4.0：API 多接入档案（保存多个上游，随时切换/测试/自动拉模型）
   detectProfiles: () => req('GET', '/api/detect/profiles'),
   saveDetectProfile: (p) => req('POST', '/api/detect/profiles', p),
@@ -228,7 +232,7 @@ export const api = {
   revokeDevice: (id) => req('DELETE', `/api/devices/${id}`),
   setEventStatus: (id, status) => req('POST', `/api/events/${id}/status`, { status }),
   bulkStatus: (payload) => req('POST', '/api/events/bulk-status', payload),
-  cameraWebrtc: (id) => req('GET', `/api/cameras/${id}/webrtc`),
+  cameraWebrtc: (id, signal) => req('GET', `/api/cameras/${id}/webrtc`, undefined, signal),
   maintenanceStatus: () => req('GET', '/api/maintenance/status'),
   maintenancePreview: () => req('GET', '/api/maintenance/preview'),
   shutdownServer: () => req('POST', '/api/system/shutdown'),  // 任务120：网页端停止服务

@@ -14,10 +14,15 @@ const wsUrl = ref('')
 const playing = ref(false)
 const snapshot = ref('')
 const capturedAt = ref(0)
+const previewEl = ref(null)
 let timer
 let controller
 let generation = 0
 let lastProbeAt = 0
+let etag = ''
+let intersection
+let inViewport = typeof IntersectionObserver === 'undefined'
+let mounted = false
 
 const snapshotLabel = computed(() => capturedAt.value
   ? `快照 ${new Date(capturedAt.value).toLocaleTimeString('zh-CN', { hour12: false })}`
@@ -27,14 +32,24 @@ function clearSnapshot() {
   if (snapshot.value) URL.revokeObjectURL(snapshot.value)
   snapshot.value = ''
   capturedAt.value = 0
+  etag = ''
+}
+
+function schedule(delay = 0) {
+  clearTimeout(timer)
+  if (mounted && !document.hidden && inViewport && !playing.value && !controller) {
+    timer = setTimeout(() => poll(generation), delay)
+  }
 }
 
 async function poll(active) {
-  if (active !== generation) return
+  if (active !== generation || document.hidden || !inViewport || playing.value || controller) return
+  const request = new AbortController()
+  controller = request
   try {
-    if (!document.hidden && props.cameraType === 'rtsp' && !playing.value && Date.now() - lastProbeAt >= 5000) {
+    if (props.cameraType === 'rtsp' && Date.now() - lastProbeAt >= 5000) {
       lastProbeAt = Date.now()
-      const preview = await api.cameraWebrtc(props.cameraId).catch(() => null)
+      const preview = await api.cameraWebrtc(props.cameraId, request.signal).catch(() => null)
       if (active !== generation) return
       if (['webrtc', 'mse'].includes(preview?.mode) && typeof preview?.ws_url === 'string') {
         mode.value = preview.mode
@@ -45,11 +60,12 @@ async function poll(active) {
         mode.value = 'snapshot'
       }
     }
-    if (!document.hidden && !playing.value && props.cameraType !== 'folder') {
-      controller = new AbortController()
-      const response = await fetchMedia(`/api/cameras/${props.cameraId}/snapshot`, controller.signal)
+    if (!playing.value && props.cameraType !== 'folder') {
+      const response = await fetchMedia(`/api/cameras/${props.cameraId}/snapshot`, request.signal, etag)
+      if (response.status === 304) return
       const time = Number(response.headers.get('x-ls-frame-time-ms')) || 0
-      if (time && time === capturedAt.value) {
+      const tag = response.headers.get('etag') || ''
+      if (!tag && time && time === capturedAt.value) {
         await response.body?.cancel()
         return
       }
@@ -57,40 +73,66 @@ async function poll(active) {
       if (active !== generation || playing.value || !blob.size) return
       clearSnapshot()
       capturedAt.value = time
+      etag = tag
       snapshot.value = URL.createObjectURL(blob)
     }
   } catch (err) {
     if (active === generation && [401, 403, 404].includes(err?.status)) clearSnapshot()
   } finally {
-    if (active === generation) timer = setTimeout(() => poll(active), playing.value ? 3000 : 1500)
+    if (controller === request) controller = undefined
+    if (active === generation && props.cameraType !== 'folder') schedule(1500)
   }
 }
 
 function stop() {
   generation++
   controller?.abort()
+  controller = undefined
   clearTimeout(timer)
   clearSnapshot()
-}
-
-function restart() {
-  stop()
   wsUrl.value = ''
   playing.value = false
   mode.value = 'snapshot'
   lastProbeAt = 0
-  poll(generation)
 }
 
-onMounted(restart)
+function restart() {
+  stop()
+  if (props.cameraType !== 'folder') schedule()
+}
+
+function onReady(ready) {
+  playing.value = ready
+  schedule()
+}
+
+onMounted(() => {
+  mounted = true
+  if (typeof IntersectionObserver !== 'undefined' && previewEl.value) {
+    intersection = new IntersectionObserver(([entry]) => {
+      if (entry && entry.isIntersecting !== inViewport) {
+        inViewport = entry.isIntersecting
+        restart()
+      }
+    })
+    intersection.observe(previewEl.value)
+  }
+  document.addEventListener('visibilitychange', restart)
+  restart()
+})
 watch(() => [props.cameraId, props.cameraType], restart)
-onBeforeUnmount(stop)
+onBeforeUnmount(() => {
+  mounted = false
+  intersection?.disconnect()
+  document.removeEventListener('visibilitychange', restart)
+  stop()
+})
 </script>
 
 <template>
-  <div class="preview">
+  <div ref="previewEl" class="preview">
     <WebrtcPlayer v-if="wsUrl" class="stream" :class="{ 'stream-pending': !playing }"
-      :ws-url="wsUrl" :mode="mode" @ready="playing = $event" />
+      :ws-url="wsUrl" :mode="mode" @ready="onReady" />
     <template v-if="!playing">
       <img v-if="snapshot" :src="snapshot" :alt="name" />
       <div v-else class="placeholder">{{ cameraType === 'folder' ? '图片文件夹' : '等待画面' }}</div>

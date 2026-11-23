@@ -9,7 +9,7 @@ use serde::Serialize;
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 17;
+pub const SCHEMA_VERSION_LATEST: i64 = 18;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
@@ -54,6 +54,8 @@ pub struct Camera {
     pub status: String,
     pub group_name: String,
     pub analyzer: String,
+    pub analysis_source: String,
+    pub analysis_shared: bool,
 }
 
 pub struct Store {
@@ -106,11 +108,12 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(17, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(18, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
-               analyzer TEXT DEFAULT 'default');
+               analyzer TEXT DEFAULT 'default', analysis_source TEXT NOT NULL DEFAULT '', \
+               analysis_shared INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS zones(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, name TEXT, polygon TEXT);
              CREATE TABLE IF NOT EXISTS rules(\
@@ -240,6 +243,26 @@ impl Store {
                policy_json TEXT NOT NULL); \
              INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(17, 'rust-ls063-device-access');",
         )?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let has_analysis_source = transaction
+            .prepare("PRAGMA table_info(cameras)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|column| column == "analysis_source");
+        if !has_analysis_source {
+            transaction.execute_batch(
+                "ALTER TABLE cameras ADD COLUMN analysis_source TEXT NOT NULL DEFAULT ''; \
+                 ALTER TABLE cameras ADD COLUMN analysis_shared INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(18, 'rust-ls065-analysis-source')",
+            [],
+        )?;
+        transaction.commit()?;
         self.schema_version()
     }
 
@@ -405,7 +428,7 @@ impl Store {
     // ---- cameras ----
     pub fn cameras(&self) -> rusqlite::Result<Vec<Camera>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id,name,source,type,status,COALESCE(group_name,''),COALESCE(analyzer,'python') FROM cameras ORDER BY id")?;
+            "SELECT id,name,source,type,status,COALESCE(group_name,''),COALESCE(analyzer,'python'),analysis_source,analysis_shared FROM cameras ORDER BY id")?;
         let rows = stmt.query_map([], |r| {
             Ok(Camera {
                 id: r.get(0)?,
@@ -415,6 +438,8 @@ impl Store {
                 status: r.get(4)?,
                 group_name: r.get(5)?,
                 analyzer: r.get(6)?,
+                analysis_source: r.get(7)?,
+                analysis_shared: r.get(8)?,
             })
         })?;
         rows.collect()
@@ -423,6 +448,18 @@ impl Store {
     pub fn camera(&self, id: i64) -> rusqlite::Result<Option<Camera>> {
         let cams = self.cameras()?;
         Ok(cams.into_iter().find(|c| c.id == id))
+    }
+
+    pub fn set_camera_analysis_source(
+        &self,
+        id: i64,
+        source: &str,
+        shared: bool,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE cameras SET analysis_source=?,analysis_shared=? WHERE id=? AND type='rtsp'",
+            params![source, shared, id],
+        )
     }
 
     /// RA2-S6：人脸同意记录（合规留痕，只存 subject/ts，不落人脸图片）。
@@ -1860,6 +1897,14 @@ impl Store {
              ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ts=excluded.updated_ts",
             params![key, value, chrono_now()],
         )
+    }
+
+    pub fn settings_set(&self, values: &[(&str, &str)]) -> rusqlite::Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        for (key, value) in values {
+            self.setting_set(key, value)?;
+        }
+        transaction.commit()
     }
 
     /// app_settings 前缀查询（R2-305：ls-server 读 alert.* 渠道覆盖）

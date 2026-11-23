@@ -27,8 +27,8 @@
 | LS-062 | 本机与局域网访问密码、浏览器会话和令牌迁移 | P1 | BLOCKED | 2026-11-23 | 在可运行构建产物的 Windows 环境执行 `node web/scripts/smoke_webrtc.mjs <staging>` 和 HTTPS 反代联测 |
 | LS-063 | 浏览器设备配对、相机范围授权与撤销 | P1 | BLOCKED | 2026-11-23 | 在可运行构建产物的 Windows 环境重跑 `node web/scripts/smoke_webrtc.mjs <staging>` 的设备画面撤销场景 |
 | LS-064 | 1／4／9 路性能、稳定性和识别质量基线 | P1 | BLOCKED | 2026-11-23 | 在可运行基准的 Windows 环境执行 `windows_rtsp_benchmark` 和 `windows_scene_truth_replay` |
-| LS-065 | 有界采集与推理、模型格式适配、媒体与前端提速 | P1 | ACTIVE | 2026-11-23 | `rg -n 'is_nms_free_shape|decode_nms_free|read_frame|broadcast' engine-rs/crates` |
-| LS-066 | 人脸关闭／本地／API、模型管理与人员录入 | P1 | READY | 2026-11-22 | `rg -n 'FaceClient|face_guard' engine-rs/crates/ls-server/src` |
+| LS-065 | 有界采集与推理、模型格式适配、媒体与前端提速 | P1 | BLOCKED | 2026-11-23 | 在可运行构建产物的 Windows 环境对照 `ceb1ebb` 重跑基准、真值与正式包联测 |
+| LS-066 | 人脸关闭／本地／API、模型管理与人员录入 | P1 | ACTIVE | 2026-11-23 | `rg -n 'FaceClient|face_guard|face_consents' engine-rs/crates` |
 | LS-067 | 告警投递与值班交接、合规报表、小样本训练预检 | P2 | READY | 2026-11-22 | `rg -n 'LS-058-(07|08|11|12)' findings.md` |
 | LS-068 | v0.6.0 · 全量验收、版本同步与 GitHub 正式发布 | P0 | READY | 2026-11-22 | 核对 `LS-060`～`LS-067` 证据，再执行 `python -X utf8 scripts/bump_version.py 0.6.0` |
 | LS-900 | 代码签名证书（T-403）与 GitHub uploads 网络通道（S302）处理 | P3 | BLOCKED | 2026-11-22 | 人工事项：待证书到位或用户调整本机网络/hosts |

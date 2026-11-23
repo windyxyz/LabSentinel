@@ -11,6 +11,7 @@ pub mod folder;
 // server 以任何方式死亡时内核自动杀掉全部 ffmpeg（不再残留占摄像头）。
 mod winjob;
 
+pub mod capture;
 /// LS-051：Rust 托管的外部子进程守护（go2rtc 等）——绑 Windows Job Object
 /// kill-on-close，主进程任何时候死亡都不留孤儿；Drop 自动杀进程。
 /// 复用 winjob 内部已收口的 unsafe，本模块零新增 unsafe。

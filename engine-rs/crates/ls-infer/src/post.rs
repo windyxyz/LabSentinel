@@ -31,7 +31,7 @@ pub fn letterbox_geom(w: u32, h: u32, s: u32) -> LetterboxGeom {
     }
 }
 
-/// LS-055：非正方形输入的 letterbox 几何（RT-DETR/YOLO26 常用 960/1280 等）。
+/// 非正方形 YOLO 输入的 letterbox 几何。
 pub fn letterbox_geom_wh(w: u32, h: u32, in_w: u32, in_h: u32) -> LetterboxGeom {
     let (w, h, iw, ih) = (w as f32, h as f32, in_w as f32, in_h as f32);
     let r = (ih / h).min(iw / w);
@@ -45,7 +45,7 @@ pub fn letterbox_geom_wh(w: u32, h: u32, in_w: u32, in_h: u32) -> LetterboxGeom 
 }
 
 /// LS-055：端到端 NMS-free 输出 `[x1, y1, x2, y2, score, class_id]` 解码
-/// （RT-DETR / YOLO26 / YOLOv10）。返回 (Det, class_id)。
+/// （YOLO26 / YOLOv10）。返回 (Det, class_id)。
 /// `class_filter` 为 Some 时仅保留该类；坐标为画布坐标，需反 letterbox。
 pub fn decode_nms_free(
     rows: &[Vec<f32>],

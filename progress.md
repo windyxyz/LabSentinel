@@ -2,11 +2,19 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID / Task-Name**：`LS-065`（`ACTIVE`）/ 有界采集与推理、模型格式适配、媒体与前端提速。
+- **Task-ID / Task-Name**：`LS-066`（`ACTIVE`）/ 人脸关闭、本地及 API、模型管理与人员录入。
 - **基线**：`main`，`LS-060` 和 `LS-061` 已通过本机实施验收。`LS-062`、`LS-063` 的业务实现有单项实测，独立 EXE 播放联测保留为发布门禁。GitHub 公开 Release 为 `v0.5.0`。
 - **范围**：用户指示全部作为 `v0.6.0`，计划后直接实施，全部验收通过后发布 GitHub。任务 `LS-060`～`LS-068` 逐项推进。
-- **性能采集**。为采集等待、JPEG、模型运行、DirectML 锁等待、规则与从读帧完成起的分析时间加入有界采样。新增原生 RTSP 基准，以 1080p H.264、5 FPS 分析和两个随包模型构造 1／4／9 路场景。当前 Windows 为 11 专业工作站版 26300，AMD Ryzen AI 9 H 365 和 Radeon 880M，显卡驱动 32.0.32015.16001，随包 ORT 文件版本 1.20.20241119.10.5c1b7cc。
-- **Next First Command**：`rg -n 'is_nms_free_shape|decode_nms_free|read_frame|broadcast' engine-rs/crates`。
+- **当前重点**。建立本地 YuNet／SFace 与 CompreFace 管理入口，落实计时、录入同意、停止和撤回，再接入相机，保留分析与登录的独立行为。
+- **Next First Command**：`rg -n 'FaceClient|face_guard|face_consents' engine-rs/crates`。
+
+---
+
+## Previous Handoff Snapshot · LS-065
+
+- **实现**。RTSP／USB 最新帧单槽、覆盖和帧龄计数，JPEG 直接 BGR 编码，减少模型解码分配并继续串行保护 DirectML。按模型声明处理新版和旧版 RT-DETR，网页可选择 PPE 输出格式与候选格式。增加高画质预览与子流分析、主码流共享及回退。检测数据按相机广播，Canvas 随数据重绘，画面离开视口或标签页隐藏时停止播放与快照轮询，同帧快照返回 HTTP 304。
+- **实测**。`cargo fmt --all -- --check` 和 Clippy 通过。`cargo test --workspace --all-features --no-fail-fast` 的 43 个实际执行用例通过，7 个目标被 Windows 应用控制以 4551 阻止。Web 98 项、生产构建、播放脚本语法、导出工具语法及契约（128 条调用，166 条路由）通过。
+- **验收**。保持 `ceb1ebb` 作为优化前基线。包内浏览器脚本已加入子码流、直连回退和共享中继。真实 RT-DETR 导出、完整 CPU／DirectML 对照、关键事件真值、多路和 24 小时压力及正式 EXE 联测待可执行环境，当前没有可宣称的整链提速幅度。
 
 ---
 

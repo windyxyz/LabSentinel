@@ -73,3 +73,5 @@
 - 用户确认全部后续任务进入 `v0.6.0`，规划后直接执行，完成后走 GitHub 正式发布。`LS-060`～`LS-067` 为实施范围，`LS-068` 负责验收与发布。旧三版本建议仅为历史讨论。
 - 安装目录 Program Files 不应承载运行账户写入的配置。回滚选择依据当前已安装文件版本，历史 `current.txt` 可能指向旧版归档。RTC、密码和设备迁移均需使用既有数据及实际会话进行回归。
 - `LS-060` 浏览器实测已收到 WebRTC 首帧，同时分析 worker 未取得快照。随包 FFmpeg 对同一 RTSP 流返回 `Option rw_timeout not found`，其 RTSP 解复用器提供的是 `-timeout`。将分析取帧作为正式包播放验收的一部分。
+- `LS-065` 记录的分析帧龄始于服务端读完原始帧。摄像头到浏览器的端到端延迟需另测。实时采集允许覆盖待分析帧，必须同时复核关键事件真值和证据。子码流与主码流使用相同视角和画面比例。
+- `LS-066` 本地采用五点对齐及余弦相似度的 YuNet／SFace。CompreFace 自身可配置是否存源图，因此引导单独的识别服务并显示远程删除状态。人员识别仅用当前同意范围，启停与 PPE、登录独立。 [OpenCV SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) · [CompreFace REST API](https://github.com/exadel-inc/CompreFace/blob/master/docs/Rest-API-description.md)

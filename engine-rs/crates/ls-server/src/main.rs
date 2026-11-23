@@ -372,7 +372,7 @@ async fn main() {
         plugins: plugins::PluginManager::default(),
         genai: genai::GenAI::from_env(),
         go2rtc: Arc::new(go2rtc::Go2rtcSupervisor::new(true)),
-        detections_tx: broadcast::channel(64).0,
+        detections: Default::default(),
     });
     // R2-305：网页端配置的渠道（app_settings alert.*，Fernet 解密）注入 ls-jobs
     // escalation 发送——"网页端保存企微 webhook → rust 路径生效"的真实验收点。
@@ -538,7 +538,7 @@ async fn selftest_http() -> bool {
         plugins: plugins::PluginManager::default(),
         genai: genai::GenAI::from_env(),
         go2rtc: Arc::new(go2rtc::Go2rtcSupervisor::new(true)),
-        detections_tx: broadcast::channel(64).0,
+        detections: Default::default(),
     });
     // 不 start() 后台作业：自检只验 API/DB 链路（顺带消除空 DB 的 backup 噪音）
     let app = build_router(st.clone());

@@ -16,6 +16,12 @@ const SOURCE_TEXT = {
   env: '环境变量指定',
   none: '未找到模型',
 }
+const OUTPUT_FORMATS = {
+  auto: '自动识别',
+  yolo: 'YOLO',
+  rtdetr_scores: 'RT-DETR · 逐类置信度',
+  rtdetr_topk: 'RT-DETR · 置信度与类别编号',
+}
 
 async function load() {
   try {
@@ -47,33 +53,51 @@ async function toggle(ev) {
 const benchBusy = ref(false)
 const bench = ref(null)
 const benchPath = ref('')
+const candidateFormat = ref('auto')
+let evaluatedCandidate = null
 const benchSides = computed(() => [
   { title: '当前模型', data: bench.value?.current },
   { title: '候选模型', data: bench.value?.candidate },
 ])
 async function runBenchmark() {
-  const path = prompt('候选模型 .onnx 的完整路径：')
-  if (!path || !path.trim()) return
+  const path = benchPath.value.trim()
+  const format = candidateFormat.value
+  if (!path) return
   benchBusy.value = true
   bench.value = null
   msg.value = ''
   try {
-    bench.value = await api.ppeBenchmark(path.trim())
-    benchPath.value = path.trim()
+    bench.value = await api.ppeBenchmark(path, false, format)
+    evaluatedCandidate = { path, format }
     msg.value = bench.value?.ok ? '对比评测完成' : '评测中发现模型错误'
   } catch (e) { msg.value = String(e.message || e) }
   benchBusy.value = false
 }
 async function activateCandidate() {
+  if (!evaluatedCandidate) return
   benchBusy.value = true
   try {
-    const result = await api.ppeBenchmark(benchPath.value, true)
+    const result = await api.ppeBenchmark(evaluatedCandidate.path, true, evaluatedCandidate.format)
     if (!result?.candidate || result.candidate.error) throw new Error(result?.candidate?.error || '候选模型不可用')
     await load()
     bench.value = null
     msg.value = '已启用候选模型'
   } catch (err) { msg.value = err.message }
   finally { benchBusy.value = false }
+}
+
+async function saveFormat(event) {
+  busy.value = true
+  msg.value = ''
+  try {
+    const result = await api.ppeConfig({ output_format: event.target.value })
+    msg.value = `已保存输出格式${result.restarted ? `，已重新加载 ${result.restarted} 路相机` : ''}`
+  } catch (err) {
+    msg.value = String(err.message || err)
+  } finally {
+    await load()
+    busy.value = false
+  }
 }
 
 async function saveThreshold(key, raw) {
@@ -173,6 +197,12 @@ onMounted(load)
                  @change="toggle" />
           <span>启用实验服检测</span>
         </label>
+        <label v-if="status.installed && status.source !== 'bundled'" class="row">
+          输出格式
+          <select :value="status.output_format || 'auto'" :disabled="busy" @change="saveFormat">
+            <option v-for="(label, value) in OUTPUT_FORMATS" :key="value" :value="value">{{ label }}</option>
+          </select>
+        </label>
         <p class="muted" style="white-space:pre-wrap">{{ status.license_notice }}</p>
         <p v-if="status.warning" class="lv2" style="font-size:12.5px">{{ status.warning }}</p>
         <!-- LS-050：PPE 置信度阈值（改完即存，运行中相机软重启生效） -->
@@ -192,7 +222,7 @@ onMounted(load)
           <span class="muted" style="display:block;font-size:12px;margin-top:4px">
             灰度/远景监控图若检出偏低，可适当降低违规置信度；阈值越低越敏感但误报增多。</span>
         </div>
-        <p v-if="status.classes?.length" class="muted" style="font-size:12px">
+        <p v-if="Array.isArray(status.classes) && status.classes.length" class="muted" style="font-size:12px">
           模型类别（{{ status.classes.length }}）：{{ status.classes.join(' / ') }}</p>
         <p class="muted">
           校验 SHA256：<code>{{ status.sha256 || '—' }}</code><br />
@@ -205,11 +235,21 @@ onMounted(load)
           <button class="ghost" :disabled="busy || status.source !== 'custom'" @click="reset">
             恢复随包模型</button>
           <input ref="fileEl" type="file" accept=".onnx" style="display:none" @change="onFile" />
-          <button class="ghost" :disabled="benchBusy" @click="runBenchmark">
-            {{ benchBusy ? '评测中…' : '对比评测（A/B）' }}</button>
           <span class="muted" style="font-size:12px">
             上传后立即启用；替换文件保存在数据目录 models\ppe-custom.onnx，卸载不删除用户数据。</span>
         </div>
+        <details class="ppe-benchmark">
+          <summary>模型对比评测</summary>
+          <form class="row" @submit.prevent="runBenchmark">
+            <label>候选 ONNX 路径 <input v-model="benchPath" placeholder="models/my-model.onnx" required /></label>
+            <label>候选输出格式
+              <select v-model="candidateFormat">
+                <option v-for="(label, value) in OUTPUT_FORMATS" :key="value" :value="value">{{ label }}</option>
+              </select>
+            </label>
+            <button type="submit" :disabled="benchBusy">{{ benchBusy ? '评测中…' : '开始评测' }}</button>
+          </form>
+        </details>
         <dialog v-if="bench" open class="card" aria-label="模型对比评测"
                 style="background:var(--dialog-bg);color:var(--text-primary);box-shadow:var(--shadow-dialog);z-index:60;border:1px solid var(--stroke-default)">
           <p>本次评测 {{ bench.images }} 张图片</p>
@@ -218,7 +258,7 @@ onMounted(load)
             <p v-if="data?.error" class="lv3">{{ data.error }}</p>
             <template v-else-if="data">
               <p>{{ data.avg_ms?.toFixed?.(1) ?? '—' }} ms/帧 · 检出 {{ data.detections }}</p>
-              <p v-if="Array.isArray(data.input)">{{ data.format }} · {{ data.input.join(' × ') }}</p>
+              <p v-if="Array.isArray(data.input)">{{ OUTPUT_FORMATS[data.output_format] || data.format }} · {{ data.input.join(' × ') }}</p>
               <div v-for="item in (Array.isArray(data.classes) ? data.classes : [])" :key="item.class">{{ item.class }} · {{ item.count }}</div>
               <details v-if="Array.isArray(data.per_image)">
                 <summary>逐图检出</summary>

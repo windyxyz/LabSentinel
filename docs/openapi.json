@@ -150,6 +150,7 @@
     "/api/system": {
       "get": {
         "summary": "System",
+        "description": "perf.analysis 按摄像头返回采样计数、采集覆盖帧数、重连和阶段延迟百分位。",
         "operationId": "system_api_system_get",
         "responses": {
           "200": {
@@ -1735,6 +1736,34 @@
         }
       }
     },
+    "/api/cameras/{cid}/analysis-source": {
+      "put": {
+        "summary": "设置 RTSP 相机分析码流",
+        "parameters": [
+          { "name": "cid", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["mode"],
+                "properties": {
+                  "mode": { "enum": ["main", "relay", "substream"] },
+                  "source": { "type": "string", "writeOnly": true }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "分析码流设置已保存" },
+          "404": { "description": "摄像头不存在" },
+          "422": { "description": "模式、摄像头类型或子码流地址无效" }
+        }
+      }
+    },
     "/api/cameras/{cid}/snapshot": {
       "get": {
         "summary": "Camera Snapshot",
@@ -1748,17 +1777,27 @@
               "type": "integer",
               "title": "Cid"
             }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "最近的分析快照",
+            "headers": {
+              "ETag": { "schema": { "type": "string" } },
+              "x-ls-frame-time-ms": { "schema": { "type": "integer" } }
+            },
             "content": {
-              "application/json": {
-                "schema": {}
+              "image/jpeg": {
+                "schema": { "type": "string", "format": "binary" }
               }
             }
           },
+          "304": { "description": "快照仍与 If-None-Match 一致" },
           "422": {
             "description": "Validation Error",
             "content": {

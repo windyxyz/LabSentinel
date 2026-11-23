@@ -160,19 +160,15 @@ impl Evidence {
     }
 }
 
-/// JPEG 编码（BGR→RGB 交换 + jpeg-encoder 质量 80，与 Python imencode 同参）。
+/// 原始 BGR 帧直接送入 JPEG 编码器，质量 80。
 pub fn encode_jpeg_bgr(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let mut rgb = data.to_vec();
-    for px in rgb.as_chunks_mut::<3>().0 {
-        px.swap(0, 2);
-    }
-    let mut out = Vec::with_capacity(rgb.len() / 4);
+    let mut out = Vec::with_capacity(data.len() / 4);
     let enc = jpeg_encoder::Encoder::new(&mut out, 80);
     enc.encode(
-        &rgb,
+        data,
         width as u16,
         height as u16,
-        jpeg_encoder::ColorType::Rgb,
+        jpeg_encoder::ColorType::Bgr,
     )
     .map_err(|e| format!("jpeg encode: {e}"))?;
     Ok(out)

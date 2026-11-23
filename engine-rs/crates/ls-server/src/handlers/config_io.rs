@@ -36,8 +36,14 @@ pub(crate) async fn config_export(
                 } else {
                     mask_rtsp_creds(&c.source)
                 };
+                let analysis_source = if with_secrets {
+                    c.analysis_source.clone()
+                } else {
+                    mask_rtsp_creds(c.analysis_source.split('?').next().unwrap_or_default())
+                };
                 json!({"name": c.name, "source": src, "type": c.type_,
-                       "group_name": c.group_name})
+                       "group_name": c.group_name, "analysis_source": analysis_source,
+                       "analysis_shared": c.analysis_shared})
             })
             .collect();
         let zones_out: Vec<Value> = zones
@@ -161,6 +167,19 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
             }
             let group = c.get("group_name").and_then(|v| v.as_str()).unwrap_or("");
             let cid = s.add_camera_full(name, source, type_, group)?;
+            if type_ == "rtsp" {
+                let analysis = c
+                    .get("analysis_source")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let shared = c
+                    .get("analysis_shared")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if analysis.is_empty() || super::cameras::valid_substream(analysis) {
+                    s.set_camera_analysis_source(cid, analysis, shared)?;
+                }
+            }
             cam_id_by_name.insert(name.to_string(), cid);
             created.0 += 1;
         }

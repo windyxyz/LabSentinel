@@ -25,6 +25,13 @@ pub(crate) async fn cameras(
                         "group_name": c.group_name, "analyzer": c.analyzer});
                     if browser.device.is_none() && !browser.share {
                         value["source"] = json!(redact_camera_source(&c.source));
+                        value["analysis_mode"] = json!(if !c.analysis_source.is_empty() {
+                            "substream"
+                        } else if c.analysis_shared {
+                            "relay"
+                        } else {
+                            "main"
+                        });
                     }
                     value
                 })
@@ -44,6 +51,67 @@ fn redact_camera_source(source: &str) -> String {
         return format!("{scheme}://***@{suffix}{}", &rest[host.len()..]);
     }
     source.to_string()
+}
+
+pub(crate) fn valid_substream(source: &str) -> bool {
+    source.len() <= 2048
+        && !source.chars().any(char::is_control)
+        && url::Url::parse(source).is_ok_and(|url| {
+            matches!(url.scheme(), "rtsp" | "rtsps")
+                && url.host().is_some()
+                && url.fragment().is_none()
+        })
+}
+
+pub(crate) async fn set_analysis_source(
+    State(st): State<Shared>,
+    AxPath(cid): AxPath<i64>,
+    Json(body): Json<Value>,
+) -> Response {
+    with_store(&st, |store| {
+        let Some(camera) = store.camera(cid)? else {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "摄像头不存在").into_response());
+        };
+        if camera.type_ != "rtsp" {
+            return Ok(detail_err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "分析码流设置适用于 RTSP 摄像头",
+            )
+            .into_response());
+        }
+        let (mode, source, shared) = match body.get("mode").and_then(Value::as_str) {
+            Some("main") => ("main", "", false),
+            Some("relay") => ("relay", "", true),
+            Some("substream") => {
+                let source = body
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&camera.analysis_source);
+                if !valid_substream(source) {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "请填写有效的 RTSP 或 RTSPS 子码流地址",
+                    )
+                    .into_response());
+                }
+                ("substream", source, false)
+            }
+            _ => {
+                return Ok(detail_err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "请选择主码流、共享中继或子码流",
+                )
+                .into_response())
+            }
+        };
+        if store.set_camera_analysis_source(cid, source, shared)? == 0 {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "摄像头不存在").into_response());
+        }
+        let restarted = crate::worker::restart_camera_if_running(&st, store, cid);
+        Ok(Json(json!({"id": cid, "analysis_mode": mode, "restarted": restarted})).into_response())
+    })
 }
 
 pub(crate) async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i64>) -> Response {
@@ -606,6 +674,7 @@ pub(crate) async fn copy_camera_config(
 pub(crate) async fn camera_snapshot(
     State(st): State<Shared>,
     AxPath(cid): AxPath<i64>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     // 存在性校验（与 Python 同口径 404）
     let exists = ls_store::Store::open(&st.db_path)
@@ -629,15 +698,29 @@ pub(crate) async fn camera_snapshot(
                 Json(json!({"detail": "暂无可用帧（刚启动或抽帧未命中）", "code": "no_frame"})),
             )
                 .into_response(),
-            Some(frame) => (
-                [
+            Some(frame) => {
+                let tag = format!("\"{}-{}\"", frame.captured_at_ms, frame.sequence);
+                let unchanged = headers
+                    .get("if-none-match")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| {
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .any(|entry| entry == "*" || entry.trim_start_matches("W/") == tag)
+                    });
+                let common = [
                     ("content-type", "image/jpeg".to_string()),
                     ("cache-control", "no-store".to_string()),
                     ("x-ls-frame-time-ms", frame.captured_at_ms.to_string()),
-                ],
-                frame.jpeg,
-            )
-                .into_response(),
+                    ("etag", tag),
+                ];
+                if unchanged {
+                    (StatusCode::NOT_MODIFIED, common).into_response()
+                } else {
+                    (common, frame.jpeg).into_response()
+                }
+            }
         },
     }
 }

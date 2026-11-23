@@ -7,6 +7,55 @@ use serde_json::json;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn analysis_source_settings_persist_without_exposing_stream_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("analysis.db");
+    let path = db.to_str().unwrap();
+    let store = ls_store::Store::open(path).unwrap();
+    store.ensure_schema().unwrap();
+    let cid = store
+        .conn_add_camera("cam", "rtsp://localhost/main", "rtsp")
+        .unwrap();
+    let app = build_router(test_state(path));
+    let endpoint = format!("/api/cameras/{cid}/analysis-source");
+    let substream = "rtsp://operator:fixture-secret@localhost/sub";
+    assert_eq!(
+        req(
+            &app,
+            "PUT",
+            &endpoint,
+            Some(json!({"mode":"substream","source":"file:///video.mp4"}))
+        )
+        .await
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let saved = body_json(
+        req(
+            &app,
+            "PUT",
+            &endpoint,
+            Some(json!({"mode":"substream","source":substream})),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(saved["analysis_mode"], "substream");
+    assert_eq!(
+        store.camera(cid).unwrap().unwrap().analysis_source,
+        substream
+    );
+    let visible = body_json(req(&app, "GET", "/api/cameras", None).await).await;
+    assert_eq!(visible[0]["analysis_mode"], "substream");
+    assert!(!visible.to_string().contains("fixture-secret"));
+    let relay = body_json(req(&app, "PUT", &endpoint, Some(json!({"mode":"relay"}))).await).await;
+    assert_eq!(relay["analysis_mode"], "relay");
+    let camera = store.camera(cid).unwrap().unwrap();
+    assert!(camera.analysis_shared);
+    assert!(camera.analysis_source.is_empty());
+}
+
+#[tokio::test]
 async fn dataset_export_contains_only_verified_samples_with_normalized_labels() {
     use std::io::Read;
     let dir = tempfile::tempdir().unwrap();
@@ -184,11 +233,16 @@ async fn detections_socket_enforces_host_and_read_token_and_delivers_frames() {
         "labsentinel, bearer.test-admin".parse().unwrap(),
     );
     let (mut socket, _) = tokio_tungstenite::connect_async(authorized).await.unwrap();
-    st.detections_tx
-        .send(json!({"camera_id": 99}).to_string())
-        .unwrap();
+    assert!(st.detections.subscribed(99).is_none());
+    let other = st.detections.subscribe(99);
+    let _other_receiver = other.subscribe();
+    other.send(json!({"camera_id": 99}).to_string()).unwrap();
     let frame = json!({"camera_id":42,"ts":"2026-11-22T08:00:00","img_w":1280,"img_h":720,"tracks":[],"zones":[]});
-    st.detections_tx.send(frame.to_string()).unwrap();
+    st.detections
+        .subscribed(42)
+        .unwrap()
+        .send(frame.to_string())
+        .unwrap();
     let received = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
         .await
         .unwrap()

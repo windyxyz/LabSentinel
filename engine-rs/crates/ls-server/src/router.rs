@@ -70,6 +70,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("DELETE", "/api/cameras/:id"),
     ("PUT", "/api/cameras/:id/group"),
     ("PUT", "/api/cameras/:id/analyzer"),
+    ("PUT", "/api/cameras/:id/analysis-source"),
     ("POST", "/api/cameras/:id/start"),
     ("GET", "/api/cameras/:id/webrtc"),
     ("GET", "/api/camera-groups"),
@@ -246,6 +247,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/cameras/:id/status", get(camera_status))
         .route("/cameras/:id/group", put(set_camera_group))
         .route("/cameras/:id/analyzer", put(set_camera_analyzer))
+        .route("/cameras/:id/analysis-source", put(set_analysis_source))
         .route("/cameras/:id/start", post(start_camera))
         .route("/cameras/:id/webrtc", get(camera_webrtc))
         .route("/camera-groups", get(camera_groups))

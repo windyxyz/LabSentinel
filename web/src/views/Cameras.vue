@@ -43,6 +43,34 @@ watch(() => form.value.type, t => { if (t === 'usb') loadUsb() })
 const snap = ref({})  // id -> timestamp (用于强制刷新 img)
 const live = ref(null)
 const liveErr = ref('')
+const analysis = ref(null)
+const analysisSaving = ref(false)
+const analysisError = ref('')
+
+function editAnalysis(camera) {
+  analysisError.value = ''
+  analysis.value = {
+    id: camera.id, name: camera.name,
+    mode: camera.analysis_mode || 'main', source: '',
+    hasSubstream: camera.analysis_mode === 'substream',
+  }
+}
+
+async function saveAnalysis() {
+  const current = analysis.value
+  if (!current || analysisSaving.value) return
+  analysisSaving.value = true
+  analysisError.value = ''
+  try {
+    await api.setAnalysisSource(current.id, { mode: current.mode, source: current.source.trim() })
+    analysis.value = null
+    await refresh()
+  } catch (error) {
+    analysisError.value = String(error.message || error)
+  } finally {
+    analysisSaving.value = false
+  }
+}
 // RA5-UX：截图文件夹目录选择器（图片文件夹接入用）
 const fsPick = ref(null)
 const fsPickTitle = ref('选择文件夹')
@@ -86,7 +114,9 @@ async function setAnalyzer(c, ev) {
 
 async function refresh() {
   try {
-    cams.value = await api.cameras()
+    const rows = await api.cameras()
+    if (!Array.isArray(rows)) throw new Error('摄像头列表格式异常')
+    cams.value = rows
     camsError.value = ''
     stale.value = false
     loaded.value = true
@@ -100,7 +130,10 @@ async function refresh() {
   try {
     sys.value = await api.system()
   } catch { /* 就绪前静默 */ }
-  try { groups.value = (await api.cameraGroups()).groups } catch { /* 旧服务端无此端点 */ }
+  try {
+    const result = await api.cameraGroups()
+    if (Array.isArray(result?.groups)) groups.value = result.groups
+  } catch { /* 保留已加载分组 */ }
 }
 
 // 任务111：分组筛选 + 批量启停
@@ -115,7 +148,7 @@ async function bulk(action) {
   bulkBusy.value = true
   try {
     const r = await api.bulkCameras(ids, action)
-    if (r.missing.length) alert(`不存在的摄像头: ${r.missing.join(',')}`)
+    if (Array.isArray(r?.missing) && r.missing.length) alert(`不存在的摄像头: ${r.missing.join(',')}`)
     if (r.failed.length) alert(`失败: ${r.failed.map(f => `#${f.id} ${f.error}`).join('；')}`)
     checked.value = []
     await refresh()
@@ -271,7 +304,8 @@ function watchLive(cam) {
       本机局域网地址：{{ discover.lan.join('、') }}（摄像头需与之同网段）</p>
     <p v-if="discover.shown && discover.error" class="muted" style="margin:6px 0 0">{{ discover.error }}</p>
     <table v-if="discover.devices.length" style="margin-top:8px">
-      <tr><th>IP</th><th>名称</th><th>探测 :554</th><th></th></tr>
+      <thead><tr><th>IP</th><th>名称</th><th>探测 :554</th><th></th></tr></thead>
+      <tbody>
       <tr v-for="d in discover.devices" :key="d.ip">
         <td>{{ d.ip }}</td>
         <td>{{ d.name || '-' }}</td>
@@ -288,6 +322,7 @@ function watchLive(cam) {
         </td>
         <td><button @click="fillFromDevice(d)">填入表单</button></td>
       </tr>
+      </tbody>
     </table>
     <p class="muted" style="margin-top:6px">
       需要 ONVIF/WS-Discovery（UDP 3702 组播）；搜不到就用品牌模板手输。填入后把"用户名:密码"
@@ -315,7 +350,8 @@ function watchLive(cam) {
         批量停止（{{ checked.length }}）</button>
     </div>
     <table>
-      <tr><th></th><th>ID</th><th>名称</th><th>类型</th><th>分组</th><th>状态</th><th>最新画面</th><th></th></tr>
+      <thead><tr><th></th><th>ID</th><th>名称</th><th>类型</th><th>分组</th><th>状态</th><th>最新画面</th><th></th></tr></thead>
+      <tbody>
       <tr v-for="c in shownCams" :key="c.id">
         <td><input type="checkbox" :value="c.id" v-model="checked" :aria-label="`选择摄像头 ${c.id}`" /></td>
         <td>{{ c.id }}</td>
@@ -360,6 +396,7 @@ function watchLive(cam) {
           </select>
           <button class="ghost" style="margin-right:6px" @click="snap[c.id] = Date.now()">看快照</button>
           <button v-if="c.type !== 'folder'" class="ghost" style="margin-right:6px" @click="watchLive(c)">实时画面</button>
+          <button v-if="c.type === 'rtsp'" class="ghost" :disabled="analysisSaving" @click="editAnalysis(c)">分析码流</button>
           <button v-if="c.type === 'folder'" class="ghost" style="margin-right:6px" :disabled="busyCam !== null" @click="scanFolder(c.id)">
             {{ busyCam === c.id ? '扫描中…' : '立即扫描' }}</button>
           <button class="ghost" style="margin-right:6px" :disabled="busyCam !== null" @click="start(c.id)">
@@ -368,7 +405,32 @@ function watchLive(cam) {
             {{ busyCam === c.id ? '删除中…' : '删除' }}</button>
         </td>
       </tr>
+      </tbody>
     </table>
+    <form v-if="analysis" class="analysis-editor" @submit.prevent="saveAnalysis">
+      <h3>{{ analysis.name }} · 分析码流</h3>
+      <div class="row">
+        <label>分析来源
+          <select v-model="analysis.mode" :disabled="analysisSaving">
+            <option value="main">直连主码流</option>
+            <option value="relay">与预览共享本机中继</option>
+            <option value="substream">单独使用子码流</option>
+          </select>
+        </label>
+        <label v-if="analysis.mode === 'substream'">子码流地址
+          <input v-model="analysis.source" type="password" autocomplete="off" :disabled="analysisSaving"
+            :placeholder="analysis.hasSubstream ? '留空保留已保存的地址' : 'rtsp://摄像头地址/子码流'"
+            :required="!analysis.hasSubstream" />
+        </label>
+      </div>
+      <p v-if="analysis.mode === 'substream'" class="muted">请选择与主码流视角、宽高比一致的子码流。实时预览继续使用主码流。</p>
+      <p v-if="analysis.mode !== 'main'" class="muted">分析源失联时回退到直连主码流。</p>
+      <p v-if="analysisError" class="st-err" role="alert">{{ analysisError }}</p>
+      <div class="row">
+        <button type="submit" :disabled="analysisSaving">{{ analysisSaving ? '保存中…' : '保存' }}</button>
+        <button type="button" class="ghost" :disabled="analysisSaving" @click="analysis = null">取消</button>
+      </div>
+    </form>
     <p v-if="liveErr" class="muted" style="margin-top:6px">{{ liveErr }}</p>
     </AsyncState>
   </div>
@@ -395,4 +457,7 @@ button { min-height: 40px; }
 .st-idle { color: #6b7280; }
 .st-error-line { color: #dc2626; font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .st-warn-line { color: #b45309; font-size: 12px; }
+.analysis-editor { display: grid; gap: 10px; padding: 16px; margin-top: 12px; border: 1px solid var(--stroke-default); border-radius: 10px; }
+.analysis-editor .row { flex-wrap: wrap; }
+.analysis-editor label { display: grid; gap: 4px; }
 </style>

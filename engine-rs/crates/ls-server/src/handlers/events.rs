@@ -307,22 +307,22 @@ pub(crate) async fn ws_detections(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // 只订阅本路相机：broadcast 全量帧，客户端按 camera_id 过滤（实现简单、零锁竞争）
-    let rx = st.detections_tx.subscribe();
+    let channel = st.detections.subscribe(cid);
+    let rx = channel.subscribe();
     let token = crate::middleware::ws_token(&headers);
     ws.protocols(["labsentinel"])
         .on_upgrade(move |socket| async move {
             tokio::select! {
-                _ = handle_detections_ws(socket, rx, cid) => {},
+                _ = handle_detections_ws(socket, rx) => {},
                 _ = socket_revoked(&st, &browser, token.as_deref()) => {},
             }
+            drop(channel);
         })
 }
 
 async fn handle_detections_ws(
     socket: axum::extract::ws::WebSocket,
     mut rx: tokio::sync::broadcast::Receiver<String>,
-    cid: i64,
 ) {
     use axum::extract::ws::Message;
     let (mut sender, mut receiver) = socket.split();
@@ -331,13 +331,7 @@ async fn handle_detections_ws(
             msg = rx.recv() => {
                 match msg {
                     Ok(raw) => {
-                        // 按 camera_id 过滤（值为 0 = 广播给所有）
-                        let keep = serde_json::from_str::<serde_json::Value>(&raw)
-                            .ok()
-                            .and_then(|v| v.get("camera_id").and_then(|x| x.as_i64()))
-                            .map(|c| c == cid || c == 0)
-                            .unwrap_or(false);
-                        if keep && sender.send(Message::Text(raw)).await.is_err() { break; }
+                        if sender.send(Message::Text(raw)).await.is_err() { break; }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, connectEvents, TYPE_TEXT } from '../api'
 import { notifyEvent, ensurePermission, permissionState, notifyEnabled, setNotifyEnabled } from '../notify'
 import AsyncState from '../components/AsyncState.vue'
@@ -45,9 +45,13 @@ const loading = ref(true)
 const error = ref('')
 const notice = ref('')
 let pollTimer = null
-const maint = ref(null)  // 任务68：磁盘水位
+let inFlight = null
+let maintainedAt = 0
+let closeEvents
+let mounted = false
+const maint = ref(null)
 
-async function reload() {
+async function refreshSystem() {
   error.value = ''
   try {
     const s = await api.system()
@@ -59,26 +63,50 @@ async function reload() {
   } finally {
     loading.value = false
   }
-  try {
-    maint.value = await api.maintenanceStatus()  // 任务68：磁盘水位（失败静默保留旧值）
-  } catch { /* 静默 */ }
 }
 
-onMounted(async () => {
-  // 2026-10-30 审阅修复：onUnmounted 必须在首个 await 之前注册（Vue 只在同步段收集生命周期钩子，
-  // 原写在 await reload() 之后是 no-op → WS 永不清理）；WS 建立同样前移，不依赖首屏数据
-  const close = connectEvents(
+function refreshMaintenance() {
+  if (Date.now() - maintainedAt < 30000) return
+  maintainedAt = Date.now()
+  return api.maintenanceStatus().then((status) => { maint.value = status }).catch(() => {})
+}
+
+function scheduleRefresh() {
+  clearTimeout(pollTimer)
+  if (mounted && !document.hidden) pollTimer = setTimeout(reload, 5000)
+}
+
+function reload() {
+  if (!inFlight) inFlight = Promise.all([refreshSystem(), refreshMaintenance()]).finally(() => {
+    inFlight = null
+    scheduleRefresh()
+  })
+  return inFlight
+}
+
+function syncVisibility() {
+  clearTimeout(pollTimer)
+  if (!document.hidden) reload()
+}
+
+onMounted(() => {
+  mounted = true
+  closeEvents = connectEvents(
     (ev) => {
       feed.value = [ev, ...feed.value].slice(0, 100)
       notifyEvent(ev)  // 任务115：页面隐藏且有权限时弹桌面通知（L2/L3，tag 去重）
     },
     (s) => (wsState.value = s),
   )
-  onUnmounted(close)
-  pollTimer = setInterval(reload, 5000)  // 任务66：卡片 5s 轮询；失败保留旧值只出提示
-  await reload()
+  document.addEventListener('visibilitychange', syncVisibility)
+  reload()
 })
-onUnmounted(() => clearInterval(pollTimer))
+onBeforeUnmount(() => {
+  mounted = false
+  closeEvents?.()
+  clearTimeout(pollTimer)
+  document.removeEventListener('visibilitychange', syncVisibility)
+})
 </script>
 
 <template>

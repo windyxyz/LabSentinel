@@ -18,9 +18,9 @@
 模型路径由 `LS_MODEL_FP32` 传入；缺失时 `ls-analyzer` 自动回退空检测（数据面/状态机照常）。
 
 ## 交付契约（Python → Rust 引擎，唯一接口）
-模型目录（`models/` 或 `m0-spike/`）中是**文件契约**，Rust `ls-infer` 只认这三件：
+模型目录（`models/` 或 `m0-spike/`）中的文件契约：
 
-1. `<model>.onnx` —— 输入 `1x3x640x640`（NCHW，可 dynamic batch）、输出 YOLO11 `(1, 4+C, N)`
+1. `<model>.onnx` 使用单张 RGB NCHW 输入。支持 YOLO 逐类置信度或带类别编号的端到端输出，也支持 Ultralytics RT-DETR 的两种输出。
 2. `<model>.classes.txt` —— 类别名，一行一类，**顺序敏感**（与训练 `data.yaml names` 一致）
 3. `model.json`（可选，T-334/Q-14）—— 类别角色声明：
    ```json
@@ -29,6 +29,9 @@
     "train_data_license": "CC BY 4.0", "source": "Roboflow lab-ppe"}
    ```
    Rust 引擎按**角色**取类别（不按文件数量硬编码），合并模型/级联模型共用同一代码路径。
+4. `<model>.model.json` 可用 `output_format` 声明当前 ONNX 的格式。可选 `auto`、`yolo`、`rtdetr_scores`（归一化中心框及逐类置信度）、`rtdetr_topk`（归一化中心框、置信度及类别编号）。`export_onnx.py --arch rtdetr` 同时写入 ONNX 元数据与配置文件。若已有模型缺少元数据，可从「模型管理」指定实验服模型及 A/B 候选的格式。
+
+Ultralytics RT-DETR 将图像直接缩放至模型输入尺寸，坐标分别按原图宽、高恢复。较早版本按每个查询的最高置信度分配类别，新版本由模型输出类别编号。 [Ultralytics 8.3.230](https://github.com/ultralytics/ultralytics/blob/v8.3.230/ultralytics/models/rtdetr/predict.py) · [Ultralytics 8.4.142](https://github.com/ultralytics/ultralytics/blob/v8.4.142/ultralytics/models/rtdetr/predict.py)
 
 ## 评测闭环
 - `tools/eval_report` 类离线评估已退役；在线口径由 `ls-analyzer --golden` + Rust 契约测试保证。

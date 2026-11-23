@@ -17,12 +17,14 @@ use ls_ingest::child_guard::ChildGuard;
 
 /// go2rtc API 默认地址（与 handlers/cameras.rs::go2rtc_reachable 同口径）。
 const DEFAULT_PORT: u16 = 1984;
+const DEFAULT_RTSP_LISTEN: &str = "127.0.0.1:8554";
 
 pub struct Go2rtcSupervisor {
     inner: Mutex<Inner>,
     wake: tokio::sync::Notify,
     external: Option<String>,
     address: SocketAddr,
+    rtsp_listen: String,
 }
 
 struct Inner {
@@ -56,6 +58,8 @@ impl Go2rtcSupervisor {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
             address: SocketAddr::from(([127, 0, 0, 1], port)),
+            rtsp_listen: std::env::var("LS_GO2RTC_RTSP_LISTEN")
+                .unwrap_or_else(|_| DEFAULT_RTSP_LISTEN.into()),
         }
     }
 
@@ -115,7 +119,7 @@ impl Go2rtcSupervisor {
         let mut cmd = std::process::Command::new(&bin);
         let config = serde_json::json!({
             "api": {"listen": api_host},
-            "rtsp": {"listen": std::env::var("LS_GO2RTC_RTSP_LISTEN").unwrap_or_else(|_| "127.0.0.1:8554".into())},
+            "rtsp": {"listen": self.rtsp_listen},
             "webrtc": {"listen": std::env::var("LS_GO2RTC_WEBRTC_LISTEN").unwrap_or_else(|_| ":8555".into())}
         });
         cmd.arg("-c").arg(config.to_string());
@@ -316,6 +320,22 @@ impl Go2rtcSupervisor {
         (inner.registered.contains_key(&id)
             && inner.child.as_mut().is_some_and(ChildGuard::is_running))
         .then(|| self.address.to_string())
+    }
+
+    pub(crate) fn local_analysis_source(&self, id: i64, main: &str) -> Option<String> {
+        let rtsp: SocketAddr = self.rtsp_listen.parse().ok()?;
+        if self.external.is_some() || !rtsp.ip().is_loopback() || rtsp.port() == 0 {
+            return None;
+        }
+        let mut inner = self.inner.lock().ok()?;
+        (inner.enabled
+            && !inner.stopped
+            && inner
+                .registered
+                .get(&id)
+                .is_some_and(|source| source == main)
+            && inner.child.as_mut().is_some_and(ChildGuard::is_running))
+        .then(|| format!("rtsp://{rtsp}/cam_{id}"))
     }
 }
 

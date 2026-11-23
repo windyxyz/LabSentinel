@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ls_infer::yolo::YoloModel;
+use ls_infer::yolo::{OutputFormat, YoloModel};
 
 use crate::pipeline::{PpeRunner, PpeStatus};
 
@@ -15,6 +15,7 @@ use crate::pipeline::{PpeRunner, PpeStatus};
 #[derive(Debug, Clone)]
 pub struct PpeConfig {
     pub model_path: PathBuf,
+    pub output_format: Option<OutputFormat>,
     pub imgsz: u32,
     pub iou: f32,
     pub violation_conf: f32,
@@ -35,6 +36,7 @@ impl Default for PpeConfig {
         // LS_PPE_WEARING_CONF/LS_PPE_VIOLATION_CLASS/LS_PPE_CLASS_NAMES）
         PpeConfig {
             model_path: PathBuf::new(),
+            output_format: None,
             imgsz: 640,
             iou: 0.50,
             violation_conf: 0.30,
@@ -275,7 +277,8 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
         None,
         cfg.use_gpu,
     ) {
-        Ok(model) => {
+        Ok(mut model) => {
+            model.use_output_format(cfg.output_format);
             println!(
                 "[ls-analyzer] PPE 模型已加载: {}（违规类={violation_class} 穿戴类={wearing_classes:?}）",
                 cfg.model_path.display()

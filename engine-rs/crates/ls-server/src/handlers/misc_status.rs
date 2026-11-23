@@ -565,13 +565,31 @@ fn run_ppe_benchmark(st: &Shared, body: &Value) -> Response {
     }
     let use_gpu = store.setting_get("infer.use_gpu").ok().flatten().as_deref() != Some("0")
         && std::env::var("LS_GPU").as_deref() != Ok("0");
-    let run = |path: &std::path::Path| -> Result<Value, String> {
+    use ls_infer::yolo::OutputFormat;
+    let current_format = store
+        .setting_get("ppe.output_format")
+        .ok()
+        .flatten()
+        .and_then(|format| OutputFormat::parse(&format).ok().flatten());
+    let candidate_format = match body.get("candidate_format") {
+        None => None,
+        Some(value) => match value
+            .as_str()
+            .ok_or("candidate_format 必须是字符串".to_string())
+            .and_then(OutputFormat::parse)
+        {
+            Ok(format) => format,
+            Err(err) => return detail_err(StatusCode::UNPROCESSABLE_ENTITY, &err).into_response(),
+        },
+    };
+    let run = |path: &std::path::Path, format: Option<OutputFormat>| -> Result<Value, String> {
         let classes = ls_analyzer::ppe::load_class_names(path);
         if classes.is_empty() {
             return Err("模型缺少配套 .classes.txt 类名表".into());
         }
         let specs: Vec<_> = (0..classes.len()).map(|index| (index, 0.25, 0.0)).collect();
         let mut model = ls_infer::yolo::YoloModel::load(path, 640, 0.25, 0.5, 0.0, None, use_gpu)?;
+        model.use_output_format(format);
         let mut total_ms = 0f64;
         let mut counts = vec![0usize; classes.len()];
         let mut per_image = Vec::with_capacity(images.len());
@@ -588,23 +606,30 @@ fn run_ppe_benchmark(st: &Shared, body: &Value) -> Response {
         }
         let (_, hash) = cached_file_sha256(path).unwrap_or_default();
         Ok(json!({
+            "output_format": model.output_format().as_str(),
             "avg_ms": total_ms / images.len() as f64,
             "detections": counts.iter().sum::<usize>(),
             "classes": classes.iter().zip(counts).map(|(class, count)| json!({"class": class, "count": count})).collect::<Vec<_>>(),
             "per_image": per_image, "input": model.input_dimensions(), "format": "ONNX", "sha256": hash,
         }))
     };
-    let current_res = run(std::path::Path::new(&current));
-    let cand_res = run(&cand_path);
+    let current_res = run(std::path::Path::new(&current), current_format);
+    let cand_res = run(&cand_path, candidate_format);
     if body.get("activate").and_then(Value::as_bool) == Some(true) && cand_res.is_ok() {
         if std::env::var("LS_PPE_MODEL").is_ok_and(|p| !p.trim().is_empty()) {
             return detail_err(StatusCode::CONFLICT, "LS_PPE_MODEL 正在覆盖网页选择")
                 .into_response();
         }
         if store
-            .setting_set("ppe_model", &cand_path.to_string_lossy())
+            .settings_set(&[
+                ("ppe_model", &cand_path.to_string_lossy()),
+                (
+                    "ppe.output_format",
+                    candidate_format.map_or("auto", OutputFormat::as_str),
+                ),
+                ("ppe.enabled", "1"),
+            ])
             .is_err()
-            || store.setting_set("ppe.enabled", "1").is_err()
         {
             return server_err();
         }
@@ -1421,6 +1446,7 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
             "enabled": enabled,
             "violation_conf": violation_conf,
             "wearing_conf": wearing_conf,
+            "output_format": s.setting_get("ppe.output_format")?.unwrap_or_else(|| "auto".into()),
             "source": source,
             "bundled": bundled.is_some(),
             "mode": if installed && enabled && !classes.is_empty() { "ppe" } else { "person_only" },
@@ -1456,10 +1482,26 @@ pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>
     let enabled = body.get("enabled").and_then(|v| v.as_bool());
     let v_conf = body.get("violation_conf").and_then(|v| v.as_f64());
     let w_conf = body.get("wearing_conf").and_then(|v| v.as_f64());
-    if enabled.is_none() && v_conf.is_none() && w_conf.is_none() {
+    let output_format = match body.get("output_format") {
+        None => None,
+        Some(value) => {
+            let Some(value) = value.as_str() else {
+                return detail_err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "output_format 必须是字符串",
+                )
+                .into_response();
+            };
+            if let Err(err) = ls_infer::yolo::OutputFormat::parse(value) {
+                return detail_err(StatusCode::UNPROCESSABLE_ENTITY, &err).into_response();
+            }
+            Some(value)
+        }
+    };
+    if enabled.is_none() && v_conf.is_none() && w_conf.is_none() && output_format.is_none() {
         return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "至少提供 enabled / violation_conf / wearing_conf 之一",
+            "至少提供 enabled / violation_conf / wearing_conf / output_format 之一",
         )
         .into_response();
     }
@@ -1482,15 +1524,22 @@ pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>
         }
     }
     with_store(&st, |s| {
+        let violation = v_conf.map(|v| format!("{v:.2}"));
+        let wearing = w_conf.map(|v| format!("{v:.2}"));
+        let mut writes = Vec::new();
         if let Some(en) = enabled {
-            s.setting_set("ppe.enabled", if en { "1" } else { "0" })?;
+            writes.push(("ppe.enabled", if en { "1" } else { "0" }));
         }
-        if let Some(v) = v_conf {
-            s.setting_set("ppe.violation_conf", &format!("{v:.2}"))?;
+        if let Some(v) = violation.as_deref() {
+            writes.push(("ppe.violation_conf", v));
         }
-        if let Some(v) = w_conf {
-            s.setting_set("ppe.wearing_conf", &format!("{v:.2}"))?;
+        if let Some(v) = wearing.as_deref() {
+            writes.push(("ppe.wearing_conf", v));
         }
+        if let Some(format) = output_format {
+            writes.push(("ppe.output_format", format));
+        }
+        s.settings_set(&writes)?;
         let restarted = crate::worker::restart_all_running(&st, s);
         let cur_en = s
             .setting_get("ppe.enabled")
@@ -1658,8 +1707,11 @@ pub(crate) async fn ppe_upload(
         None
     };
     with_store(&st, |s| {
-        s.setting_set("ppe_model", &dest.to_string_lossy())?;
-        s.setting_set("ppe.enabled", "1")?;
+        s.settings_set(&[
+            ("ppe_model", &dest.to_string_lossy()),
+            ("ppe.enabled", "1"),
+            ("ppe.output_format", "auto"),
+        ])?;
         let restarted = crate::worker::restart_all_running(&st, s);
         Ok(Json(json!({
             "ok": true,
@@ -1676,8 +1728,11 @@ pub(crate) async fn ppe_upload(
 /// POST /api/models/ppe/reset——恢复随包模型（清除自定义路径）并启用。
 pub(crate) async fn ppe_reset(State(st): State<Shared>) -> Response {
     with_store(&st, |s| {
-        s.setting_set("ppe_model", "")?;
-        s.setting_set("ppe.enabled", "1")?;
+        s.settings_set(&[
+            ("ppe_model", ""),
+            ("ppe.enabled", "1"),
+            ("ppe.output_format", "auto"),
+        ])?;
         let restarted = crate::worker::restart_all_running(&st, s);
         Ok(Json(json!({"ok": true, "enabled": true, "restarted": restarted})).into_response())
     })
@@ -2155,7 +2210,10 @@ pub(crate) async fn ppe_download(State(st): State<Shared>, Json(body): Json<Valu
     }
     let model_path = models_dir.join("yolo11n_ppe.onnx");
     with_store(&st, |s| {
-        s.setting_set("ppe_model", &model_path.to_string_lossy())?;
+        s.settings_set(&[
+            ("ppe_model", &model_path.to_string_lossy()),
+            ("ppe.output_format", "auto"),
+        ])?;
         Ok(Json(json!({"ok": true, "installed": true, "mode": "ppe",
                        "downloaded": downloaded,
                        "model_path": model_path.to_string_lossy(),
