@@ -9,6 +9,7 @@ pub struct AppState {
     /// R2-103 对齐：只读令牌（LS_READ_TOKEN；写永拒）
     pub read_token: String,
     pub read_protected: bool,
+    pub(crate) access: crate::access::AccessControl,
     pub trusted_hosts: Vec<String>,
     pub allowed_origins: Vec<String>,
     pub web_dist: String,

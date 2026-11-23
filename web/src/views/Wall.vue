@@ -18,6 +18,7 @@
         <button class="ghost" @click="toggleMute">{{ muted ? '开启提示音' : '静音' }}</button>
         <button class="ghost" @click="toggleNotifications">{{ notifications ? '关闭桌面通知' : '开启桌面通知' }}</button>
         <button class="ghost" @click="toggleFullscreen">{{ isFullscreen ? '退出全屏' : '进入全屏值守大屏' }}</button>
+        <button v-if="signedIn" class="ghost" @click="$emit('sign-out')">退出登录</button>
       </div>
     </header>
     <div class="grid" :style="{ gridTemplateColumns: `repeat(${cols}, 1fr)` }">
@@ -56,7 +57,8 @@ import CameraPreview from '../components/CameraPreview.vue'
 import VideoOverlayCanvas from '../components/VideoOverlayCanvas.vue'
 
 const cameras = ref([])
-defineProps({ readonly: Boolean })
+defineProps({ readonly: Boolean, signedIn: Boolean })
+defineEmits(['sign-out'])
 const tracks = ref({})
 const events = ref([])
 const now = ref('')

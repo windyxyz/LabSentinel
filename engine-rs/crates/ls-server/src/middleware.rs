@@ -30,23 +30,25 @@ pub(crate) async fn static_cache_policy(req: axum::extract::Request, next: Next)
 
 pub(crate) async fn guard_middleware(
     State(st): State<Shared>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
     let method = req.method().clone();
     let headers = req.headers().clone();
-    // Host 白名单（防 DNS Rebinding）
-    let host = headers
+    let authority = headers
         .get(header::HOST)
-        .and_then(|v| v.to_str().unwrap_or("").split(':').next())
-        .unwrap_or("")
-        .to_string();
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok());
+    let host = authority
+        .as_ref()
+        .map(|a| a.host().trim_matches(['[', ']']))
+        .unwrap_or("");
     // LS-044：/ws/events 同样校验 Host 白名单（防 DNS Rebinding / CSWSH）
     if !st
         .trusted_hosts
         .iter()
-        .any(|h| h.eq_ignore_ascii_case(&host))
+        .any(|h| h.eq_ignore_ascii_case(host))
         && !(st.testing && host == "testserver")
     {
         return detail_err(StatusCode::BAD_REQUEST, "host not allowed").into_response();
@@ -55,11 +57,84 @@ pub(crate) async fn guard_middleware(
         || method == axum::http::Method::PUT
         || method == axum::http::Method::PATCH
         || method == axum::http::Method::DELETE;
-    let provided = provided_token(&headers);
-    if let Some(token) = provided.as_deref() {
-        if share_device(&st, token) && (unsafe_m || !share_read_path(&path)) {
-            return detail_err(StatusCode::FORBIDDEN, "分享令牌仅可访问值守大屏").into_response();
-        }
+    let is_api = path.starts_with("/api/");
+    let is_socket = path.starts_with("/ws/");
+    let provided = if is_socket {
+        ws_token(&headers)
+    } else {
+        provided_token(&headers)
+    };
+    let browser = st.access.request(&req, host);
+    let session_admin = provided.is_none() && browser.session.is_some();
+    let api_admin = is_api_admin(&st, provided.as_deref());
+    let password_required = st.access.required(browser.client);
+    let share = provided
+        .as_deref()
+        .is_some_and(|token| share_device(&st, token));
+    if share && (unsafe_m || !share_read_path(&path)) {
+        return detail_err(StatusCode::FORBIDDEN, "分享令牌仅可访问值守大屏").into_response();
+    }
+    if share
+        && path != "/api/share-links/verify"
+        && !provided
+            .as_deref()
+            .is_some_and(|token| valid_read_credential(&st, token))
+    {
+        return detail_err(StatusCode::UNAUTHORIZED, "分享链接已失效").into_response();
+    }
+    let public_read = !unsafe_m
+        && (path.starts_with("/api/health/")
+            || matches!(
+                path.as_str(),
+                "/api/access/status" | "/api/v1/meta" | "/api/share-links/verify"
+            ));
+    let public_write = method == axum::http::Method::POST
+        && matches!(
+            path.as_str(),
+            "/api/access/login"
+                | "/api/access/logout"
+                | "/api/access/recover"
+                | "/api/pairing/claim"
+        );
+    if password_required
+        && (is_api || is_socket)
+        && !public_read
+        && !public_write
+        && !session_admin
+        && !provided
+            .as_deref()
+            .is_some_and(|token| valid_read_credential(&st, token))
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "detail": "请登录后继续", "code": "password_required",
+            })),
+        )
+            .into_response();
+    }
+    if (is_socket || (unsafe_m && is_api))
+        && !same_origin(
+            &headers,
+            authority.as_ref(),
+            &st.allowed_origins,
+            (session_admin || path.starts_with("/api/access/")).then_some(browser.client.secure),
+        )
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "detail": "跨站请求被拒绝", "code": "csrf_blocked",
+            })),
+        )
+            .into_response();
+    }
+    if is_socket
+        && (st.read_protected || share)
+        && !session_admin
+        && !check_read_token(&st, provided.as_deref())
+    {
+        return detail_err(StatusCode::UNAUTHORIZED, "实时数据需要读取凭据").into_response();
     }
     const ADMIN_GETS: &[&str] = &[
         "/api/diagnostics/bundle.zip",
@@ -68,6 +143,7 @@ pub(crate) async fn guard_middleware(
         "/api/system/autostart",
         "/api/reports/schedule",
         "/api/share-links",
+        "/api/access/settings",
     ];
     const PROTECTED_ADMIN_GETS: &[&str] = &[
         "/api/audit",
@@ -88,68 +164,22 @@ pub(crate) async fn guard_middleware(
         || (st.read_protected && PROTECTED_ADMIN_GETS.iter().any(matches_path));
     if !unsafe_m
         && admin_get
-        && path != "/api/share-links/verify"
-        && !st.admin_token.is_empty()
-        && !provided
-            .as_deref()
-            .is_some_and(|t| ct_eq(t, &st.admin_token))
+        && !public_read
+        && (password_required || !st.admin_token.is_empty() || provided.is_some())
+        && !session_admin
+        && !api_admin
     {
         return detail_err(StatusCode::UNAUTHORIZED, "该端点需要管理令牌").into_response();
     }
     let mut actor = String::new();
-    if unsafe_m && path.starts_with("/api/") {
-        // CSRF/Fetch-Metadata（写请求跨站拒绝）
-        let sfs = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
-        let same = match sfs {
-            Some("same-origin") | Some("none") => true,
-            Some(_) => false,
-            None => {
-                let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
-                match origin {
-                    None => true,
-                    Some(o) => {
-                        let o_host = o
-                            .split_once("://")
-                            .map(|(_, hp)| hp.split('/').next().unwrap_or(""))
-                            .map(|hp| {
-                                if let Some(r6) = hp.strip_prefix('[') {
-                                    r6.split(']').next().unwrap_or("")
-                                } else {
-                                    hp.split(':').next().unwrap_or("")
-                                }
-                            })
-                            .unwrap_or("");
-                        o_host.eq_ignore_ascii_case(&host)
-                            || st.allowed_origins.iter().any(|a| a == o)
-                    }
-                }
-            }
-        };
-        if !same {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({"detail": "跨站请求被拒绝", "code": "csrf_blocked"})),
-            )
-                .into_response();
-        }
+    if unsafe_m && is_api {
         static RATE: std::sync::Mutex<
             Option<std::collections::HashMap<String, Vec<std::time::Instant>>>,
         > = std::sync::Mutex::new(None);
-        // LS-044：仅在显式 LS_TRUST_PROXY=1 时读取 X-Forwarded-For，防伪造头绕过配对码限流
-        let trust_proxy = std::env::var("LS_TRUST_PROXY")
-            .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        let ip = if trust_proxy {
-            headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.split(',').next())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| host.clone())
-        } else {
-            host.clone()
-        };
+        let ip = browser
+            .client
+            .ip
+            .map_or_else(|| host.to_owned(), |ip| ip.to_string());
         let (limit, window) = if path == "/api/pairing/claim" {
             (10usize, 60u64)
         } else {
@@ -188,12 +218,18 @@ pub(crate) async fn guard_middleware(
             )
                 .into_response();
         }
-        // 管理令牌（写操作；设备令牌可处置事件但不可改配置——T-620）。
-        // 豁免：/api/pairing/claim 在 Python 侧无鉴权守卫（公开配对入口，
-        // 由配对码本身与限流保护）——契约 1:1 对齐。
-        let provided = provided_token(&headers);
-        if path == "/api/pairing/claim" {
+        if public_write && !session_admin {
             actor = "anonymous".into();
+        } else if session_admin {
+            actor = "admin".into();
+        } else if password_required && !api_admin {
+            match check_write_token(&st, provided.as_deref(), &path) {
+                Ok(a) if is_triage_path(&path) && a.starts_with("device:") => actor = a,
+                _ => {
+                    return detail_err(StatusCode::FORBIDDEN, "此操作需要管理员权限")
+                        .into_response()
+                }
+            }
         } else {
             match check_write_token(&st, provided.as_deref(), &path) {
                 Ok(a) => actor = a,
@@ -201,16 +237,15 @@ pub(crate) async fn guard_middleware(
             }
         }
     } else if (method == axum::http::Method::GET || method == axum::http::Method::HEAD)
-        && path.starts_with("/api/")
+        && is_api
         && st.read_protected
-        && !path.starts_with("/api/health/")
-        && path != "/api/v1/meta"
-        && path != "/api/share-links/verify"
+        && !public_read
+        && !session_admin
     {
         // R2-103 对齐：读保护时 admin/read/设备令牌均可读
-        let provided = provided_token(&headers);
         if !check_read_token(&st, provided.as_deref())
-            && !crate::handlers::misc_status::valid_media_signature(&st, req.uri())
+            && (password_required
+                || !crate::handlers::misc_status::valid_media_signature(&st, req.uri()))
         {
             return detail_err(
                 StatusCode::UNAUTHORIZED,
@@ -222,6 +257,7 @@ pub(crate) async fn guard_middleware(
         actor = "read".into();
     }
     let rid = uuid_like();
+    req.extensions_mut().insert(browser);
     let mut resp = next.run(req).await;
     // 审计（任务87/R2-503 对齐：写 /api/* 记录；失败不影响响应；不含 body/headers）。
     // await 而非 detach：tokio 的 spawn_blocking 异步等待不阻塞执行器，且保证
@@ -248,6 +284,9 @@ pub(crate) async fn guard_middleware(
         .await;
     }
     let hs = resp.headers_mut();
+    if !public_read && is_api && (password_required || session_admin) {
+        hs.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     hs.insert("x-request-id", HeaderValue::from_str(&rid).unwrap());
     hs.entry("x-content-type-options")
         .or_insert(HeaderValue::from_static("nosniff"));
@@ -256,6 +295,48 @@ pub(crate) async fn guard_middleware(
     hs.entry("referrer-policy")
         .or_insert(HeaderValue::from_static("no-referrer"));
     resp
+}
+
+fn same_origin(
+    headers: &axum::http::HeaderMap,
+    authority: Option<&axum::http::uri::Authority>,
+    allowed: &[String],
+    secure: Option<bool>,
+) -> bool {
+    if headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|site| !matches!(site, "same-origin" | "none"))
+    {
+        return false;
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if secure.is_none() && allowed.iter().any(|value| origin == value) {
+        return true;
+    }
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str().filter(|s| matches!(*s, "http" | "https")) else {
+        return false;
+    };
+    if secure.is_some_and(|s| s != (scheme == "https")) {
+        return false;
+    }
+    let Some(from) = uri.authority() else {
+        return false;
+    };
+    let Some(to) = authority else {
+        return false;
+    };
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    from.host().eq_ignore_ascii_case(to.host())
+        && from.port_u16().unwrap_or(default_port) == to.port_u16().unwrap_or(default_port)
 }
 
 fn share_read_path(path: &str) -> bool {
@@ -307,6 +388,31 @@ pub(crate) fn provided_token(headers: &axum::http::HeaderMap) -> Option<String> 
         .filter(|s| !s.is_empty())
 }
 
+pub(crate) fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|protocols| {
+            protocols.split(',').find_map(|protocol| {
+                protocol
+                    .trim()
+                    .strip_prefix("bearer.")
+                    .filter(|value| !value.is_empty())
+            })
+        })
+        .map(str::to_owned)
+        .or_else(|| provided_token(headers))
+}
+
+pub(crate) fn is_api_admin(st: &Shared, provided: Option<&str>) -> bool {
+    !st.admin_token.is_empty() && provided.is_some_and(|value| ct_eq(value, &st.admin_token))
+}
+
+pub(crate) fn is_api_reader(st: &Shared, provided: Option<&str>) -> bool {
+    is_api_admin(st, provided)
+        || (!st.read_token.is_empty() && provided.is_some_and(|value| ct_eq(value, &st.read_token)))
+}
+
 /// 设备令牌校验（sha256 存库 + 60s touch 节流）；返回设备名。
 pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
     if token.is_empty() {
@@ -345,7 +451,8 @@ pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
 /// 无早退分支；对齐 Python hmac.compare_digest）。
 pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
     use sha2::{Digest, Sha256};
-    Sha256::digest(a.as_bytes()).as_slice() == Sha256::digest(b.as_bytes()).as_slice()
+    use subtle::ConstantTimeEq;
+    bool::from(Sha256::digest(a.as_bytes()).ct_eq(&Sha256::digest(b.as_bytes())))
 }
 
 /// P1-1（安全审计）：triage 端点白名单——设备令牌仅允许处置单事件
@@ -368,11 +475,8 @@ pub(crate) fn check_write_token(
     provided: Option<&str>,
     path: &str,
 ) -> Result<String, Box<Response>> {
-    if st.admin_token.is_empty() {
-        return Ok("anonymous(auth-off)".into());
-    }
     let provided = provided.unwrap_or("");
-    if ct_eq(provided, &st.admin_token) {
+    if is_api_admin(st, Some(provided)) {
         return Ok("admin".into());
     }
     if !st.read_token.is_empty() && ct_eq(provided, &st.read_token) {
@@ -398,6 +502,9 @@ pub(crate) fn check_write_token(
             .into_response(),
         ));
     }
+    if st.admin_token.is_empty() {
+        return Ok("anonymous(auth-off)".into());
+    }
     Err(Box::new(
         detail_err(
             StatusCode::UNAUTHORIZED,
@@ -409,17 +516,11 @@ pub(crate) fn check_write_token(
 
 /// 读守卫：admin/read/设备令牌均可（R2-103）；P2-2 常数时间比较
 pub(crate) fn check_read_token(st: &Shared, provided: Option<&str>) -> bool {
-    if st.admin_token.is_empty() {
-        return true;
-    }
-    let provided = provided.unwrap_or("");
-    if ct_eq(provided, &st.admin_token) {
-        return true;
-    }
-    if !st.read_token.is_empty() && ct_eq(provided, &st.read_token) {
-        return true;
-    }
-    check_device_token(st, provided).is_some()
+    st.admin_token.is_empty() || provided.is_some_and(|token| valid_read_credential(st, token))
+}
+
+fn valid_read_credential(st: &Shared, provided: &str) -> bool {
+    is_api_reader(st, Some(provided)) || check_device_token(st, provided).is_some()
 }
 
 /// Python `_audit_write` 的 target 提取：/cameras/3 → "camera:3" 等

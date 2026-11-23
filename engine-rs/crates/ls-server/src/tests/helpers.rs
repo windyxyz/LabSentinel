@@ -37,6 +37,7 @@ pub(crate) fn test_state_custom(
         admin_token: admin_token.into(),
         read_token: String::new(),
         read_protected,
+        access: crate::access::AccessControl::default(),
         trusted_hosts: vec!["127.0.0.1".into(), "localhost".into()],
         allowed_origins: vec![],
         web_dist: web_dist.into(),

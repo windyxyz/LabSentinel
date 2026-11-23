@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+mod access;
 mod discovery;
 mod fernet;
 mod pdf;
@@ -150,6 +151,12 @@ async fn main() {
             "data".into()
         }
     });
+    let db_path = env_path("LS_DB_PATH").unwrap_or_else(|| {
+        std::path::Path::new(&data_dir)
+            .join("labsentinel.db")
+            .to_string_lossy()
+            .into_owned()
+    });
     if let Ok(content) = std::fs::read_to_string(envfile::network_path(&data_dir)) {
         for (key, explicit) in envfile::NETWORK_KEYS.into_iter().zip(explicit_network) {
             if !explicit {
@@ -236,6 +243,16 @@ async fn main() {
             );
             std::process::exit(0);
         }
+        if a == "--access-recovery-code" {
+            match access::recovery_code(&db_path) {
+                Ok(code) => println!("本机访问恢复码（十分钟内有效）\n{code}"),
+                Err(err) => {
+                    eprintln!("[access] {err}");
+                    std::process::exit(2);
+                }
+            }
+            return;
+        }
         // RA4（ADR-0011）：health_check.py 消解件——真起服务于 127.0.0.1:0，
         // 轮询 /api/health/ready ≤60s（Inno finalize/升级后自检调用；exit 0=通过）。
         if a == "--selftest-http" {
@@ -280,12 +297,6 @@ async fn main() {
     //   /api/health/ready=503）；源码开发形态沿用 data/（仓库相对）。
     // - 前端目录：LS_WEB_DIST 优先；发行形态用 <安装根>/web（包内布局），
     //   源码开发用 web/dist——此前安装版根路径 404 即因默认 web/dist 不存在。
-    let db_path = env_path("LS_DB_PATH").unwrap_or_else(|| {
-        std::path::Path::new(&data_dir)
-            .join("labsentinel.db")
-            .to_string_lossy()
-            .into_owned()
-    });
     let token = std::env::var("LS_ADMIN_TOKEN").unwrap_or_default();
     let read_token = std::env::var("LS_READ_TOKEN").unwrap_or_default();
     let read_protected = std::env::var("LS_AUTH_READ_PROTECTED")
@@ -339,6 +350,9 @@ async fn main() {
         admin_token: token,
         read_token,
         read_protected,
+        access: access::AccessControl::new(
+            std::env::var("LS_TRUST_PROXY").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
+        ),
         trusted_hosts,
         allowed_origins: vec![],
         // 2026-11-21：web_dist 已按发行/源码布局解析（LS_WEB_DIST 仍可覆盖）
@@ -410,6 +424,7 @@ async fn main() {
             Err(e) => eprintln!("[ls-server] schema 自举失败: {e}"),
         }
     }
+    st.access.load(&st.db_path);
     let app = build_router(st.clone());
     st.jobs.start();
     // LS-051：按 app_settings 决定是否托管 go2rtc（缺失二进制优雅降级，不阻塞启动）
@@ -470,7 +485,12 @@ async fn main() {
             open_browser(port);
         });
     }
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 /// RA4：默认浏览器打开服务页（Windows `cmd /C start`；其他平台 xdg-open/open）。
@@ -498,6 +518,7 @@ async fn selftest_http() -> bool {
         db_path: db.to_string_lossy().into_owned(),
         admin_token: String::new(),
         read_token: String::new(),
+        access: access::AccessControl::default(),
         read_protected: false,
         trusted_hosts: vec!["127.0.0.1".into(), "localhost".into()],
         allowed_origins: vec![],

@@ -4,7 +4,8 @@
 // UX1（2026-11-20）：9 分区扩容——「模型与检测」置顶（UX2 三模式）；设备管理/
 // 人脸管理 从一级导航迁入；原「模型管理」页并入「模型与检测」的本地模型卡。
 import { computed, onMounted, ref } from 'vue'
-import { api, adminToken, downloadBinary } from '../api'
+import { api, downloadBinary } from '../api'
+import AccessSettings from './AccessSettings.vue'
 import DetectPanel from './DetectPanel.vue'
 import Devices from './Devices.vue'
 import Face from './Face.vue'
@@ -14,7 +15,7 @@ const search = ref('')
 const active = ref('detect')
 const sections = [
   { id: 'detect', label: '模型与检测', kw: '检测模式 本地 api 联网 协作 cascade 精判 省钱 预算 置信度 模型 vlm ppe 实验服', icon: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M5 7h6M5 10h4"/>' },
-  { id: 'token', label: '管理令牌', kw: '令牌 token 鉴权 认证', icon: '<circle cx="5" cy="8" r="3"/><path d="M7.6 8H14v2.2M12 8v2.2"/>' },
+  { id: 'access', label: '访问控制', kw: '密码 令牌 token 登录 认证 会话', icon: '<circle cx="5" cy="8" r="3"/><path d="M7.6 8H14v2.2M12 8v2.2"/>' },
   { id: 'notify', label: '通知与告警', kw: '渠道 测试 静默 投递 失败 告警 企业微信 钉钉 邮件', icon: '<path d="M8 2.5a3.5 3.5 0 0 1 3.5 3.5v3l1.5 2.5H3l1.5-2.5v-3A3.5 3.5 0 0 1 8 2.5z"/><path d="M6.5 13a1.8 1.8 0 0 0 3 0"/>' },
   { id: 'template', label: '告警文案', kw: '模板 预览 占位符 文案 标题 正文', icon: '<path d="M3 4h10M3 8h10M3 12h6"/>' },
   { id: 'devices', label: '设备与配对', kw: '设备 配对 令牌 移动端 手机 撤销 三级', icon: '<rect x="4.5" y="2" width="7" height="12" rx="1.5"/><path d="M7 12.2h2"/>' },
@@ -41,15 +42,7 @@ function show(id) {
 function go(id) { active.value = id; search.value = '' }
 
 // ---- 以下为搬移的业务逻辑（零改动）----
-const tokenInput = ref(adminToken.get())
-const tokenMsg = ref('')
-
 const cams = ref([])   // 静默窗口的摄像头下拉
-
-function saveToken() {
-  adminToken.set(tokenInput.value.trim())
-  tokenMsg.value = adminToken.get() ? '令牌已保存（仅存本浏览器）' : '令牌已清除'
-}
 
 
 // 任务23：告警渠道状态与自测
@@ -424,9 +417,7 @@ async function loadPlugins() {
     const msg = String(e.message || e)
     pluginsLoaded.value = true
     // 产品化：网络异常（Failed to fetch 等）不裸露浏览器原文
-    pluginsError.value = msg.includes('401') || msg.includes('403')
-      ? '需要管理令牌——请在页面顶部填写后重试'
-      : '无法连接服务，请确认服务正在运行'
+    pluginsError.value = [401, 403].includes(e.status) ? msg : '无法连接服务，请确认服务正在运行'
   }
 }
 function pluginStateLabel(p) {
@@ -448,8 +439,7 @@ async function pluginAct(p, action) {
     await api.pluginAction(p.id, action)
     await loadPlugins()
   } catch (e) {
-    const msg = String(e.message || e)
-    alert(msg + (msg.includes('401') || msg.includes('403') ? '\n请先在页面顶部填写管理令牌' : ''))
+    alert(String(e.message || e))
   }
   pluginBusy.value = ''
 }
@@ -477,9 +467,7 @@ async function onUploadZip(e) {
     await loadPlugins()
   } catch (err) {
     const m = String(err.message || err)
-    pluginsError.value = m.includes('401') || m.includes('403')
-      ? '需要管理令牌——请在页面顶部填写后重试'
-      : '安装失败：' + m
+    pluginsError.value = [401, 403].includes(err.status) ? m : '安装失败：' + m
   } finally {
     pluginBusy.value = ''
     e.target.value = ''
@@ -493,7 +481,8 @@ async function loadCams() {
 onMounted(() => {
   loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadGo2rtc(); loadNetwork(); loadPool(); loadShares()
   // UX1：hash 深链分区（#/settings/face 等，App.vue 旧路由重定向后落到这里）
-  const sub = window.location.hash.split('/')[2]
+  const hashSection = window.location.hash.split('/')[2]
+  const sub = hashSection === 'token' ? 'access' : hashSection
   if (sections.some((s) => s.id === sub)) active.value = sub
 })
 </script>
@@ -516,17 +505,8 @@ onMounted(() => {
       <section v-show="show('detect')" class="panel detect-panel-host">
         <DetectPanel />
       </section>
-      <section v-show="show('token')" class="panel">
-    <h3 style="margin-bottom:10px">管理令牌</h3>
-    <div class="row">
-      <input v-model="tokenInput" placeholder="服务端启用鉴权时填写（LS_ADMIN_TOKEN）" aria-label="管理令牌" style="flex:1" />
-      <button @click="saveToken">保存令牌</button>
-      <span v-if="tokenMsg" class="muted">{{ tokenMsg }}</span>
-    </div>
-    <p class="muted" style="margin-top:4px">
-      令牌只保存在本浏览器（localStorage），不上传到任何地方。它是「管理员密码」性质：
-      仅当服务端以局域网/外网模式启动且设置了 LS_ADMIN_TOKEN 时才需要填写——
-      本机访问（127.0.0.1）默认无需令牌。</p>
+      <section v-if="show('access')" class="panel">
+        <AccessSettings />
       </section>
       <section v-show="show('notify')" class="panel">
     <h3 style="margin:14px 0 10px">告警渠道状态</h3>
@@ -745,7 +725,7 @@ onMounted(() => {
             <button class="ghost" :disabled="netBusy" @click="restartServer">立即重启生效</button>
           </div>
           <p v-if="newToken" class="muted" style="font-size:12px; word-break:break-all">新令牌：<code>{{ newToken }}</code>（只显示一次，请妥善保存）</p>
-          <p class="muted" style="font-size:12px">开启局域网访问前必须设置管理令牌；保存写入安装目录 .env，重启后生效。</p>
+          <p class="muted" style="font-size:12px">直接监听局域网地址需要管理令牌。监听设置保存在数据目录，重启后生效。网页密码可在「访问控制」即时设置。</p>
         </template>
         <hr style="border:none;border-top:1px solid var(--divider);margin:12px 0" />
         <template v-if="reports">

@@ -108,3 +108,35 @@ it('分享链接校验后锁定值守视图并保留本机管理令牌', async (
     localStorage.removeItem('admin_token')
   }
 })
+
+it('启用本机密码后在登录前隐藏产品视图，登录后用会话访问', async () => {
+  const App = (await import('../src/App.vue')).default
+  localStorage.setItem('admin_token', 'previous-browser-token')
+  let signedIn = false
+  const fetch = vi.fn(async (url, opts) => {
+    if (url === '/api/access/login') {
+      expect(JSON.parse(opts.body).password).toBe('local-fixture-password')
+      expect(opts.headers['X-Admin-Token']).toBeUndefined()
+      signedIn = true
+      return { ok: true, json: async () => ({ ok: true }) }
+    }
+    expect(url).toBe('/api/access/status')
+    return { ok: true, json: async () => ({ required: true, signed_in: signedIn, local: true, password_supported: true }) }
+  })
+  vi.stubGlobal('fetch', fetch)
+  const view = mount(App, { global: { stubs: { Insights: true, Welcome: true } } })
+  try {
+    expect(view.find('nav').exists()).toBe(false)
+    await flushPromises()
+    expect(view.get('h1').text()).toBe('登录')
+    expect(view.find('nav').exists()).toBe(false)
+    await view.get('input[type="password"]').setValue('local-fixture-password')
+    await view.get('form').trigger('submit')
+    await flushPromises()
+    expect(view.find('nav').exists()).toBe(true)
+    expect(view.get('.sign-out').text()).toBe('退出登录')
+  } finally {
+    view.unmount()
+    localStorage.removeItem('admin_token')
+  }
+})

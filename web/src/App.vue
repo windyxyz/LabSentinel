@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { api } from './api'
+import { api, setBrowserPasswordMode } from './api'
+import AccessLogin from './components/AccessLogin.vue'
 import Insights from './views/Insights.vue'
 import Sources from './views/Sources.vue'
 import Events from './views/Events.vue'
@@ -64,7 +65,13 @@ function activateShare() {
 }
 let readonlyToken = activateShare()
 let shareTimer
+let accessTimer
+let accessRequest
+const access = ref(null)
+const accessError = ref('')
+const signOutError = ref('')
 const wallPath = ref(isWallPath())
+const recoveryPath = ref(location.hash === '#/recover')
 const isWall = computed(() => Boolean(shareStatus.value) || wallPath.value)
 function isWallPath() {
   return location.pathname.replace(/\/+$/, '') === '/wall' || location.hash.split('?')[0] === '#/wall'
@@ -78,6 +85,7 @@ function onHashChange() {
   normalizeHash()
   active.value = hashTab()
   wallPath.value = isWallPath()
+  recoveryPath.value = location.hash === '#/recover'
   if (new URLSearchParams(location.hash.split('?')[1]).has('readonly_token')) {
     readonlyToken = activateShare()
     verifyShare()
@@ -99,22 +107,83 @@ async function verifyShare() {
     shareStatus.value = 'unavailable'
   }
 }
+
+function refreshAccess() {
+  if (shareStatus.value || accessRequest) return accessRequest
+  accessRequest = api.accessStatus()
+    .then(status => {
+      if (typeof status?.required !== 'boolean' || typeof status.signed_in !== 'boolean') {
+        throw new Error('服务未返回访问状态。')
+      }
+      setBrowserPasswordMode(status.required || status.signed_in)
+      access.value = status
+      accessError.value = ''
+    })
+    .catch(err => { accessError.value = String(err.message || err) })
+    .finally(() => { accessRequest = null })
+  return accessRequest
+}
+
+async function signOut() {
+  signOutError.value = ''
+  try {
+    await api.accessLogout()
+    await refreshAccess()
+  } catch (err) { signOutError.value = String(err.message || err) }
+}
+
+async function signedIn() {
+  await refreshAccess()
+  if (access.value?.signed_in && recoveryPath.value) location.hash = '#/settings/access'
+}
+
+function leaveRecovery() {
+  location.hash = access.value?.required && !access.value?.signed_in ? '#/dash' : '#/settings/access'
+}
+
+function onVisibilityChange() {
+  if (!document.hidden) refreshAccess()
+}
+
 onMounted(() => {
   window.addEventListener('hashchange', onHashChange)
-  verifyShare()
+  window.addEventListener('ls-access-changed', refreshAccess)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  if (readonlyToken) verifyShare()
+  else refreshAccess()
   shareTimer = setInterval(verifyShare, 15000)
+  accessTimer = setInterval(() => {
+    if (!document.hidden && (access.value?.required || access.value?.signed_in)) refreshAccess()
+  }, 30000)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('hashchange', onHashChange)
+  window.removeEventListener('ls-access-changed', refreshAccess)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   clearInterval(shareTimer)
+  clearInterval(accessTimer)
+  setBrowserPasswordMode(false)
 })
 </script>
 
 <template>
+  <p v-if="signOutError" class="sign-out-error" role="alert">{{ signOutError }}</p>
   <div v-if="shareStatus && shareStatus !== 'valid'" class="card" role="status">
     {{ { checking: '正在验证分享链接…', invalid: '分享链接已过期或被吊销。', unavailable: '暂时无法验证分享链接。' }[shareStatus] }}
   </div>
-  <Wall v-else-if="isWall" :readonly="shareStatus === 'valid'" />
+  <Wall v-else-if="shareStatus === 'valid'" :readonly="true" />
+  <main v-else-if="!access" class="access-loading">
+    <div class="panel">
+      <p v-if="accessError" role="alert">{{ accessError }}</p>
+      <p v-else role="status">正在连接 LabSentinel…</p>
+      <button v-if="accessError" type="button" class="ghost" @click="refreshAccess">重试</button>
+    </div>
+  </main>
+  <AccessLogin v-else-if="(access.required && !access.signed_in) || (recoveryPath && access.local)"
+               :key="recoveryPath ? 'recovery' : 'login'" :start-recovery="recoveryPath && access.local"
+               :local="access.local" :password-supported="access.password_supported"
+               @signed-in="signedIn" @leave-recovery="leaveRecovery" />
+  <Wall v-else-if="isWall" :signed-in="access.signed_in" @sign-out="signOut" />
   <div v-else class="layout">
     <nav>
       <h1><img class="logo" :src="logoUrl" alt="LabSentinel 图标" />LabSentinel</h1>
@@ -124,6 +193,7 @@ onBeforeUnmount(() => {
              stroke-linecap="round" stroke-linejoin="round" v-html="t.icon"></svg>
         <span>{{ t.label }}</span>
       </a>
+      <button v-if="access.signed_in" type="button" class="ghost sign-out" @click="signOut">退出登录</button>
     </nav>
     <main>
       <!-- 显式分支渲染（生产构建动态组件切换空渲染规避，2026-11-21） -->
@@ -144,4 +214,10 @@ nav .logo {
   border-radius: 6px; object-fit: contain;
   flex-shrink: 0;
 }
+.access-loading { min-height: 100vh; max-width: none; display: grid; place-items: center; }
+.access-loading button { margin-top: 8px; }
+.sign-out { margin: auto 4px 4px; }
+.sign-out-error { position: fixed; right: 14px; bottom: 14px; z-index: 25; padding: 10px 12px;
+  background: var(--dialog-bg); color: var(--sys-critical); border-radius: var(--control-radius); }
+@media (max-width: 760px) { .sign-out { margin: 0 0 0 auto; white-space: nowrap; } }
 </style>

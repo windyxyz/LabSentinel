@@ -44,6 +44,14 @@ taskkill /PID <pid> /F
 ```
 或直接 `scripts\stop-all.bat`（带确认）。
 
+### 网页密码与 HTTPS
+
+1. 在运行 LabSentinel 的电脑打开 `http://127.0.0.1:8000`，进入「设置 → 访问控制」。启用「本机访问需要登录」，填写至少 12 个字符的密码并确认。保存后在新浏览器窗口验证登录。
+2. 局域网浏览器使用 HTTPS 时，在同一台电脑将 HTTPS 反向代理指向 LabSentinel 的回环地址。为入口的主机名配置可被客户端信任的证书，并在「网络与运维」将该名称加入可信主机。代理需要转发 WebSocket，保留浏览器的 `Host`，以实际客户端地址覆盖 `X-Forwarded-For`，设置 `X-Forwarded-Proto: https`。
+3. 从本机打开「访问控制」，启用「局域网访问需要 HTTPS 登录」和「信任本机 HTTPS 代理」。通过 HTTPS 入口验证登录和实时画面。若使用标准 Caddy HTTPS 站点，`reverse_proxy 127.0.0.1:8000` 会转发原 Host 并处理转发头。[Caddy 反向代理文档](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults)
+4. 浏览器会话持续 12 小时。当前浏览器可退出登录，管理员可在「浏览器会话」撤销其他登录。改密时会刷新当前登录并撤销旧会话。
+5. 忘记密码时，在服务所在电脑的安装目录打开 PowerShell，执行 `.\labsentinel-server.exe --console --access-recovery-code`。在本机登录页或「访问控制」点击「忘记密码」，输入一次性恢复码和新密码。恢复码在十分钟内有效。采用自定义数据目录的实例应在同一环境中运行命令。
+
 **Q：vite 起了但 curl http://127.0.0.1:5173 不通**
 → vite dev **仅绑 IPv6 localhost**。解决：`curl -g "http://[::1]:5173"`；浏览器用 http://localhost:5173 无碍。
 
@@ -240,8 +248,7 @@ body `errcode≠0` 也判失败（`_is_ok`）。失败会重试（1s/4s/15s 三�
 其他协作者新增样式一律写组件 `<style scoped>`，令牌（--card-bg/--accent/--l1~l3/--stroke-*）直接复用。
 
 **Q：写接口 401**
-→ 服务端启用了管理鉴权（LS_ADMIN_TOKEN）。在「设置 → 管理令牌」填写令牌（存浏览器
-localStorage），所有 POST/DELETE 自动携带。
+→ 网页访问先检查当前浏览器的登录状态。旧版令牌模式可在「设置 → 访问控制 → 高级 · API 凭据」填写管理令牌。脚本可使用 `Authorization: Bearer` 或 `X-Admin-Token` 请求头。
 
 **Q：能嵌到别的系统里吗（iframe）？CSP 怎么开？**
 → 默认 `X-Frame-Options: DENY`（任务89）——嵌入大屏改 `LS_FRAME_OPTIONS=SAMEORIGIN`。

@@ -5,6 +5,68 @@
     "version": "0.2.0"
   },
   "paths": {
+    "/api/access/status": {
+      "get": {
+        "summary": "当前浏览器的访问状态",
+        "operationId": "access_status",
+        "responses": {"200": {"description": "required、signed_in、local、password_supported、password_set"}}
+      }
+    },
+    "/api/access/settings": {
+      "get": {
+        "summary": "访问策略与浏览器会话列表",
+        "operationId": "access_settings",
+        "responses": {"200": {"description": "本机与局域网策略、代理信任、浏览器会话"}, "401": {"description": "需要管理员权限"}}
+      },
+      "put": {
+        "summary": "保存访问策略或更新密码",
+        "operationId": "access_update_settings",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "required": ["local", "lan"], "properties": {
+            "local": {"type": "boolean"}, "lan": {"type": "boolean"}, "trust_proxy": {"type": "boolean"},
+            "password": {"type": "string", "writeOnly": true, "minLength": 12},
+            "current_password": {"type": "string", "writeOnly": true}
+          }
+        }}}},
+        "responses": {"200": {"description": "设置生效，刷新本浏览器 Cookie"}, "401": {"description": "需要有效的管理员权限及当前密码"}, "409": {"description": "设置已被同时更新"}}
+      }
+    },
+    "/api/access/login": {
+      "post": {
+        "summary": "用访问密码登录",
+        "operationId": "access_login",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "required": ["password"], "properties": {"password": {"type": "string", "writeOnly": true}}
+        }}}},
+        "responses": {"200": {"description": "返回 HttpOnly 会话 Cookie"}, "401": {"description": "密码无效"}, "403": {"description": "局域网登录要求 HTTPS"}, "429": {"description": "尝试过于频繁"}}
+      }
+    },
+    "/api/access/logout": {
+      "post": {
+        "summary": "注销当前浏览器会话",
+        "operationId": "access_logout",
+        "responses": {"200": {"description": "撤销会话并清除 Cookie"}}
+      }
+    },
+    "/api/access/revoke-others": {
+      "post": {
+        "summary": "撤销其他浏览器会话",
+        "operationId": "access_revoke_others",
+        "responses": {"200": {"description": "保留当前 Cookie 对应的会话"}, "401": {"description": "需要管理员权限"}}
+      }
+    },
+    "/api/access/recover": {
+      "post": {
+        "summary": "用一次性恢复码在本机重设密码",
+        "operationId": "access_recover",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "required": ["code", "password"], "properties": {
+            "code": {"type": "string", "writeOnly": true}, "password": {"type": "string", "writeOnly": true, "minLength": 12}
+          }
+        }}}},
+        "responses": {"200": {"description": "恢复码已用，设置新密码并登录"}, "401": {"description": "恢复码无效或过期"}, "403": {"description": "从服务所在电脑访问"}}
+      }
+    },
     "/api/media/sign": {
       "get": {
         "summary": "Sign Media Url",

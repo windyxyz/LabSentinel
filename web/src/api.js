@@ -8,13 +8,19 @@ export const adminToken = {
   set: (v) => v ? localStorage.setItem('admin_token', v) : localStorage.removeItem('admin_token'),
 }
 
-export const requestToken = () => sessionStorage.getItem('ls_readonly_token') || adminToken.get()
+let browserPasswordMode = false
+export const setBrowserPasswordMode = enabled => { browserPasswordMode = enabled }
+export const requestToken = () => sessionStorage.getItem('ls_readonly_token') || (browserPasswordMode ? '' : adminToken.get())
+export const accessChanged = () => window.dispatchEvent(new Event('ls-access-changed'))
 
 export async function fetchMedia(path, signal) {
   const token = requestToken()
   const headers = token ? { 'X-Admin-Token': token } : {}
     const response = await fetch(path, { headers, cache: 'no-store', signal })
-    if (!response.ok) throw Object.assign(new Error(`下载失败（HTTP ${response.status}）`), { status: response.status })
+    if (!response.ok) {
+      if (response.status === 401 && browserPasswordMode) accessChanged()
+      throw Object.assign(new Error(`下载失败（HTTP ${response.status}）`), { status: response.status })
+    }
     return response
 }
 
@@ -78,14 +84,29 @@ async function req(method, path, body) {
   })
   if (!r.ok) {
     let msg = `${method} ${path} -> ${r.status}`
-    try { msg = (await r.json()).detail || msg } catch {}
-    if (r.status === 401) msg = '需要管理令牌。请在「设置 → 管理令牌」填写后重试。'
-    throw Object.assign(new Error(msg), { status: r.status })
+    let code
+    try {
+      const error = await r.json()
+      if (typeof error?.detail === 'string') msg = error.detail
+      code = error?.code
+    } catch {}
+    if (code === 'password_required') accessChanged()
+    else if (r.status === 401 && !path.startsWith('/api/access/')) {
+      msg = '需要管理令牌。请在「设置 → 访问控制」填写 API 凭据后重试。'
+    }
+    throw Object.assign(new Error(msg), { status: r.status, code })
   }
   return r.json()
 }
 
 export const api = {
+  accessStatus: () => req('GET', '/api/access/status'),
+  accessSettings: () => req('GET', '/api/access/settings'),
+  saveAccess: (data) => req('PUT', '/api/access/settings', data),
+  accessLogin: (password) => req('POST', '/api/access/login', { password }),
+  accessLogout: () => req('POST', '/api/access/logout', {}),
+  revokeOtherSessions: () => req('POST', '/api/access/revoke-others', {}),
+  recoverAccess: (data) => req('POST', '/api/access/recover', data),
   system: () => req('GET', '/api/system'),
   cameras: () => req('GET', '/api/cameras'),
   usbDevices: (refresh = false) => req('GET', '/api/cameras/usb-devices' + (refresh ? '?refresh=1' : '')),

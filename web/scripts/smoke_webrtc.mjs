@@ -115,7 +115,10 @@ try {
   browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] })
   const admin = await browser.newPage()
   admin.on('console', message => { if (message.type() === 'error') logs.push(message.text()) })
-  await admin.addInitScript(secret => localStorage.setItem('admin_token', secret), adminToken)
+  await admin.addInitScript(secret => {
+    localStorage.setItem('admin_token', secret)
+    localStorage.setItem('ls-welcome-done', '1')
+  }, adminToken)
   await admin.goto(origin + '/#/wall')
   const frameReady = () => {
     const video = document.querySelector('.camera-preview video')
@@ -175,6 +178,34 @@ try {
   assert.equal(expiredSnapshot.status, 401)
   await admin.waitForFunction(frameReady, null, { timeout: 6000 })
   console.log('PASS · MSE video decoded and disconnects upon share revocation')
+
+  const localPassword = 'isolated-playback-test-password'
+  await admin.goto(origin + '/#/settings/access')
+  const settings = admin.locator('.access-form')
+  await settings.getByLabel('访问密码', { exact: true }).fill(localPassword)
+  await settings.getByLabel('确认新密码', { exact: true }).fill(localPassword)
+  await settings.getByRole('button', { name: '保存访问设置' }).click()
+  await admin.getByText('访问设置已生效。').waitFor({ timeout: 15000 })
+
+  const protectedViewer = await browser.newPage()
+  await protectedViewer.goto(origin + '/#/wall')
+  await protectedViewer.getByRole('heading', { name: '登录' }).waitFor()
+  assert.equal(await protectedViewer.locator('.camera-preview').count(), 0)
+  await protectedViewer.getByLabel('访问密码', { exact: true }).fill(localPassword)
+  await protectedViewer.getByRole('button', { name: '登录', exact: true }).click()
+  await protectedViewer.waitForFunction(frameReady, null, { timeout: 25000 })
+  assert.match(await protectedViewer.locator('.camera-preview video').getAttribute('src'), /^blob:/)
+  const session = (await protectedViewer.context().cookies()).find(item => item.name === 'ls_session')
+  assert.ok(session?.httpOnly && session.sameSite === 'Strict')
+
+  await admin.reload()
+  await admin.getByRole('button', { name: '撤销其他会话' }).click()
+  await protectedViewer.waitForFunction(() => !document.querySelector('.camera-preview video')?.getAttribute('src'), null, { timeout: 6000 })
+  const afterRevocation = await protectedViewer.request.get(origin + '/api/system')
+  assert.equal(afterRevocation.status(), 401)
+  await admin.getByRole('button', { name: '退出登录' }).click()
+  await admin.getByRole('heading', { name: '登录' }).waitFor()
+  console.log('PASS · localhost password, browser session, revocable media and sign-out')
 } catch (err) {
   console.error(logs.join('\n'))
   throw err

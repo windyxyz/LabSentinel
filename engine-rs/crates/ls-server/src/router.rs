@@ -16,6 +16,13 @@ pub fn dump_routes() -> serde_json::Value {
 pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/health/live"),
     ("GET", "/api/health/ready"),
+    ("GET", "/api/access/status"),
+    ("GET", "/api/access/settings"),
+    ("PUT", "/api/access/settings"),
+    ("POST", "/api/access/login"),
+    ("POST", "/api/access/logout"),
+    ("POST", "/api/access/revoke-others"),
+    ("POST", "/api/access/recover"),
     ("GET", "/api/system"),
     ("GET", "/api/go2rtc/status"), // LS-051
     ("PUT", "/api/go2rtc/config"), // LS-051
@@ -190,6 +197,7 @@ pub fn build_router(state: Shared) -> Router {
     let api = Router::new()
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .nest("/access", crate::access::routes())
         .route("/system", get(system))
         .route("/go2rtc/status", get(go2rtc_status))
         .route("/go2rtc/config", put(go2rtc_configure))

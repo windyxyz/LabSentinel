@@ -235,47 +235,29 @@ pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i6
 ///   非浏览器客户端，放行）；
 /// - read_protected 时校验令牌（子协议 bearer.<token> 优先 → Authorization
 ///   Bearer），admin/read/设备令牌均可（与 HTTP 读口径一致）。
-fn ws_origin_ok(origin: Option<&str>, host: &str, allowed: &[String]) -> bool {
-    let Some(origin) = origin else {
-        return true; // 非浏览器客户端（curl/插件/移动端）
-    };
-    if origin.split("://").last().unwrap_or("") == host {
-        return true;
-    }
-    allowed.iter().any(|o| o == origin)
-}
-
-pub(super) fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    // 令牌来源优先级：子协议 bearer.<token> → Authorization: Bearer
-    let protos = headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    for p in protos.split(',').map(|s| s.trim()) {
-        if let Some(t) = p.strip_prefix("bearer.") {
-            return Some(t.to_string());
-        }
-    }
-    crate::middleware::provided_token(headers)
-}
-
-pub(super) async fn socket_revoked(st: &Shared, token: Option<&str>) {
-    let Some(token) = token else {
-        return std::future::pending().await;
-    };
-    if !st.read_protected && !crate::middleware::share_device(st, token) {
+pub(super) async fn socket_revoked(
+    st: &Shared,
+    browser: &crate::access::BrowserAccess,
+    token: Option<&str>,
+) {
+    if crate::middleware::is_api_reader(st, token) {
         return std::future::pending().await;
     }
-    let token = token.to_string();
     loop {
-        let st = st.clone();
-        let token = token.clone();
-        if !tokio::task::spawn_blocking(move || {
-            crate::middleware::check_read_token(&st, Some(&token))
-        })
-        .await
-        .unwrap_or(false)
-        {
+        let valid = if let Some(token) = token {
+            let st = st.clone();
+            let token = token.to_owned();
+            tokio::task::spawn_blocking(move || {
+                crate::middleware::check_device_token(&st, &token).is_some()
+            })
+            .await
+            .unwrap_or(false)
+        } else if let Some(digest) = &browser.session {
+            st.access.session_valid(digest, browser.client)
+        } else {
+            !st.access.required(browser.client)
+        };
+        if !valid {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -284,43 +266,18 @@ pub(super) async fn socket_revoked(st: &Shared, token: Option<&str>) {
 
 pub(crate) async fn ws_events(
     State(st): State<Shared>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
-    if !ws_origin_ok(origin, &headers_host(&headers), &st.allowed_origins) {
-        return (StatusCode::FORBIDDEN, "WS Origin 校验失败").into_response();
-    }
-    if !ws_read_allowed(&st, &headers) {
-        return (StatusCode::UNAUTHORIZED, "WS 读令牌校验失败").into_response();
-    }
-    let token = ws_token(&headers);
+    let token = crate::middleware::ws_token(&headers);
     ws.protocols(["labsentinel"])
         .on_upgrade(move |socket| async move {
             tokio::select! {
                 _ = handle_ws(socket, st.events_tx.subscribe()) => {},
-                _ = socket_revoked(&st, token.as_deref()) => {},
+                _ = socket_revoked(&st, &browser, token.as_deref()) => {},
             }
         })
-}
-
-fn headers_host(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string()
-}
-
-pub(super) fn ws_read_allowed(st: &Shared, headers: &axum::http::HeaderMap) -> bool {
-    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
-    let token = ws_token(headers);
-    let needs_token = st.read_protected
-        || token
-            .as_deref()
-            .is_some_and(|t| crate::middleware::share_device(st, t));
-    ws_origin_ok(origin, &headers_host(headers), &st.allowed_origins)
-        && (!needs_token || crate::middleware::check_read_token(st, token.as_deref()))
 }
 
 /// LS-051：`/ws/detections/:cid` 实时检测元数据广播（受 trusted_hosts + 读令牌守卫，
@@ -329,24 +286,18 @@ pub(super) fn ws_read_allowed(st: &Shared, headers: &axum::http::HeaderMap) -> b
 pub(crate) async fn ws_detections(
     State(st): State<Shared>,
     AxPath(cid): AxPath<i64>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
-    if !ws_origin_ok(origin, &headers_host(&headers), &st.allowed_origins) {
-        return (StatusCode::FORBIDDEN, "WS Origin 校验失败").into_response();
-    }
-    if !ws_read_allowed(&st, &headers) {
-        return (StatusCode::UNAUTHORIZED, "WS 读令牌校验失败").into_response();
-    }
     // 只订阅本路相机：broadcast 全量帧，客户端按 camera_id 过滤（实现简单、零锁竞争）
     let rx = st.detections_tx.subscribe();
-    let token = ws_token(&headers);
+    let token = crate::middleware::ws_token(&headers);
     ws.protocols(["labsentinel"])
         .on_upgrade(move |socket| async move {
             tokio::select! {
                 _ = handle_detections_ws(socket, rx, cid) => {},
-                _ = socket_revoked(&st, token.as_deref()) => {},
+                _ = socket_revoked(&st, &browser, token.as_deref()) => {},
             }
         })
 }

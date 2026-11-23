@@ -243,16 +243,15 @@ pub(crate) async fn camera_webrtc(
         )
         .into_response()),
         Some(c) => {
-            // LS-042 决策 A：USB / 文件源或 go2rtc 不可用时明确返回 mode="snapshot" 优雅降级，
-            // 仅 RTSP 源且 go2rtc 可用时走 WebRTC，消除无限重连报错。
-            let shared = crate::middleware::provided_token(&headers)
-                .is_some_and(|token| crate::middleware::share_device(&st, &token));
+            // 为可撤销的浏览器会话和访客保留服务端媒体连接。
+            let token = crate::middleware::provided_token(&headers);
+            let direct = crate::middleware::is_api_admin(&st, token.as_deref());
             let (mode, suffix) = match (
                 c.type_ == "rtsp" && st.go2rtc.address_for_camera(cid).is_some(),
-                shared,
+                direct,
             ) {
-                (true, true) => ("mse", "?transport=mse"),
-                (true, false) => ("webrtc", ""),
+                (true, false) => ("mse", "?transport=mse"),
+                (true, true) => ("webrtc", ""),
                 (false, _) => ("snapshot", ""),
             };
             Ok(Json(json!({
@@ -271,20 +270,14 @@ pub(crate) async fn ws_webrtc(
     State(st): State<Shared>,
     AxPath(cid): AxPath<i64>,
     Query(query): Query<std::collections::HashMap<String, String>>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
     headers: axum::http::HeaderMap,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Response {
-    if !super::events::ws_read_allowed(&st, &headers) {
-        return detail_err(StatusCode::UNAUTHORIZED, "实时画面鉴权失败").into_response();
-    }
-    let token = super::events::ws_token(&headers);
+    let token = crate::middleware::ws_token(&headers);
     let mse = query.get("transport").is_some_and(|mode| mode == "mse");
-    if !mse
-        && token
-            .as_deref()
-            .is_some_and(|token| crate::middleware::share_device(&st, token))
-    {
-        return detail_err(StatusCode::FORBIDDEN, "分享画面需使用中继播放").into_response();
+    if !mse && !crate::middleware::is_api_admin(&st, token.as_deref()) {
+        return detail_err(StatusCode::FORBIDDEN, "此会话需使用中继播放").into_response();
     }
     let Some(addr) = st.go2rtc.address_for_camera(cid) else {
         return detail_err(
@@ -375,7 +368,7 @@ pub(crate) async fn ws_webrtc(
             tokio::select! {
                 _ = c2u => {},
                 _ = u2c => {},
-                _ = super::events::socket_revoked(&st, token.as_deref()) => {},
+                _ = super::events::socket_revoked(&st, &browser, token.as_deref()) => {},
             }
         })
 }

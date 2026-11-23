@@ -2,10 +2,18 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID / Task-Name**：`LS-062`（`ACTIVE`）/ 本机与局域网访问密码、浏览器会话和令牌迁移。
-- **基线**：`main`，`LS-060`、`LS-061` 已通过本机验收。当前 GitHub 公开 Release 为 `v0.5.0`。
+- **Task-ID / Task-Name**：`LS-063`（`ACTIVE`）/ 浏览器设备配对、相机范围授权与撤销。
+- **基线**：`main`，`LS-060` 和 `LS-061` 已通过本机实施验收。`LS-062` 的独立 Windows EXE 联测受应用控制阻塞。GitHub 公开 Release 为 `v0.5.0`。
 - **范围**：用户指示全部作为 `v0.6.0`，计划后直接实施，全部验收通过后发布 GitHub。任务 `LS-060`～`LS-068` 逐项推进。
-- **Next First Command**：`rg -n 'check_read_token|provided_token|LS_ADMIN_TOKEN' engine-rs/crates/ls-server/src`。
+- **Next First Command**：`rg -n 'create_pairing|claim_pairing|revoke_device' engine-rs/crates/ls-server/src/handlers/pairing.rs`。
+
+---
+
+## Previous Handoff Snapshot · LS-062
+
+- **实现**。访问控制网页支持本机与局域网分开开启密码、Argon2id 密码摘要、HTTPS 反代、12 小时浏览器会话、注销与批量撤销、仅本机一次性恢复码。媒体与 WebSocket 继承鉴权，浏览器会话使用可撤销中继，原 API 令牌仍适用。
+- **实测**。首次 Windows GNU `fmt --check`、Clippy 和 `cargo test --workspace --all-features` 通过，共 190 项。包含本机密码、既有令牌、会话撤销、代理边界和恢复码的三项新增路由测试。最终改动后 `fmt --check` 和 Clippy 通过，Web 95 项、生产构建和 `node --check scripts/smoke_webrtc.mjs` 通过，契约审计为 123 条前端 API 匹配 162 条路线登记。
+- **验收阻塞**。`node web/scripts/smoke_webrtc.mjs <staging>` 和独立 HTTPS Chromium 联测无法启动新 EXE。`python -X utf8 scripts/rust_route_coverage.py --exe <debug> --fail-under 95` 返回 Windows 4551。Code Integrity `3033` / `3077` 确认签名策略拒绝。此后的全量 `cargo test` 执行 27 项后，运行 `ls_core` 测试程序亦返回 4551。仓库没有自托管 GitHub Windows runner 或已知签名连接。最终 Windows 浏览器、路由覆盖和安装验收须在可运行该产物的环境重跑。
 
 ---
 

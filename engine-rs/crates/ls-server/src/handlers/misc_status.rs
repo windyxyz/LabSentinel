@@ -639,10 +639,10 @@ pub(crate) async fn share_link_create(
     State(st): State<Shared>,
     Json(body): Json<Value>,
 ) -> Response {
-    if st.admin_token.is_empty() || !st.read_protected {
+    if (st.admin_token.is_empty() || !st.read_protected) && !st.access.lan_protected() {
         return detail_err(
             StatusCode::CONFLICT,
-            "生成分享链接前，请启用管理令牌与读取保护",
+            "生成分享链接前，请启用局域网访问密码，或同时配置管理令牌与读取保护",
         )
         .into_response();
     }
