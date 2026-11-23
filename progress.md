@@ -2,6 +2,13 @@
 
 ## Latest Handoff Snapshot
 
+- **Task-ID / Task-Name**：`v0.6.x → v1.0.0 GA` 长线规划入库（`LS-080` ～ `LS-101` 登记为 `READY`；现网基线维持 `v0.6.0` / `LS-075` `DONE`）。`main`，本地工作区。
+- **本轮交付**：完成 18 个指定项目/论文/文章 + 15+ 全网顶级标杆（Frigate v0.18、AmberSight、Moonfire/Retina、Construction-Hazard-Detection、YOLO26/YOLOE/PP-LCNet、Qwen3-VL/SmolVLM2、`sqlite-vec`）的深度对标；经 Swarm 三轨架构规划与实码核验，正式入库 [docs/plan/v1.0.0-roadmap.md](docs/plan/v1.0.0-roadmap.md)（9 个渐进版本 `v0.6.1 → v1.0.0 GA`、22 项任务 `LS-080`～`LS-101`、SQLite `v22 → v32`）、[docs/adr/0012-unified-vulkan-gpu.md](docs/adr/0012-unified-vulkan-gpu.md)（`Proposed`），并同步更新 `task_plan.md` 与 `task_registry.md`。
+- **已锁定方向**：无 PDCA 隐患工单；统一推进 Vulkan GPU（CV + 离线托管 `llama-server.exe` VLM，保留 `DirectML + dml_lock → CPU` 回退）；细粒度逐工具可配高权限本地 MCP；性价比带识图 AI 辅助报告/多轮问答历史（DeepSeek/Qwen-VL-Flash 等）；现成合规权重拿来即验 + 7 大训练配方（严禁 SH17 等 NC 进随包权重）。
+- **Next First Command**：确认 `v0.6.0`（`LS-070` 现场联测/`LS-068` 发版）收口时机后，锁定 `LS-080`（`v0.6.1`）启动实施。
+
+## Previous Handoff Snapshot · LS-075
+
 - **Task-ID / Task-Name**：`LS-075`（`DONE`）/ 候选模型对照、合并与淘汰。`main`，本地工作区。
 - **交付**。将随包 PPE 切到 LAB PPE 专项版，使用 YOLOE 对已穿白大褂做复核。两者均在 Rust ONNX 路径运行；阳性框须唯一归属到人员，证据不足保留未知，明确未穿独立保留。近景口罩开关仍可单独试用。移除指向旧权重的下载入口。
 - **整包对照**。同一批 59 张照片，旧包 57 个人框全部判已穿、0 条未穿；新包仍检出 57 个人框，已穿 2、未穿 3、未知 52，59 张均有检查记录。原监控视频完成检查并多产生 1 条带截图的未穿实验服事件。CPU 两次文件用时均约 28 秒。结果限定于这批样本。额外试用：近景口罩隔离开关对照通过；同批现场照片用新基础模型时，2 条口罩告警开启补判后数量相同。

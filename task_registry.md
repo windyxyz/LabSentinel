@@ -38,4 +38,26 @@
 | LS-073 | 视觉模型与数据调研、标注训练集分组导出 | P1 | DONE | 2026-11-23 | 本地复测包已更新。现场授权数据供日后独立验收，本机不训练 |
 | LS-074 | 现成检测权重对照与 0.6.0 本地随包验证 | P1 | DONE | 2026-11-23 | `python -X utf8 scripts/smoke_rust.py --zip Resources/dist/labsentinel-rust-0.6.0-20261123.zip`，等待用户现场试用，GitHub 发布暂停 |
 | LS-075 | 候选模型对照、合并与淘汰 | P1 | DONE | 2026-11-23 | 本地双产物已更新，`python -X utf8 scripts/smoke_rust.py --zip Resources/dist/labsentinel-rust-0.6.0-20261123.zip`；现场测试后再处理 GitHub 发布 |
+| LS-080 | v0.6.1 · `InferBackend` 抽象 + 现成权重对照整合（YOLOE 正负对照/`PP-LCNet`）+ 256×256 上身 PPE 精判/唯一归属/遮挡断轨/COCO 互证 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-080` |
+| LS-081 | v0.6.1 · 并发流硬上限（≤5）+ WS `?since=` 断线重放 + 分阶段耗时 HUD + 敏感度三档预设 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-081` |
+| LS-082 | v0.6.2 · 空间智能防误报（4 锚点/死区/12 帧离场宽限/Motion+Filter 双遮罩/静止降频/一键记住误报点/抑制审计） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-082`（Schema `v23`） |
+| LS-083 | v0.6.2 · 共享 `GpuScheduler` + Vulkan 物理设备枚举 + 干净 WebP 叠框 + Debug 叠层/Digital PTZ | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-083`（Schema `v24`） |
+| LS-084 | v0.7.0 · 违规事件段聚合（`duration_s`/峰值截图）+ 两级宽限倒计时 + 合规恢复自动消警（`alert_resolved`） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-084`（Schema `v25`） |
+| LS-085 | v0.7.0 · 统一 AI Review 可解释性抽屉与抑制审视面板 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-085` |
+| LS-086 | v0.7.0 · 统一 Vulkan CV 引擎选型 Spike（`ncnn-vulkan` vs `ort-webgpu` vs `wgpu`）& 真机对比基准 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-086` 与 `docs/adr/0012-unified-vulkan-gpu.md` |
+| LS-087 | v0.7.5 · 实验室专项规则（1D 通风橱 `ref_lines` / OR-of-ANDs PPE 策略矩阵 / 协议无关固定机位规则） | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-087`（Schema `v26`） |
+| LS-088 | v0.7.5 · 防幻觉 VLM 2.0 统一引擎 + 性价比带识图 AI 辅助报告、多轮历史问答与持久化记录（DeepSeek/Qwen-VL-Flash 等） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-088`（Schema `v26`） |
+| LS-089 | v0.8.0 · 零 NC 数据集 COCO-Pose 姿态跌倒/昏迷检测 + 可选红外热成像温度遥测钩子 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-089`（Schema `v27`） |
+| LS-090 | v0.8.0 · 摄像头防篡改检测（`tamper.rs`）+ 可选 FFmpeg 音频尖峰旁路 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-090` |
+| LS-091 | v0.8.0 · 全链路模型/阈值/提示词 SHA-256 溯源（`open-nvr` 模式）+ 机位×时段热点热力图 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-091`（Schema `v27`） |
+| LS-092 | v0.8.0 · 托管离线 Vulkan `llama-server.exe`（反 NF4 硬拦截 + 显存配额防 TDR）+ `tools/` `ms-swift` 微调剧本 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-092` |
+| LS-093 | v0.8.5 · 统一 Vulkan CV 生产引擎灰度落地 + 下一代检测器（YOLO26n/s + Apache-2.0 可选线） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-093` |
+| LS-094 | v0.8.5 · 声明式「实验室安全技能包（Skill Packs）」4 套内置场景模板 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-094`（Schema `v28`） |
+| LS-095 | v0.9.0 · Vulkan 晋升统一默认 GPU + 数据飞轮 2.0（绿灯数据集 + NC 许可防火墙 + 7 大训练配方 + 人话评测） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-095`（Schema `v29`） |
+| LS-096 | v0.9.0 · 零外部服务中英文语义事件检索（嵌入式 `sqlite-vec` + `Jina-CLIP v2`/`SigLIP 2`） | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-096`（Schema `v30`） |
+| LS-097 | v0.9.0 · 零转码视频底座（可选 `retina` RTSP + 关键帧环 + 按需 fMP4）+ 分层保留 + 事务性 Alert Outbox | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-097`（Schema `v31`） |
+| LS-098 | v0.9.5 · 细粒度可配权限本地 MCP Server（默认只读 + 逐工具高权限勾选 + 独立令牌 + 审计 + HMAC 凭证） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-098`（Schema `v32`） |
+| LS-099 | v0.9.5 · 原生 `windows-service` 服务化 + 一键纯视觉审计证据包 ZIP + 可选物理声光报警 Actor | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-099` |
+| LS-100 | v1.0.0 · 72h 统一 Vulkan（CV+VLM）并发长稳压测 + 全维度精度与 MCP 安全认证 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-100` |
+| LS-101 | v1.0.0 · 升级/回滚/干净卸载全矩阵 + 代码签名（`LS-900`）+ `v1.0.0` GA 双产物正式发布 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-101` |
 | LS-900 | 代码签名证书（T-403）与 GitHub uploads 网络通道（S302）处理 | P3 | BLOCKED | 2026-11-22 | 人工事项：待证书到位或用户调整本机网络/hosts |

@@ -2,9 +2,18 @@
 
 ## Goal
 
-以已公开的 `v0.5.0` 为基线，先修复正式包、实时画面与升级路径，再迭代访问方式、值守设备、日常运维和人脸模型管理。用可重复的 Windows 基准改善多路性能，同时保留识别质量、证据和 DirectML 串行保护。
+以 `v0.6.0`（`main @ 2fef1b4`，已完成至 `LS-075`，SQLite `v22`）为基线，按弹性小版本阶梯 **`v0.6.1 → v0.6.2 → v0.7.0 → v0.7.5 → v0.8.0 → v0.8.5 → v0.9.0 → v0.9.5 → v1.0.0 GA`**（共 22 项任务 `LS-080` ～ `LS-101`）持续推进，聚焦**识别精度突破（攻克 52/57 未知态与现成权重择优整合）、统一跨厂商 Vulkan GPU（CV + 离线 `llama-server.exe` VLM）、高性能零转码视频底座、性价比带识图 AI 辅助报告/多轮问答历史、嵌入式语义检索与细粒度可配权限本地 MCP Server**。
 
-`LS-050`～`LS-057` 的历史任务卡与审阅清单见 [v0.5.0 任务书](docs/plan/v0.5.0-ai-dispatch-prompts.md)。
+- **`v0.6.x → v1.0.0 GA` 完整工程总规划**：见 [docs/plan/v1.0.0-roadmap.md](docs/plan/v1.0.0-roadmap.md)（架构设计、Schema `v22 → v32` 演进、风险矩阵与 `1.0.0` 量化退出门禁）。
+- **统一 Vulkan GPU 架构草案**：见 [docs/adr/0012-unified-vulkan-gpu.md](docs/adr/0012-unified-vulkan-gpu.md)（`Proposed`）。
+- **`v0.5.0` 历史任务卡与审阅清单**：见 [docs/plan/v0.5.0-ai-dispatch-prompts.md](docs/plan/v0.5.0-ai-dispatch-prompts.md)。
+
+## v0.6.x → v1.0.0 已确认设计决策（2026-11-23）
+
+1. **不做 PDCA 隐患整改工单闭环**：保持产品锐度，合规输出聚焦纯视觉/事件审计、热点热力图、交接备注与防篡改审计证据包 ZIP。
+2. **细粒度可配权限本地 MCP Server（`LS-098`）**：默认关闭；开启默认严格全只读（11 项 Tier-1）；Web 设置逐项勾选开放 9 项 Tier-2 高权限写/控工具（含独立 `mcp_tokens`、拒 Cookie CSRF、全量 `audit_log.detail` 审计与 HMAC 证据凭证）；Tier-3 与人脸 PII 永禁。
+3. **统一 Vulkan GPU 演进（CV + 离线 VLM）**：`v0.8.0` 托管离线 Vulkan `llama-server.exe`（反 NF4 硬护栏），`v0.7.0` 真机 Vulkan CV Spike（`LS-086`）→ `v0.8.5` 灰度（`LS-093`）→ `v0.9.0` 晋升统一默认 GPU（`LS-095`），永久保留 `DirectML (ls-dml-worker + dml_lock) → CPU` 自动降级链。
+4. **性价比带识图 AI 辅助报告/问答与现成模型整合**：`LS-088` 原生支持 DeepSeek / 通义 Qwen-VL-Flash / 智谱 GLM-4V-Flash 等性价比带识图模型生成持久化安全报告与确定性证据路由多轮问答（首轮 ≤4 张干净原图，后续切 `record_only`）；`LS-080`/`093`/`095` 先盲测现成合规开源权重（YOLOE 正负对照、`PP-LCNet`、YOLO26、Qwen3-VL/SmolVLM2）并沉淀 7 大训练配方至 `tools/`（严禁 SH17 等 NC 数据集混入随包权重）。
 
 ## v0.5.0 已确认设计决策（2026-11-22）
 
