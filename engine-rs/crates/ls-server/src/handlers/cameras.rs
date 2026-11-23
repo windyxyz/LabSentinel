@@ -8,7 +8,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 
-pub(crate) async fn cameras(State(st): State<Shared>) -> Response {
+pub(crate) async fn cameras(
+    State(st): State<Shared>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
+) -> Response {
     let s = match ls_store::Store::open(&st.db_path) {
         Ok(s) => s,
         Err(_) => return server_err(),
@@ -16,10 +19,14 @@ pub(crate) async fn cameras(State(st): State<Shared>) -> Response {
     match s.cameras() {
         Ok(rows) => Json(
             rows.iter()
+                .filter(|camera| browser.device.as_ref().is_none_or(|device| device.allows_camera(camera.id)))
                 .map(|c| {
-                    json!({"id": c.id, "name": c.name,
-            "source": redact_camera_source(&c.source), "type": c.type_, "status": c.status,
-            "group_name": c.group_name, "analyzer": c.analyzer})
+                    let mut value = json!({"id": c.id, "name": c.name, "type": c.type_, "status": c.status,
+                        "group_name": c.group_name, "analyzer": c.analyzer});
+                    if browser.device.is_none() && !browser.share {
+                        value["source"] = json!(redact_camera_source(&c.source));
+                    }
+                    value
                 })
                 .collect::<Vec<_>>(),
         )
@@ -233,6 +240,7 @@ pub(crate) async fn start_camera(State(st): State<Shared>, AxPath(cid): AxPath<i
 pub(crate) async fn camera_webrtc(
     State(st): State<Shared>,
     AxPath(cid): AxPath<i64>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     with_store(&st, |s| match s.camera(cid)? {
@@ -245,7 +253,8 @@ pub(crate) async fn camera_webrtc(
         Some(c) => {
             // 为可撤销的浏览器会话和访客保留服务端媒体连接。
             let token = crate::middleware::provided_token(&headers);
-            let direct = crate::middleware::is_api_admin(&st, token.as_deref());
+            let direct =
+                browser.device.is_none() && crate::middleware::is_api_admin(&st, token.as_deref());
             let (mode, suffix) = match (
                 c.type_ == "rtsp" && st.go2rtc.address_for_camera(cid).is_some(),
                 direct,
@@ -276,7 +285,8 @@ pub(crate) async fn ws_webrtc(
 ) -> Response {
     let token = crate::middleware::ws_token(&headers);
     let mse = query.get("transport").is_some_and(|mode| mode == "mse");
-    if !mse && !crate::middleware::is_api_admin(&st, token.as_deref()) {
+    if !mse && (browser.device.is_some() || !crate::middleware::is_api_admin(&st, token.as_deref()))
+    {
         return detail_err(StatusCode::FORBIDDEN, "此会话需使用中继播放").into_response();
     }
     let Some(addr) = st.go2rtc.address_for_camera(cid) else {

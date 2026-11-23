@@ -9,7 +9,7 @@ use serde::Serialize;
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 16;
+pub const SCHEMA_VERSION_LATEST: i64 = 17;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
@@ -106,7 +106,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(16, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(17, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -157,6 +157,9 @@ impl Store {
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
                platform TEXT DEFAULT '', token_hash TEXT NOT NULL UNIQUE, \
                created_ts TEXT NOT NULL, last_seen_ts TEXT, revoked INTEGER DEFAULT 0);
+             CREATE TABLE IF NOT EXISTS device_access(\
+               device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, \
+               policy_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS dataset_samples(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT NOT NULL, \
                source_id TEXT NOT NULL, camera_id INTEGER, image_path TEXT NOT NULL, \
@@ -231,7 +234,13 @@ impl Store {
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(16, 'rust-ls054-dataset-share')",
             [],
         )?;
-        Ok(16)
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS device_access(\
+               device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, \
+               policy_json TEXT NOT NULL); \
+             INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(17, 'rust-ls063-device-access');",
+        )?;
+        self.schema_version()
     }
 
     /// UX3/UX4 优雅关停：WAL checkpoint 回主库（托盘退出/shutdown 语义——
@@ -329,6 +338,17 @@ impl Store {
         camera_id: Option<i64>,
         status: Option<&str>,
     ) -> rusqlite::Result<Vec<Event>> {
+        self.events_scoped(limit, offset, camera_id, status, None)
+    }
+
+    pub fn events_scoped(
+        &self,
+        limit: i64,
+        offset: i64,
+        camera_id: Option<i64>,
+        status: Option<&str>,
+        allowed_cameras: Option<&[i64]>,
+    ) -> rusqlite::Result<Vec<Event>> {
         let mut sql = String::from("SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0) FROM events WHERE 1=1");
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(cid) = camera_id {
@@ -339,6 +359,7 @@ impl Store {
             sql.push_str(" AND COALESCE(status,'new')=?");
             args.push(Box::new(st.to_string()));
         }
+        append_camera_scope(&mut sql, &mut args, allowed_cameras);
         sql.push_str(" ORDER BY id DESC LIMIT ? OFFSET ?");
         args.push(Box::new(limit));
         args.push(Box::new(offset));
@@ -533,6 +554,40 @@ pub struct Device {
     pub created_ts: String,
     pub last_seen_ts: Option<String>,
     pub revoked: bool,
+    #[serde(skip)]
+    pub policy_json: Option<String>,
+}
+
+fn map_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
+    Ok(Device {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        platform: row.get(2)?,
+        created_ts: row.get(3)?,
+        last_seen_ts: row.get(4)?,
+        revoked: row.get::<_, i64>(5)? != 0,
+        policy_json: row.get(6)?,
+    })
+}
+
+fn append_camera_scope(
+    sql: &mut String,
+    args: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    scope: Option<&[i64]>,
+) {
+    if let Some(ids) = scope {
+        if ids.is_empty() {
+            sql.push_str(" AND 0");
+            return;
+        }
+        sql.push_str(" AND camera_id IN (");
+        sql.push_str(&vec!["?"; ids.len()].join(","));
+        sql.push(')');
+        args.extend(
+            ids.iter()
+                .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>),
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -920,37 +975,61 @@ impl Store {
 
     pub fn devices(&self) -> rusqlite::Result<Vec<Device>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id,name,COALESCE(platform,''),created_ts,last_seen_ts,COALESCE(revoked,0) FROM devices ORDER BY id")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Device {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                platform: r.get(2)?,
-                created_ts: r.get(3)?,
-                last_seen_ts: r.get(4)?,
-                revoked: r.get::<_, i64>(5)? != 0,
-            })
-        })?;
+            "SELECT d.id,d.name,COALESCE(d.platform,''),d.created_ts,d.last_seen_ts,COALESCE(d.revoked,0),a.policy_json \
+             FROM devices d LEFT JOIN device_access a ON d.id=a.device_id ORDER BY d.id")?;
+        let rows = stmt.query_map([], map_device)?;
         rows.collect()
     }
 
     pub fn device_by_hash(&self, token_hash: &str) -> rusqlite::Result<Option<Device>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id,name,COALESCE(platform,''),created_ts,last_seen_ts,COALESCE(revoked,0) FROM devices WHERE token_hash=?")?;
-        let mut rows = stmt.query_map(params![token_hash], |r| {
-            Ok(Device {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                platform: r.get(2)?,
-                created_ts: r.get(3)?,
-                last_seen_ts: r.get(4)?,
-                revoked: r.get::<_, i64>(5)? != 0,
-            })
-        })?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
+        use rusqlite::OptionalExtension;
+        self.conn.query_row(
+            "SELECT d.id,d.name,COALESCE(d.platform,''),d.created_ts,d.last_seen_ts,COALESCE(d.revoked,0),a.policy_json \
+             FROM devices d LEFT JOIN device_access a ON d.id=a.device_id WHERE d.token_hash=?",
+            [token_hash], map_device,
+        ).optional()
+    }
+
+    pub fn add_browser_device(
+        &self,
+        name: &str,
+        token_hash: &str,
+        policy: &str,
+        previous: Option<i64>,
+    ) -> rusqlite::Result<i64> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let id = self.add_device(name, "web", token_hash)?;
+        transaction.execute(
+            "INSERT INTO device_access(device_id,policy_json) VALUES(?,?)",
+            params![id, policy],
+        )?;
+        if let Some(previous) = previous {
+            self.revoke_device(previous)?;
         }
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    pub fn update_browser_device(
+        &self,
+        id: i64,
+        name: &str,
+        policy: &str,
+    ) -> rusqlite::Result<bool> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let updated = transaction.execute(
+            "UPDATE devices SET name=? WHERE id=? AND COALESCE(revoked,0)=0 AND EXISTS(SELECT 1 FROM device_access WHERE device_id=?)",
+            params![name, id, id],
+        )?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        transaction.execute(
+            "UPDATE device_access SET policy_json=? WHERE device_id=?",
+            params![policy, id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn touch_device(&self, device_id: i64) -> rusqlite::Result<usize> {
@@ -1479,6 +1558,16 @@ impl Store {
         camera_id: Option<i64>,
         status: Option<&str>,
     ) -> rusqlite::Result<Vec<(String, AggRow)>> {
+        self.stats_daily_scoped(days, camera_id, status, None)
+    }
+
+    pub fn stats_daily_scoped(
+        &self,
+        days: i64,
+        camera_id: Option<i64>,
+        status: Option<&str>,
+        allowed_cameras: Option<&[i64]>,
+    ) -> rusqlite::Result<Vec<(String, AggRow)>> {
         let days = days.clamp(1, 90);
         let start = iso_days_ago(days - 1);
         let mut where_sql = " AND ts>=?".to_string();
@@ -1492,6 +1581,7 @@ impl Store {
             where_sql.push_str(" AND COALESCE(status,'new')=?");
             args.push(Box::new(st.to_string()));
         }
+        append_camera_scope(&mut where_sql, &mut args, allowed_cameras);
         let agg = self._agg_sql("substr(ts,1,10)", &where_sql, &args)?;
         let mut out = Vec::new();
         for i in 0..days {
@@ -2246,9 +2336,9 @@ mod tests {
         let s = Store::open(p.to_str().unwrap()).unwrap();
         // UX2：v12 存量库先迁移到 v14（events cascade 列；幂等复跑安全），
         // 之后的读写 SELECT 都含新列
-        assert_eq!(s.migrate().unwrap(), 16);
-        assert_eq!(s.migrate().unwrap(), 16); // 二次调用不炸
-        assert_eq!(s.schema_version().unwrap(), 16);
+        assert_eq!(s.migrate().unwrap(), SCHEMA_VERSION_LATEST);
+        assert_eq!(s.migrate().unwrap(), SCHEMA_VERSION_LATEST); // 二次调用不炸
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION_LATEST);
         let eid = s
             .add_event(&NewEvent {
                 camera_id: 1,
@@ -2284,7 +2374,7 @@ mod tests {
         assert!(cols.contains(&"vlm_verdict".to_string()));
         assert!(cols.contains(&"vlm_ts".to_string()));
         assert!(cols.contains(&"vlm_suppressed".to_string()));
-        assert_eq!(s.schema_version().unwrap(), 16);
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION_LATEST);
     }
 
     #[test]
@@ -2302,7 +2392,7 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         assert!(cols.iter().any(|c| c == "vlm_verdict"));
-        assert_eq!(s.schema_version().unwrap(), 16);
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION_LATEST);
         // 验证 WAL 模式已开启
         let jm: String = s
             .conn()
@@ -2329,7 +2419,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert_eq!(s.migrate().unwrap(), 16);
+        assert_eq!(s.migrate().unwrap(), SCHEMA_VERSION_LATEST);
         let rules = s.rules_all().unwrap();
         assert_eq!(rules[0].10.as_deref(), Some("1,2,3,4,5,6,7"));
     }

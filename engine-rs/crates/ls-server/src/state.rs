@@ -40,10 +40,7 @@ pub struct AppState {
 #[derive(Default)]
 
 pub struct PairState {
-    /// code -> expire_unix_ts
-    pub pending: std::collections::HashMap<String, i64>,
-    /// 连续 claim 失败计数（5 次作废全部待配对码，N-17/R2-110）
-    pub failures: u32,
+    pub(crate) pending: std::collections::HashMap<String, crate::handlers::pairing::PendingPairing>,
     /// device_id -> 上次 touch（60s 节流，R2-103）
     pub touch: std::collections::HashMap<i64, std::time::Instant>,
 }

@@ -99,7 +99,8 @@ pub(crate) fn seed_schema(path: &std::path::Path) {
          CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ts TEXT NOT NULL);
          CREATE TABLE devices(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
          platform TEXT DEFAULT '', token_hash TEXT NOT NULL UNIQUE, created_ts TEXT NOT NULL, \
-         last_seen_ts TEXT, revoked INTEGER DEFAULT 0);",
+         last_seen_ts TEXT, revoked INTEGER DEFAULT 0);
+         CREATE TABLE device_access(device_id INTEGER PRIMARY KEY, policy_json TEXT NOT NULL);",
     )
     .unwrap();
 }

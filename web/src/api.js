@@ -8,9 +8,9 @@ export const adminToken = {
   set: (v) => v ? localStorage.setItem('admin_token', v) : localStorage.removeItem('admin_token'),
 }
 
-let browserPasswordMode = false
-export const setBrowserPasswordMode = enabled => { browserPasswordMode = enabled }
-export const requestToken = () => sessionStorage.getItem('ls_readonly_token') || (browserPasswordMode ? '' : adminToken.get())
+let browserSessionMode = false
+export const setBrowserSessionMode = enabled => { browserSessionMode = enabled }
+export const requestToken = () => sessionStorage.getItem('ls_readonly_token') || (browserSessionMode ? '' : adminToken.get())
 export const accessChanged = () => window.dispatchEvent(new Event('ls-access-changed'))
 
 export async function fetchMedia(path, signal) {
@@ -18,7 +18,7 @@ export async function fetchMedia(path, signal) {
   const headers = token ? { 'X-Admin-Token': token } : {}
     const response = await fetch(path, { headers, cache: 'no-store', signal })
     if (!response.ok) {
-      if (response.status === 401 && browserPasswordMode) accessChanged()
+      if (response.status === 401 && browserSessionMode) accessChanged()
       throw Object.assign(new Error(`下载失败（HTTP ${response.status}）`), { status: response.status })
     }
     return response
@@ -90,7 +90,7 @@ async function req(method, path, body) {
       if (typeof error?.detail === 'string') msg = error.detail
       code = error?.code
     } catch {}
-    if (code === 'password_required') accessChanged()
+    if (code === 'password_required' || code === 'device_expired') accessChanged()
     else if (r.status === 401 && !path.startsWith('/api/access/')) {
       msg = '需要管理令牌。请在「设置 → 访问控制」填写 API 凭据后重试。'
     }
@@ -219,8 +219,12 @@ export const api = {
   deleteDetectProfile: (id) => req('DELETE', `/api/detect/profiles/${id}`),
   detectModels: (p) => req('POST', '/api/detect/models', p),
   // R2-203：设备配对与三级令牌
-  createPairing: () => req('POST', '/api/pairing'),
+  createPairing: (data) => req('POST', '/api/pairing', data),
+  claimPairing: (data) => req('POST', '/api/pairing/claim', data),
+  cancelPairing: (code) => req('POST', '/api/pairing/revoke', { code }),
+  deviceLogout: () => req('POST', '/api/pairing/logout', {}),
   listDevices: () => req('GET', '/api/devices'),
+  editDevice: (id, data) => req('PUT', `/api/devices/${id}`, data),
   revokeDevice: (id) => req('DELETE', `/api/devices/${id}`),
   setEventStatus: (id, status) => req('POST', `/api/events/${id}/status`, { status }),
   bulkStatus: (payload) => req('POST', '/api/events/bulk-status', payload),

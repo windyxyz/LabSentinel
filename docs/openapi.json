@@ -9,7 +9,7 @@
       "get": {
         "summary": "当前浏览器的访问状态",
         "operationId": "access_status",
-        "responses": {"200": {"description": "required、signed_in、local、password_supported、password_set"}}
+        "responses": {"200": {"description": "密码登录状态、浏览器设备授权与配对过期状态"}}
       }
     },
     "/api/access/settings": {
@@ -249,7 +249,7 @@
     "/api/pairing": {
       "post": {
         "summary": "Create Pairing",
-        "description": "生成一次性配对码（6 位数字，5 分钟有效，管理员操作）。",
+        "description": "生成一次性配对码，有效期 5 分钟。浏览器可设置只读或处置权限、摄像头与分组范围和设备有效天数。空请求体生成兼容旧版客户端的配对码。",
         "operationId": "create_pairing_api_pairing_post",
         "responses": {
           "200": {
@@ -266,7 +266,7 @@
     "/api/pairing/claim": {
       "post": {
         "summary": "Claim Pairing",
-        "description": "客户端用配对码换设备令牌（只返回一次；服务端只存 hash）。\n\nR2-110/N-17：单独限流 10 次/分钟/IP + 连续 5 次失败作废全部待配对码，\n防 6 位码被暴力枚举（全局写限流 120/分钟对 10^6 空间太宽松）。",
+        "description": "认领浏览器配对码后设置 HttpOnly 设备 Cookie。旧版配对码返回一次设备令牌。失败会受到按来源与全局限流。",
         "operationId": "claim_pairing_api_pairing_claim_post",
         "requestBody": {
           "content": {
@@ -316,7 +316,20 @@
         }
       }
     },
+    "/api/pairing/revoke": {
+      "post": {"summary": "撤销尚未认领的配对码", "operationId": "cancel_pending_pairing",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "required": ["code"], "properties": {"code": {"type": "string", "writeOnly": true}}
+        }}}}, "responses": {"200": {"description": "配对码已失效"}}}
+    },
+    "/api/pairing/logout": {
+      "post": {"summary": "退出配对设备", "operationId": "logout_paired_browser",
+        "responses": {"200": {"description": "浏览器设备访问已撤销并清除 Cookie"}}}
+    },
     "/api/devices/{did}": {
+      "put": {"summary": "修改设备名称、权限、摄像头范围和有效期", "operationId": "edit_paired_device",
+        "parameters": [{"name": "did", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "responses": {"200": {"description": "设备授权已更新"}, "404": {"description": "设备已撤销或需要重新配对"}}},
       "delete": {
         "summary": "Revoke Device",
         "operationId": "revoke_device_api_devices__did__delete",

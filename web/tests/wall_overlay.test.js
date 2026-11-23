@@ -53,7 +53,11 @@ function mockFetch(responses) {
   return fn
 }
 
-afterEach(() => { vi.unstubAllGlobals() })
+afterEach(() => {
+  vi.unstubAllGlobals()
+  localStorage.removeItem('ls-wall-view-console')
+  localStorage.removeItem('ls-wall-view-9')
+})
 
 describe('Wall.vue（LS-051 全屏值守）', () => {
   it('默认 9 宫格 + 检测框显隐 + 静音开关', async () => {
@@ -139,4 +143,31 @@ it('启用本机密码后在登录前隐藏产品视图，登录后用会话访�
     view.unmount()
     localStorage.removeItem('admin_token')
   }
+})
+
+it('授权设备按分组值守，能在大屏处置事件并记住布局', async () => {
+  const Wall = (await import('../src/views/Wall.vue')).default
+  const fetch = mockFetch({
+    'GET /api/cameras': [{ id: 2, name: 'A room', type: 'rtsp', group_name: 'A' }, { id: 3, name: 'B room', type: 'rtsp', group_name: 'B' }],
+    'GET /api/events': [{ id: 4, camera_id: 2, detail: 'A event' }, { id: 5, camera_id: 3, detail: 'B event' }],
+    'GET /api/stats/daily': { days: [{ l2: 2, l3: 0 }] },
+    'POST /api/events/4/status': { ok: true },
+  })
+  const w = mount(Wall, {
+    props: { readonly: true, device: { id: 9, name: 'QA tablet', can_triage: true } },
+    global: { stubs: { CameraPreview: true, VideoOverlayCanvas: true } },
+  })
+  try {
+    await flushPromises()
+    await w.get('select[aria-label="摄像头分组"]').setValue('A')
+    await w.get('select[aria-label="宫格切换"]').setValue('4')
+    expect(w.text()).toContain('A event')
+    expect(w.text()).not.toContain('B event')
+    expect(w.text()).not.toContain('抓拍入池')
+    await w.get('.event-actions button').trigger('click')
+    await flushPromises()
+    expect(fetch.mock.calls.some(([url, opts]) => url === '/api/events/4/status' && JSON.parse(opts.body).status === 'acked')).toBe(true)
+    expect(w.get('.event-state').text()).toBe('已处置')
+    expect(JSON.parse(localStorage.getItem('ls-wall-view-9'))).toEqual({ grid: 4, group: 'A' })
+  } finally { w.unmount() }
 })

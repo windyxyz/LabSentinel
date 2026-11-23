@@ -13,16 +13,24 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-pub(crate) async fn events(State(st): State<Shared>, Query(q): Query<EventsQuery>) -> Response {
+pub(crate) async fn events(
+    State(st): State<Shared>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
+    Query(q): Query<EventsQuery>,
+) -> Response {
     let s = match ls_store::Store::open(&st.db_path) {
         Ok(s) => s,
         Err(_) => return server_err(),
     };
-    match s.events(
-        q.limit.unwrap_or(50).min(200),
-        q.offset.unwrap_or(0),
+    match s.events_scoped(
+        q.limit.unwrap_or(50).clamp(0, 200),
+        q.offset.unwrap_or(0).max(0),
         q.camera_id,
         q.status.as_deref(),
+        browser
+            .device
+            .as_ref()
+            .and_then(|device| device.cameras.as_deref()),
     ) {
         Ok(rows) => Json(rows.iter().map(event_json).collect::<Vec<_>>()).into_response(),
         Err(_) => server_err(),
@@ -240,11 +248,19 @@ pub(super) async fn socket_revoked(
     browser: &crate::access::BrowserAccess,
     token: Option<&str>,
 ) {
-    if crate::middleware::is_api_reader(st, token) {
+    if browser.device.is_none() && crate::middleware::is_api_reader(st, token) {
         return std::future::pending().await;
     }
     loop {
-        let valid = if let Some(token) = token {
+        let valid = if let Some(device) = &browser.device {
+            let st = st.clone();
+            let expected = device.clone();
+            tokio::task::spawn_blocking(move || {
+                super::pairing::paired_device(&st, &expected.digest).as_ref() == Some(&expected)
+            })
+            .await
+            .unwrap_or_default()
+        } else if let Some(token) = token {
             let st = st.clone();
             let token = token.to_owned();
             tokio::task::spawn_blocking(move || {
@@ -271,10 +287,11 @@ pub(crate) async fn ws_events(
     ws: WebSocketUpgrade,
 ) -> Response {
     let token = crate::middleware::ws_token(&headers);
+    let rx = st.events_tx.subscribe();
     ws.protocols(["labsentinel"])
         .on_upgrade(move |socket| async move {
             tokio::select! {
-                _ = handle_ws(socket, st.events_tx.subscribe()) => {},
+                _ = handle_ws(socket, rx, browser.device.as_ref()) => {},
                 _ = socket_revoked(&st, &browser, token.as_deref()) => {},
             }
         })
@@ -550,13 +567,23 @@ pub(crate) async fn export_evidence_zip(
     })
 }
 
-pub(crate) async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
+async fn handle_ws(
+    mut socket: WebSocket,
+    mut rx: broadcast::Receiver<String>,
+    device: Option<&super::pairing::PairedDevice>,
+) {
     use axum::extract::ws::Message;
     loop {
         tokio::select! {
             msg = rx.recv() => {
                 match msg {
                     Ok(text) => {
+                        if let Some(device) = device {
+                            let visible = serde_json::from_str::<Value>(&text).ok()
+                                .and_then(|event| event.get("camera_id")?.as_i64())
+                                .is_some_and(|id| device.allows_camera(id));
+                            if !visible { continue; }
+                        }
                         if socket.send(Message::Text(text)).await.is_err() { break; }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue, // 慢客户端丢弃

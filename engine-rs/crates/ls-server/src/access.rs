@@ -41,7 +41,7 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    fn can_use_password(self) -> bool {
+    pub(crate) fn can_use_password(self) -> bool {
         self.local || self.secure
     }
 }
@@ -51,6 +51,9 @@ pub(crate) struct BrowserAccess {
     pub client: Client,
     /// Digest of the browser credential, after a successful server-side lookup.
     pub session: Option<String>,
+    pub device: Option<crate::handlers::pairing::PairedDevice>,
+    pub device_expired: bool,
+    pub share: bool,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -143,10 +146,16 @@ impl AccessControl {
         };
         let session = client
             .can_use_password()
-            .then(|| cookie_digest(headers))
+            .then(|| cookie_digest(headers, COOKIE))
             .flatten()
             .filter(|hash| self.session_valid(hash, client));
-        BrowserAccess { client, session }
+        BrowserAccess {
+            client,
+            session,
+            device: None,
+            device_expired: false,
+            share: false,
+        }
     }
 
     pub fn required(&self, client: Client) -> bool {
@@ -277,19 +286,19 @@ fn single_header<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a s
     (values.next().is_none() && !first.contains(',')).then_some(first)
 }
 
-fn cookie_digest(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn cookie_digest(headers: &HeaderMap, cookie: &str) -> Option<String> {
     let value = headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|raw| raw.to_str().ok())
         .flat_map(|raw| raw.split(';'))
         .filter_map(|part| part.trim().split_once('='))
-        .find_map(|(name, value)| (name == COOKIE).then_some(value))?;
+        .find_map(|(name, value)| (name == cookie).then_some(value))?;
     (value.len() == 64 && value.bytes().all(|ch| ch.is_ascii_hexdigit()))
         .then(|| sha256_hex(value.as_bytes()))
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -378,12 +387,25 @@ fn session_response(client: Client, result: Result<Option<String>, AccessError>)
         Err((status, detail)) => return (status, Json(json!({"detail": detail}))).into_response(),
     };
     let max_age = token.as_ref().map_or(0, |_| SESSION_SECONDS);
-    let secure = if client.secure { "; Secure" } else { "" };
-    let cookie = format!(
-        "{COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}",
-        token.unwrap_or_default()
-    );
-    let mut response = Json(json!({"ok": true})).into_response();
+    set_cookie(
+        Json(json!({"ok": true})).into_response(),
+        COOKIE,
+        token.as_deref().unwrap_or_default(),
+        max_age,
+        client.secure,
+    )
+}
+
+pub(crate) fn set_cookie(
+    mut response: Response,
+    name: &str,
+    value: &str,
+    max_age: u64,
+    https: bool,
+) -> Response {
+    let secure = if https { "; Secure" } else { "" };
+    let cookie =
+        format!("{name}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}");
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).expect("valid session cookie"),
@@ -408,6 +430,8 @@ pub(crate) async fn status(
         "required": required, "signed_in": browser.session.is_some(),
         "local": browser.client.local, "password_supported": browser.client.can_use_password(),
         "password_set": policy.password_hash.is_some(),
+        "device": browser.device.as_ref().map(|device| device.summary()),
+        "device_expired": browser.device_expired,
     }))
     .into_response();
     response

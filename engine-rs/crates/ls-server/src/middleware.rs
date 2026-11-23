@@ -64,13 +64,12 @@ pub(crate) async fn guard_middleware(
     } else {
         provided_token(&headers)
     };
-    let browser = st.access.request(&req, host);
-    let session_admin = provided.is_none() && browser.session.is_some();
-    let api_admin = is_api_admin(&st, provided.as_deref());
+    let mut browser = st.access.request(&req, host);
     let password_required = st.access.required(browser.client);
     let share = provided
         .as_deref()
         .is_some_and(|token| share_device(&st, token));
+    browser.share = share;
     if share && (unsafe_m || !share_read_path(&path)) {
         return detail_err(StatusCode::FORBIDDEN, "分享令牌仅可访问值守大屏").into_response();
     }
@@ -95,11 +94,49 @@ pub(crate) async fn guard_middleware(
                 | "/api/access/logout"
                 | "/api/access/recover"
                 | "/api/pairing/claim"
+                | "/api/pairing/logout"
         );
+    if (is_api || is_socket) && !share {
+        if let Some(digest) = crate::access::cookie_digest(&headers, crate::pairing::DEVICE_COOKIE)
+        {
+            browser.session = None;
+            if browser.client.can_use_password() {
+                let shared = st.clone();
+                browser.device = tokio::task::spawn_blocking(move || {
+                    crate::pairing::paired_device(&shared, &digest)
+                })
+                .await
+                .unwrap_or_default();
+            }
+            browser.device_expired = browser.device.is_none();
+        }
+    }
+    let device_session = browser.device.is_some();
+    if browser.device_expired
+        && !public_read
+        && !(method == axum::http::Method::POST
+            && matches!(path.as_str(), "/api/pairing/claim" | "/api/pairing/logout"))
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "detail": "设备配对已过期或被撤销", "code": "device_expired",
+            })),
+        )
+            .into_response();
+    }
+    if let Some(device) = &browser.device {
+        if !crate::pairing::permit_device(&st, device, &method, &path) {
+            return detail_err(StatusCode::FORBIDDEN, "该设备无权访问此资源").into_response();
+        }
+    }
+    let session_admin = provided.is_none() && browser.session.is_some();
+    let api_admin = !device_session && is_api_admin(&st, provided.as_deref());
     if password_required
         && (is_api || is_socket)
         && !public_read
         && !public_write
+        && !device_session
         && !session_admin
         && !provided
             .as_deref()
@@ -118,7 +155,8 @@ pub(crate) async fn guard_middleware(
             &headers,
             authority.as_ref(),
             &st.allowed_origins,
-            (session_admin || path.starts_with("/api/access/")).then_some(browser.client.secure),
+            (session_admin || device_session || path.starts_with("/api/access/"))
+                .then_some(browser.client.secure),
         )
     {
         return (
@@ -132,6 +170,7 @@ pub(crate) async fn guard_middleware(
     if is_socket
         && (st.read_protected || share)
         && !session_admin
+        && !device_session
         && !check_read_token(&st, provided.as_deref())
     {
         return detail_err(StatusCode::UNAUTHORIZED, "实时数据需要读取凭据").into_response();
@@ -144,10 +183,10 @@ pub(crate) async fn guard_middleware(
         "/api/reports/schedule",
         "/api/share-links",
         "/api/access/settings",
+        "/api/devices",
     ];
     const PROTECTED_ADMIN_GETS: &[&str] = &[
         "/api/audit",
-        "/api/devices",
         "/api/config/summary",
         "/api/config/export",
         "/api/alerts/config",
@@ -209,6 +248,14 @@ pub(crate) async fn guard_middleware(
                 } else {
                     e.push(now);
                 }
+                if allowed && path == "/api/pairing/claim" {
+                    let all_claims = m.entry("pairing-claims".into()).or_default();
+                    all_claims.retain(|t| now.saturating_duration_since(*t).as_secs() < 60);
+                    allowed = all_claims.len() < 50;
+                    if allowed {
+                        all_claims.push(now);
+                    }
+                }
             }
         }
         if !allowed {
@@ -218,7 +265,9 @@ pub(crate) async fn guard_middleware(
             )
                 .into_response();
         }
-        if public_write && !session_admin {
+        if let Some(device) = &browser.device {
+            actor = format!("device:{}", device.name);
+        } else if public_write && !session_admin {
             actor = "anonymous".into();
         } else if session_admin {
             actor = "admin".into();
@@ -241,6 +290,7 @@ pub(crate) async fn guard_middleware(
         && st.read_protected
         && !public_read
         && !session_admin
+        && !device_session
     {
         // R2-103 对齐：读保护时 admin/read/设备令牌均可读
         if !check_read_token(&st, provided.as_deref())
@@ -284,7 +334,7 @@ pub(crate) async fn guard_middleware(
         .await;
     }
     let hs = resp.headers_mut();
-    if !public_read && is_api && (password_required || session_admin) {
+    if !public_read && is_api && (password_required || session_admin || device_session) {
         hs.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     hs.insert("x-request-id", HeaderValue::from_str(&rid).unwrap());
@@ -421,7 +471,7 @@ pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
     let hash = sha256_hex(token.as_bytes());
     let s = ls_store::Store::open(&st.db_path).ok()?;
     let dev = s.device_by_hash(&hash).ok()??;
-    if dev.revoked {
+    if dev.revoked || dev.policy_json.is_some() {
         return None;
     }
     // LS-054：分享链接令牌额外校验 TTL（过期/吊销即失效）
@@ -432,19 +482,23 @@ pub(crate) fn check_device_token(st: &Shared, token: &str) -> Option<String> {
     {
         return None;
     }
+    touch_device(st, &s, dev.id);
+    Some(dev.name)
+}
+
+pub(crate) fn touch_device(st: &Shared, store: &ls_store::Store, id: i64) {
     if let Ok(mut ps) = st.pair_state.lock() {
         let now = std::time::Instant::now();
         let need = ps
             .touch
-            .get(&dev.id)
+            .get(&id)
             .map(|t| now.duration_since(*t).as_secs() >= 60)
             .unwrap_or(true);
         if need {
-            let _ = s.touch_device(dev.id);
-            ps.touch.insert(dev.id, now);
+            let _ = store.touch_device(id);
+            ps.touch.insert(id, now);
         }
     }
-    Some(dev.name)
 }
 
 /// P2-2（安全审计）：常数时间令牌比较（双 SHA256 后定长比较——长度恒 32，

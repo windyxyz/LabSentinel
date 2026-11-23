@@ -362,3 +362,180 @@ async fn recovery_is_local_one_time_and_keeps_the_lan_policy() {
     let reused = local(&app, "POST", "/api/access/recover", &[], Some(payload)).await;
     assert_eq!(reused.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn browser_pairing_scopes_http_and_closes_a_socket_when_authorization_changes() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("devices.sqlite");
+    let db_path = path.to_str().unwrap();
+    let store = ls_store::Store::open(db_path).unwrap();
+    store.ensure_schema().unwrap();
+    let first = store
+        .conn_add_camera("Room A", "example-a.mp4", "file")
+        .unwrap();
+    let second = store
+        .conn_add_camera("Room B", "example-b.mp4", "file")
+        .unwrap();
+    store.set_camera_group(first, "Room A").unwrap();
+    let add_event = |camera_id| {
+        store
+            .add_event(&ls_store::NewEvent {
+                camera_id,
+                type_: "enter",
+                level: 2,
+                track_id: 1,
+                detail: "test event",
+                snapshot: None,
+                ts: &crate::util::iso_now(),
+            })
+            .unwrap()
+    };
+    let first_event = add_event(first);
+    let second_event = add_event(second);
+    let st = test_state_cfg(db_path, "fixture-admin", true);
+    let app = build_router(st.clone());
+    let admin = [("x-admin-token", "fixture-admin")];
+    let created = local(
+        &app,
+        "POST",
+        "/api/pairing",
+        &admin,
+        Some(json!({
+            "role": "read_only", "all_cameras": false, "groups": ["Room A"], "expires_days": 30,
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let code = body_json(created).await["code"].clone();
+    let payload = json!({"code": code, "device_name": "Test tablet", "platform": "web"});
+    let claim = local(
+        &app,
+        "POST",
+        "/api/pairing/claim",
+        &[],
+        Some(payload.clone()),
+    )
+    .await;
+    assert_eq!(claim.status(), StatusCode::OK);
+    let set_cookie = claim.headers()[header::SET_COOKIE].to_str().unwrap();
+    assert!(set_cookie.contains("HttpOnly; SameSite=Strict"));
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
+    assert!(cookie.starts_with("ls_device="));
+    assert!(body_json(claim).await.get("token").is_none());
+    let replay = local(&app, "POST", "/api/pairing/claim", &[], Some(payload)).await;
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    let paired = [("cookie", cookie.as_str())];
+
+    let cameras = body_json(local(&app, "GET", "/api/cameras", &paired, None).await).await;
+    let cameras = cameras.as_array().unwrap();
+    assert_eq!(cameras.len(), 1);
+    assert_eq!(cameras[0]["id"], first);
+    assert!(cameras[0].get("source").is_none());
+    let events = body_json(local(&app, "GET", "/api/events", &paired, None).await).await;
+    assert_eq!(events.as_array().unwrap().len(), 1);
+    assert_eq!(events[0]["id"], first_event);
+    let daily = body_json(local(&app, "GET", "/api/stats/daily?days=1", &paired, None).await).await;
+    assert_eq!(daily["days"][0]["l2"], 1);
+    for denied in [
+        "/api/system".to_owned(),
+        format!("/api/cameras/{second}/snapshot"),
+        format!("/ws/detections/{second}"),
+    ] {
+        assert_eq!(
+            local(&app, "GET", &denied, &paired, None).await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let status_path = format!("/api/events/{first_event}/status");
+    let ack = json!({"status": "acked"});
+    assert_eq!(
+        local(&app, "POST", &status_path, &paired, Some(ack.clone()))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let now = body_json(local(&app, "GET", "/api/access/status", &paired, None).await).await;
+    let device_id = now["device"]["id"].as_i64().unwrap();
+
+    let listener = tokio::net::TcpListener::bind((LOCAL, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service = app
+        .clone()
+        .into_make_service_with_connect_info::<SocketAddr>();
+    let host = tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
+    let socket_request = || {
+        let mut request = format!("ws://{address}/ws/events")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(header::COOKIE, cookie.parse().unwrap());
+        request
+    };
+    let (mut socket, _) = tokio_tungstenite::connect_async(socket_request())
+        .await
+        .unwrap();
+    st.events_tx
+        .send(json!({"id": second_event, "camera_id": second}).to_string())
+        .unwrap();
+    st.events_tx
+        .send(json!({"id": first_event, "camera_id": first}).to_string())
+        .unwrap();
+    let visible = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+        .await
+        .unwrap();
+    let Some(Ok(Message::Text(visible))) = visible else {
+        panic!("expected one authorized event")
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&visible).unwrap()["camera_id"],
+        first
+    );
+
+    let device_path = format!("/api/devices/{device_id}");
+    let edited = local(&app, "PUT", &device_path, &admin, Some(json!({
+        "name": "Shift tablet", "role": "triage", "all_cameras": false, "camera_ids": [second], "expires_days": 30,
+    }))).await;
+    assert_eq!(edited.status(), StatusCode::OK);
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+        .await
+        .unwrap();
+    assert!(!matches!(ended, Some(Ok(Message::Text(_)))));
+    assert_eq!(
+        local(&app, "POST", &status_path, &paired, Some(ack.clone()))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        local(
+            &app,
+            "POST",
+            &format!("/api/events/{second_event}/status"),
+            &paired,
+            Some(ack)
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        local(&app, "DELETE", &device_path, &admin, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        local(&app, "GET", "/api/cameras", &paired, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(tokio_tungstenite::connect_async(socket_request())
+        .await
+        .is_err());
+    host.abort();
+}

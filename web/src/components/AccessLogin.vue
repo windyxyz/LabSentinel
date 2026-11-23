@@ -64,6 +64,7 @@ async function submit() {
         </div>
       </form>
       <p v-else class="muted">请使用管理员提供的 HTTPS 地址登录。</p>
+      <a class="pair-link" href="#/pair">使用配对码</a>
     </section>
   </main>
 </template>
@@ -79,4 +80,5 @@ label { display: grid; gap: 4px; }
 input { width: 100%; margin: 0; min-height: 40px; }
 code { overflow-wrap: anywhere; background: var(--ctrl-fill); padding: 7px; border-radius: var(--control-radius); }
 .login-actions { margin-bottom: 0; }
+.pair-link { display: inline-block; margin-top: 12px; color: var(--accent-strong); }
 </style>

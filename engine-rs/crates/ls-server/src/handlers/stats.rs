@@ -70,13 +70,18 @@ pub(crate) fn agg_json(row: &ls_store::AggRow) -> Value {
 
 pub(crate) async fn stats_daily(
     State(st): State<Shared>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let days: i64 = q.get("days").and_then(|v| v.parse().ok()).unwrap_or(7);
     let cid: Option<i64> = q.get("camera_id").and_then(|v| v.parse().ok());
     let status = q.get("status").map(|s| s.as_str());
     with_store(&st, |s| {
-        let rows = s.stats_daily(days, cid, status)?;
+        let cameras = browser
+            .device
+            .as_ref()
+            .and_then(|device| device.cameras.as_deref());
+        let rows = s.stats_daily_scoped(days, cid, status, cameras)?;
         Ok(Json(json!({"days": rows.into_iter()
             .map(|(d, row)| { let mut v = json!({"date": d}); if let Value::Object(m) = agg_json(&row) { for (k, val) in m { v[k] = val; } } v })
             .collect::<Vec<_>>()})))

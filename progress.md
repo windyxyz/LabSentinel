@@ -2,10 +2,19 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID / Task-Name**：`LS-063`（`ACTIVE`）/ 浏览器设备配对、相机范围授权与撤销。
-- **基线**：`main`，`LS-060` 和 `LS-061` 已通过本机实施验收。`LS-062` 的独立 Windows EXE 联测受应用控制阻塞。GitHub 公开 Release 为 `v0.5.0`。
+- **Task-ID / Task-Name**：`LS-064`（`ACTIVE`）/ 1／4／9 路性能、稳定性和识别质量基线。
+- **基线**：`main`，`LS-060` 和 `LS-061` 已通过本机实施验收。`LS-062`、`LS-063` 的业务实现有单项实测，独立 EXE 播放联测保留为发布门禁。GitHub 公开 Release 为 `v0.5.0`。
 - **范围**：用户指示全部作为 `v0.6.0`，计划后直接实施，全部验收通过后发布 GitHub。任务 `LS-060`～`LS-068` 逐项推进。
-- **Next First Command**：`rg -n 'create_pairing|claim_pairing|revoke_device' engine-rs/crates/ls-server/src/handlers/pairing.rs`。
+- **Next First Command**：`rg -n 'analysis_fps|evidence_fps|MotionGate' engine-rs/crates/ls-server/src/worker.rs`。
+
+---
+
+## Previous Handoff Snapshot · LS-063
+
+- **实现**。浏览器扫码和 6 位码认领，设备 Cookie、只读或处置角色、摄像头及分组范围、有效期、改名和撤销。v17 迁移保存设备授权，旧版令牌兼容。大屏记住分组和布局，允许授权设备处置事件。服务器检查 HTTP、事件 WebSocket、检测和视频，权限或分组变化后会断开存量连接。
+- **本机门禁**。Windows `fmt --check` 与 Clippy 通过。`cargo test -p ls-server -p ls-store --all-features --no-fail-fast` 共 91 项通过。其中浏览器设备用例通过真实本机 WebSocket，验证只收到授权事件，更新授权后原连接断开，撤销后列表和新连接拒绝。全量 `cargo test --workspace --all-features --no-fail-fast` 172 项通过，另有 `dispatch_integration`、`ls-ingest`、`ls-jobs` 目标被 Windows 4551 拒绝执行。
+- **前端实测**。Vitest 96 项与生产构建通过，生产依赖审计 0 项。Chromium 使用生产前端与模拟接口验证生成二维码、375 px 配对、分组、确认事件、到期提示和无横向溢出。契约审计为 127 条前端 API 匹配 165 条路由登记。
+- **发行门禁**。`smoke_webrtc.mjs` 已加入真实相机画面与设备撤销场景。最终双产物运行时完成浏览器端联测，当前本机独立 EXE 有 Code Integrity 阻塞。
 
 ---
 

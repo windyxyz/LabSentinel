@@ -101,8 +101,11 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     // ---- 配对/设备（T-620） ----
     ("POST", "/api/pairing"),
     ("POST", "/api/pairing/claim"),
+    ("POST", "/api/pairing/revoke"),
+    ("POST", "/api/pairing/logout"),
     ("GET", "/api/devices"),
     ("DELETE", "/api/devices/:did"),
+    ("PUT", "/api/devices/:did"),
     // ---- 审计/投递/静默/日历 ----
     ("GET", "/api/audit"),
     ("GET", "/api/alert-deliveries"),
@@ -272,8 +275,10 @@ pub fn build_router(state: Shared) -> Router {
         .route("/events/count", get(events_count))
         .route("/pairing", post(create_pairing))
         .route("/pairing/claim", post(claim_pairing))
+        .route("/pairing/revoke", post(revoke_pairing))
+        .route("/pairing/logout", post(device_logout))
         .route("/devices", get(list_devices))
-        .route("/devices/:did", delete(revoke_device))
+        .route("/devices/:did", delete(revoke_device).put(edit_device))
         .route("/audit", get(audit_list))
         .route("/alert-deliveries", get(deliveries_list))
         .route("/alert-deliveries/:did/retry", post(retry_delivery))

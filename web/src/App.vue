@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { api, setBrowserPasswordMode } from './api'
+import { api, setBrowserSessionMode } from './api'
 import AccessLogin from './components/AccessLogin.vue'
+import DevicePair from './components/DevicePair.vue'
 import Insights from './views/Insights.vue'
 import Sources from './views/Sources.vue'
 import Events from './views/Events.vue'
@@ -67,14 +68,23 @@ let readonlyToken = activateShare()
 let shareTimer
 let accessTimer
 let accessRequest
+let lastAccessCheck = 0
 const access = ref(null)
 const accessError = ref('')
 const signOutError = ref('')
 const wallPath = ref(isWallPath())
 const recoveryPath = ref(location.hash === '#/recover')
+const pairingRoute = ref(readPairingRoute())
 const isWall = computed(() => Boolean(shareStatus.value) || wallPath.value)
 function isWallPath() {
   return location.pathname.replace(/\/+$/, '') === '/wall' || location.hash.split('?')[0] === '#/wall'
+}
+function readPairingRoute() {
+  const [path, query] = location.hash.split('?')
+  if (path !== '#/pair') return { active: false, code: '' }
+  const code = new URLSearchParams(query).get('code') || ''
+  if (query) history.replaceState(null, '', '/#/pair')
+  return { active: true, code: /^[0-9]{6}$/.test(code) ? code : '' }
 }
 function go(key) {
   active.value = key
@@ -86,6 +96,7 @@ function onHashChange() {
   active.value = hashTab()
   wallPath.value = isWallPath()
   recoveryPath.value = location.hash === '#/recover'
+  pairingRoute.value = readPairingRoute()
   if (new URLSearchParams(location.hash.split('?')[1]).has('readonly_token')) {
     readonlyToken = activateShare()
     verifyShare()
@@ -110,12 +121,13 @@ async function verifyShare() {
 
 function refreshAccess() {
   if (shareStatus.value || accessRequest) return accessRequest
+  lastAccessCheck = Date.now()
   accessRequest = api.accessStatus()
     .then(status => {
       if (typeof status?.required !== 'boolean' || typeof status.signed_in !== 'boolean') {
         throw new Error('服务未返回访问状态。')
       }
-      setBrowserPasswordMode(status.required || status.signed_in)
+      setBrowserSessionMode(status.required || status.signed_in || !!status.device || status.device_expired === true)
       access.value = status
       accessError.value = ''
     })
@@ -127,14 +139,25 @@ function refreshAccess() {
 async function signOut() {
   signOutError.value = ''
   try {
-    await api.accessLogout()
+    if (access.value?.device || access.value?.device_expired) {
+      await api.deviceLogout()
+      location.hash = '#/dash'
+    } else await api.accessLogout()
+    await accessRequest
     await refreshAccess()
   } catch (err) { signOutError.value = String(err.message || err) }
 }
 
 async function signedIn() {
+  await accessRequest
   await refreshAccess()
   if (access.value?.signed_in && recoveryPath.value) location.hash = '#/settings/access'
+}
+
+async function devicePaired() {
+  await accessRequest
+  await refreshAccess()
+  if (access.value?.device) location.hash = '#/wall'
 }
 
 function leaveRecovery() {
@@ -153,8 +176,10 @@ onMounted(() => {
   else refreshAccess()
   shareTimer = setInterval(verifyShare, 15000)
   accessTimer = setInterval(() => {
-    if (!document.hidden && (access.value?.required || access.value?.signed_in)) refreshAccess()
-  }, 30000)
+    if (document.hidden || !access.value) return
+    const interval = access.value.device ? 5000 : 30000
+    if (Date.now() - lastAccessCheck >= interval) refreshAccess()
+  }, 5000)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('hashchange', onHashChange)
@@ -162,7 +187,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibilityChange)
   clearInterval(shareTimer)
   clearInterval(accessTimer)
-  setBrowserPasswordMode(false)
+  setBrowserSessionMode(false)
 })
 </script>
 
@@ -179,6 +204,19 @@ onBeforeUnmount(() => {
       <button v-if="accessError" type="button" class="ghost" @click="refreshAccess">重试</button>
     </div>
   </main>
+  <DevicePair v-else-if="pairingRoute.active" :key="pairingRoute.code"
+              :code="pairingRoute.code" :can-pair="access.password_supported" @paired="devicePaired" />
+  <main v-else-if="access.device_expired" class="access-loading">
+    <div class="panel">
+      <h2>设备配对已失效</h2>
+      <div class="row">
+        <a href="#/pair">重新配对</a>
+        <button type="button" class="ghost" @click="signOut">返回控制台</button>
+      </div>
+    </div>
+  </main>
+  <Wall v-else-if="access.device" :key="`${access.device.id}/${access.device.scope_version}`"
+        :device="access.device" :readonly="true" @sign-out="signOut" />
   <AccessLogin v-else-if="(access.required && !access.signed_in) || (recoveryPath && access.local)"
                :key="recoveryPath ? 'recovery' : 'login'" :start-recovery="recoveryPath && access.local"
                :local="access.local" :password-supported="access.password_supported"

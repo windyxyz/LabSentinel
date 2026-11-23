@@ -583,7 +583,7 @@ onMounted(() => {
     <p v-if="silenceMsg" class="muted" style="margin-top:4px">{{ silenceMsg }}</p>
 
       </section>
-      <section v-show="show('devices')" class="panel">
+      <section v-if="show('devices')" class="panel">
         <Devices />
       </section>
       <section v-show="show('face')" class="panel">
