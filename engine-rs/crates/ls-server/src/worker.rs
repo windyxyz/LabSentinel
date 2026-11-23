@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::handlers::events::event_json;
+use crate::performance::{FrameTiming, PerformanceWindow};
 use crate::state::Shared;
 
 /// 事件去重窗口容量（Python sidecar_events.SEEEN_MAX 同值）。
@@ -323,6 +324,7 @@ pub struct WorkerHandle {
     /// LS-050：Motion Gate 统计（跳过帧数 / 总帧数），供 /api/system 读取
     pub motion_skipped: Arc<AtomicU64>,
     pub motion_total: Arc<AtomicU64>,
+    pub(crate) performance: Mutex<PerformanceWindow>,
 }
 
 #[derive(Clone)]
@@ -353,6 +355,30 @@ impl Workers {
                 s + h.motion_skipped.load(Ordering::Relaxed),
             )
         })
+    }
+
+    pub(crate) fn performance_summary(&self) -> Vec<serde_json::Value> {
+        let Ok(map) = self.map.lock() else {
+            return Vec::new();
+        };
+        let mut entries: Vec<_> = map
+            .iter()
+            .map(|(&id, handle)| (id, Arc::clone(handle)))
+            .collect();
+        drop(map);
+        entries.sort_unstable_by_key(|(id, _)| *id);
+        entries
+            .into_iter()
+            .filter_map(|(id, handle)| {
+                let samples = handle.performance.lock().ok()?.clone();
+                if samples.frames() == 0 {
+                    return None;
+                }
+                let mut summary = samples.summary();
+                summary["camera_id"] = serde_json::json!(id);
+                Some(summary)
+            })
+            .collect()
     }
 
     fn insert(&self, cid: i64, h: Arc<WorkerHandle>) {
@@ -587,6 +613,7 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         wake: Arc::new(AtomicBool::new(false)),
         motion_skipped: Arc::new(AtomicU64::new(0)),
         motion_total: Arc::new(AtomicU64::new(0)),
+        performance: Mutex::new(PerformanceWindow::default()),
     });
     st.workers.insert(cid, Arc::clone(&handle));
     if cfg.spec.type_ == "rtsp" {
@@ -829,6 +856,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             break;
         }
         if let Err(e) = ing.spawn_with_slot(Arc::clone(&handle.ffmpeg)) {
+            if let Ok(mut metrics) = handle.performance.lock() {
+                metrics.reconnect();
+            }
             if !on_restart(&store, &cfg, &mut restarts, None, &format!("spawn: {e}")) {
                 // given_up：error 状态已写；注册表自清理（否则 stop_worker 永远命中不了）
                 if let Ok(mut m) = st.workers.map.lock() {
@@ -846,8 +876,10 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             if handle.stop.load(Ordering::SeqCst) {
                 break 'outer;
             }
+            let read_started = std::time::Instant::now();
             match ing.read_frame() {
                 Ok(Some(frame)) => {
+                    let received = std::time::Instant::now();
                     // 存活 >5s 重置重启计数（Python Manager 口径）
                     if alive_since
                         .map(|t| t.elapsed().as_secs() >= RESTART_ALIVE_RESET_S)
@@ -856,6 +888,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         restarts = 0;
                     }
                     // 先喂证据环（事件帧须已在环内；同时自动补活动录像 post 帧）
+                    let jpeg_start = std::time::Instant::now();
                     let ev_snapshot: Option<Vec<u8>> = evidence.feed(frame.index, || {
                         ls_analyzer::evidence::encode_jpeg_bgr(
                             &frame.data,
@@ -875,6 +908,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             });
                         }
                     }
+                    let jpeg_elapsed = jpeg_start.elapsed();
                     // LS-050 Motion Gate：每秒刷新配置（网页开关/阈值即时生效）；
                     // 无活跃 track + 低帧差 + 心跳未到 → 跳过 YOLO/PPE 推理。
                     if motion_cfg_stamp.elapsed() >= std::time::Duration::from_secs(1) {
@@ -903,23 +937,29 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         pipe.active_track_count() > 0,
                     );
                     handle.motion_total.fetch_add(1, Ordering::Relaxed);
+                    let detect_start = std::time::Instant::now();
                     let dets = if motion_skip {
                         handle.motion_skipped.fetch_add(1, Ordering::Relaxed);
                         Vec::new() // 跳过昂贵推理；管线空帧路径仍走（保留 exit 语义/心跳）
                     } else {
                         detector.detect(&frame)
                     };
+                    let detection_elapsed = detect_start.elapsed();
                     // LS-041：实时流（rtsp/usb）使用真实本地时间，仅离线 file 回放沿用确定性时钟
                     let ts = if cfg.spec.type_ == "file" {
                         ls_analyzer::pipeline::frame_ts_for(frame.index, cfg.spec.analysis_fps)
                     } else {
                         ls_core::time::local_now_iso()
                     };
+                    let rules_start = std::time::Instant::now();
                     let cands = pipe.process_with_frame(
                         &dets,
                         &ts,
                         Some((&frame.data, frame.width, frame.height)),
                     );
+                    let rules_elapsed = rules_start.elapsed();
+                    let analysis_elapsed = received.elapsed();
+                    let inference = ls_infer::yolo::take_inference_timings();
                     // LS-051：≤5Hz 推送实时检测框元数据（tracks + zones）到 WS 订阅者
                     if last_det_broadcast.elapsed() >= std::time::Duration::from_millis(200) {
                         last_det_broadcast = std::time::Instant::now();
@@ -1107,6 +1147,20 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             }
                         }
                     }
+                    if let Ok(mut metrics) = handle.performance.lock() {
+                        metrics.record(FrameTiming {
+                            read_wait: received.saturating_duration_since(read_started),
+                            jpeg: jpeg_elapsed,
+                            detection: detection_elapsed,
+                            rules: rules_elapsed,
+                            ort: inference.run,
+                            directml_wait: inference.directml_wait,
+                            analysis: analysis_elapsed,
+                            persistence: rules_hit.then(|| received.elapsed()),
+                            inferred: inference.calls > 0,
+                            directml_calls: inference.directml_calls,
+                        });
+                    }
                 }
                 Ok(None) => break, // 流结束（文件源 EOF）
                 Err(e) => {
@@ -1129,6 +1183,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 m.remove(&cfg.camera_id);
             }
             return;
+        }
+        if let Ok(mut metrics) = handle.performance.lock() {
+            metrics.reconnect();
         }
         if !on_restart(&store, &cfg, &mut restarts, alive_since, "stream ended") {
             evidence.flush();

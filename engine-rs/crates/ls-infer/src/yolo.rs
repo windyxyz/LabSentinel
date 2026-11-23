@@ -12,6 +12,7 @@
 //! （"tract"|"ort"）选择。
 
 use std::path::Path;
+use std::time::Duration;
 
 #[cfg(feature = "ort")]
 use ort::session::Session;
@@ -21,6 +22,25 @@ use ort::value::{TensorElementType, ValueType};
 use tract_onnx::prelude::*;
 
 use crate::post::{self, Det, LetterboxGeom};
+
+#[derive(Clone, Copy, Default)]
+pub struct InferenceTimings {
+    pub run: Duration,
+    pub directml_wait: Duration,
+    pub calls: u64,
+    pub directml_calls: u64,
+}
+
+thread_local! {
+    static INFERENCE_TIMINGS: std::cell::Cell<InferenceTimings> = const {
+        std::cell::Cell::new(InferenceTimings { run: Duration::ZERO, directml_wait: Duration::ZERO, calls: 0, directml_calls: 0 })
+    };
+}
+
+/// Collect model calls from the current worker thread since its previous frame.
+pub fn take_inference_timings() -> InferenceTimings {
+    INFERENCE_TIMINGS.with(|metrics| metrics.replace(InferenceTimings::default()))
+}
 
 /// 推理后端种类。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -429,14 +449,25 @@ impl YoloModel {
                 }
                 .map_err(|e| format!("输入张量创建失败: {e}"))?;
                 // 事故 A1 防护：DirectML 推理必须跨线程串行；CPU 推理不加锁。
+                let waiting_since = std::time::Instant::now();
                 let _dml_guard = if self.ep_is_dml {
                     Some(dml_lock().lock().unwrap_or_else(|e| e.into_inner()))
                 } else {
                     None
                 };
-                let outputs = session
-                    .run(ort::inputs![tensor])
-                    .map_err(|e| format!("推理失败: {e}"))?;
+                let run_started = std::time::Instant::now();
+                let outputs = session.run(ort::inputs![tensor]);
+                INFERENCE_TIMINGS.with(|metrics| {
+                    let mut totals = metrics.get();
+                    totals.run += run_started.elapsed();
+                    if self.ep_is_dml {
+                        totals.directml_wait += run_started - waiting_since;
+                        totals.directml_calls += 1;
+                    }
+                    totals.calls += 1;
+                    metrics.set(totals);
+                });
+                let outputs = outputs.map_err(|e| format!("推理失败: {e}"))?;
                 // YOLO 单输出：取首个输出（SessionOutputs 可迭代，取第一个键值对）
                 let (_name, v) = outputs.iter().next().ok_or("模型无输出")?;
                 let (shape, rows) = if let Ok((shape, flat)) = v.try_extract_tensor::<f32>() {

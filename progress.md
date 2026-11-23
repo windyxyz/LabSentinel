@@ -2,10 +2,20 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID / Task-Name**：`LS-064`（`ACTIVE`）/ 1／4／9 路性能、稳定性和识别质量基线。
+- **Task-ID / Task-Name**：`LS-065`（`ACTIVE`）/ 有界采集与推理、模型格式适配、媒体与前端提速。
 - **基线**：`main`，`LS-060` 和 `LS-061` 已通过本机实施验收。`LS-062`、`LS-063` 的业务实现有单项实测，独立 EXE 播放联测保留为发布门禁。GitHub 公开 Release 为 `v0.5.0`。
 - **范围**：用户指示全部作为 `v0.6.0`，计划后直接实施，全部验收通过后发布 GitHub。任务 `LS-060`～`LS-068` 逐项推进。
-- **Next First Command**：`rg -n 'analysis_fps|evidence_fps|MotionGate' engine-rs/crates/ls-server/src/worker.rs`。
+- **性能采集**。为采集等待、JPEG、模型运行、DirectML 锁等待、规则与从读帧完成起的分析时间加入有界采样。新增原生 RTSP 基准，以 1080p H.264、5 FPS 分析和两个随包模型构造 1／4／9 路场景。当前 Windows 为 11 专业工作站版 26300，AMD Ryzen AI 9 H 365 和 Radeon 880M，显卡驱动 32.0.32015.16001，随包 ORT 文件版本 1.20.20241119.10.5c1b7cc。
+- **Next First Command**：`rg -n 'is_nms_free_shape|decode_nms_free|read_frame|broadcast' engine-rs/crates`。
+
+---
+
+## Previous Handoff Snapshot · LS-064
+
+- **实现**。有界阶段采样、RTSP 1／4／9 路基准、识别真值回放、Windows 进程树资源采样与复跑命令。
+- **实测**。Windows `fmt --check` 与 Clippy 通过。FFmpeg 生成 20 秒 1080p H.264 视频，ffprobe 确认 240 帧。包内 go2rtc 提供 RTSP，1、4、9 并发的 FFmpeg 均正常完成，10 秒媒体窗口输出 46–50 帧，实际耗时 11.772–11.910 秒。详情见 `docs/guide/性能验收.md`。
+- **回归**。`cargo +stable-x86_64-pc-windows-gnu test --workspace --all-features --no-fail-fast` 实际执行的 118 项通过，两个性能用例默认忽略，六个目标被应用控制以 4551 拒绝启动。
+- **阻塞**。Windows 4551 拦截 Release 的依赖编译脚本和 Debug 基准程序，批准执行的开发 Python 加载独立 NumPy 模块时也遇到应用控制。完整 Rust CPU／DirectML 场景、识别真值与 24 小时压力复测保留为发行门禁。
 
 ---
 

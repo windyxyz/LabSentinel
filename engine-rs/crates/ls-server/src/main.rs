@@ -37,6 +37,7 @@ mod genai;
 mod go2rtc;
 mod handlers;
 mod middleware;
+mod performance;
 mod plugins;
 mod router;
 mod state;
