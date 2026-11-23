@@ -40,6 +40,11 @@ const testResult = ref(null)
 const apiCardEl = ref(null)
 const urlInputEl = ref(null)
 const runtimeEp = ref('dml')
+const sensitivityPresets = [
+  { id: 'conservative', label: '保守' },
+  { id: 'balanced', label: '平衡' },
+  { id: 'sensitive', label: '敏感' },
+]
 
 // ---- LS-050：自定义 VLM 提示词 + 性能开关（Motion Gate）----
 const vlmPrompt = ref('')
@@ -380,6 +385,12 @@ onMounted(load)
             GPU 初始化失败会自动回落 CPU（看服务日志）</span>
         </div>
         <p class="muted">最近加载的推理设备 {{ cfg?.runtime?.last_loaded_ep || '尚无会话数据' }}</p>
+        <div class="row" role="group" aria-label="检测灵敏度">
+          <span>检测灵敏度</span>
+          <button v-for="preset in sensitivityPresets" :key="preset.id" type="button" class="ghost"
+                  :aria-pressed="cfg?.sensitivity === preset.id" :disabled="busy || cfg?.sensitivity === preset.id"
+                  @click="save({ sensitivity: preset.id }, '已应用' + preset.label + '灵敏度')">{{ preset.label }}</button>
+        </div>
         <Models />
       </div>
 

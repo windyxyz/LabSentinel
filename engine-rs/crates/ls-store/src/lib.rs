@@ -1148,6 +1148,30 @@ impl Store {
         )
     }
 
+    pub fn latest_event_id(&self, cameras: Option<&[i64]>) -> rusqlite::Result<i64> {
+        let mut sql = "SELECT COALESCE(MAX(id),0) FROM events WHERE 1=1".to_string();
+        let mut args = Vec::new();
+        append_camera_scope(&mut sql, &mut args, cameras);
+        self.conn
+            .query_row(&sql, rusqlite::params_from_iter(args), |row| row.get(0))
+    }
+
+    pub fn events_after_id(
+        &self,
+        id: i64,
+        cameras: Option<&[i64]>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Event>> {
+        let mut sql = format!("SELECT {EVENT_COLUMNS} FROM events WHERE id>?");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(id)];
+        append_camera_scope(&mut sql, &mut args, cameras);
+        sql.push_str(" ORDER BY id ASC LIMIT ?");
+        args.push(Box::new(limit));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), map_event)?;
+        rows.collect()
+    }
+
     pub fn bulk_status(
         &self,
         ids: &[i64],

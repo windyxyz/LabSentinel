@@ -323,15 +323,30 @@ export const STATUS_TEXT = {
 
 export function connectEvents(onEvent, onState) {
   let ws, timer, closed = false
+  let cursor = null
   function open() {
     if (closed) return
     // T-106/T-201：令牌走 Sec-WebSocket-Protocol 子协议（不进 URL/日志），
     // 服务端口径与 HTTP 读一致（auth_read_protected 开启才要求令牌）。
     const t = requestToken()
     const protos = t ? ['labsentinel', 'bearer.' + t] : undefined
-    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/events', protos)
+    const url = new URL('/ws/events', location.href)
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    url.searchParams.set('since', cursor ?? 'latest')
+    ws = new WebSocket(url.toString(), protos)
     ws.onopen = () => onState && onState('ok')
-    ws.onmessage = (m) => { try { onEvent(JSON.parse(m.data)) } catch {} }
+    ws.onmessage = (m) => {
+      if (closed) return
+      try {
+        const event = JSON.parse(m.data)
+        if (Number.isSafeInteger(event?.stream_cursor)) {
+          cursor = event.stream_cursor
+        } else if (Number.isSafeInteger(event?.id) && (cursor === null || event.id > cursor)) {
+          cursor = event.id
+          onEvent(event)
+        }
+      } catch { /* Malformed event payload. */ }
+    }
     ws.onclose = () => {
       // 2026-10-30 审阅修复：cleanup 里 ws.close() 会异步触发 onclose，原实现会重新武装
       // 3s 重连定时器 → 卸载后幽灵连接永久重连（每切一次页面泄漏一条）

@@ -586,6 +586,15 @@ impl WorkerConfig {
         // 模型路径：进程 env LS_MODEL_PATH（未设 = NullDetector，仅人员检测为空）。
         // RA2 接模型管理（assets.lock/网页端许可确认）后改从 settings 组装。
         let mut detector = ls_analyzer::detector::DetectorConfig::default();
+        if let Some(confidence) = s
+            .setting_get("detector.conf")
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| (0.05..=0.95).contains(value))
+        {
+            detector.conf = confidence;
+        }
         // RA5（模型模块化）：app_settings 的 model.active 优先（/api/models/active
         // UI 切换写入）→ 回退 env LS_MODEL_PATH；都空 = NullDetector
         let model_active = s

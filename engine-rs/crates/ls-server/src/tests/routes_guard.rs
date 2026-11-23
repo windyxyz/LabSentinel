@@ -287,6 +287,114 @@ async fn detections_socket_enforces_host_and_read_token_and_delivers_frames() {
 }
 
 #[tokio::test]
+async fn sensitivity_preset_updates_person_and_ppe_thresholds() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("preset.db");
+    seed_schema(&db);
+    let state = test_state_cfg(db.to_str().unwrap(), "", false);
+    let app = build_router(state);
+    let response = req(
+        &app,
+        "PUT",
+        "/api/detect/config",
+        Some(json!({"sensitivity": "sensitive"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+    let camera = store.conn_add_camera("preset", "fixture", "file").unwrap();
+    let config = crate::worker::WorkerConfig::from_db(&store, camera)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.detector.conf, 0.32);
+    assert_eq!(crate::worker::ppe_thresholds(&store, true), (0.42, 0.40));
+    let response = req(&app, "GET", "/api/detect/config", None).await;
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let prefs: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(prefs["sensitivity"], "sensitive");
+
+    let bad = req(
+        &app,
+        "PUT",
+        "/api/detect/config",
+        Some(json!({"sensitivity": 4})),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        store.setting_get("detector.conf").unwrap().as_deref(),
+        Some("0.32")
+    );
+}
+
+#[tokio::test]
+async fn events_socket_replays_committed_ids_in_order_after_reconnect() {
+    use futures_util::StreamExt;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("replay.db");
+    let st = test_state_cfg(db.to_str().unwrap(), "", false);
+    let store = ls_store::Store::open(&st.db_path).unwrap();
+    store.ensure_schema().unwrap();
+    let add = |camera_id| {
+        store
+            .add_event(&ls_store::NewEvent {
+                camera_id,
+                type_: "enter",
+                level: 2,
+                track_id: 0,
+                detail: "replay fixture",
+                snapshot: None,
+                ts: "2026-11-23T12:00:00",
+            })
+            .unwrap()
+    };
+    let first = add(1);
+    let since = add(2);
+    let second = add(1);
+    let third = add(2);
+    let scoped = store.events_after_id(first, Some(&[1]), 64).unwrap();
+    assert_eq!(
+        scoped.iter().map(|event| event.id).collect::<Vec<_>>(),
+        vec![second]
+    );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let url = format!(
+        "ws://{}/ws/events?since={since}",
+        listener.local_addr().unwrap()
+    );
+    let app = build_router(st.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let next_id = async |socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+                         key: &str| {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(message.to_text().unwrap()).unwrap()[key]
+            .as_i64()
+            .unwrap()
+    };
+    assert_eq!(next_id(&mut socket, "stream_cursor").await, since);
+    assert_eq!(next_id(&mut socket, "id").await, second);
+    assert_eq!(next_id(&mut socket, "id").await, third);
+    let fourth = add(1);
+    let fifth = add(2);
+    st.events_tx.send(json!({"id": fifth}).to_string()).unwrap();
+    assert_eq!(next_id(&mut socket, "id").await, fourth);
+    assert_eq!(next_id(&mut socket, "id").await, fifth);
+    server.abort();
+}
+
+#[tokio::test]
 async fn revoking_a_share_ends_an_open_events_socket() {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};

@@ -20,11 +20,15 @@
           <option :value="9">9 宫格</option>
         </select>
         <button class="ghost" @click="toggleOverlay">{{ overlay ? '隐藏检测框' : '显示检测框' }}</button>
+        <button v-if="!readonly && !device" type="button" class="ghost" :aria-expanded="showLatency" @click="showLatency = !showLatency">
+          {{ showLatency ? '隐藏耗时' : '分析耗时' }}
+        </button>
         <button class="ghost" @click="toggleMute">{{ muted ? '开启提示音' : '静音' }}</button>
         <button class="ghost" @click="toggleNotifications">{{ notifications ? '关闭桌面通知' : '开启桌面通知' }}</button>
         <button class="ghost" @click="toggleFullscreen">{{ isFullscreen ? '退出全屏' : '进入全屏值守大屏' }}</button>
         <button v-if="signedIn || device" class="ghost" @click="$emit('sign-out')">{{ device ? '退出设备' : '退出登录' }}</button>
       </div>
+      <LatencyHudBar v-if="showLatency && !readonly && !device" :samples="visibleLatency" :names="cameraNames" />
     </header>
     <div class="grid" :class="{ single: cols === 1 }" :style="{ '--wall-columns': cols }">
       <p v-if="!visibleCameras.length" class="muted wall-empty">当前范围内暂无摄像头。</p>
@@ -66,6 +70,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, connectEvents, TYPE_TEXT } from '../api'
 import CameraPreview from '../components/CameraPreview.vue'
+import LatencyHudBar from '../components/LatencyHudBar.vue'
 import VideoOverlayCanvas from '../components/VideoOverlayCanvas.vue'
 
 const cameras = ref([])
@@ -88,6 +93,8 @@ const notifications = ref(false)
 const isFullscreen = ref(false)
 const toast = ref(null)
 const violationsToday = ref('—')
+const showLatency = ref(false)
+const latency = ref([])
 const triaging = ref(new Set())
 const triageError = ref('')
 
@@ -102,6 +109,11 @@ const cols = computed(() => (grid.value >= 9 ? 3 : grid.value >= 4 ? 2 : 1))
 const groups = computed(() => [...new Set(cameras.value.map(camera => camera.group_name).filter(Boolean))].sort())
 const groupCameras = computed(() => !selectedGroup.value ? cameras.value : cameras.value.filter(camera => camera.group_name === selectedGroup.value))
 const visibleCameras = computed(() => groupCameras.value.slice(0, grid.value))
+const cameraNames = computed(() => Object.fromEntries(cameras.value.map(c => [c.id, c.name])))
+const visibleLatency = computed(() => {
+  const ids = new Set(visibleCameras.value.map(c => c.id))
+  return latency.value.filter(sample => ids.has(sample?.camera_id))
+})
 const visibleEvents = computed(() => {
   if (!selectedGroup.value) return events.value
   const cameraIds = new Set(groupCameras.value.map(camera => camera.id))
@@ -133,6 +145,26 @@ async function loadStats() {
     if (day) violationsToday.value = (Number(day.l2) || 0) + (Number(day.l3) || 0)
   } catch { /* 旧服务端无字段：保持 — */ }
 }
+
+watch(showLatency, (enabled, _, onCleanup) => {
+  if (!enabled || props.readonly || props.device) return
+  let active = true
+  let timer
+  onCleanup(() => { active = false; clearTimeout(timer) })
+  async function refresh() {
+    try {
+      if (!document.hidden) {
+        const data = await api.system()
+        if (active) latency.value = Array.isArray(data?.perf?.analysis) ? data.perf.analysis : []
+      }
+    } catch {
+      if (active) latency.value = []
+    } finally {
+      if (active) timer = setTimeout(refresh, 2000)
+    }
+  }
+  refresh()
+})
 
 function beep() {
   if (muted.value) return

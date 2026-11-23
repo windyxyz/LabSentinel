@@ -506,6 +506,7 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
             // LS-050：自定义 VLM 提示词（空=内置默认）；性能开关（Motion Gate）
             "vlm_prompt": cfg.vlm_prompt,
             "perf": perf_config(s),
+            "sensitivity": sensitivity_preset(s),
             "usage": {"date": usage.date, "count": usage.count,
                       "budget": usage.budget, "exhausted": usage.exhausted()},
             // UX（2026-11-21）：推理设备（DirectML——DX12 统一层，N/A/Intel 卡
@@ -551,6 +552,26 @@ pub fn runtime_ep_pref(s: &ls_store::Store) -> String {
         })
 }
 
+const SENSITIVITY_KEYS: [&str; 3] = ["detector.conf", "ppe.violation_conf", "ppe.wearing_conf"];
+const SENSITIVITY_PRESETS: [(&str, [f32; 3]); 3] = [
+    ("conservative", [0.50, 0.65, 0.40]),
+    ("balanced", [0.40, 0.50, 0.40]),
+    ("sensitive", [0.32, 0.42, 0.40]),
+];
+
+fn sensitivity_preset(store: &ls_store::Store) -> Option<&'static str> {
+    let current = SENSITIVITY_KEYS.map(|key| {
+        store
+            .setting_get(key)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<f32>().ok())
+    });
+    SENSITIVITY_PRESETS
+        .iter()
+        .find_map(|(name, settings)| (current == settings.map(Some)).then_some(*name))
+}
+
 /// PUT /api/detect/config——增量写（缺字段/空串=不变更；api_key 仅在给出非
 /// "***" 且非空时改写并加密）。生效：运行中「跟随全局」的相机软重启。
 pub(crate) async fn detect_config_put(
@@ -558,6 +579,22 @@ pub(crate) async fn detect_config_put(
     Json(body): Json<Value>,
 ) -> Response {
     // 形校验先行（不合法整体拒绝，避免半套配置入库）
+    let sensitivity = match body.get("sensitivity") {
+        Some(value) => match SENSITIVITY_PRESETS
+            .iter()
+            .find(|(name, _)| value.as_str() == Some(*name))
+        {
+            Some((_, thresholds)) => Some(*thresholds),
+            None => {
+                return detail_err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "灵敏度必须为保守、平衡或敏感",
+                )
+                .into_response()
+            }
+        },
+        None => None,
+    };
     let mode = body.get("mode").and_then(|v| v.as_str());
     if let Some(m) = mode {
         if !MODES.contains(&m) {
@@ -619,6 +656,14 @@ pub(crate) async fn detect_config_put(
         let data_dir = Path::new(&st.data_dir);
         let mut writes: Vec<(String, String)> = Vec::new();
         let mut errs: Vec<String> = Vec::new();
+        if let Some(thresholds) = sensitivity {
+            writes.extend(
+                SENSITIVITY_KEYS
+                    .into_iter()
+                    .zip(thresholds)
+                    .map(|(key, value)| (key.into(), value.to_string())),
+            );
+        }
         if let Some(m) = mode {
             writes.push(("detect.mode".into(), m.into()));
         }
@@ -776,6 +821,7 @@ pub(crate) async fn detect_config_put(
                 }
             }
         }
+        let tx = s.conn().unchecked_transaction()?;
         let mut ep_changed = false;
         if let Some((ep_l, changed)) = ep_write {
             s.setting_set("runtime.ep", &ep_l)?;
@@ -784,8 +830,9 @@ pub(crate) async fn detect_config_put(
         for (k, v) in &writes {
             s.setting_set(k, v)?;
         }
+        tx.commit()?;
         // 即时生效：EP 变化时全部重启（避免先 restart_following_global 再 restart_all_running 双重重启）
-        let restarted = if ep_changed {
+        let restarted = if ep_changed || sensitivity.is_some() {
             crate::worker::restart_all_running(&st, s)
         } else {
             crate::worker::restart_following_global(&st, s)

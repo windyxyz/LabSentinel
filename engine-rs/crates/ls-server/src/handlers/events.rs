@@ -433,18 +433,109 @@ pub(super) async fn socket_revoked(
 pub(crate) async fn ws_events(
     State(st): State<Shared>,
     axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
+    Query(query): Query<ReplayQuery>,
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let replay = match query.since.as_deref() {
+        None => None,
+        Some("latest") => Some(None),
+        Some(value) => match value.parse::<i64>() {
+            Ok(id) if id >= 0 => Some(Some(id)),
+            _ => {
+                return detail_err(StatusCode::BAD_REQUEST, "since 必须是非负事件编号或 latest")
+                    .into_response()
+            }
+        },
+    };
     let token = crate::middleware::ws_token(&headers);
     let rx = st.events_tx.subscribe();
     ws.protocols(["labsentinel"])
         .on_upgrade(move |socket| async move {
+            let stream = async {
+                if let Some(since) = replay {
+                    let cameras = browser
+                        .device
+                        .as_ref()
+                        .and_then(|device| device.cameras.clone());
+                    handle_replay(socket, rx, st.db_path.clone(), cameras, since).await;
+                } else {
+                    handle_ws(socket, rx, browser.device.as_ref()).await;
+                }
+            };
             tokio::select! {
-                _ = handle_ws(socket, rx, browser.device.as_ref()) => {},
+                _ = stream => {},
                 _ = socket_revoked(&st, &browser, token.as_deref()) => {},
             }
         })
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ReplayQuery {
+    since: Option<String>,
+}
+
+async fn handle_replay(
+    mut socket: WebSocket,
+    mut rx: broadcast::Receiver<String>,
+    db_path: String,
+    cameras: Option<Vec<i64>>,
+    since: Option<i64>,
+) {
+    use axum::extract::ws::Message;
+
+    const PAGE: i64 = 64;
+    let db = db_path.clone();
+    let scope = cameras.clone();
+    let latest = tokio::task::spawn_blocking(move || {
+        ls_store::Store::open(&db)?.latest_event_id(scope.as_deref())
+    })
+    .await;
+    let Ok(Ok(latest)) = latest else { return };
+    let mut after = since.map_or(latest, |cursor| cursor.min(latest));
+    if socket
+        .send(Message::Text(json!({ "stream_cursor": after }).to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut poll = tokio::time::interval(std::time::Duration::from_secs(2));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut more = true;
+    loop {
+        // The broadcast is a wake-up. Reading committed IDs in order makes reconnection,
+        // concurrent producers, and lagged receivers use the same cursor.
+        if more {
+            let db = db_path.clone();
+            let scope = cameras.clone();
+            let batch = tokio::task::spawn_blocking(move || {
+                ls_store::Store::open(&db)?.events_after_id(after, scope.as_deref(), PAGE)
+            })
+            .await;
+            let Ok(Ok(batch)) = batch else { return };
+            more = batch.len() == PAGE as usize;
+            for event in batch {
+                if socket
+                    .send(Message::Text(event_json(&event).to_string()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                after = event.id;
+            }
+        }
+        tokio::select! {
+            message = socket.recv() => if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) { return },
+            message = rx.recv() => {
+                if matches!(message, Err(broadcast::error::RecvError::Closed)) { return; }
+                more = true;
+            },
+            _ = poll.tick() => more = true,
+            _ = tokio::task::yield_now(), if more => {},
+        }
+    }
 }
 
 /// LS-051：`/ws/detections/:cid` 实时检测元数据广播（受 trusted_hosts + 读令牌守卫，

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, fetchMedia } from '../api'
+import { reservePreviewStream } from '../streamPool'
 import WebrtcPlayer from './WebrtcPlayer.vue'
 
 const props = defineProps({
@@ -11,6 +12,7 @@ const props = defineProps({
 
 const mode = ref('snapshot')
 const wsUrl = ref('')
+const streamReserved = ref(false)
 const playing = ref(false)
 const snapshot = ref('')
 const capturedAt = ref(0)
@@ -23,6 +25,18 @@ let etag = ''
 let intersection
 let inViewport = typeof IntersectionObserver === 'undefined'
 let mounted = false
+let releasePreviewStream
+
+watch(wsUrl, (url) => {
+  if (url && !releasePreviewStream) {
+    releasePreviewStream = reservePreviewStream((granted) => {
+      streamReserved.value = granted
+    })
+  } else if (!url) {
+    releasePreviewStream?.()
+    releasePreviewStream = undefined
+  }
+}, { flush: 'sync' })
 
 const snapshotLabel = computed(() => capturedAt.value
   ? `快照 ${new Date(capturedAt.value).toLocaleTimeString('zh-CN', { hour12: false })}`
@@ -103,6 +117,11 @@ function restart() {
 
 function onReady(ready) {
   playing.value = ready
+  if (!ready && streamReserved.value) {
+    wsUrl.value = ''
+    mode.value = 'snapshot'
+    lastProbeAt = Date.now()
+  }
   schedule()
 }
 
@@ -131,7 +150,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="previewEl" class="preview">
-    <WebrtcPlayer v-if="wsUrl" class="stream" :class="{ 'stream-pending': !playing }"
+    <WebrtcPlayer v-if="wsUrl && streamReserved" class="stream" :class="{ 'stream-pending': !playing }"
       :ws-url="wsUrl" :mode="mode" @ready="onReady" />
     <template v-if="!playing">
       <img v-if="snapshot" :src="snapshot" :alt="name" />

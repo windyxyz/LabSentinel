@@ -31,8 +31,9 @@
 
 ### 2.3 验证红线（`relay-verify`）
 - **未执行并记录真实命令与结果前，严禁宣称“已完成/已修复”。**
-- Rust 改动必过三连：`cargo fmt --all -- --check` → `cargo clippy --workspace --all-targets --all-features -- -D warnings` → `cargo test --workspace --all-features`（修改 `Cargo.toml` 时须连同 `Cargo.lock` 一起提交）。
-- 前端改动必过：`npx vitest run` + `npm run build`；接口解包必须校验返回形状（`Array.isArray` 等防御，严禁未校验直接 `.field.length`）。
+- 开发批次按改动运行必要的编译检查和定向测试。从 `v0.7.0` 起，每个大版本集中执行全量回归和回归审阅，并覆盖本次大版本累积的小批次。当前 `v0.6.2` 按定向验证收口。
+- 大版本 Rust 门禁为 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 和 `cargo test --workspace --all-features`。修改 `Cargo.toml` 时连同 `Cargo.lock` 提交。
+- 大版本前端门禁为 `npx vitest run` 与 `npm run build`。接口解包始终校验返回形状（`Array.isArray` 等防御，严禁未校验直接 `.field.length`）。
 - 实测结果须回写 `progress.md`。
 
 ### 2.4 会话收尾（`relay-handoff-stop`）
