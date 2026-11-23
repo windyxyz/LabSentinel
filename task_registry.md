@@ -40,7 +40,7 @@
 | LS-075 | 候选模型对照、合并与淘汰 | P1 | DONE | 2026-11-23 | 本地双产物已更新，`python -X utf8 scripts/smoke_rust.py --zip Resources/dist/labsentinel-rust-0.6.0-20261123.zip`；现场测试后再处理 GitHub 发布 |
 | LS-076 | v0.6.0 基线缺陷审查与 1.0.0 路线图补充 | P0 | DONE | 2026-11-23 | 查 `docs/plan/v1.0.0-roadmap.md` §1.3 的 9 项发现与验收。待用户恢复后锁定 `LS-080`。 |
 | LS-080 | v0.6.1 · `InferBackend` 抽象 + 现成权重对照整合（YOLOE 正负对照/`PP-LCNet`）+ 256×256 上身 PPE 精判/唯一归属/遮挡断轨/COCO 互证 | P0 | READY | 2026-11-23 | 文件检测和首批后端改动已验证。原生 256 候选未提升覆盖，待进一步对照可用权重。 |
-| LS-081 | v0.6.1 · 并发流硬上限（≤5）+ WS `?since=` 断线重放 + 分阶段耗时 HUD + 敏感度三档预设 | P0 | ACTIVE | 2026-11-23 | 已通过 §1.3 的规则热更新和模型锁回归。接续 `LS-076-05～07` 的投递恢复、检查统计和 AI 复核。 |
+| LS-081 | v0.6.1 · 并发流硬上限（≤5）+ WS `?since=` 断线重放 + 分阶段耗时 HUD + 敏感度三档预设 | P0 | ACTIVE | 2026-11-24 | 基线告警恢复、检查统计和 AI 复核已通过测试。接续值守流量上限和重连续传。 |
 | LS-082 | v0.6.2 · 空间智能防误报（4 锚点/死区/12 帧离场宽限/Motion+Filter 双遮罩/静止降频/一键记住误报点/抑制审计） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-082`（Schema `v23`） |
 | LS-083 | v0.6.2 · 共享 `GpuScheduler` + Vulkan 物理设备枚举 + 干净 WebP 叠框 + Debug 叠层/Digital PTZ | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-083`（Schema `v24`） |
 | LS-084 | v0.7.0 · 违规事件段聚合（`duration_s`/峰值截图）+ 两级宽限倒计时 + 合规恢复自动消警（`alert_resolved`） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-084`（Schema `v25`） |

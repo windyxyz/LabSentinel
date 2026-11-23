@@ -11,7 +11,8 @@
 - **LS-081 已验证**。区域、规则和排班保存后，下次检测使用新版配置。照片目录运行中删除规则后仍留检查记录，新增规则后按新等级生成告警。区域设置页显示分析任务的实际生效状态。已锁定的人员权重通过校验，临时损坏缓存触发重新准备，严格构建在编译前停止。退出正常的临时 ZIP 冒烟包含新前端、PPE 回退、规则热更新和视频失败对照。
 - **验证命令**。Rust 三连通过（205 项通过、4 项忽略）。`npx vitest run` 101 项通过、`npm run build` 通过。`contract_audit.py` 匹配 141 条前端路径，`rust_route_coverage.py --exe C:/Users/User/devtools/ls-target/debug/labsentinel-server.exe --fail-under 100` 为 126/126。前端仍有既有 Vite 配置、表格结构和 jsdom Canvas 提示。
 - **安装器**。Inno Setup 7 从同一临时暂存目录编译通过，退出码 0，验证产物 154.2 MB。交互安装仍在后续验收范围。
-- **Next First Command**。`git status --short --branch` 后处理陈旧待发送告警及正常检查的处置统计，接续 AI 复核和 `LS-081` 的值守交付。达到使用门槛的 256 候选仍待核验。
+- **投递与处置**。启动时恢复历史的待投递项，保留重试退避和已发送记录。测试检查记录可查、告警统计排除检查、AI 复核的展示与筛选一致。Rust 三连通过（207 项通过、4 项忽略），前端 101 项和构建通过。
+- **Next First Command**。`git status --short --branch`，继续 `LS-081` 的大屏流量上限、事件重连、耗时界面和灵敏度设置。达到使用门槛的 256 候选仍待核验。
 
 ## Previous Handoff Snapshot · LS-076
 

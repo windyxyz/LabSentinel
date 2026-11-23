@@ -22,7 +22,9 @@ fn make_db(dir: &Path) -> PathBuf {
         "INSERT INTO schema_version VALUES(13,'2026-01-01T00:00:00')",
         "CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, camera_id INTEGER, \
          type TEXT, level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT, \
-         status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, escalated_ts TEXT, \n         vlm_verdict TEXT, vlm_ts TEXT, vlm_suppressed INTEGER DEFAULT 0)",
+         status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, escalated_ts TEXT, \
+         ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT, \
+         vlm_verdict TEXT, vlm_ts TEXT, vlm_suppressed INTEGER DEFAULT 0)",
         "CREATE TABLE alert_deliveries(id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER, \
          channel TEXT, status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0, \
          last_error TEXT, updated_ts TEXT)",
@@ -580,6 +582,34 @@ fn report_text_contains_metrics_and_top_cameras() {
     assert!(text.contains("合规率（本地抽样）：75.0%"));
     assert!(text.contains("已判定 4 次，未知 2 次"));
     assert!(text.contains("试剂区（3 次）"));
+}
+
+#[test]
+fn startup_recovers_interrupted_deliveries_without_requeueing_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("retry.db");
+    let store = Store::open(db_path.to_str().unwrap()).unwrap();
+    store.ensure_schema().unwrap();
+    let previous = store.add_delivery(900, "webhook").unwrap();
+    let success = store.add_delivery(901, "webhook").unwrap();
+    store.update_delivery(success, "ok", 1, None).unwrap();
+    let jobs = std::sync::Arc::new(ls_jobs::Jobs::new(
+        db_path.clone(),
+        ls_jobs::JobsConfig::default_for_db(&db_path),
+    ));
+    jobs.start();
+    let active = store.add_delivery(902, "webhook").unwrap();
+    let recovered = store.delivery_by_id(previous).unwrap().unwrap();
+    assert_eq!(recovered.1, "retry");
+    assert!(recovered.3.unwrap().contains("上次进程退出"));
+    assert_eq!(store.delivery_by_id(success).unwrap().unwrap().1, "ok");
+    assert!(!jobs.retry_now(active).unwrap());
+    assert!(jobs.retry_now(previous).unwrap());
+    assert_eq!(
+        store.delivery_by_id(previous).unwrap().unwrap().1,
+        "dead_letter"
+    );
+    jobs.stop();
 }
 
 #[test]

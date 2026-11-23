@@ -825,6 +825,14 @@ impl Jobs {
         if !handles.is_empty() {
             return;
         }
+        // 启动顺序先恢复遗留记录，再启动首发业务和重试消费者。
+        match ls_store::Store::open(&self.db_path.to_string_lossy())
+            .and_then(|store| store.recover_interrupted_deliveries())
+        {
+            Ok(count) if count > 0 => println!("[jobs] 恢复 {count} 条中断的告警投递"),
+            Ok(_) => (),
+            Err(error) => eprintln!("[jobs] 无法恢复中断的告警投递: {error}"),
+        }
         self.stop.store(false, Ordering::SeqCst);
         handles.push(spawn_loop(
             "retention",

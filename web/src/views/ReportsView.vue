@@ -182,7 +182,7 @@ function barGeom(h) {
       <div class="card"><div class="muted">误报率（已处置口径）</div>
         <div class="num">{{ (quality.false_positive_rate * 100).toFixed(1) }}%</div></div>
       <div class="card"><div class="muted">已处置 / 总数</div>
-        <div class="num" style="font-size:16px">{{ quality.total - quality.unhandled }} / {{ quality.total }}</div></div>
+        <div class="num" style="font-size:16px">{{ quality.handled ?? quality.total - quality.unhandled }} / {{ quality.total }}</div></div>
     </div>
     <div class="panel" v-if="quality && quality.total > 0">
       <b>按摄像头处置质量（近 {{ quality.days }} 天，最多 10 路）</b>

@@ -30,6 +30,9 @@ pub struct Event {
     pub status: String,
     pub handled_by: Option<String>,
     pub handled_ts: Option<String>,
+    pub ai_review: Option<String>,
+    pub ai_review_ts: Option<String>,
+    pub ai_review_model: Option<String>,
     /// UX2 cascade：VLM 复核判定（完整 JSON 文本；None=未复核）
     pub vlm_verdict: Option<String>,
     /// UX2 cascade：复核时间
@@ -53,7 +56,19 @@ pub struct NewEvent<'a> {
 }
 
 const EVENT_COLUMNS: &str = "id,ts,camera_id,type,level,track_id,detail,snapshot,video,\
-    COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0),handled_by,handled_ts";
+    COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0),handled_by,handled_ts,\
+    ai_review,ai_review_ts,ai_review_model";
+
+pub const ALERT_EVENTS_SQL: &str = "type NOT IN ('photo_check','video_check')";
+
+pub const AI_VERDICT_SQL: &str = "COALESCE(
+    CASE WHEN json_valid(ai_review) THEN CASE json_extract(ai_review,'$.verdict')
+        WHEN 'likely_true' THEN 'likely_true' WHEN 'likely_false' THEN 'likely_false'
+        WHEN 'uncertain' THEN 'uncertain' END END,
+    CASE WHEN json_valid(vlm_verdict) THEN CASE json_extract(vlm_verdict,'$.verdict')
+        WHEN 'likely_true' THEN 'likely_true' WHEN 'likely_false' THEN 'likely_false'
+        WHEN 'uncertain' THEN 'uncertain' END END,
+    'none')";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Camera {
@@ -305,6 +320,15 @@ impl Store {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        let event_columns = tx
+            .prepare("PRAGMA table_info(events)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        for column in ["ai_review", "ai_review_ts", "ai_review_model"] {
+            if !event_columns.contains(column) {
+                tx.execute(&format!("ALTER TABLE events ADD COLUMN {column} TEXT"), [])?;
+            }
+        }
         let has_folder_results: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='folder_images')",
             [], |row| row.get(0),
@@ -863,7 +887,10 @@ impl EventsFilter<'_> {
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         match self.category {
             Some("check") => sql.push_str(" AND type IN ('photo_check','video_check')"),
-            Some("alert") => sql.push_str(" AND type NOT IN ('photo_check','video_check')"),
+            Some("alert") => {
+                sql.push_str(" AND ");
+                sql.push_str(ALERT_EVENTS_SQL);
+            }
             _ => {}
         }
         if let Some(v) = self.camera_id {
@@ -903,7 +930,9 @@ impl EventsFilter<'_> {
             ]);
         }
         if let Some(verdict) = self.ai_verdict {
-            sql.push_str(" AND COALESCE(CASE WHEN json_valid(vlm_verdict) THEN json_extract(vlm_verdict, '$.verdict') END,'none')=?");
+            sql.push_str(" AND ");
+            sql.push_str(AI_VERDICT_SQL);
+            sql.push_str("=?");
             args.push(Box::new(verdict.to_owned()));
         }
         append_camera_scope(&mut sql, &mut args, self.allowed_cameras);
@@ -1364,6 +1393,17 @@ impl Store {
             })
         })?;
         rows.collect()
+    }
+
+    /// 回收上次进程退出时留下的首发记录，沿用原始时间与重试退避。
+    pub fn recover_interrupted_deliveries(&self) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE alert_deliveries SET status='retry', attempts=COALESCE(attempts,0),
+             updated_ts=COALESCE(NULLIF(updated_ts,''),?),
+             last_error=COALESCE(NULLIF(last_error,''),'上次进程退出时尚未记录发送结果')
+             WHERE COALESCE(status,'pending')='pending'",
+            [chrono_now()],
+        )
     }
 
     pub fn retry_delivery(&self, id: i64) -> rusqlite::Result<bool> {
@@ -2460,6 +2500,9 @@ fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
         vlm_suppressed: r.get(12)?,
         handled_by: r.get(13)?,
         handled_ts: r.get(14)?,
+        ai_review: r.get(15)?,
+        ai_review_ts: r.get(16)?,
+        ai_review_model: r.get(17)?,
     })
 }
 
@@ -2612,6 +2655,21 @@ mod tests {
         let got = s.event_by_id(eid).unwrap().unwrap();
         assert_eq!(got.detail, "Rust 写入");
         assert_eq!(got.status, "new");
+        s.set_ai_review(
+            eid,
+            r#"{"verdict":"uncertain"}"#,
+            "2026-01-01T00:00:02",
+            "legacy-fixture",
+        )
+        .unwrap();
+        assert_eq!(
+            s.event_by_id(eid)
+                .unwrap()
+                .unwrap()
+                .ai_review_model
+                .as_deref(),
+            Some("legacy-fixture")
+        );
         s.set_event_status(eid, "acked", Some("rust"), Some("2026-01-01T00:00:02"))
             .unwrap();
         assert_eq!(s.event_by_id(eid).unwrap().unwrap().status, "acked");

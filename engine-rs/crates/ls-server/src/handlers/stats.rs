@@ -223,7 +223,7 @@ pub(crate) async fn stats_quality(
     with_store(&st, |s| {
         let start = iso_days_ago(days - 1) + "T00:00:00";
         let end = iso_now();
-        let mut where_sql = String::from(" AND ts>=? AND ts<=?");
+        let mut where_sql = format!(" AND {} AND ts>=? AND ts<=?", ls_store::ALERT_EVENTS_SQL);
         let mut args: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(start.clone()), Box::new(end.clone())];
         if let Some(c) = cid {
@@ -271,12 +271,20 @@ pub(crate) async fn stats_quality(
                 by_type.insert(k, json!(n));
             }
         }
+        let rate = |fp: i64, handled: i64| {
+            if handled > 0 {
+                (fp as f64 / handled as f64 * 1000.0).round() / 1000.0
+            } else {
+                0.0
+            }
+        };
         let mut by_camera: Vec<Value> = Vec::new();
         {
             let sql = format!(
                 "SELECT e.camera_id, COALESCE(c.name,'') name, COUNT(*) total, \
-                 SUM(CASE WHEN e.status='false_positive' THEN 1 ELSE 0 END) fp \
-                 FROM events e LEFT JOIN cameras c ON c.id=e.camera_id WHERE 1=1{where_sql} \
+                 SUM(CASE WHEN e.status='false_positive' THEN 1 ELSE 0 END) fp, \
+                 SUM(CASE WHEN e.status IN ('acked','false_positive','ignored') THEN 1 ELSE 0 END) handled \
+                 FROM (SELECT * FROM events WHERE 1=1{where_sql}) e LEFT JOIN cameras c ON c.id=e.camera_id \
                  GROUP BY e.camera_id ORDER BY total DESC"
             );
             let mut stmt = s.conn().prepare(&sql)?;
@@ -286,12 +294,12 @@ pub(crate) async fn stats_quality(
                     r.get::<_, String>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
                 ))
             })?;
-            for (cid2, name, total2, fp) in rows.collect::<Result<Vec<_>, _>>()? {
+            for (cid2, name, total2, fp, handled) in rows.collect::<Result<Vec<_>, _>>()? {
                 by_camera.push(json!({"camera_id": cid2, "name": name, "total": total2,
-                    "false_positive": fp,
-                    "rate": if total2 > 0 { (fp as f64 / total2 as f64 * 1000.0).round() / 1000.0 } else { 0.0 }}));
+                    "false_positive": fp, "handled": handled, "rate": rate(fp, handled)}));
             }
         }
         let mut daily: Vec<Value> = Vec::new();
@@ -320,6 +328,20 @@ pub(crate) async fn stats_quality(
         let handled = stat(&by_status, "acked") + fp + stat(&by_status, "ignored");
         let l3_total = by_level.get("3").and_then(|v| v.as_i64()).unwrap_or(0);
         let unhandled = stat(&by_status, "new");
+        let mut by_ai_verdict = json!({"likely_true": 0, "likely_false": 0, "uncertain": 0});
+        let mut stmt = s.conn().prepare(&format!(
+            "SELECT {} verdict, COUNT(*) FROM events WHERE 1=1{where_sql} GROUP BY verdict",
+            ls_store::AI_VERDICT_SQL
+        ))?;
+        let rows = stmt.query_map(vals.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (verdict, count) = row?;
+            if verdict != "none" {
+                by_ai_verdict[verdict] = json!(count);
+            }
+        }
         Ok(Json(json!({
             "days": days, "start_ts": start, "end_ts": end,
             "total": total,
@@ -327,10 +349,11 @@ pub(crate) async fn stats_quality(
             "by_level": Value::Object(by_level),
             "by_type": Value::Object(by_type),
             "by_camera": by_camera,
-            "false_positive_rate": if handled > 0 { (fp as f64 / handled as f64 * 1000.0).round() / 1000.0 } else { 0.0 },
+            "false_positive_rate": rate(fp, handled),
+            "handled": handled,
             "unhandled": unhandled,
             "l3_total": l3_total,
-            "by_ai_verdict": {"likely_true": 0, "likely_false": 0, "uncertain": 0},
+            "by_ai_verdict": by_ai_verdict,
             "daily": daily,
         }))
         .into_response())

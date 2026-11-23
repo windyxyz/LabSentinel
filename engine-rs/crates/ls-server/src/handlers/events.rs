@@ -72,24 +72,39 @@ impl EventsQuery {
 }
 
 pub(crate) fn event_json(e: &ls_store::Event) -> Value {
-    // UX2 cascade：VLM 复核结果随事件出（suppressed=已复核否定并抑制）；
-    // verdict JSON 解析失败不出该键（诊断可用 /api/events/:iid 全量字段）
     let vlm_verdict = e
         .vlm_verdict
         .as_deref()
         .and_then(|v| serde_json::from_str::<Value>(v).ok());
-    let ai_verdict = vlm_verdict
-        .as_ref()
-        .and_then(|review| review.get("verdict"));
+    let background_review = e
+        .ai_review
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(|review| recognized_verdict(review).is_some());
+    let review = background_review.as_ref().or(vlm_verdict.as_ref());
+    let ai_verdict = review.and_then(recognized_verdict);
+    let (review_ts, review_model) = if background_review.is_some() {
+        (e.ai_review_ts.as_deref(), e.ai_review_model.as_deref())
+    } else {
+        (e.vlm_ts.as_deref(), None)
+    };
     json!({"id": e.id, "ts": e.ts, "camera_id": e.camera_id, "type": e.type_,
            "category": if matches!(e.type_.as_str(), "photo_check" | "video_check") { "check" } else { "alert" },
            "level": e.level, "track_id": e.track_id, "detail": e.detail,
            "has_snapshot": e.snapshot.is_some(), "has_video": e.video.is_some(),
            "status": e.status, "handled_by": e.handled_by, "handled_ts": e.handled_ts,
-           "ai_verdict": ai_verdict, "ai_review": vlm_verdict,
+           "ai_verdict": ai_verdict, "ai_review": review,
+           "ai_review_ts": review_ts, "ai_review_model": review_model,
            "vlm_suppressed": e.vlm_suppressed != 0,
            "vlm_ts": e.vlm_ts,
            "vlm_verdict": vlm_verdict})
+}
+
+fn recognized_verdict(review: &Value) -> Option<&str> {
+    review
+        .get("verdict")?
+        .as_str()
+        .filter(|verdict| matches!(*verdict, "likely_true" | "likely_false" | "uncertain"))
 }
 
 pub(crate) async fn events_count(

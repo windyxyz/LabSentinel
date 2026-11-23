@@ -4,6 +4,87 @@ use crate::tests::helpers::*;
 use crate::*;
 use axum::http::StatusCode;
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn checks_remain_queryable_without_polluting_alert_disposition_or_ai_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    seed_schema(&db);
+    let db_path = db.to_str().unwrap();
+    let store = ls_store::Store::open(db_path).unwrap();
+    let timestamp = format!("{}T00:00:00", ls_core::time::local_today_iso());
+    let open_alert = store
+        .add_event(&ls_store::NewEvent {
+            camera_id: 1,
+            type_: "enter",
+            level: 2,
+            track_id: 1,
+            detail: "open",
+            snapshot: None,
+            ts: &timestamp,
+        })
+        .unwrap();
+    let handled_alert = store
+        .add_event(&ls_store::NewEvent {
+            camera_id: 1,
+            type_: "enter",
+            level: 2,
+            track_id: 2,
+            detail: "handled",
+            snapshot: None,
+            ts: &timestamp,
+        })
+        .unwrap();
+    store
+        .set_event_status(handled_alert, "false_positive", None, None)
+        .unwrap();
+    store
+        .add_check_event(1, "video_check", "recorded check", &timestamp, None)
+        .unwrap();
+    store
+        .set_event_vlm(open_alert, r#"{"verdict":"likely_true"}"#, &timestamp)
+        .unwrap();
+    store
+        .set_ai_review(
+            open_alert,
+            r#"{"verdict":"likely_false","reason":"fixture"}"#,
+            &timestamp,
+            "audit-model",
+        )
+        .unwrap();
+    drop(store);
+    let app = build_router(test_state(db_path));
+    async fn result(app: &axum::Router, path: &str) -> serde_json::Value {
+        let response = req(app, "GET", path, None).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+    assert_eq!(result(&app, "/api/system").await["unhandled_today"], 1);
+    let checks = result(&app, "/api/events?category=check").await;
+    assert_eq!(checks.as_array().unwrap().len(), 1);
+    let reviewed = result(&app, "/api/events?ai_verdict=likely_false").await;
+    assert_eq!(reviewed.as_array().unwrap().len(), 1);
+    assert_eq!(reviewed[0]["id"], open_alert);
+    assert_eq!(reviewed[0]["ai_review"]["reason"], "fixture");
+    assert_eq!(reviewed[0]["ai_review_model"], "audit-model");
+    assert_eq!(reviewed[0]["status"], "new");
+    assert_ne!(
+        result(&app, "/api/events?ai_verdict=none").await[0]["id"],
+        open_alert
+    );
+    let quality = result(&app, "/api/stats/quality?camera_id=1").await;
+    assert_eq!(quality["total"], 2);
+    assert_eq!(quality["handled"], 1);
+    assert_eq!(quality["unhandled"], 1);
+    assert_eq!(quality["false_positive_rate"], 1.0);
+    assert_eq!(quality["by_camera"][0]["rate"], 1.0);
+    assert_eq!(quality["by_ai_verdict"]["likely_false"], 1);
+    assert_eq!(quality["by_ai_verdict"]["likely_true"], 0);
+}
+
 #[tokio::test]
 async fn export_monthly_pdf_route() {
     let dir = tempfile::tempdir().unwrap();

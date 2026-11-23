@@ -46,9 +46,16 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
     // RA2：system 契约补齐（today_counts/unhandled_today/alerts，SQL 口径对齐
     // Python store.today_event_counts/count_events_today_handled/delivery_counts）
     let today = s.today_event_counts().unwrap_or_default();
-    let handled = s.count_events_today_handled().unwrap_or(0);
-    let total_today: i64 = today.iter().map(|(_, n)| *n).sum();
-    let unhandled = (total_today - handled).max(0);
+    let today_iso = ls_core::time::local_today_iso();
+    let unhandled = s
+        .events_query_count(&ls_store::EventsFilter {
+            status: Some("new"),
+            category: Some("alert"),
+            start_ts: Some(&today_iso),
+            end_ts: Some(&today_iso),
+            ..Default::default()
+        })
+        .unwrap_or(0);
     let (pending, failed, ok) = s.delivery_counts().unwrap_or((0, 0, 0));
     let mut today_counts = std::collections::BTreeMap::new();
     for (lv, n) in &today {
