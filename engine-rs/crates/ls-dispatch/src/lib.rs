@@ -216,7 +216,10 @@ pub fn type_text(type_: &str) -> String {
         "no_gloves" => "未戴手套".to_string(),
         "no_goggles" => "未戴护目镜".to_string(),
         "no_mask" => "未戴口罩".to_string(),
+        "face_match" => "识别到已录入人员".to_string(),
         "solo_after_hours" => "单人留守超时".to_string(),
+        "camera_offline" => "摄像头断流".to_string(),
+        "camera_recovered" => "摄像头恢复".to_string(),
         other => other.to_string(),
     }
 }

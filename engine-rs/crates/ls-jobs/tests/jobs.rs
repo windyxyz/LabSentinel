@@ -566,11 +566,19 @@ fn weekly_due_checks_weekday_and_same_week_dedup() {
 fn report_text_contains_metrics_and_top_cameras() {
     let mut names = std::collections::HashMap::new();
     names.insert(1, "试剂区".to_string());
-    let text = ls_jobs::report_text("日报", 10, 3, 2, &[(1, 3)], &names);
+    let sample = ls_store::ComplianceCounts {
+        frames: 7,
+        cameras: 1,
+        compliant: 3,
+        violations: 1,
+        unknown: 2,
+    };
+    let text = ls_jobs::report_text("日报", 10, 3, 2, &[(1, 3)], &names, &sample);
     assert!(text.contains("事件总数：10"));
-    assert!(text.contains("违规事件（L2+）：3"));
+    assert!(text.contains("警告及严重事件：3"));
     assert!(text.contains("未处置：2"));
-    assert!(text.contains("合规率：70%"));
+    assert!(text.contains("合规率（本地抽样）：75.0%"));
+    assert!(text.contains("已判定 4 次，未知 2 次"));
     assert!(text.contains("试剂区（3 次）"));
 }
 

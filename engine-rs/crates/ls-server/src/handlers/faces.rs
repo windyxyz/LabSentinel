@@ -88,7 +88,8 @@ fn config_json(
                 .setting_get(&format!("face.camera.{}", c.id))
                 .ok()
                 .flatten();
-            json!({"id": c.id, "name": c.name, "permission": allowed.as_deref().unwrap_or("off")})
+            json!({"id": c.id, "name": c.name, "permission": allowed.as_deref().unwrap_or("off"),
+                   "alert_on_match": local_face::match_alert_enabled(store, c.id)})
         })
         .collect();
     Ok(
@@ -308,8 +309,19 @@ pub(crate) async fn face_set_camera(
             )
             .into_response());
         }
-        store.setting_set(&format!("face.camera.{id}"), permission)?;
-        Ok(Json(json!({"ok":true,"permission":permission})).into_response())
+        let alert = permission != "off"
+            && body
+                .get("alert_on_match")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| local_face::match_alert_enabled(store, id));
+        store.settings_set(&[
+            (&format!("face.camera.{id}"), permission),
+            (
+                &format!("face.camera_alert.{id}"),
+                if alert { "1" } else { "0" },
+            ),
+        ])?;
+        Ok(Json(json!({"ok":true,"permission":permission,"alert_on_match":alert})).into_response())
     })
 }
 

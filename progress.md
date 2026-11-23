@@ -2,11 +2,76 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID / Task-Name**：`LS-067`（`ACTIVE`）/ 告警投递与值班交接、合规报表、小样本训练预检。
-- **基线**：`main`，`LS-060` 和 `LS-061` 已通过本机实施验收。`LS-062`、`LS-063` 的业务实现有单项实测，独立 EXE 播放联测保留为发布门禁。GitHub 公开 Release 为 `v0.5.0`。
-- **范围**：用户指示全部作为 `v0.6.0`，计划后直接实施，全部验收通过后发布 GitHub。任务 `LS-060`～`LS-068` 逐项推进。
-- **当前重点**。先完成投递重试与证据、小样本导出和无人 Cascade 夹具，再核对值班、相机健康和合规样本口径。
-- **Next First Command**：`rg -n 'LS-058-(07|08|11|12)' findings.md`。
+- **Task-ID / Task-Name**：`LS-075`（`DONE`）/ 候选模型对照、合并与淘汰。`main`，本地工作区。
+- **交付**。将随包 PPE 切到 LAB PPE 专项版，使用 YOLOE 对已穿白大褂做复核。两者均在 Rust ONNX 路径运行；阳性框须唯一归属到人员，证据不足保留未知，明确未穿独立保留。近景口罩开关仍可单独试用。移除指向旧权重的下载入口。
+- **整包对照**。同一批 59 张照片，旧包 57 个人框全部判已穿、0 条未穿；新包仍检出 57 个人框，已穿 2、未穿 3、未知 52，59 张均有检查记录。原监控视频完成检查并多产生 1 条带截图的未穿实验服事件。CPU 两次文件用时均约 28 秒。结果限定于这批样本。额外试用：近景口罩隔离开关对照通过；同批现场照片用新基础模型时，2 条口罩告警开启补判后数量相同。
+- **淘汰与后续**。AIZOO 对俯拍小脸不稳定，Grounding DINO INT8 CPU 中位 2.15 秒／帧，人员 INT8 在现场照片只给出 24 个人框、当前模型 62（独立推理统一 0.35 阈值），且更慢。未选入发布。化学实验室 YOLO 作者权重下载超时，动作和身份替代模型仍待单独实测，未计入性能淘汰。
+- **验证**。Rust fmt、Clippy、workspace 全特性 203 通过／4 忽略；Vitest 101 通过，Vite 构建、API 契约 141／178、Python 编译及 `git diff --check` 通过。`build_rust.py --strict --zip` 和 `build_setup_exe.py` 完成。最终 ZIP 和安装目录布局以 `smoke_rust.py --mask-fixture` 均通过检查完成、证据截图、规则和近景口罩补判对照。
+- **产物**。`Resources/dist/labsentinel-rust-0.6.0-20261123.zip` SHA-256 `6220523B343132421B220E5EC73B718426CB65EB7418A65E63244F24BEEC5470`。`Resources/dist/LabSentinel-setup-0.6.0.exe` SHA-256 `8DC05227A27934829DAEC53A0FB040391CEE2FF73541DA41BFEBAABCCF3BA470`。
+- **限制**。只做推理与导出，本机未训练。现场 DirectML 多路性能和覆盖安装仍待实测。生产实例未覆盖，GitHub 发布暂停。
+
+## Previous Handoff Snapshot · LS-074
+
+- **Task-ID / Task-Name**：`LS-074`（`DONE`）/ 现成检测权重对照与 0.6.0 本地随包验证。`main`，本地工作区。
+- **交付**。通过 Ghost Downloader 下载并校验 MIT 权重 YuNet 与 MobileNetV2。两种发行产物均随包提供。设置可打开「近景口罩检测（试用）」，默认关闭。已有 PPE 无口罩证据时，近景模型按唯一的人框归属补判，未戴置信度至少 0.99，戴口罩至少 0.95。共用 Rust ONNX Runtime 与 DirectML 串行锁。
+- **模型对照**。CPU 模型独立测试中，现场 59 张照片基础模型 0 张未戴，近景模型 7 张，经逐张核对；16 张具备可分类的人脸，其中 9 张信心不足。俯拍视频每 2 秒抽 1 帧，共 32 帧，整帧路径无可用人脸；按 91 个人上半部裁切找到 23 个脸框，只有 2 个达到 40 像素且均未达到判定阈值。Elisa/mask_kaggle 公开验证集 180 张中，未戴 45/60 检出，正确佩戴 0/60 被标为未戴。佩戴不规范样本未验证成独立识别类别。无经验证的实验服替代权重，未引入额外运行环境。
+- **验证**。`cargo fmt --all -- --check`、Clippy 全特性无警告、Rust 202 通过／4 忽略，Vitest 102 通过，Vite 构建、`contract_audit.py` 141／178、三个打包脚本 Python 编译、`git diff --check` 均通过。`build_rust.py --strict --zip`、`build_setup_exe.py` 通过。`smoke_rust.py --zip` 和 `--install-dir` 均用 `--mask-fixture` 对照，照片和视频关闭时只写检查记录，打开后均产生带截图的未戴口罩告警。
+- **产物**。`Resources/dist/labsentinel-rust-0.6.0-20261123.zip` SHA-256 `FA654FDA55C7A37EBD1D7A2B22BED65D5387FD500355E2133806FF11C259A261`。`Resources/dist/LabSentinel-setup-0.6.0.exe` SHA-256 `F2B99BCA9677B16100A39B060CD913492F1867107D91E6B42F02D47984D0522F`。
+- **待现场**。保留 GitHub 发布暂停。仅隔离推理与打包，生产实例未覆盖，本机未训练。DirectML 多路和真实覆盖安装待现场安排。
+
+## Previous Handoff Snapshot · LS-073
+
+- **Task-ID / Task-Name**：`LS-073`（`DONE`）/ 视觉模型与数据调研、标注训练集分组导出。
+- **范围**。本地学习使用。复用官方模型和数据候选，增加标注分组、分组或统一导出、排除及确认删除。GitHub 发布暂停。
+- **现场观察**。用户开启乐橙实时预览，见实验台高位俯拍、门口、办公区，以及彩色、灰度与特殊光照片段。遮挡与小目标支持按机位选择规则、近景口罩和人脸。本轮未保存监控素材、未加入标注池、未训练模型。
+- **验证**。Rust fmt／Clippy／202 项测试通过，4 项忽略。Vitest 101 项、Vite 构建、训练工具 13 项、契约 141／178。Chromium 联测训练集选择、排除下载和确认删除。ZIP 与安装目录布局冒烟均通过。
+- **本地产物**。ZIP SHA-256 `8FC0C1A6CF5FB746BE02B85918C72C8519606769608913AFB8680C3ABD348042`。安装器 SHA-256 `4CE29173784F6E4DA91D1BEF9611A922F017ED76CE118A2C2EAB7F1F1DCD88DE`。候选模型未替换现用权重，训练及真机模型验收留待按用户指定条件执行。
+
+## Previous Handoff Snapshot · LS-072
+
+- **Task-ID / Task-Name**：`LS-072`（`DONE`）/ 事件详情过渡、检查图片预览与标注。
+- **范围**。用户反馈详情闪白闪黑，检查事件无法预览标注。隔离验收，GitHub 发布暂停。
+- **实现**。移除抽屉的整页 View Transition，保留遮罩变暗与面板滑动，支持减少动态效果。图片检查事务写入原图关联，旧库按来源、时间与文件名恢复唯一关联。视频重跑后保留当次截图。图片找不到时提示不可用。
+- **验证**。旧前端回归复现调用整页动画，旧 ZIP 冒烟复现照片截图接口 404。新前端 Chromium 深浅色均通过，Vitest 101 项。Rust fmt／Clippy／201 项测试通过，4 项忽略，契约 141／178。ZIP 和安装目录布局均通过预览、标注及视频留痕冒烟。独立 v21 数据库升级后，旧图片事件可取原图和缩略图，重复标注返回同一样本。
+- **本地产物**。ZIP SHA-256 `9CFC02F55FB0DC0A8193430BDE7995DB79272E9546E4CC090CAB61DCB7C56C01`。安装器 SHA-256 `29B2B86CD48900346F1299AEBC99667D6EA008C1A0EA3E561FD2DF135B385751`。仅本地重打包，现场未覆盖安装。
+
+## Previous Handoff Snapshot · LS-071
+
+- **Task-ID / Task-Name**：`LS-071`（`DONE`）/ 本地图片和视频检查留痕及事件分类。
+- **目标**。用户要求正常检查也写入事件。检查与告警独立分类，图片与视频任务核对真实写入和筛选。现场实例只读，GitHub 发布保持暂停。
+- **实现**。图片检查结果与检查事件一起提交，完成、异常或已处理后被停止的视频分析留一条检查事件。已完成旧照片从持久化结果一次性补录，旧视频需重新分析。事件列表、计数和 CSV 共用分类条件，视频页展示已检查帧数及检查记录入口。
+- **现场隔离验证**。旧库样本经新二进制自启动补入 59 条照片事件。原视频无规则重跑，生成一条检查记录，处理 321 帧，316 帧检出人员，0 条告警。按视频和检查分类导出只含该视频记录。现场库未改动。
+- **回归**。`cargo fmt --all -- --check`、Clippy 全目标全功能、全量测试通过，201 项通过、4 项默认忽略。Vitest 100 项、Vite 生产构建、契约 141／178、Python 编译、`git diff --check` 通过。便携 ZIP 与安装目录布局均通过 `scripts/smoke_rust.py`，检查覆盖无规则照片、无规则视频、有规则视频、分类和优雅退出。
+- **本地产物**。`Resources/dist/labsentinel-rust-0.6.0-20261123.zip` SHA-256 `9CD73F09CCB62A80A1A5C1EADA8C123458826D27ABB1041135C7C3AF49AB32FF`。ISCC 编译的 `Resources/dist/LabSentinel-setup-0.6.0.exe` SHA-256 `94960E0B461A1F03EDF725096B6C59C5E8FF58C924170C81AADB0F36C0B10DDE`。现场部署待用户操作，PPE 召回需单独改进。
+
+## Previous Handoff Snapshot · LS-070
+
+- **Task-ID / Task-Name**：`LS-070`（`READY`）/ 现场检测分类、人脸告警、大华接入与卸载清理。
+- **范围**。继续 v0.6.0 本机验收。GitHub 发布暂停，本轮未操作现场安装和数据。
+- **检测**。随包 PPE 模型同时输出实验服和口罩证据。视频支持独立未戴口罩规则，图片列表与详情显示实际分类。模型关闭或证据不足时不生成未穿实验服事件。
+- **人脸与取流**。每路视频源可在授权范围内开启匹配告警。同设备同人 90 秒限频，管理员查看身份信息。大华新增局域网 RTSP 通道与主辅码流配置。
+- **卸载**。现场扫描 283 行中 254 行来自三处开发测试临时目录。卸载按安装路径清理进程、启动项和快捷方式，默认保留现用及旧布局数据。照片、视频、安装卸载和数据选择已加入发布验收。
+- **验证**。`cargo +stable-x86_64-pc-windows-gnu fmt --all -- --check`、`clippy --workspace --all-targets --all-features -- -D warnings`、`test --workspace --all-features --no-fail-fast` 通过，200 项通过、4 项默认忽略。`npx vitest run` 100 项、`npm run build`、`python -X utf8 scripts/contract_audit.py` 契约 141／178、Python 冒烟脚本编译通过。
+- **包内回归**。`python -X utf8 scripts/smoke_rust.py --zip Resources/dist/labsentinel-rust-0.6.0-20261123.zip --timeout 40` 与 `--install-dir Resources/dist/rust/labsentinel-server` 均通过真实照片检人、视频首帧、检查完成、规则事件和优雅退出，两个临时目录均回收。`node web/scripts/smoke_webrtc.mjs Resources/dist/rust/labsentinel-server` 通过 RTSP 主辅流、WebRTC、快照回退、MSE、设备授权与密码会话。期间修复同一设置页分区深链未刷新的问题。
+- **本地产物**。`Resources/dist/labsentinel-rust-0.6.0-20261123.zip` SHA-256 `5DC1DE6AE6411040EFC8159EC3F980DF8372561657B445B5D2F8D471910A21E4`。`Resources/dist/LabSentinel-setup-0.6.0.exe` SHA-256 `695B76D873C9D2353F3F5E8FC70C4E981979F8E354FA3310E77B6707505F25D9`。ISCC 7 编译通过，真实安装卸载组合命令被本机执行策略拒绝。
+- **Next First Command**：用户本地联测大华实际设备、白大褂与口罩现场影像、人脸库和真实安装卸载。保持 GitHub 发布暂停。
+
+## Previous Handoff Snapshot · LS-069
+
+- **Task-ID / Task-Name**：`LS-069`（`DONE`）/ 现场 v0.5.0 图片结果、视频文件选择与安全区底图，含发布前检测门禁。
+- **现场实证**。v0.5.0 的 59 张图片均解码成功。直接运行随包人员模型 634279b4 得到 opset 22 超过运行库上限 21 的错误。隔离的 v0.5.0 切换已验证模型 4758511e 后，59 张有 56 张检出人员。现场同一段 AV1 MP4 解码成功，隔离实例用验证模型和进入规则生成 27 条事件。生产 v0.5.0 通过现有模型配置接口切换至验证模型，重载了 1 路。已有图片记录仍保留先前的分析结果。
+- **交付与门禁**。视频文件选择器、未启动可看的首帧、`检查完成`、展示模型加载失败和真实图片汇总。构建时把锁定的上游人员模型转换为 opset 21 并校验 SHA-256。便携包和安装目录两种入口均要求有人的照片检出人员，同时验证视频首帧、完成状态和真实规则事件。
+- **验证**。旧二进制与原模型测试包在新门禁的检测步失败并退出 1。修正后的本地测试包通过 `python -X utf8 scripts/smoke_rust.py --zip engine-rs/target/ls-qa/ls069-fixed.zip --timeout 30`，同一产物以隔离安装目录布局运行 `--install-dir` 同样通过。Rust fmt／Clippy 和全量 197 项测试通过，4 项默认忽略。Vitest 100 项、生产构建、契约 141／178、Python 脚本编译与 diff 检查通过。
+- **交接**。改动在本地工作区，生产实例继续使用原 v0.5.0 EXE。发布和余下 v0.6.0 开发仍暂停。恢复后从 `git status --short --branch` 核对本地差异，发布验收时重跑真正的安装器流水线。
+
+## Previous Handoff Snapshot · LS-067
+
+- **Task-ID / Task-Name**：`LS-067`（`DEFERRED`）/ 告警投递与值班交接、合规报表、小样本训练预检。
+- **暂停点**。用户正在生产环境测试，要求发版前暂停。`main` 最新本地提交为 `92cfa67`，领先本地 `origin/main` 记录 7 条。`LS-067` 源码和手册保留在本地工作区，尚未提交。没有推送本批提交、打 `v0.6.0` 标签或启动发布。
+- **当前进度**。工作区包含告警带图重试与历史、小样本 ZIP 和预检、无人 Cascade 夹具、断流与恢复事件、交接备注、按样本统计合规率的服务端改动和部分界面。规则演练、合规报表界面、事件投递与断流实证、API 契约和最终发布验收待续。
+- **已执行**。`python -X utf8 -m unittest discover -s tools/tests` 为 13 项通过，相关脚本语法检查退出 0。最后一轮 Rust fmt 通过，Clippy 在日报发送接口缺少新参数处停止，已补接口调用，待重新运行强制三连。当前 Web 改动待 Vitest、构建和浏览器实测。
+- **现场接入**。优先取授权录像机或摄像头的内网 RTSP，用实际通道验证首帧。已核对大华和乐橙官方接入资料及当前 Rust 的 RTSP／RTSPS 入口，待现场确认型号和网络。
+- **Next First Command**：恢复后执行 `git status --short --branch`。先把摄像头离线筛选移入列表并核对交接和统计界面，再跑 Rust 强制三连及其余回归。正式包和现场验证归 `LS-068`。
 
 ---
 

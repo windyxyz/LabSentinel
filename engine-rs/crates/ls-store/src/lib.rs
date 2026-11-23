@@ -8,11 +8,13 @@ use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
 mod faces;
+mod operations;
 pub use faces::{FacePerson, FaceTemplate};
+pub use operations::{ComplianceCounts, DeliveryWithHistory, EventNote};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 19;
+pub const SCHEMA_VERSION_LATEST: i64 = 22;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
@@ -26,6 +28,8 @@ pub struct Event {
     pub snapshot: Option<String>,
     pub video: Option<String>,
     pub status: String,
+    pub handled_by: Option<String>,
+    pub handled_ts: Option<String>,
     /// UX2 cascade：VLM 复核判定（完整 JSON 文本；None=未复核）
     pub vlm_verdict: Option<String>,
     /// UX2 cascade：复核时间
@@ -47,6 +51,9 @@ pub struct NewEvent<'a> {
     pub snapshot: Option<&'a str>,
     pub ts: &'a str,
 }
+
+const EVENT_COLUMNS: &str = "id,ts,camera_id,type,level,track_id,detail,snapshot,video,\
+    COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0),handled_by,handled_ts";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Camera {
@@ -127,7 +134,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(19, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(22, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -195,6 +202,7 @@ impl Store {
                revoked INTEGER DEFAULT 0);",
         )?;
         self.conn.execute_batch(faces::SCHEMA)?;
+        self.conn.execute_batch(operations::SCHEMA)?;
         Ok(true)
     }
 
@@ -288,6 +296,58 @@ impl Store {
             "INSERT OR IGNORE INTO schema_version VALUES(19, 'rust-ls066-face-models')",
             [],
         )?;
+        self.conn.execute_batch(operations::SCHEMA)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(20, 'rust-ls067-operations')",
+            [],
+        )?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let has_folder_results: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='folder_images')",
+            [], |row| row.get(0),
+        )?;
+        if tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(21, 'rust-ls071-file-checks')",
+            [],
+        )? > 0
+            && has_folder_results
+        {
+            tx.execute(
+                    "INSERT INTO events(ts,camera_id,type,level,track_id,detail,status)
+                     SELECT f.processed_ts,f.camera_id,'photo_check',0,0,
+                     CASE WHEN COALESCE(f.error,'')<>'' THEN
+                       printf('补录图片「%s」检查失败。%s', COALESCE(f.name,'图片'), f.error)
+                     ELSE
+                       printf('补录图片「%s」检查完成。检出 %d 人，已穿实验服 %d、未穿 %d。%s',
+                         COALESCE(f.name,'图片'), f.persons, f.ppe_wearing, f.ppe_no,
+                         CASE WHEN f.violation<>0 THEN '有违规分类，详见图片识别结果。' ELSE '未检出明确违规。' END)
+                     END, 'recorded'
+                     FROM folder_images f JOIN cameras c ON c.id=f.camera_id
+                     WHERE f.width IS NOT NULL AND COALESCE(f.processed_ts,'')<>''",
+                    [],
+                )?;
+        }
+        if tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(22, 'rust-ls072-check-media')",
+            [],
+        )? > 0
+            && has_folder_results
+        {
+            tx.execute(
+                "INSERT OR IGNORE INTO photo_check_images(event_id,image_id)
+                 SELECT e.id,MIN(f.id) FROM events e JOIN folder_images f
+                      ON f.camera_id=e.camera_id AND f.processed_ts=e.ts
+                 WHERE e.type='photo_check' AND
+                      (instr(e.detail,printf('图片「%s」检查',COALESCE(f.name,'图片')))=1 OR
+                       instr(e.detail,printf('补录图片「%s」检查',COALESCE(f.name,'图片')))=1)
+                 GROUP BY e.id HAVING COUNT(*)=1",
+                [],
+            )?;
+        }
+        tx.commit()?;
         self.schema_version()
     }
 
@@ -315,6 +375,35 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    pub fn add_check_event(
+        &self,
+        camera_id: i64,
+        kind: &str,
+        detail: &str,
+        ts: &str,
+        snapshot: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO events(ts,camera_id,type,level,track_id,detail,status,snapshot)
+             VALUES(?,?,?,0,0,?,'recorded',?)",
+            params![ts, camera_id, kind, detail, snapshot],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn check_image_path(&self, event_id: i64) -> rusqlite::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT f.path FROM photo_check_images p JOIN folder_images f ON f.id=p.image_id
+             JOIN events e ON e.id=p.event_id AND e.camera_id=f.camera_id
+             WHERE e.id=? AND e.type='photo_check'",
+                [event_id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     /// 今日事件按级别计数（RA2 对齐 Python today_event_counts：本地日 ts 前缀
     /// 匹配——SQLite `localtime` 取 OS 时区，与 Python datetime.now() 同口径）。
     pub fn today_event_counts(&self) -> rusqlite::Result<Vec<(i64, i64)>> {
@@ -326,11 +415,11 @@ impl Store {
         rows.collect()
     }
 
-    /// 今日已处置数（status != 'new'；Python count_events_today_handled 同口径）。
+    /// 今日已处置告警数。
     pub fn count_events_today_handled(&self) -> rusqlite::Result<i64> {
         self.conn.query_row(
             "SELECT COUNT(*) FROM events \
-             WHERE ts LIKE date('now','localtime') || '%' AND status != 'new'",
+             WHERE ts LIKE date('now','localtime') || '%' AND status NOT IN ('new','recorded')",
             [],
             |r| r.get(0),
         )
@@ -397,29 +486,20 @@ impl Store {
         status: Option<&str>,
         allowed_cameras: Option<&[i64]>,
     ) -> rusqlite::Result<Vec<Event>> {
-        let mut sql = String::from("SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0) FROM events WHERE 1=1");
-        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(cid) = camera_id {
-            sql.push_str(" AND camera_id=?");
-            args.push(Box::new(cid));
-        }
-        if let Some(st) = status {
-            sql.push_str(" AND COALESCE(status,'new')=?");
-            args.push(Box::new(st.to_string()));
-        }
-        append_camera_scope(&mut sql, &mut args, allowed_cameras);
-        sql.push_str(" ORDER BY id DESC LIMIT ? OFFSET ?");
-        args.push(Box::new(limit));
-        args.push(Box::new(offset));
-        let vals: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(vals.as_slice(), map_event)?;
-        rows.collect()
+        self.events_query(&EventsFilter {
+            limit,
+            offset,
+            camera_id,
+            status,
+            allowed_cameras,
+            ..Default::default()
+        })
     }
 
     pub fn event_by_id(&self, id: i64) -> rusqlite::Result<Option<Event>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0) FROM events WHERE id=?")?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {EVENT_COLUMNS} FROM events WHERE id=?"))?;
         let mut rows = stmt.query_map(params![id], map_event)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
@@ -557,12 +637,29 @@ impl Store {
 
     /// L3 控制面：新增摄像头（列/默认值与历史 schema 兼容；新相机默认本地检测）
     pub fn conn_add_camera(&self, name: &str, source: &str, type_: &str) -> rusqlite::Result<i64> {
-        self.conn.execute(
-            // UX1（2026-11-20）：新建相机默认「跟随全局」（detect.mode）；显式
-            // rust=仅本地/vlm=仅 API/cascade=协作 为 per-camera 覆盖
-            "INSERT INTO cameras(name,source,type,group_name,analyzer) VALUES(?,?,?,'','default')",
-            params![name, source, type_],
-        )?;
+        self.add_camera_with_sources(name, source, type_, "", "")
+    }
+
+    pub fn add_camera_with_sources(
+        &self,
+        name: &str,
+        source: &str,
+        type_: &str,
+        group: &str,
+        analysis_source: &str,
+    ) -> rusqlite::Result<i64> {
+        if analysis_source.is_empty() {
+            self.conn.execute(
+                "INSERT INTO cameras(name,source,type,group_name,analyzer) VALUES(?,?,?,?,'default')",
+                params![name, source, type_, group],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT INTO cameras(name,source,type,group_name,analysis_source,analyzer)
+                 VALUES(?,?,?,?,?,'default')",
+                params![name, source, type_, group, analysis_source],
+            )?;
+        }
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -750,10 +847,68 @@ pub struct EventsFilter<'a> {
     pub status: Option<&'a str>,
     pub level: Option<i64>,
     pub type_: Option<&'a str>,
+    pub category: Option<&'a str>,
     pub start_ts: Option<&'a str>,
     pub end_ts: Option<&'a str>,
+    pub search: Option<&'a str>,
+    pub ai_verdict: Option<&'a str>,
+    pub allowed_cameras: Option<&'a [i64]>,
     pub limit: i64,
     pub offset: i64,
+}
+
+impl EventsFilter<'_> {
+    fn conditions(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let mut sql = String::from(" WHERE 1=1");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        match self.category {
+            Some("check") => sql.push_str(" AND type IN ('photo_check','video_check')"),
+            Some("alert") => sql.push_str(" AND type NOT IN ('photo_check','video_check')"),
+            _ => {}
+        }
+        if let Some(v) = self.camera_id {
+            sql.push_str(" AND camera_id=?");
+            args.push(Box::new(v));
+        }
+        if let Some(v) = self.level {
+            sql.push_str(" AND level=?");
+            args.push(Box::new(v));
+        }
+        for (condition, value) in [
+            (" AND COALESCE(status,'new')=?", self.status),
+            (" AND type=?", self.type_),
+            (" AND ts>=?", self.start_ts),
+        ] {
+            if let Some(value) = value {
+                sql.push_str(condition);
+                args.push(Box::new(value.to_owned()));
+            }
+        }
+        if let Some(v) = self.end_ts {
+            if v.len() == 10 {
+                sql.push_str(" AND ts < date(?, '+1 day')");
+                args.push(Box::new(v.to_owned()));
+            } else {
+                sql.push_str(" AND ts<=?");
+                args.push(Box::new(v.to_owned()));
+            }
+        }
+        if let Some(search) = self.search {
+            sql.push_str(
+                " AND (instr(lower(detail), lower(?))>0 OR instr(lower(type), lower(?))>0)",
+            );
+            args.extend([
+                Box::new(search.to_owned()) as Box<dyn rusqlite::ToSql>,
+                Box::new(search.to_owned()),
+            ]);
+        }
+        if let Some(verdict) = self.ai_verdict {
+            sql.push_str(" AND COALESCE(CASE WHEN json_valid(vlm_verdict) THEN json_extract(vlm_verdict, '$.verdict') END,'none')=?");
+            args.push(Box::new(verdict.to_owned()));
+        }
+        append_camera_scope(&mut sql, &mut args, self.allowed_cameras);
+        (sql, args)
+    }
 }
 
 /// 统计聚合行（Python `_EMPTY` 同形：total/l1/l2/l3 + 按类型计数）
@@ -945,40 +1100,23 @@ impl Store {
 
     // ---- events（过滤 / 批量处置） ----
     pub fn events_query(&self, f: &EventsFilter<'_>) -> rusqlite::Result<Vec<Event>> {
-        let mut sql = String::from(
-            "SELECT id,ts,camera_id,type,level,track_id,detail,snapshot,video,COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0) FROM events WHERE 1=1");
-        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(v) = f.camera_id {
-            sql.push_str(" AND camera_id=?");
-            args.push(Box::new(v));
-        }
-        if let Some(v) = f.status {
-            sql.push_str(" AND COALESCE(status,'new')=?");
-            args.push(Box::new(v.to_string()));
-        }
-        if let Some(v) = f.level {
-            sql.push_str(" AND level=?");
-            args.push(Box::new(v));
-        }
-        if let Some(v) = f.type_ {
-            sql.push_str(" AND type=?");
-            args.push(Box::new(v.to_string()));
-        }
-        if let Some(v) = f.start_ts {
-            sql.push_str(" AND ts>=?");
-            args.push(Box::new(v.to_string()));
-        }
-        if let Some(v) = f.end_ts {
-            sql.push_str(" AND ts<=?");
-            args.push(Box::new(v.to_string()));
-        }
-        sql.push_str(" ORDER BY id DESC LIMIT ? OFFSET ?");
+        let (conditions, mut args) = f.conditions();
         args.push(Box::new(f.limit));
         args.push(Box::new(f.offset));
-        let vals: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(vals.as_slice(), map_event)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {EVENT_COLUMNS} FROM events{conditions} ORDER BY id DESC LIMIT ? OFFSET ?"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), map_event)?;
         rows.collect()
+    }
+
+    pub fn events_query_count(&self, filter: &EventsFilter<'_>) -> rusqlite::Result<i64> {
+        let (conditions, args) = filter.conditions();
+        self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM events{conditions}"),
+            rusqlite::params_from_iter(args),
+            |row| row.get(0),
+        )
     }
 
     pub fn bulk_status(
@@ -1190,9 +1328,22 @@ impl Store {
 
     // ---- 投递记录 ----
     pub fn deliveries(&self, status: Option<&str>, limit: i64) -> rusqlite::Result<Vec<Delivery>> {
+        self.list_deliveries(status, None, limit)
+    }
+
+    fn list_deliveries(
+        &self,
+        status: Option<&str>,
+        event_id: Option<i64>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Delivery>> {
         let mut sql = String::from(
             "SELECT id,event_id,channel,COALESCE(status,'pending'),attempts,last_error,updated_ts FROM alert_deliveries WHERE 1=1");
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(id) = event_id {
+            sql.push_str(" AND event_id=?");
+            args.push(Box::new(id));
+        }
         if let Some(s) = status {
             sql.push_str(" AND COALESCE(status,'pending')=?");
             args.push(Box::new(s.to_string()));
@@ -1217,7 +1368,7 @@ impl Store {
 
     pub fn retry_delivery(&self, id: i64) -> rusqlite::Result<bool> {
         let n = self.conn.execute(
-            "UPDATE alert_deliveries SET status='retry', attempts=0, last_error=NULL, updated_ts=? WHERE id=? AND status != 'ok'",
+            "UPDATE alert_deliveries SET status='retry', attempts=0, last_error=NULL, updated_ts=? WHERE id=? AND status IN ('failed','retry','dead_letter')",
             params!["1970-01-01T00:00:00", id],
         )?;
         Ok(n > 0)
@@ -1805,7 +1956,7 @@ impl Store {
         let (limit, offset) = (f.limit, f.offset);
         let mut sql = String::from(
             "SELECT id,camera_id,path,name,ts,processed_ts,width,height,persons,in_zone, \
-             ppe_no,ppe_wearing,COALESCE(key,0),COALESCE(violation,0),event_id,snapshot,error \
+             ppe_no,ppe_wearing,COALESCE(key,0),COALESCE(violation,0),event_id,snapshot,error,zones,violations \
              FROM folder_images WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -1995,7 +2146,7 @@ impl Store {
     pub fn folder_image(&self, iid: i64) -> rusqlite::Result<Option<FolderImageRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id,camera_id,path,name,ts,processed_ts,width,height,persons,in_zone, \
-             ppe_no,ppe_wearing,COALESCE(key,0),COALESCE(violation,0),event_id,snapshot,error \
+             ppe_no,ppe_wearing,COALESCE(key,0),COALESCE(violation,0),event_id,snapshot,error,zones,violations \
              FROM folder_images WHERE id=?",
         )?;
         let mut rows = stmt.query_map(params![iid], map_folder_image)?;
@@ -2026,10 +2177,11 @@ impl Store {
         error: Option<&str>,
         processed_ts: &str,
     ) -> rusqlite::Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let fresh = tx.execute(
             "UPDATE folder_images SET width=?,height=?,persons=?,in_zone=?,ppe_no=?, \
              ppe_wearing=?,zones=?,violations=?,key=?,violation=?,snapshot=?,error=?, \
-             processed_ts=? WHERE id=?",
+             processed_ts=? WHERE id=? AND width IS NULL AND COALESCE(error,'')=''",
             params![
                 width,
                 height,
@@ -2047,7 +2199,27 @@ impl Store {
                 iid
             ],
         )?;
-        Ok(())
+        if fresh > 0 {
+            let (camera, name): (i64, String) = tx.query_row(
+                "SELECT camera_id,COALESCE(name,'图片') FROM folder_images WHERE id=?",
+                [iid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let detail = if let Some(error) = error {
+                format!("图片「{name}」检查失败。{error}")
+            } else {
+                let unknown = (persons - ppe_no - ppe_wearing).max(0);
+                format!("图片「{name}」检查完成。检出 {persons} 人，实验服证据：已穿 {ppe_wearing}、未穿 {ppe_no}、未知 {unknown}。{}",
+                    if violation { "有违规分类，详见图片识别结果。" } else { "未检出明确违规。" })
+            };
+            let event_id =
+                self.add_check_event(camera, "photo_check", &detail, processed_ts, None)?;
+            tx.execute(
+                "INSERT INTO photo_check_images(event_id,image_id) VALUES(?,?)",
+                params![event_id, iid],
+            )?;
+        }
+        tx.commit()
     }
 
     /// RA2-S3：folder 图片关联首个事件（Python set_folder_image_event 同口径）。
@@ -2180,6 +2352,8 @@ fn map_folder_image(r: &Row<'_>) -> rusqlite::Result<FolderImageRow> {
         event_id: r.get(14)?,
         snapshot: r.get(15)?,
         error: r.get(16)?,
+        zones: r.get(17)?,
+        violations: r.get(18)?,
     })
 }
 
@@ -2225,6 +2399,8 @@ pub struct FolderImageRow {
     pub event_id: Option<i64>,
     pub snapshot: Option<String>,
     pub error: Option<String>,
+    pub zones: Option<String>,
+    pub violations: Option<String>,
 }
 
 /// folder_images 列表过滤（R2-309 批次 2：与 Python GET /api/folder-images 同参）
@@ -2282,6 +2458,8 @@ fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
         vlm_verdict: r.get(10)?,
         vlm_ts: r.get(11)?,
         vlm_suppressed: r.get(12)?,
+        handled_by: r.get(13)?,
+        handled_ts: r.get(14)?,
     })
 }
 
@@ -2456,6 +2634,41 @@ mod tests {
         assert!(cols.contains(&"vlm_ts".to_string()));
         assert!(cols.contains(&"vlm_suppressed".to_string()));
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION_LATEST);
+    }
+
+    #[test]
+    fn migration_records_completed_photo_results_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v20.db");
+        let store = Store::open(path.to_str().unwrap()).unwrap();
+        store.ensure_schema().unwrap();
+        store
+            .conn()
+            .execute("DELETE FROM schema_version WHERE version >= 21", [])
+            .unwrap();
+        let cid = store
+            .conn_add_camera("Photos", "fixtures", "folder")
+            .unwrap();
+        store
+            .conn()
+            .execute(
+            "INSERT INTO folder_images(camera_id,path,name,ts,processed_ts,width,persons)
+             VALUES(?1,'checked.jpg','checked.jpg','2026-11-23T08:00:00','2026-11-23T08:56:17',1280,1),
+                   (?1,'pending.jpg','pending.jpg','2026-11-23T08:00:00','2026-11-23T08:56:18',NULL,0)",
+                [cid],
+            )
+            .unwrap();
+        store.migrate().unwrap();
+        store.migrate().unwrap();
+        let rows = store.events(10, 0, Some(cid), Some("recorded")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].type_, "photo_check");
+        assert_eq!(rows[0].ts, "2026-11-23T08:56:17");
+        assert!(rows[0].detail.contains("checked.jpg"));
+        assert_eq!(
+            store.check_image_path(rows[0].id).unwrap().as_deref(),
+            Some("checked.jpg")
+        );
     }
 
     #[test]

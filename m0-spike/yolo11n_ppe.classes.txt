@@ -8,4 +8,3 @@ No Lab Coat
 No Mask
 Person
 Shoes
-HairNet

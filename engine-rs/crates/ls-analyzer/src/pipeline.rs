@@ -62,6 +62,12 @@ pub enum PpeStatus {
     NoPpe,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PpeObservation {
+    pub coat: PpeStatus,
+    pub mask: PpeStatus,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct PersonDetection {
     /// tlbr（像素）
@@ -75,6 +81,13 @@ pub struct LiveTrack {
     pub bbox: [f32; 4],
     pub ppe: PpeStatus,
     pub confidence: f32,
+}
+
+#[derive(Default)]
+pub struct PpeSample {
+    pub compliant: i64,
+    pub violations: i64,
+    pub unknown: i64,
 }
 
 /// 检测器抽象（T-325 接入 ort 后替换实现）。
@@ -121,6 +134,7 @@ pub struct CameraPipeline {
     /// LS-051：上一帧活跃轨迹 `(track_id, tlbr, PPE 状态)`，供实时检测框广播。
     /// 用 Box 存以让新字段不影响现有栈上构造大小敏感路径。
     last_tracks: Vec<LiveTrack>,
+    last_ppe_sample: PpeSample,
     frame_index: u64,
     /// L1 对齐诊断：true 时每帧记录 ByteTrack 激活轨迹 (track_id, tlbr)
     pub log_tracks: bool,
@@ -139,6 +153,22 @@ pub trait PpeRunner: Send {
     /// 皆无 → Unknown——绝不把"证据不足"当"未穿"）。
     fn statuses(&mut self, bgr: &[u8], w: u32, h: u32, person_boxes: &[[f32; 4]])
         -> Vec<PpeStatus>;
+
+    fn observations(
+        &mut self,
+        bgr: &[u8],
+        w: u32,
+        h: u32,
+        person_boxes: &[[f32; 4]],
+    ) -> Vec<PpeObservation> {
+        self.statuses(bgr, w, h, person_boxes)
+            .into_iter()
+            .map(|coat| PpeObservation {
+                coat,
+                mask: PpeStatus::Unknown,
+            })
+            .collect()
+    }
 }
 
 impl CameraPipeline {
@@ -177,6 +207,7 @@ impl CameraPipeline {
             solo_since: HashMap::new(),
             last_active_count: 0,
             last_tracks: Vec::new(),
+            last_ppe_sample: PpeSample::default(),
             frame_index: 0,
             log_tracks: false,
             track_log: Vec::new(),
@@ -200,6 +231,10 @@ impl CameraPipeline {
         &self.last_tracks
     }
 
+    pub fn last_ppe_sample(&self) -> &PpeSample {
+        &self.last_ppe_sample
+    }
+
     /// 处理一帧检测结果，返回本帧事件候选（未入库）。
     /// 无帧数据 = PPE 恒 Unknown（黄金语料/无模型路径，与 Python ppe_model="" 同口径）。
     pub fn process(&mut self, dets: &[PersonDetection], frame_ts: &str) -> Vec<Candidate> {
@@ -214,6 +249,17 @@ impl CameraPipeline {
         frame_ts: &str,
         frame: Option<(&[u8], u32, u32)>,
     ) -> Vec<Candidate> {
+        self.process_with_ppe_sample(dets, frame_ts, frame, false)
+    }
+
+    pub fn process_with_ppe_sample(
+        &mut self,
+        dets: &[PersonDetection],
+        frame_ts: &str,
+        frame: Option<(&[u8], u32, u32)>,
+        sample_ppe: bool,
+    ) -> Vec<Candidate> {
+        self.last_ppe_sample = PpeSample::default();
         self.frame_index += 1;
         let now = parse_ts(frame_ts).unwrap_or_else(ls_time::local_now_civil);
         let mut out = Vec::new();
@@ -262,14 +308,41 @@ impl CameraPipeline {
         // 但该区尚未记录其在内）才整帧跑一次（与 Python 帧级缓存"每分析帧最多
         // 一次"同口径；进入事件的 PPE 判定必须发生在进场那一帧）。
         let mut det_ppe: Vec<PpeStatus> = dets.iter().map(|d| d.ppe).collect();
+        let mut without_mask = HashSet::new();
+        let mask_interval = self.camera.analysis_fps.round().max(1.0) as u64;
+        let sample_masks = (self.frame_index - 1).is_multiple_of(mask_interval)
+            && self
+                .rules
+                .iter()
+                .any(|r| r.enabled && r.behavior == "no_mask");
         if let (Some(runner), Some((bgr, w, h))) = (self.ppe.as_mut(), frame) {
-            if needs_ppe(&self.zones, &self.zone_states, &active) {
+            if !active.is_empty()
+                && !dets.is_empty()
+                && (sample_ppe
+                    || sample_masks
+                    || needs_ppe(&self.zones, &self.zone_states, &active))
+            {
                 let person_boxes: Vec<[f32; 4]> = active.iter().map(|(b, _)| *b).collect();
-                let statuses = runner.statuses(bgr, w, h, &person_boxes);
-                for (bbox, st) in active.iter().zip(statuses) {
-                    if let Some(i) = dets.iter().position(|d| d.box_ == bbox.0) {
-                        det_ppe[i] = st;
+                let observations = runner.observations(bgr, w, h, &person_boxes);
+                for ((bbox, id), observation) in active.iter().zip(observations) {
+                    if let Some(i) = dets.iter().position(|d| d.box_ == *bbox) {
+                        det_ppe[i] = observation.coat;
+                        if observation.mask == PpeStatus::NoPpe {
+                            without_mask.insert(*id);
+                        }
                     }
+                }
+            }
+        }
+        if sample_ppe {
+            for (bbox, _) in &active {
+                let Some(index) = dets.iter().position(|d| d.box_ == *bbox) else {
+                    continue;
+                };
+                match det_ppe[index] {
+                    PpeStatus::Wearing => self.last_ppe_sample.compliant += 1,
+                    PpeStatus::NoPpe => self.last_ppe_sample.violations += 1,
+                    PpeStatus::Unknown => self.last_ppe_sample.unknown += 1,
                 }
             }
         }
@@ -331,6 +404,24 @@ impl CameraPipeline {
             for zid in &inside {
                 if let Some(s) = occ.get_mut(zid) {
                     s.insert(*tid);
+                }
+            }
+            if without_mask.contains(tid) {
+                let mut zone_ids: Vec<_> = inside.iter().copied().collect();
+                zone_ids.sort_unstable();
+                for zone_id in zone_ids.into_iter().map(Some).chain(std::iter::once(None)) {
+                    if self.try_fire(
+                        zone_id,
+                        "no_mask",
+                        *tid,
+                        "检测到人员未戴口罩",
+                        2,
+                        &now,
+                        frame_ts,
+                        &mut out,
+                    ) {
+                        break;
+                    }
                 }
             }
             let ppe = dets
@@ -407,21 +498,6 @@ impl CameraPipeline {
                             frame_ts,
                             &mut out,
                         );
-                        // LS-043：仅当 PPE 模型未启用时才回退发 enter_no_ppe 并提示「实验服检测未启用」；
-                        // 已启用 PPE 模型但证据不足（Unknown）时不误报未穿实验服。
-                        if self.ppe.is_none() {
-                            let detail = format!("进入安全区「{zname}」（实验服检测未启用）");
-                            self.try_fire(
-                                Some(zid),
-                                "enter_no_ppe",
-                                tid,
-                                &detail,
-                                2,
-                                &now,
-                                frame_ts,
-                                &mut out,
-                            );
-                        }
                     }
                 },
             }
@@ -671,6 +747,17 @@ fn rule_zone_ok(rule: &RuleSpec, behavior: &str, zone_id: Option<i64>) -> bool {
         };
     }
     rule.zone_id == 0 || zone_id == Some(rule.zone_id)
+}
+
+pub fn rule_active_at(rule: &RuleSpec, frame_ts: &str, calendar: &HashMap<String, String>) -> bool {
+    let now = parse_ts(frame_ts).unwrap_or_else(ls_time::local_now_civil);
+    rule.enabled
+        && weekday_allowed(&rule.weekdays, &now)
+        && hour_in_window(&rule.time_start, &rule.time_end, &now)
+        && (!rule.holiday_only
+            || calendar
+                .get(&ls_time::format_date(now))
+                .is_some_and(|day| day == "holiday"))
 }
 
 /// "1-5" / "1,2,3" / 空=全部；非法串按不匹配（fail-closed，与 Python 口径一致）。
@@ -1003,6 +1090,58 @@ mod tests {
         assert_eq!(ev[0].behavior, "enter_no_ppe");
         assert_eq!(ev[0].level, 3);
         assert!(ev[0].detail.contains("未穿实验服"));
+    }
+
+    #[test]
+    fn unmasked_person_does_not_trigger_coat_rule_without_coat_evidence() {
+        struct Unmasked;
+        impl PpeRunner for Unmasked {
+            fn statuses(&mut self, _: &[u8], _: u32, _: u32, boxes: &[[f32; 4]]) -> Vec<PpeStatus> {
+                vec![PpeStatus::Unknown; boxes.len()]
+            }
+
+            fn observations(
+                &mut self,
+                _: &[u8],
+                _: u32,
+                _: u32,
+                boxes: &[[f32; 4]],
+            ) -> Vec<PpeObservation> {
+                vec![
+                    PpeObservation {
+                        coat: PpeStatus::Unknown,
+                        mask: PpeStatus::NoPpe
+                    };
+                    boxes.len()
+                ]
+            }
+        }
+        let mut pipe = CameraPipeline::new(
+            camera(),
+            vec![zone()],
+            vec![rule(1, "enter_no_ppe", 2, 0), rule(2, "no_mask", 3, 15)],
+            HashMap::new(),
+            1,
+            1,
+        );
+        let person = PersonDetection {
+            box_: [10., 10., 60., 90.],
+            score: 0.9,
+            ppe: PpeStatus::Unknown,
+        };
+        assert!(pipe.process(&[person], "2026-11-23T12:00:00").is_empty());
+        pipe.set_ppe(Some(Box::new(Unmasked)));
+        let mut events = Vec::new();
+        for frame in 1..=11 {
+            events.extend(pipe.process_with_frame(
+                &[person],
+                &frame_ts_for(frame, 5.0),
+                Some((&[0], 1, 1)),
+            ));
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].behavior, "no_mask");
+        assert_eq!(events[0].level, 3);
     }
 
     #[test]

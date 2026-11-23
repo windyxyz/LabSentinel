@@ -56,6 +56,37 @@ async fn analysis_source_settings_persist_without_exposing_stream_credentials() 
 }
 
 #[tokio::test]
+async fn dahua_create_persists_main_and_substream_without_echoing_password() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("dahua.db");
+    let path = database.to_str().unwrap();
+    let store = ls_store::Store::open(path).unwrap();
+    store.ensure_schema().unwrap();
+    let app = build_router(test_state(path));
+    let result = req(
+        &app,
+        "POST",
+        "/api/cameras",
+        Some(json!({
+            "name": "NVR", "type": "rtsp", "group_name": "Lab",
+            "dahua": {"host":"192.168.1.10","port":554,"channel":3,
+                      "username":"operator","password":"fixture-secret","substream":true}
+        })),
+    )
+    .await;
+    assert_eq!(result.status(), StatusCode::OK);
+    let created = body_json(result).await;
+    assert!(!created.to_string().contains("fixture-secret"));
+    let camera = store
+        .camera(created["id"].as_i64().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(camera.source.ends_with("channel=3&subtype=0"));
+    assert!(camera.analysis_source.ends_with("channel=3&subtype=1"));
+    assert_eq!(camera.group_name, "Lab");
+}
+
+#[tokio::test]
 async fn dataset_export_contains_only_verified_samples_with_normalized_labels() {
     use std::io::Read;
     let dir = tempfile::tempdir().unwrap();

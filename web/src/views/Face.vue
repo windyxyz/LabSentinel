@@ -115,9 +115,9 @@ function install() {
   })
 }
 
-function setCamera(camera, permission) {
+function setCamera(camera, permission, alertOnMatch = camera.alert_on_match) {
   return run(async () => {
-    await api.setFaceCamera(camera.id, permission)
+    await api.setFaceCamera(camera.id, permission, alertOnMatch)
     setConfig(await api.faceConfig())
     notice.value = `已保存「${camera.name}」的人脸识别范围`
   })
@@ -332,8 +332,8 @@ onBeforeUnmount(() => {
       </details>
 
       <details v-if="cameras.length" class="panel">
-        <summary>相机事件的身份辅助</summary>
-        <p class="muted">只处理已允许的相机，识别结果在事件详情中由管理员查看。</p>
+        <summary>相机人脸识别与告警</summary>
+        <p class="muted">开启匹配告警后，识别到已录入人员会生成事件。姓名和匹配分数仅管理员在事件详情中可见。</p>
         <div v-for="camera in cameras" :key="camera.id" class="camera-access">
           <label :for="`face-camera-${camera.id}`">{{ camera.name }}</label>
           <select :id="`face-camera-${camera.id}`" :value="camera.permission" :disabled="busy"
@@ -342,6 +342,9 @@ onBeforeUnmount(() => {
             <option value="local">仅限本地识别</option>
             <option value="local_or_api">允许本地识别和向所选 API 发送事件人脸区域</option>
           </select>
+          <label><input type="checkbox" :checked="camera.alert_on_match"
+            :disabled="busy || camera.permission === 'off'"
+            @change="setCamera(camera, camera.permission, $event.target.checked)" /> 匹配已录入人员时告警</label>
         </div>
       </details>
 

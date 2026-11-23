@@ -20,7 +20,12 @@ export async function fetchMedia(path, signal, etag) {
   const response = await fetch(path, { headers, cache: 'no-store', signal })
   if (!response.ok && !(etag && response.status === 304)) {
     if (response.status === 401 && browserSessionMode) accessChanged()
-    throw Object.assign(new Error(`下载失败（HTTP ${response.status}）`), { status: response.status })
+    let message = `下载失败（HTTP ${response.status}）`
+    if (response.headers.get('content-type')?.includes('application/json')) {
+      const body = await response.json().catch(() => null)
+      if (typeof body?.detail === 'string') message = body.detail
+    }
+    throw Object.assign(new Error(message), { status: response.status })
   }
   return response
 }
@@ -111,6 +116,7 @@ export const api = {
   recoverAccess: (data) => req('POST', '/api/access/recover', data),
   system: () => req('GET', '/api/system'),
   cameras: () => req('GET', '/api/cameras'),
+  cameraStatus: (id) => req('GET', `/api/cameras/${id}/status`),
   usbDevices: (refresh = false) => req('GET', '/api/cameras/usb-devices' + (refresh ? '?refresh=1' : '')),
   addCamera: (d) => req('POST', '/api/cameras', d),
   cameraGroups: () => req('GET', '/api/camera-groups'),
@@ -153,7 +159,10 @@ export const api = {
   datasetCapture: (cid) => req('POST', `/api/dataset/samples/capture/${cid}`, {}),
   datasetUpdate: (id, d) => req('PUT', `/api/dataset/samples/${id}`, d),
   datasetDelete: (id) => req('DELETE', `/api/dataset/samples/${id}`),
-  datasetExportUrl: () => '/api/dataset/export.zip',
+  datasetExportUrl: (params = {}) => {
+    const query = new URLSearchParams(params).toString()
+    return query ? '/api/dataset/export.zip?' + query : '/api/dataset/export.zip'
+  },
   diagnosticsBundleUrl: () => '/api/diagnostics/bundle.zip',
   shareLinks: () => req('GET', '/api/share-links'),
   createShareLink: (d) => req('POST', '/api/share-links', d),
@@ -185,6 +194,8 @@ export const api = {
   delRuleTemplate: (id) => req('DELETE', `/api/rule-templates/${id}`),
   events: (params = {}) => req('GET', '/api/events?' + new URLSearchParams(params)),
   eventsCount: (params = {}) => req('GET', '/api/events/count?' + new URLSearchParams(params)),
+  eventNotes: (id, signal) => req('GET', `/api/events/${id}/notes`, undefined, signal),
+  addEventNote: (id, text) => req('POST', `/api/events/${id}/notes`, { text }),
   alertsStatus: () => req('GET', '/api/alerts/status'),
   alertConfig: () => req('GET', '/api/alerts/config'),
   saveAlertConfig: (data) => req('PUT', '/api/alerts/config', data),
@@ -192,7 +203,7 @@ export const api = {
   pushPolicy: () => req('GET', '/api/alerts/push-policy'),
   savePushPolicy: (d) => req('PUT', '/api/alerts/push-policy', d),
   alertTest: (channel) => req('POST', '/api/alert-test' + (channel ? `?channel=${encodeURIComponent(channel)}` : '')),
-  alertDeliveries: (params = {}) => req('GET', '/api/alert-deliveries?' + new URLSearchParams(params)),
+  alertDeliveries: (params = {}, signal) => req('GET', '/api/alert-deliveries?' + new URLSearchParams(params), undefined, signal),
   alertDeliveryRetry: (id) => req('POST', `/api/alert-deliveries/${id}/retry`),
   alertSilences: (active = 1) => req('GET', '/api/alert-silences' + (active ? '?active=1' : '')),
   addAlertSilence: (d) => req('POST', '/api/alert-silences', d),
@@ -263,7 +274,7 @@ export const api = {
   saveFaceConfig: (patch) => req('PUT', '/api/face/config', patch),
   installFaceLocal: () => req('POST', '/api/face/models/local/install', {}),
   testFaceApi: (id) => req('POST', `/api/face/models/${id}/test`, {}),
-  setFaceCamera: (id, permission) => req('PUT', `/api/face/cameras/${id}`, { permission }),
+  setFaceCamera: (id, permission, alert_on_match) => req('PUT', `/api/face/cameras/${id}`, { permission, alert_on_match }),
   recognizeFace: (form) => req('POST', '/api/face/recognize', form),
   faceLibrary: () => req('GET', '/api/face/library'),
   removeFacePerson: (id) => req('DELETE', `/api/face/library/${id}`),
@@ -273,6 +284,7 @@ export const api = {
   faceDeletePerson: (subject) => req('DELETE', `/api/face/persons/${encodeURIComponent(subject)}`),
   faceClearAll: () => req('DELETE', '/api/face/persons/all'),
   statsDaily: (params = {}) => req('GET', '/api/stats/daily?' + new URLSearchParams(params)),
+  statsCompliance: (params = {}) => req('GET', '/api/stats/compliance?' + new URLSearchParams(params)),
   statsWeekly: (params = {}) => req('GET', '/api/stats/weekly?' + new URLSearchParams(params)),
   statsSummary: (params = {}) => req('GET', '/api/stats/summary?' + new URLSearchParams(params)),
   statsQuality: (params = {}) => req('GET', '/api/stats/quality?' + new URLSearchParams(params)),
@@ -280,6 +292,9 @@ export const api = {
 }
 
 export const TYPE_TEXT = {
+  photo_check: '图片检查',
+  video_check: '视频检查',
+  face_match: '识别到已录入人员',
   enter_no_ppe: '进入安全区未穿实验服',
   enter: '进入安全区',
   exit: '离开安全区',
@@ -289,9 +304,17 @@ export const TYPE_TEXT = {
   no_gloves: '未戴手套',
   no_goggles: '未戴护目镜',
   no_mask: '未戴口罩',
+  camera_offline: '摄像头断流',
+  camera_recovered: '摄像头恢复',
+}
+
+export const CHANNEL_NAMES = {
+  wecom: '企业微信', dingtalk: '钉钉', feishu: '飞书', serverchan: 'Server酱·微信',
+  pushplus: 'PushPlus·微信', qmsg: 'Qmsg·QQ', email: '邮件', webhook: 'Webhook',
 }
 
 export const STATUS_TEXT = {
+  recorded: '已记录',
   new: '未处置',
   acked: '已确认',
   false_positive: '误报',

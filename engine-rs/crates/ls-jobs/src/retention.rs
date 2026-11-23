@@ -404,6 +404,12 @@ pub fn run_cleanup_with(
             )
             .unwrap_or(0);
     }
+    if table_exists(conn, "compliance_daily") {
+        let _ = conn.execute(
+            "DELETE FROM compliance_daily WHERE day < substr(?,1,10)",
+            [&cutoff],
+        );
+    }
 
     // 3.6) 图片文件夹识别记录：只删派生证据副本与缩略图
     if table_exists(conn, "folder_images") {

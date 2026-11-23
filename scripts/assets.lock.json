@@ -1,6 +1,20 @@
 {
   "_readme": "T-005 资产哈希清单：scripts/deploy.py 与 scripts/build_portable.py 的所有二进制下载必须经 download_verified() 按 sha256 逐源校验，不匹配即删除残件换下一源。urls 为官方/官方镜像直连（均 https 公网）；mirror_urls 为加速代理源，仅在 LS_ALLOW_MIRROR_PROXY=1 时启用且同样强制校验。更新某个资产时：先从官方渠道下载并核对哈希（有官方校验文件的以官方为准，如 node SHASUMS256.txt），再更新本文件。哈希来源（2026-11-04 实测）：openh264/ffmpeg/ffprobe/ffmpeg-installer 为本次下载实测；python embed 为 python.org 官方产物实测；node 与 nodejs.org/dist/v20.20.2/SHASUMS256.txt 逐字一致。",
   "assets": {
+    "mask_detector.onnx": {
+      "version": "7f17625a18e809737e4ac44d39fc949994c4c1d1",
+      "license": "MIT",
+      "urls": ["https://huggingface.co/Dao-Dung/face-mask-detector-onnx/resolve/7f17625a18e809737e4ac44d39fc949994c4c1d1/mask_detector.onnx"],
+      "sha256": "fcc9e8d5a19b8000e11fbae4e2cb40315c477c32c5dbf533d3a00f84fd258c00",
+      "size": 9564435
+    },
+    "face_detection_yunet_2023mar.onnx": {
+      "version": "3cc26e7f1014a5ee5d74a42acee58bafc9d0a310",
+      "license": "MIT",
+      "urls": ["https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/face_detection_yunet_2023mar.onnx"],
+      "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+      "size": 232589
+    },
     "go2rtc_win64.zip": {
       "version": "v1.9.15",
       "urls": ["https://github.com/AlexxIT/go2rtc/releases/download/v1.9.15/go2rtc_win64.zip"],
@@ -28,13 +42,18 @@
       "size": 121756431
     },
     "yolo11n_ppe.onnx": {
-      "version": "v1",
-      "license": "权重由 LAB PPE 数据集（Roboflow Universe，CC BY 4.0）训练派生；自 0.3.1 起随发行包分发，署名见 NOTICE",
-      "urls": [
-        "https://github.com/Windy-LabSentinel/assets/releases/download/ppe-v1/yolo11n_ppe.onnx"
-      ],
-      "sha256": "f00231e64433af05323076956d5240830a1b25207c30acfe2f45bc23a152dd6f",
-      "size": 10673073
+      "version": "lab-ppe-specialist-20261025",
+      "license": "LAB PPE CC BY 4.0（署名见 NOTICE），Ultralytics AGPL-3.0",
+      "urls": [],
+      "sha256": "46a36b0354d0973f034a0ae9a7c81ed3071dbb1c5dd2c06b44d3003b1489de78",
+      "size": 10672088
+    },
+    "labcoat-confirm.onnx": {
+      "version": "yoloe-26n-labcoat-20261123",
+      "license": "Ultralytics AGPL-3.0（源权重与导出说明见 NOTICE）",
+      "urls": [],
+      "sha256": "0e73ac56ae72dc9741f99263fef9663c2f674923464892c3a8dafb691bbb1e2c",
+      "size": 9818911
     },
     "yolo11n.onnx": {
       "version": "v8.3.0",
@@ -44,16 +63,17 @@
         "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx"
       ],
       "sha256": "634279b40c07c6391472c51ad45b81ebc48706a9a1fe72dd3396322acd0c053b",
-      "size": 10930182
+      "size": 10930182,
+      "prepared_sha256": "d6ddc4b87afed63c36e5a5dfac2c3238b3e8b440cc38811a33842ce99c110f26",
+      "prepared_size": 10659399,
+      "prepared_opset": 21
     },
     "yolo11n_ppe.classes.txt": {
-      "version": "v1",
-      "license": "同上（Q-08）",
-      "urls": [
-        "https://github.com/Windy-LabSentinel/assets/releases/download/ppe-v1/yolo11n_ppe.classes.txt"
-      ],
-      "sha256": "7ae65014ddcb3940b9bab06e350f404c5fe5873ba8b5551843f5a3f0351bf0d7",
-      "size": 91
+      "version": "lab-ppe-specialist-20261025",
+      "license": "同 yolo11n_ppe.onnx",
+      "urls": [],
+      "sha256": "f97c94a26ee1b5218ea05063eff8e42324e84b1d5cbc628253408ded20243b16",
+      "size": 83
     }
   }
 }

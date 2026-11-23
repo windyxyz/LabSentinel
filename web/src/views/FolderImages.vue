@@ -6,11 +6,10 @@ import AsyncState from '../components/AsyncState.vue'
 
 const folders = ref([])
 const selected = ref('')
-const days = ref(7)
-const filter = ref('key')          // key=有人 | violation=仅违规 | all=全部
+const days = ref(3650)
+const filter = ref('all')
 const items = ref([])
 const summary = ref({ items: [], totals: {}, days: 7 })
-const live = ref({})               // camera_id -> manager 运行指标
 const loading = ref(true)
 const loaded = ref(false)
 const error = ref('')
@@ -21,7 +20,6 @@ let timer = null
 
 const currentSummary = computed(() =>
   summary.value.items.find(x => String(x.camera_id) === String(selected.value)) || null)
-const currentLive = computed(() => selected.value ? live.value[selected.value] : null)
 const total = computed(() => summary.value.totals || {})
 const dayLabel = computed(() => days.value >= 3650 ? '不限时间' : `近 ${days.value} 天`)
 
@@ -51,17 +49,14 @@ function exportUrl() {
 async function reload(showSpinner = false) {
   if (showSpinner) loading.value = true
   try {
-    const [cams, sum, sys, pics] = await Promise.all([
+    const [cams, sum, pics] = await Promise.all([
       api.cameras(),
       api.folderImagesSummary({ days: days.value, ...(selected.value ? { camera_id: selected.value } : {}) }),
-      api.system(),
       api.folderImages(query()),
     ])
     folders.value = (Array.isArray(cams) ? cams : []).filter(c => c.type === 'folder')
-    summary.value = sum || { items: [], totals: {} }
+    summary.value = { items: Array.isArray(sum?.items) ? sum.items : [], totals: sum?.totals || {} }
     items.value = Array.isArray(pics?.items) ? pics.items : []
-    live.value = Object.fromEntries((Array.isArray(sys?.cameras) ? sys.cameras : [])
-      .filter(c => (c.kind || c.type) === 'folder').map(c => [String(c.id), c]))
     if (!loaded.value && !selected.value && folders.value.length) {
       // 仅首次进入默认选第一个文件夹；用户主动选「全部文件夹」后不再强行跳回
       selected.value = String(folders.value[0].id)
@@ -92,8 +87,12 @@ onMounted(() => {
 onUnmounted(() => clearInterval(timer))
 
 function violationsText(it) {
-  return (it.violations || []).map(v =>
-    `${TYPE_TEXT[v.type] || v.type}${v.zone ? `「${v.zone}」` : ''}`).join('、')
+  const violations = Array.isArray(it.violations) ? it.violations : []
+  return violations.map(v => {
+    const type = typeof v === 'string' ? v : v?.type
+    const label = type === 'enter_no_ppe' ? '未穿实验服' : TYPE_TEXT[type] || type
+    return label ? `${label}${v?.zone ? `「${v.zone}」` : ''}` : ''
+  }).filter(Boolean).join('、') || (it.violation ? '已标记违规' : '')
 }
 
 function thumbFailed(it) {
@@ -160,15 +159,6 @@ async function addToPool(it) {
         <div class="muted">读取失败</div>
         <div class="num" :style="total.errors ? 'color:#dc2626' : undefined">{{ total.errors || 0 }}</div>
       </div>
-      <div v-if="currentLive" class="card">
-        <div class="muted">当前文件夹（{{ currentLive.status }}）</div>
-        <div class="num" style="font-size:18px; padding-top:6px">
-          待处理 {{ currentLive.backlog ?? 0 }}</div>
-        <div class="muted" style="font-size:11px">
-          本轮已识别 {{ currentLive.processed_total ?? 0 }} 张
-          <span v-if="currentLive.error_total"> · 失败 {{ currentLive.error_total }}</span>
-        </div>
-      </div>
     </div>
 
     <div v-if="!loading && !folders.length" class="panel" style="margin-top:12px">
@@ -217,7 +207,7 @@ async function addToPool(it) {
         <tr><th>图片时间</th><td>{{ detail.ts }}</td><th>识别时间</th><td>{{ detail.processed_ts }}</td></tr>
         <tr><th>分辨率</th><td>{{ detail.width }} × {{ detail.height }}</td>
             <th>识别结果</th><td>人员 {{ detail.persons }} · 在区 {{ detail.in_zone }}</td></tr>
-        <tr><th>命中区域</th><td colspan="3">{{ (detail.zones || []).join('、') || '—' }}</td></tr>
+        <tr><th>命中区域</th><td colspan="3">{{ (Array.isArray(detail.zones) ? detail.zones.join('、') : '') || '—' }}</td></tr>
         <tr><th>实验服证据</th><td colspan="3">
           未穿 {{ detail.ppe_no }} · 已穿 {{ detail.ppe_wearing }}</td></tr>
         <tr><th>违规</th><td colspan="3" :style="detail.violation ? 'color:var(--l3)' : ''">

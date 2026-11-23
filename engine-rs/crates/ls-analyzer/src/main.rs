@@ -213,6 +213,8 @@ fn make_ppe_runner() -> Option<Box<dyn pipeline::PpeRunner>> {
         clahe_enabled: std::env::var("LS_PPE_CLAHE")
             .map(|v| !matches!(v.trim(), "0" | "false" | "off"))
             .unwrap_or(true),
+        close_mask: None,
+        coat_confirmation: None,
     };
     ppe::make_ppe_runner(&cfg)
 }

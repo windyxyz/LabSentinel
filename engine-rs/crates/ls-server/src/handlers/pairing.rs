@@ -163,7 +163,9 @@ pub(crate) fn permit_device(
             path,
             "/api/cameras"
                 | "/api/events"
+                | "/api/events/count"
                 | "/api/stats/daily"
+                | "/api/stats/compliance"
                 | "/ws/events"
                 | "/api/access/status"
                 | "/api/share-links/verify"
@@ -191,9 +193,11 @@ pub(crate) fn permit_device(
     let Some((id, field)) = split_path_id(path, "/api/events/") else {
         return false;
     };
-    let permitted_operation = (method == Method::POST && field == "status" && device.can_triage())
-        || ((method == Method::GET || method == Method::HEAD)
-            && matches!(field, "thumb" | "snapshot" | "video"));
+    let permitted_operation =
+        (method == Method::POST && matches!(field, "status" | "notes") && device.can_triage())
+            || ((method == Method::GET || method == Method::HEAD)
+                && (matches!(field, "thumb" | "snapshot" | "video")
+                    || (field == "notes" && device.can_triage())));
     permitted_operation
         && ls_store::Store::open(&st.db_path)
             .ok()

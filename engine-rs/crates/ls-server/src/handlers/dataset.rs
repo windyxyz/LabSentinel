@@ -12,7 +12,44 @@ use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
+use zip::write::SimpleFileOptions;
+
+const TRAINING_CLASSES: &[&str] = &[
+    "lab_coat",
+    "no_lab_coat",
+    "gloves",
+    "no_gloves",
+    "goggles",
+    "no_goggles",
+    "mask",
+    "person",
+    "no_mask",
+];
+const TRAINING_SETS: &[(&str, &[&str])] = &[
+    ("coat", &["lab_coat", "no_lab_coat"]),
+    ("mask", &["mask", "no_mask"]),
+    ("gloves", &["gloves", "no_gloves"]),
+    ("goggles", &["goggles", "no_goggles"]),
+    ("person", &["person"]),
+];
+
+fn training_sets(boxes: &Value) -> Vec<&'static str> {
+    let Some(boxes) = boxes.as_array() else {
+        return Vec::new();
+    };
+    TRAINING_SETS
+        .iter()
+        .filter_map(|(name, classes)| {
+            boxes
+                .iter()
+                .any(|b| b["class"].as_str().is_some_and(|c| classes.contains(&c)))
+                .then_some(*name)
+        })
+        .collect()
+}
 
 fn pool_dir(st: &Shared) -> PathBuf {
     std::path::Path::new(&st.data_dir).join("dataset_pool")
@@ -70,11 +107,12 @@ fn preannotate(st: &Shared, cid: i64, src: &Path) -> String {
 
 fn sample_json(s: &ls_store::DatasetSample) -> Value {
     let boxes: Value = serde_json::from_str(&s.boxes_json).unwrap_or_else(|_| json!([]));
+    let sets = training_sets(&boxes);
     json!({
         "id": s.id, "source_type": s.source_type, "source_id": s.source_id,
         "camera_id": s.camera_id, "image_path": s.image_path,
         "width": s.width, "height": s.height, "status": s.status,
-        "boxes": boxes, "created_at": s.created_at, "updated_at": s.updated_at,
+        "boxes": boxes, "training_sets": sets, "created_at": s.created_at, "updated_at": s.updated_at,
     })
 }
 
@@ -82,37 +120,49 @@ pub(crate) async fn samples_from_event(
     State(st): State<Shared>,
     AxPath(eid): AxPath<i64>,
 ) -> Response {
-    let Ok(store) = ls_store::Store::open(&st.db_path) else {
-        return server_err();
+    tokio::task::spawn_blocking(move || {
+        let Ok(store) = ls_store::Store::open(&st.db_path) else {
+            return server_err();
+        };
+        match stage_event_sample(&st, &store, eid, true) {
+            Ok(id) => created_sample(&store, id),
+            Err((code, error)) => detail_err(code, &error).into_response(),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| server_err())
+}
+
+pub(super) fn stage_event_sample(
+    st: &Shared,
+    store: &ls_store::Store,
+    eid: i64,
+    annotate: bool,
+) -> Result<i64, (StatusCode, String)> {
+    let db_error = |_| (StatusCode::INTERNAL_SERVER_ERROR, "暂时无法保存样本".into());
+    let root = Path::new(&st.data_dir);
+    if let Some(id) = store.event_sample_id(eid).map_err(db_error)? {
+        return Ok(id);
+    }
+    let Some(event) = store.event_by_id(eid).map_err(db_error)? else {
+        return Err((StatusCode::NOT_FOUND, "事件不存在".into()));
     };
-    let Ok(Some(ev)) = store.event_by_id(eid) else {
-        return detail_err(StatusCode::NOT_FOUND, "event not found").into_response();
+    let Some(src) = super::events::event_image_path(st, store, &event) else {
+        return Err((StatusCode::NOT_FOUND, "事件没有可用截图".into()));
     };
-    let Some(rel) = ev.snapshot.filter(|s| !s.is_empty()) else {
-        return detail_err(StatusCode::NOT_FOUND, "event has no snapshot").into_response();
+    let (rel, w, h) = copy_into_pool(st, &src, &format!("event_{eid}"))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let photo = root.join(&rel);
+    let boxes = if annotate {
+        preannotate(st, event.camera_id, &photo)
+    } else {
+        "[]".into()
     };
-    let Some(src) = rooted_file(Path::new(&st.data_dir), Path::new(&rel)) else {
-        return detail_err(StatusCode::NOT_FOUND, "snapshot file not found").into_response();
-    };
-    let tag = format!("event_{eid}");
-    let (rel, w, h) = match copy_into_pool(&st, &src, &tag) {
-        Ok(v) => v,
-        Err(e) => return detail_err(StatusCode::BAD_REQUEST, &e).into_response(),
-    };
-    let boxes = preannotate(&st, ev.camera_id, &Path::new(&st.data_dir).join(&rel));
-    match store.add_dataset_sample(
-        "event",
-        &eid.to_string(),
-        Some(ev.camera_id),
-        &rel,
-        w as i64,
-        h as i64,
-        &boxes,
-    ) {
-        Ok(id) => created_sample(&store, id),
-        Err(_) => {
-            let _ = std::fs::remove_file(Path::new(&st.data_dir).join(&rel));
-            server_err()
+    match store.add_event_sample_once(&event, &rel, (w, h), &boxes) {
+        Ok((id, true)) => Ok(id),
+        result => {
+            let _ = std::fs::remove_file(&photo);
+            result.map(|(id, _)| id).map_err(db_error)
         }
     }
 }
@@ -242,11 +292,18 @@ pub(crate) async fn samples_list(
         Err(_) => return server_err(),
     };
     let class = q.get("class").filter(|class| !class.is_empty());
+    let training_set = q
+        .get("set")
+        .filter(|name| !name.is_empty() && name.as_str() != "all");
     let samples: Vec<_> = rows
         .iter()
         .map(sample_json)
         .filter(|sample| {
-            class.is_none_or(|class| {
+            training_set.is_none_or(|name| {
+                sample["training_sets"]
+                    .as_array()
+                    .is_some_and(|sets| sets.iter().any(|s| s.as_str() == Some(name)))
+            }) && class.is_none_or(|class| {
                 sample["boxes"].as_array().is_some_and(|boxes| {
                     boxes
                         .iter()
@@ -319,13 +376,19 @@ pub(crate) async fn sample_delete(State(st): State<Shared>, AxPath(id): AxPath<i
         .ok()
         .flatten()
         .map(|s| s.image_path);
-    match store.delete_dataset_sample(id) {
-        Ok(n) if n > 0 => {
-            if let Some(path) = rel.and_then(|rel| sample_path(&st, &rel)) {
-                let _ = std::fs::remove_file(path);
+    if let Some(path) = rel.and_then(|rel| sample_path(&st, &rel)) {
+        if let Err(error) = std::fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return detail_err(
+                    StatusCode::CONFLICT,
+                    "无法删除标注池副本，请检查文件占用或权限",
+                )
+                .into_response();
             }
-            Json(json!({"ok": true})).into_response()
         }
+    }
+    match store.delete_dataset_sample(id) {
+        Ok(n) if n > 0 => Json(json!({"ok": true})).into_response(),
         _ => detail_err(StatusCode::NOT_FOUND, "sample not found").into_response(),
     }
 }
@@ -362,110 +425,244 @@ pub fn yolo_label_line(b: &Value, img_w: i64, img_h: i64, class_index: usize) ->
     Some(format!("{class_index} {cx:.6} {cy:.6} {w:.6} {h:.6}"))
 }
 
-/// 导出 YOLO 训练集 ZIP（仅 verified；8:2 划分；含 data.yaml/classes.txt/README）。
-pub(crate) async fn dataset_export(State(st): State<Shared>) -> Response {
-    let Ok(store) = ls_store::Store::open(&st.db_path) else {
-        return server_err();
+#[derive(Default, serde::Deserialize)]
+pub(crate) struct DatasetExport {
+    set: Option<String>,
+    exclude: Option<String>,
+}
+
+/// 在阻塞线程准备 ZIP，再以有界缓冲输出到浏览器。
+pub(crate) async fn dataset_export(
+    State(st): State<Shared>,
+    Query(query): Query<DatasetExport>,
+) -> Response {
+    use axum::http::header;
+    let (classes, scoped) = match query.set.as_deref() {
+        None | Some("" | "all") => (TRAINING_CLASSES, false),
+        Some(id) => {
+            let Some((_, classes)) = TRAINING_SETS.iter().find(|(name, _)| *name == id) else {
+                return detail_err(StatusCode::BAD_REQUEST, "未知训练集").into_response();
+            };
+            (*classes, true)
+        }
     };
-    let samples = match store.dataset_samples(Some("verified"), 10_000) {
-        Ok(s) => s,
-        Err(_) => return server_err(),
+    let exclude = query.exclude.as_deref().unwrap_or("");
+    let excluded = exclude
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .map(str::parse::<i64>)
+        .collect::<Result<std::collections::HashSet<_>, _>>();
+    let Ok(excluded) = excluded else {
+        return detail_err(StatusCode::BAD_REQUEST, "排除样本 ID 无效").into_response();
     };
+    let DatasetArchive { file, size } = match tokio::task::spawn_blocking(move || {
+        build_dataset_zip(&st, classes, scoped, &excluded)
+    })
+    .await
+    {
+        Ok(Ok(Some(zip))) => zip,
+        Ok(Ok(None)) => {
+            return detail_err(
+                StatusCode::CONFLICT,
+                "没有可导出的图片。请先核验样本，并检查已核验样本的原图是否仍在标注池。",
+            )
+            .into_response()
+        }
+        _ => {
+            return detail_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "导出中断。请检查磁盘空间或样本是否刚被移除，再重试。",
+            )
+            .into_response()
+        }
+    };
+    let chunks =
+        tokio_util::io::ReaderStream::with_capacity(tokio::fs::File::from_std(file), 65_536);
+    (
+        [
+            (header::CONTENT_TYPE, "application/zip".into()),
+            (header::CONTENT_LENGTH, size.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"labsentinel-yolo-dataset.zip\"".into(),
+            ),
+        ],
+        axum::body::Body::from_stream(chunks),
+    )
+        .into_response()
+}
+
+struct DatasetArchive {
+    file: File,
+    size: u64,
+}
+
+fn build_dataset_zip(
+    st: &Shared,
+    classes: &[&str],
+    scoped: bool,
+    excluded: &std::collections::HashSet<i64>,
+) -> Result<Option<DatasetArchive>, Box<dyn std::error::Error + Send + Sync>> {
+    let store = ls_store::Store::open(&st.db_path)?;
+    let samples = store.dataset_samples(Some("verified"), 10_000)?;
+    let selected = samples
+        .into_iter()
+        .filter(|sample| !excluded.contains(&sample.id))
+        .map(|sample| {
+            let boxes = serde_json::from_str::<Vec<Value>>(&sample.boxes_json).unwrap_or_default();
+            let labels = boxes
+                .iter()
+                .filter_map(|b| {
+                    let name = b["class"].as_str()?;
+                    let index = classes.iter().position(|c| *c == name)?;
+                    yolo_label_line(b, sample.width, sample.height, index)
+                })
+                .collect::<Vec<_>>();
+            (sample, labels)
+        })
+        .filter(|(_, labels)| !scoped || !labels.is_empty())
+        .collect::<Vec<_>>();
+    let verified = selected.len();
+    let samples: Vec<_> = selected
+        .into_iter()
+        .filter_map(|(sample, labels)| {
+            let path = sample_path(st, &sample.image_path)?;
+            let file = File::open(&path).ok()?;
+            image::ImageReader::with_format(BufReader::new(file), image::ImageFormat::Jpeg)
+                .into_dimensions()
+                .ok()?;
+            Some((sample, path, labels))
+        })
+        .collect();
     if samples.is_empty() {
-        return detail_err(
-            StatusCode::CONFLICT,
-            "没有已核验样本——请先在标注池把样本标记为「已核验」",
-        )
-        .into_response();
+        return Ok(None);
     }
-    // 类别表：固定标准词表（与 tools/merge_datasets.py 对齐）
-    let classes = [
-        "lab_coat",
-        "no_lab_coat",
-        "gloves",
-        "no_gloves",
-        "goggles",
-        "no_goggles",
-        "mask",
-        "person",
-    ];
-    let class_index = |name: &str| -> usize {
-        classes
-            .iter()
-            .position(|c| *c == name)
-            .unwrap_or(classes.len() - 1)
-    };
-    let mut zip = crate::handlers::events::ZipWriter::new();
-    let mut train_n = 0usize;
-    let mut val_n = 0usize;
-    for (i, s) in samples.iter().enumerate() {
-        let Some(src) = sample_path(&st, &s.image_path) else {
-            continue;
-        };
-        let Ok(bytes) = std::fs::read(&src) else {
-            continue;
-        };
-        let split = if i % 5 == 0 { "val" } else { "train" };
-        if split == "val" {
-            val_n += 1;
+    let mut zip = zip::ZipWriter::new(BufWriter::new(tempfile::tempfile()?));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let count = samples.len();
+    let val_n = if count == 1 { 0 } else { count.div_ceil(5) };
+    let train_n = count - val_n;
+    for (i, (s, path, lines)) in samples.iter().enumerate() {
+        let split = if val_n > 0 && i % 5 == 0 {
+            "val"
         } else {
-            train_n += 1;
-        }
-        let stem = format!("{}_{}", s.source_type, s.id);
-        zip.add_file(&format!("images/{split}/{stem}.jpg"), &bytes);
-        let boxes: Vec<Value> = serde_json::from_str(&s.boxes_json).unwrap_or_default();
-        let mut lines = Vec::new();
-        for b in &boxes {
-            let cls = b.get("class").and_then(|c| c.as_str()).unwrap_or("person");
-            if let Some(line) = yolo_label_line(b, s.width, s.height, class_index(cls)) {
-                lines.push(line);
-            }
-        }
-        zip.add_file(
-            &format!("labels/{split}/{stem}.txt"),
-            lines.join("\n").as_bytes(),
-        );
+            "train"
+        };
+        let stem = format!("sample_{}", s.id);
+        zip.start_file(format!("images/{split}/{stem}.jpg"), options)?;
+        std::io::copy(&mut File::open(path)?, &mut zip)?;
+        zip.start_file(format!("labels/{split}/{stem}.txt"), options)?;
+        zip.write_all(lines.join("\n").as_bytes())?;
     }
-    zip.add_file(
-        "data.yaml",
-        format!(
-            "path: .\ntrain: images/train\nval: images/val\nnames:\n{}",
+    let instructions = if val_n > 0 {
+        zip.start_file("data.yaml", options)?;
+        write!(
+            zip,
+            "train: images/train\nval: images/val\nnames:\n{}\n",
             classes
                 .iter()
                 .enumerate()
                 .map(|(i, c)| format!("  {i}: {c}"))
                 .collect::<Vec<_>>()
                 .join("\n")
-        )
-        .as_bytes(),
-    );
-    zip.add_file("classes.txt", classes.join("\n").as_bytes());
-    zip.add_file(
-        "README.txt",
-        format!(
-            "LabSentinel YOLO 训练集\n样本：{}（train {train_n} / val {val_n}）\n类别：{}\n\n训练示例：\n  yolo detect train data=data.yaml model=yolo11n.pt imgsz=640 epochs=80\n或使用 tools/train_ppe.py --user-zip <本zip>\n",
-            samples.len(),
-            classes.join(", ")
-        )
-        .as_bytes(),
-    );
-    let bytes = zip.finish();
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "application/zip"),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                "attachment; filename=\"labsentinel-yolo-dataset.zip\"",
-            ),
-        ],
-        bytes,
-    )
-        .into_response()
+        )?;
+        "解压后执行 python tools/train_ppe.py --data <解压目录>/data.yaml --preflight。"
+    } else {
+        "当前只有一张图片。请添加并核验更多图片，或用 --user-zip 合并到已有数据集后预检。"
+    };
+    zip.start_file("classes.txt", options)?;
+    zip.write_all(classes.join("\n").as_bytes())?;
+    zip.start_file("README.txt", options)?;
+    write!(
+        zip,
+        "LabSentinel YOLO 样本\n已导出 {count} 张（train {train_n} / val {val_n}）\n缺失或不可读 {} 张\n\n{instructions}\n",
+        verified - count,
+    )?;
+    let mut file = zip.finish()?.into_inner()?;
+    let size = file.metadata()?.len();
+    file.rewind()?;
+    Ok(Some(DatasetArchive { file, size }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn export_by_training_set_skips_selected_samples_without_mutating_pool() {
+        use crate::tests::helpers::{req, test_state_cfg_dir};
+        use http_body_util::BodyExt;
+        use std::io::{Cursor, Read};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("training.db");
+        let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+        store.ensure_schema().unwrap();
+        let pool = dir.path().join("dataset_pool");
+        std::fs::create_dir(&pool).unwrap();
+        let jpeg = ls_analyzer::evidence::encode_jpeg_bgr(&[64; 48], 4, 4).unwrap();
+        for (name, classes) in [
+            ("combined", &["lab_coat", "no_mask"][..]),
+            ("skip", &["mask"][..]),
+            ("coat", &["no_lab_coat"][..]),
+        ] {
+            std::fs::write(pool.join(format!("{name}.jpg")), &jpeg).unwrap();
+            let boxes = classes
+                .iter()
+                .map(|class| json!({"class":class,"x1":0,"y1":0,"x2":3,"y2":3}))
+                .collect::<Vec<_>>();
+            let id = store
+                .add_dataset_sample(
+                    "event",
+                    name,
+                    None,
+                    &format!("dataset_pool/{name}.jpg"),
+                    4,
+                    4,
+                    "[]",
+                )
+                .unwrap();
+            store
+                .update_dataset_sample(id, &json!(boxes).to_string(), "verified")
+                .unwrap();
+        }
+        let app = crate::build_router(test_state_cfg_dir(
+            db.to_str().unwrap(),
+            "",
+            false,
+            dir.path().to_str().unwrap(),
+        ));
+        let response = req(
+            &app,
+            "GET",
+            "/api/dataset/export.zip?set=mask&exclude=2",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            zip.file_names()
+                .map(Result::unwrap)
+                .filter(|name| name.ends_with(".jpg"))
+                .collect::<Vec<_>>(),
+            ["images/train/sample_1.jpg"]
+        );
+        let mut labels = String::new();
+        zip.by_name("labels/train/sample_1.txt")
+            .unwrap()
+            .read_to_string(&mut labels)
+            .unwrap();
+        assert_eq!(labels.lines().count(), 1);
+        assert!(labels.starts_with("1 "));
+        assert!(pool.join("skip.jpg").is_file());
+        let response = req(&app, "DELETE", "/api/dataset/samples/2", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!pool.join("skip.jpg").exists());
+        assert!(pool.join("combined.jpg").is_file());
+        assert!(store.dataset_sample_by_id(2).unwrap().is_none());
+    }
 
     #[test]
     fn yolo_label_normalizes_and_clamps() {
@@ -479,5 +676,79 @@ mod tests {
         // 退化框返回 None
         let b3 = json!({"x1":10.0,"y1":10.0,"x2":10.0,"y2":20.0});
         assert!(yolo_label_line(&b3, 200, 100, 0).is_none());
+    }
+
+    #[tokio::test]
+    async fn export_splits_only_readable_verified_images() {
+        use crate::tests::helpers::{req, test_state_cfg_dir};
+        use http_body_util::BodyExt;
+        use std::io::Cursor;
+
+        for count in [0, 1, 2, 4, 5] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("export.db");
+            let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+            store.ensure_schema().unwrap();
+            let pool = dir.path().join("dataset_pool");
+            std::fs::create_dir(&pool).unwrap();
+            let photo = ls_analyzer::evidence::encode_jpeg_bgr(&[64; 48], 4, 4).unwrap();
+            for i in 0..=count {
+                let name = format!("test{i}.jpg");
+                if i < count {
+                    std::fs::write(pool.join(&name), &photo).unwrap();
+                }
+                let id = store
+                    .add_dataset_sample(
+                        "event",
+                        "1",
+                        None,
+                        &format!("dataset_pool/{name}"),
+                        4,
+                        4,
+                        "[]",
+                    )
+                    .unwrap();
+                store
+                    .conn()
+                    .execute(
+                        "UPDATE dataset_samples SET status='verified' WHERE id=?",
+                        [id],
+                    )
+                    .unwrap();
+            }
+            let st = test_state_cfg_dir(
+                db.to_str().unwrap(),
+                "",
+                false,
+                dir.path().to_str().unwrap(),
+            );
+            let router = crate::router::build_router(st);
+            let response = req(&router, "GET", "/api/dataset/export.zip", None).await;
+            if count == 0 {
+                assert_eq!(response.status(), StatusCode::CONFLICT);
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+            let names: Vec<_> = zip.file_names().map(Result::unwrap).collect();
+            let val = usize::from(count > 1);
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.starts_with("images/train/"))
+                    .count(),
+                count - val
+            );
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.starts_with("images/val/"))
+                    .count(),
+                val
+            );
+            assert_eq!(names.iter().any(|name| name == "data.yaml"), count > 1);
+            assert!(names.iter().any(|name| name == "classes.txt"));
+        }
     }
 }

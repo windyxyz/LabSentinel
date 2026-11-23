@@ -28,6 +28,9 @@ pub(crate) async fn static_cache_policy(req: axum::extract::Request, next: Next)
 
 // ---- 中间件：Host/CSRF/鉴权（读保护+设备令牌）/安全头/request-id/审计 ----
 
+#[derive(Clone)]
+pub(crate) struct RequestActor(pub String);
+
 pub(crate) async fn guard_middleware(
     State(st): State<Shared>,
     mut req: axum::extract::Request,
@@ -184,6 +187,7 @@ pub(crate) async fn guard_middleware(
         "/api/share-links",
         "/api/access/settings",
         "/api/devices",
+        "/api/alert-deliveries",
         "/api/face/config",
         "/api/face/persons",
         "/api/face/library",
@@ -202,7 +206,12 @@ pub(crate) async fn guard_middleware(
         "/api/plugins",
     ];
     let matches_path = |p: &&str| path == *p || path.starts_with(&format!("{p}/"));
+    let event_notes = path
+        .strip_prefix("/api/events/")
+        .and_then(|tail| tail.strip_suffix("/notes"))
+        .is_some_and(|id| id.parse::<i64>().is_ok());
     let admin_get = ADMIN_GETS.iter().any(matches_path)
+        || (event_notes && !device_session)
         || (st.read_protected && PROTECTED_ADMIN_GETS.iter().any(matches_path));
     if !unsafe_m
         && admin_get
@@ -311,6 +320,9 @@ pub(crate) async fn guard_middleware(
     }
     let rid = uuid_like();
     req.extensions_mut().insert(browser);
+    if unsafe_m && is_api {
+        req.extensions_mut().insert(RequestActor(actor.clone()));
+    }
     let mut resp = next.run(req).await;
     // 审计（任务87/R2-503 对齐：写 /api/* 记录；失败不影响响应；不含 body/headers）。
     // await 而非 detach：tokio 的 spawn_blocking 异步等待不阻塞执行器，且保证
@@ -398,6 +410,7 @@ fn share_read_path(path: &str) -> bool {
         "/api/share-links/verify"
             | "/api/cameras"
             | "/api/stats/daily"
+            | "/api/stats/compliance"
             | "/api/events"
             | "/ws/events"
     ) || path

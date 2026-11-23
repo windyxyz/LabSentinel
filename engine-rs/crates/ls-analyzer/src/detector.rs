@@ -109,19 +109,17 @@ impl Detector for YoloDetector {
 
 /// 构造检测器：模型缺失/无效/加载失败均回退 `NullDetector`（与 sidecar 原语义一致）。
 pub fn make_detector(cfg: &DetectorConfig) -> Box<dyn Detector> {
-    let Some(raw) = &cfg.model_path else {
-        println!("[ls-analyzer] 未配置模型——使用空检测器");
-        return Box::new(NullDetector);
-    };
-    // T-325 安全加固：模型路径规范化 + 普通文件锚点（相对路径/目录/符号链接逃逸拒绝）
-    let Some(path) = anchor_model_file(raw) else {
-        println!(
-            "[ls-analyzer] 模型路径无效/不可读（空检测）: {}",
-            raw.display()
-        );
-        return Box::new(NullDetector);
-    };
-    match YoloModel::load(
+    load_detector(cfg).unwrap_or_else(|error| {
+        eprintln!("[ls-analyzer] 人员检测模型不可用: {error}");
+        Box::new(NullDetector)
+    })
+}
+
+pub fn load_detector(cfg: &DetectorConfig) -> Result<Box<dyn Detector>, String> {
+    let raw = cfg.model_path.as_ref().ok_or("未配置人员检测模型")?;
+    let path = anchor_model_file(raw)
+        .ok_or_else(|| format!("人员检测模型路径无效或不可读: {}", raw.display()))?;
+    let model = YoloModel::load(
         &path,
         cfg.imgsz,
         cfg.conf,
@@ -129,20 +127,13 @@ pub fn make_detector(cfg: &DetectorConfig) -> Box<dyn Detector> {
         cfg.min_area,
         None,
         cfg.use_gpu,
-    ) {
-        Ok(model) => {
-            println!(
-                "[ls-analyzer] 模型已加载 {}（imgsz={} conf={} iou={}）",
-                path.display(),
-                cfg.imgsz,
-                cfg.conf,
-                cfg.iou
-            );
-            Box::new(YoloDetector { model })
-        }
-        Err(e) => {
-            println!("[ls-analyzer] 模型加载失败（回退空检测）: {e}");
-            Box::new(NullDetector)
-        }
-    }
+    )?;
+    println!(
+        "[ls-analyzer] 模型已加载 {}（imgsz={} conf={} iou={}）",
+        path.display(),
+        cfg.imgsz,
+        cfg.conf,
+        cfg.iou,
+    );
+    Ok(Box::new(YoloDetector { model }))
 }

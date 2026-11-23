@@ -8,6 +8,61 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 
+pub(crate) async fn stats_compliance(
+    State(st): State<Shared>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let days = query
+        .get("days")
+        .and_then(|n| n.parse::<i64>().ok())
+        .unwrap_or(1)
+        .clamp(1, 365);
+    let group = query
+        .get("group")
+        .filter(|name| !name.is_empty())
+        .map(String::as_str);
+    let camera_id = query.get("camera_id").and_then(|id| id.parse::<i64>().ok());
+    let default_start = ls_core::time::local_days_ago_date(days - 1);
+    let today = ls_core::time::local_today_iso();
+    let start = query
+        .get("start")
+        .map_or(default_start.as_str(), String::as_str);
+    let end = query.get("end").map_or(today.as_str(), String::as_str);
+    let is_date = |s: &str| {
+        s.len() == 10
+            && ls_core::time::parse_local_datetime(&format!("{s}T00:00:00"))
+                .is_some_and(|date| ls_core::time::format_date(date) == s)
+    };
+    if !is_date(start) || !is_date(end) || start > end {
+        return detail_err(StatusCode::BAD_REQUEST, "统计日期范围无效").into_response();
+    }
+    with_store(&st, |store| {
+        let eligible: Vec<_> = store
+            .cameras()?
+            .into_iter()
+            .filter(|c| matches!(c.type_.as_str(), "rtsp" | "usb"))
+            .filter(|c| {
+                camera_id.is_none_or(|id| c.id == id) && group.is_none_or(|g| c.group_name == g)
+            })
+            .filter(|c| {
+                browser
+                    .device
+                    .as_ref()
+                    .is_none_or(|device| device.allows_camera(c.id))
+            })
+            .map(|c| c.id)
+            .collect();
+        let count = store.compliance_counts(start, end, None, Some(&eligible))?;
+        Ok(Json(
+            json!({"start":start, "end":end, "frames":count.frames,
+            "checked":count.checked(), "compliant":count.compliant, "violations":count.violations,
+            "unknown":count.unknown, "observed_cameras":count.cameras, "eligible_cameras":eligible.len(),
+            "rate_percent":count.rate_percent()}),
+        ))
+    })
+}
+
 pub(crate) async fn stats_summary(
     State(st): State<Shared>,
     Query(q): Query<std::collections::HashMap<String, String>>,
@@ -76,12 +131,25 @@ pub(crate) async fn stats_daily(
     let days: i64 = q.get("days").and_then(|v| v.parse().ok()).unwrap_or(7);
     let cid: Option<i64> = q.get("camera_id").and_then(|v| v.parse().ok());
     let status = q.get("status").map(|s| s.as_str());
+    let group = q.get("group").filter(|name| !name.is_empty());
     with_store(&st, |s| {
-        let cameras = browser
+        let allowed = browser
             .device
             .as_ref()
             .and_then(|device| device.cameras.as_deref());
-        let rows = s.stats_daily_scoped(days, cid, status, cameras)?;
+        let group_cameras = group
+            .map(|name| {
+                s.cameras().map(|rows| {
+                    rows.into_iter()
+                        .filter(|c| {
+                            c.group_name == *name && allowed.is_none_or(|ids| ids.contains(&c.id))
+                        })
+                        .map(|c| c.id)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .transpose()?;
+        let rows = s.stats_daily_scoped(days, cid, status, group_cameras.as_deref().or(allowed))?;
         Ok(Json(json!({"days": rows.into_iter()
             .map(|(d, row)| { let mut v = json!({"date": d}); if let Value::Object(m) = agg_json(&row) { for (k, val) in m { v[k] = val; } } v })
             .collect::<Vec<_>>()})))

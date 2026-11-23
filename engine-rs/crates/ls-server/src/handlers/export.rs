@@ -9,12 +9,17 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::json;
 
-pub(crate) async fn export_events_csv(State(st): State<Shared>) -> Response {
+pub(crate) async fn export_events_csv(
+    State(st): State<Shared>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
+    Query(query): Query<super::events::EventsQuery>,
+) -> Response {
+    let today = ls_core::time::local_today_iso();
     with_store(&st, |s| {
         let rows = s.events_query(&ls_store::EventsFilter {
             limit: 10_000,
             offset: 0,
-            ..Default::default()
+            ..query.filter(&browser, &today)
         })?;
         let mut out = String::from("id,ts,camera_id,type,level,track_id,status,detail\n");
         for e in &rows {

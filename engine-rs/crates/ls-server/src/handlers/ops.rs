@@ -78,19 +78,20 @@ pub(crate) async fn deliveries_list(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let status = q.get("status").map(|s| s.as_str());
-    let limit: i64 = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
-    with_store(&st, |s| {
-        let rows = s.deliveries(status, limit)?;
-        Ok(Json(
-            rows.iter()
-                .map(|d| {
-                    json!({"id": d.id, "event_id": d.event_id, "channel": d.channel,
-                            "status": d.status, "attempts": d.attempts,
-                            "last_error": d.last_error, "updated_ts": d.updated_ts})
-                })
-                .collect::<Vec<_>>(),
-        ))
-    })
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(50)
+        .clamp(1, 100);
+    if let Some(event) = q.get("event_id") {
+        let Ok(event_id) = event.parse::<i64>() else {
+            return detail_err(StatusCode::BAD_REQUEST, "事件编号格式不正确").into_response();
+        };
+        return with_store(&st, |s| {
+            Ok(Json(json!(s.event_deliveries(event_id, status, limit)?)))
+        });
+    }
+    with_store(&st, |s| Ok(Json(json!(s.deliveries(status, limit)?))))
 }
 
 pub(crate) async fn retry_delivery(State(st): State<Shared>, AxPath(did): AxPath<i64>) -> Response {

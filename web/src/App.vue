@@ -36,15 +36,16 @@ const LEGACY = {
 }
 function normalizeHash() {
   const h = window.location.hash.replace(/^#\/?/, '')
-  const key = h.split('/')[0]
+  const key = h.split(/[/?]/, 1)[0]
   if (LEGACY[key]) window.history.replaceState(null, '', LEGACY[key])
 }
 normalizeHash()
 function hashTab() {
-  const key = window.location.hash.replace(/^#\/?/, '').split('/')[0]
+  const key = window.location.hash.replace(/^#\/?/, '').split(/[/?]/, 1)[0]
   return tabs.some((t) => t.key === key) ? key : 'dash'
 }
 const active = ref(hashTab())
+const routeQuery = ref(window.location.hash.split('?')[1] || '')
 const showWelcome = ref(true)
 const logoUrl = '/icons/icon-512-app.png'
 // T-709：值班大屏路由（无 vue-router 的轻量判定）——/wall 全屏无导航
@@ -88,12 +89,14 @@ function readPairingRoute() {
 }
 function go(key) {
   active.value = key
+  routeQuery.value = ''
   window.history.replaceState(null, '', `#/${key}`)
 }
 // 浏览器前进/后退时同步高亮（replaceState 不产生历史，仅外部 hash 变化触发）
 function onHashChange() {
   normalizeHash()
   active.value = hashTab()
+  routeQuery.value = window.location.hash.split('?')[1] || ''
   wallPath.value = isWallPath()
   recoveryPath.value = location.hash === '#/recover'
   pairingRoute.value = readPairingRoute()
@@ -236,8 +239,8 @@ onBeforeUnmount(() => {
     <main>
       <!-- 显式分支渲染（生产构建动态组件切换空渲染规避，2026-11-21） -->
       <Insights v-if="active === 'dash'" />
-      <Sources v-else-if="active === 'sources'" />
-      <Events v-else-if="active === 'events'" />
+      <Sources v-else-if="active === 'sources'" :route-query="routeQuery" />
+      <Events v-else-if="active === 'events'" :route-query="routeQuery" />
       <AlertSettings v-else-if="active === 'alerts'" />
       <Settings v-else />
     </main>

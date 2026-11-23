@@ -45,7 +45,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['close', 'saved'])
 
-const CLASSES = ['person', 'lab_coat', 'no_lab_coat', 'gloves', 'no_gloves', 'goggles', 'no_goggles', 'mask']
+const CLASSES = ['person', 'lab_coat', 'no_lab_coat', 'gloves', 'no_gloves', 'goggles', 'no_goggles', 'mask', 'no_mask']
 const wrapEl = ref(null)
 const viewport = ref(null)
 const image = ref('')
@@ -252,7 +252,7 @@ function deleteSelected() {
 function onKey(e) {
   if (!props.sample || e.target?.matches?.('input, textarea, select, button, [contenteditable]')) return
   const className = CLASSES[Number(e.key) - 1]
-  if (/^[1-8]$/.test(e.key) && className) {
+  if (/^[1-9]$/.test(e.key) && className) {
     cls.value = className
     if (selected.value >= 0) boxes.value[selected.value].class = className
     draw()

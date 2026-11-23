@@ -41,6 +41,7 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
         Err(_) => return Json(json!({"status": "error"})),
     };
     let cams = s.cameras().unwrap_or_default();
+    let outages = s.camera_outages().unwrap_or_default();
     let _total = s.count_events().unwrap_or(0);
     // RA2：system 契约补齐（today_counts/unhandled_today/alerts，SQL 口径对齐
     // Python store.today_event_counts/count_events_today_handled/delivery_counts）
@@ -86,12 +87,17 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
         "perf": {"motion": {"total_frames": motion_total, "skipped_frames": motion_skipped,
                  "skip_ratio": if motion_total > 0 { motion_skipped as f64 / motion_total as f64 } else { 0.0 }},
                  "analysis": st.workers.performance_summary()},
-        "cameras": cams.iter().map(|c| json!({"id": c.id, "name": c.name,
-            "status": c.status, "type": c.type_})).collect::<Vec<_>>(),
+        "cameras": cams.iter().map(|c| {
+            let (age, last_frame, reconnects) = super::cameras::capture_health(&st, c.id);
+            json!({"id": c.id, "name": c.name, "status": c.status, "type": c.type_,
+                "offline_since": outages.get(&c.id), "last_frame_at": last_frame,
+                "frame_age_s": age, "reconnect_count": reconnects})
+        }).collect::<Vec<_>>(),
         "today_counts": today_counts,
         "unhandled_today": unhandled,
         "alerts": {"pending": pending, "failed": failed, "ok": ok},
-        "components": {"engine": {"state": "idle"}, "go2rtc": {"ok": false}},
+        "components": {"engine": {"state": if cams.iter().any(|c| c.status == "running") { "running" } else { "idle" }},
+            "go2rtc": {"ok": st.go2rtc.status()["running"].as_bool().unwrap_or(false)}},
         "config_issues": {"fail": 0, "warn": 0, "source_issues": []},
         "detect": detect,
         "providers": providers,
@@ -201,6 +207,9 @@ pub(crate) async fn reports_send_now(State(st): State<Shared>) -> Response {
         .into_iter()
         .map(|c| (c.id, c.name))
         .collect();
+    let compliance = store
+        .compliance_counts(&today, &today, None, None)
+        .unwrap_or_default();
     let text = ls_jobs::report_text(
         "日报",
         summary.total,
@@ -208,6 +217,7 @@ pub(crate) async fn reports_send_now(State(st): State<Shared>) -> Response {
         summary.unhandled,
         &summary.top,
         &names,
+        &compliance,
     );
     let channels = st.jobs.alert_channels_snapshot();
     let mut sent = 0;
@@ -1430,23 +1440,18 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
         } else {
             None
         };
-        let violation_conf = s
-            .setting_get("ppe.violation_conf")
-            .ok()
-            .flatten()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .unwrap_or(0.30);
-        let wearing_conf = s
-            .setting_get("ppe.wearing_conf")
-            .ok()
-            .flatten()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .unwrap_or(0.20);
+        let coat_confirmation = model_path
+            .as_ref()
+            .is_some_and(|path| crate::worker::bundled_ppe_model(std::path::Path::new(path)));
+        let (violation_conf, wearing_conf) = crate::worker::ppe_thresholds(s, coat_confirmation);
         Ok(Json(json!({
             "installed": installed,
             "enabled": enabled,
             "violation_conf": violation_conf,
             "wearing_conf": wearing_conf,
+            "coat_confirmation": coat_confirmation,
+            "close_mask_available": crate::worker::close_mask_assets().is_some(),
+            "close_mask_enabled": crate::worker::close_mask_enabled(s),
             "output_format": s.setting_get("ppe.output_format")?.unwrap_or_else(|| "auto".into()),
             "source": source,
             "bundled": bundled.is_some(),
@@ -1481,6 +1486,21 @@ pub(crate) async fn ppe_status(State(st): State<Shared>) -> Response {
 /// PUT /api/models/ppe/config——启停实验服检测及可调置信度阈值 {enabled?, violation_conf?, wearing_conf?}；运行中相机软重启。
 pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>) -> Response {
     let enabled = body.get("enabled").and_then(|v| v.as_bool());
+    let close_mask = body.get("close_mask_enabled").and_then(Value::as_bool);
+    if body.get("close_mask_enabled").is_some() && close_mask.is_none() {
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "close_mask_enabled 必须是布尔值",
+        )
+        .into_response();
+    }
+    if close_mask == Some(true) && crate::worker::close_mask_assets().is_none() {
+        return detail_err(
+            StatusCode::CONFLICT,
+            "当前安装缺少随包的近景口罩模型，请更新安装包",
+        )
+        .into_response();
+    }
     let v_conf = body.get("violation_conf").and_then(|v| v.as_f64());
     let w_conf = body.get("wearing_conf").and_then(|v| v.as_f64());
     let output_format = match body.get("output_format") {
@@ -1499,10 +1519,15 @@ pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>
             Some(value)
         }
     };
-    if enabled.is_none() && v_conf.is_none() && w_conf.is_none() && output_format.is_none() {
+    if enabled.is_none()
+        && close_mask.is_none()
+        && v_conf.is_none()
+        && w_conf.is_none()
+        && output_format.is_none()
+    {
         return detail_err(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "至少提供 enabled / violation_conf / wearing_conf / output_format 之一",
+            "至少提供 enabled / close_mask_enabled / violation_conf / wearing_conf / output_format 之一",
         )
         .into_response();
     }
@@ -1531,6 +1556,9 @@ pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>
         if let Some(en) = enabled {
             writes.push(("ppe.enabled", if en { "1" } else { "0" }));
         }
+        if let Some(en) = close_mask {
+            writes.push(("ppe.close_mask_enabled", if en { "1" } else { "0" }));
+        }
         if let Some(v) = violation.as_deref() {
             writes.push(("ppe.violation_conf", v));
         }
@@ -1548,7 +1576,7 @@ pub(crate) async fn ppe_config(State(st): State<Shared>, Json(body): Json<Value>
             .flatten()
             .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
             .unwrap_or(true);
-        Ok(Json(json!({"ok": true, "enabled": cur_en, "restarted": restarted})).into_response())
+        Ok(Json(json!({"ok": true, "enabled": cur_en, "close_mask_enabled": crate::worker::close_mask_enabled(s), "restarted": restarted})).into_response())
     })
 }
 

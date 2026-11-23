@@ -209,6 +209,26 @@ impl Ingest {
         }
     }
 
+    fn file_exit_ok(&self) -> bool {
+        let Some(slot) = &self.child else {
+            return false;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            match slot
+                .lock()
+                .ok()
+                .and_then(|mut child| child.as_mut()?.try_wait().ok())
+            {
+                Some(Some(status)) => return status.success(),
+                Some(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                _ => return false,
+            }
+        }
+    }
+
     /// 重连退避：0.5s×2^n，上限 30s（n = 连续失败次数）
     pub fn backoff(attempt: u32) -> Duration {
         let s = 0.5f64 * 2f64.powi(attempt.min(6) as i32);

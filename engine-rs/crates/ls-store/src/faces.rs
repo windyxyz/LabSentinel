@@ -229,6 +229,50 @@ impl Store {
         Ok(())
     }
 
+    pub fn add_face_alert(
+        &self,
+        event: &crate::NewEvent<'_>,
+        person: i64,
+        similarity: f32,
+        now: i64,
+        since: &str,
+    ) -> rusqlite::Result<Option<i64>> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            self.conn(),
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let inserted = tx.execute(
+            "INSERT INTO events(ts,camera_id,type,level,track_id,detail)
+             SELECT ?1,?2,'face_match',?3,?4,?5
+             WHERE EXISTS (SELECT 1 FROM cameras WHERE id=?2)
+               AND EXISTS (SELECT 1 FROM face_people WHERE id=?6 AND removing=0 AND expires_at>?7)
+               AND NOT EXISTS (
+                 SELECT 1 FROM face_event_matches m JOIN events e ON e.id=m.event_id
+                 WHERE m.person_id=?6 AND e.camera_id=?2 AND e.type='face_match' AND e.ts>=?8
+               )",
+            params![
+                event.ts,
+                event.camera_id,
+                event.level,
+                event.track_id,
+                event.detail,
+                person,
+                now,
+                since
+            ],
+        )?;
+        if inserted == 0 {
+            return Ok(None);
+        }
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO face_event_matches(event_id,person_id,similarity) VALUES(?,?,?)",
+            params![id, person, similarity],
+        )?;
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
     pub fn event_face_match(
         &self,
         event: i64,

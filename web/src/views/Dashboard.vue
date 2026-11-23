@@ -30,11 +30,13 @@ const monitoring = computed(() => {
   for (const camera of cameras) {
     if (!camera || typeof camera.id !== 'number' || camera.type === 'folder') continue
     counts.total++
+    if (camera.offline_since && camera.status !== 'stopped') { counts.offline++; continue }
     switch (camera.status) {
       case 'running': counts.running++; break
       case 'starting':
       case 'reconnecting': counts.starting++; break
-      case 'stopped': counts.stopped++; break
+      case 'stopped':
+      case 'completed': counts.stopped++; break
       default: counts.offline++
     }
   }
@@ -121,10 +123,16 @@ onBeforeUnmount(() => {
           </div>
         </template>
         <p v-else class="muted stat-detail">{{ monitoring ? '尚未添加摄像头' : '暂时无法读取摄像头状态' }}</p>
-        <a href="#/sources/cams" class="stat-link">{{ monitoring?.total === 0 ? '添加摄像头' : '查看摄像头' }}</a>
+        <a :href="monitoring?.offline ? '#/sources/cams?status=offline' : '#/sources/cams'" class="stat-link">
+          {{ monitoring?.total === 0 ? '添加摄像头' : monitoring?.offline ? '查看离线摄像头' : '查看摄像头' }}
+        </a>
       </div>
       <div class="card"><div class="muted">今日事件</div><div class="num">{{ Object.values(sys.today_counts || {}).reduce((a, b) => a + b, 0) }}</div></div>
-      <div class="card"><div class="muted">未处置</div><div class="num" :style="{ color: sys.unhandled_today > 0 ? 'var(--l2)' : undefined }">{{ sys.unhandled_today ?? 0 }}</div></div>
+      <div class="card">
+        <div class="muted">今日待处置</div>
+        <div class="num" :style="{ color: sys.unhandled_today > 0 ? 'var(--l2)' : undefined }">{{ sys.unhandled_today ?? 0 }}</div>
+        <a href="#/events?status=new&today=1" class="stat-link">查看待处置事件</a>
+      </div>
       <div class="card"><div class="muted">警告(L2)</div><div class="num">{{ sys.today_counts?.['2'] || 0 }}</div></div>
       <div class="card"><div class="muted">严重(L3)</div><div class="num">{{ sys.today_counts?.['3'] || 0 }}</div></div>
       <div class="card"><div class="muted">实时通道</div><div class="num" :style="{ fontSize: '18px', paddingTop: '6px' }">{{ wsState }}</div></div>

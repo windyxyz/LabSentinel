@@ -20,6 +20,7 @@ LS_VLM_URL/KEY 指向真实端点后重跑本脚本即可。
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -46,6 +48,19 @@ def step(name: str, ok: bool, detail: str = "") -> None:
     global ok_all
     print(f"[{'PASS' if ok else 'FAIL'}] {name} {detail}", flush=True)
     ok_all = ok and ok_all
+
+
+def write_empty_frame(path: Path) -> None:
+    width, height = 640, 480
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        data = kind + payload
+        return struct.pack(">I", len(payload)) + data + struct.pack(">I", zlib.crc32(data))
+
+    pixels = (b"\0" + b"\x80" * width * 3) * height
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+                     + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
 
 
 def get(url: str, timeout: float = 3.0):
@@ -71,9 +86,8 @@ def main() -> int:
     proc = None
     try:
         # [1] 素材
-        imgs_ok = (imgs / "person-frame.jpg").is_file() \
-            and (imgs / "empty-frame.jpg").is_file()
-        step("1 素材（有人帧+空场景帧）", imgs_ok, str(imgs))
+        imgs_ok = (imgs / "person-frame.jpg").is_file()
+        step("1 素材（实拍有人帧）", imgs_ok, str(imgs))
         if not imgs_ok:
             return 1
 
@@ -205,7 +219,7 @@ def main() -> int:
         # （analyzer=default 跟随全局 cascade；本地扫不到人/规则 → 不送 API）
         empty_dir = tmp / "casc-empty"
         empty_dir.mkdir()
-        shutil.copy(imgs / "empty-frame.jpg", empty_dir / "empty.jpg")
+        write_empty_frame(empty_dir / "empty.png")
         st, j = post(f"{base}/api/cameras",
                      {"name": "cascade-empty", "source": str(empty_dir),
                       "type": "folder"})

@@ -35,6 +35,7 @@ CANONICAL = [
     "no_goggles",
     "mask",
     "person",
+    "no_mask",
 ]
 
 # 常见别名 → 标准词
@@ -55,6 +56,8 @@ DEFAULT_MAP = {
     "no goggles": "no_goggles",
     "mask": "mask",
     "face mask": "mask",
+    "no mask": "no_mask",
+    "without mask": "no_mask",
     "person": "person",
     "people": "person",
     "worker": "person",
@@ -206,16 +209,21 @@ def mix(user: list[Sample], public: list[Sample], ratio: tuple[int, int]) -> lis
 
 
 def write_dataset(samples: list[Sample], out: Path, val_ratio: float = 0.2) -> dict:
-    """写标准 YOLO 目录（8:2），返回统计。"""
-    for sub in ("images/train", "images/val", "labels/train", "labels/val"):
-        (out / sub).mkdir(parents=True, exist_ok=True)
+    """写 YOLO 样本目录。有独立验证集时才写训练配置。"""
+    available = [s for s in samples if s.image.is_file()]
+    if not available:
+        raise ValueError("没有可用图片，请检查样本文件")
+    if not 0 < val_ratio < 1:
+        raise ValueError("验证集比例须介于 0 与 1 之间")
     n_train = n_val = 0
-    stride = max(1, round(1 / val_ratio))
-    for i, s in enumerate(samples):
-        split = "val" if len(samples) > 1 and (i + 1) % stride == 0 else "train"
+    stride = max(2, round(1 / val_ratio))
+    for i, s in enumerate(available):
+        split = "val" if len(available) > 1 and i % stride == 0 else "train"
         stem = f"{i:06d}_{s.image.stem}"
         dst_img = out / "images" / split / (stem + s.image.suffix)
         dst_lab = out / "labels" / split / (stem + ".txt")
+        dst_img.parent.mkdir(parents=True, exist_ok=True)
+        dst_lab.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(s.image, dst_img)
         dst_lab.write_text("\n".join(s.lines), encoding="utf-8")
         if split == "val":
@@ -223,13 +231,19 @@ def write_dataset(samples: list[Sample], out: Path, val_ratio: float = 0.2) -> d
         else:
             n_train += 1
     (out / "classes.txt").write_text("\n".join(CANONICAL), encoding="utf-8")
-    (out / "data.yaml").write_text(
-        "path: .\ntrain: images/train\nval: images/val\nnames:\n"
-        + "\n".join(f"  {i}: {c}" for i, c in enumerate(CANONICAL))
-        + "\n",
-        encoding="utf-8",
-    )
-    return {"total": len(samples), "train": n_train, "val": n_val}
+    if n_val:
+        (out / "data.yaml").write_text(
+            "train: images/train\nval: images/val\nnames:\n"
+            + "\n".join(f"  {i}: {c}" for i, c in enumerate(CANONICAL)) + "\n",
+            encoding="utf-8",
+        )
+    else:
+        (out / "README.txt").write_text(
+            "只有 1 张可用图片。继续补充或合并样本，生成独立的训练集和验证集后再训练。\n",
+            encoding="utf-8",
+        )
+    return {"total": len(available), "train": n_train, "val": n_val,
+            "missing": len(samples) - len(available)}
 
 
 def extract_user_zip(zip_path: Path, out_dir: Path) -> Path:
@@ -282,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
 
     mapping = json.loads(Path(args.map).read_text(encoding="utf-8")) if args.map else None
     out = Path(args.out)
-    if (out / "data.yaml").exists():
+    if (out / "data.yaml").exists() or (out / "classes.txt").exists():
         ap.error("--out 已包含训练集，请指定新的输出目录")
     all_public: list[Sample] = []
     for spec in args.src:
@@ -316,7 +330,11 @@ def main(argv: list[str] | None = None) -> int:
         if not merged:
             print("[失败] 没有可用样本", file=sys.stderr)
             return 2
-        stats = write_dataset(merged, out)
+        try:
+            stats = write_dataset(merged, out)
+        except (OSError, ValueError) as exc:
+            print(f"[失败] {exc}", file=sys.stderr)
+            return 2
         print(f"[ok] {out}: {stats}")
     finally:
         if tmp_ctx is not None:

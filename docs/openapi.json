@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "LabSentinel",
-    "version": "0.2.0"
+    "version": "0.6.0"
   },
   "paths": {
     "/api/access/status": {
@@ -2774,8 +2774,10 @@
     "/api/events": {
       "get": {
         "summary": "Events",
+        "description": "事件包含检查记录和告警。检查记录为 photo_check 或 video_check。",
         "operationId": "events_api_events_get",
         "parameters": [
+          {"name":"category","in":"query","schema":{"enum":["check","alert"]}},
           {
             "name": "limit",
             "in": "query",
@@ -2953,6 +2955,7 @@
         "description": "与 events 相同过滤条件的总数（任务19；分页用；任务84 q 关键词）。",
         "operationId": "events_count_api_events_count_get",
         "parameters": [
+          {"name":"category","in":"query","schema":{"enum":["check","alert"]}},
           {
             "name": "camera_id",
             "in": "query",
@@ -3318,14 +3321,17 @@
     },
     "/api/face/cameras/{id}": {
       "put": {
-        "summary": "设置事件人脸辅助识别的相机权限",
+        "summary": "设置相机人脸辅助识别权限及匹配告警",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "type": "object", "required": ["permission"],
-                "properties": { "permission": { "enum": ["off", "local", "local_or_api"] } }
+                "properties": {
+                  "permission": { "enum": ["off", "local", "local_or_api"] },
+                  "alert_on_match": { "type": "boolean", "default": false }
+                }
               }
             }
           }
@@ -3825,6 +3831,7 @@
         "description": "事件 CSV（UTF-8 带 BOM，Excel 中文不乱码；生成器流式返回）。",
         "operationId": "export_events_csv_api_export_events_csv_get",
         "parameters": [
+          {"name":"category","in":"query","schema":{"enum":["check","alert"]}},
           {
             "name": "days",
             "in": "query",
@@ -4548,6 +4555,7 @@
     "/api/models/ppe/status": {
       "get": {
         "summary": "Ppe Status",
+        "description": "coat_confirmation 表示使用随包白大褂复核。close_mask_available 表示当前安装有近景口罩模型，close_mask_enabled 表示管理员已启用近景补判。",
         "operationId": "ppe_status_api_models_ppe_status_get",
         "responses": {
           "200": {
@@ -4764,6 +4772,19 @@
             "type": "string",
             "title": "Source"
           },
+          "dahua": {
+            "type": "object",
+            "description": "大华局域网设备。type 为 rtsp 时可用此字段代替 source。",
+            "required": ["host", "port", "channel", "username", "password", "substream"],
+            "properties": {
+              "host": { "type": "string" },
+              "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "channel": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "username": { "type": "string" },
+              "password": { "type": "string", "format": "password", "writeOnly": true },
+              "substream": { "type": "boolean" }
+            }
+          },
           "type": {
             "type": "string",
             "title": "Type",
@@ -4783,8 +4804,11 @@
         },
         "type": "object",
         "required": [
-          "name",
-          "source"
+          "name"
+        ],
+        "oneOf": [
+          { "required": ["source"], "not": { "required": ["dahua"] } },
+          { "properties": { "type": { "const": "rtsp" } }, "required": ["type", "dahua"] }
         ],
         "title": "CameraCreate"
       },

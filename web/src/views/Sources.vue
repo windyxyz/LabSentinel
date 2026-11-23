@@ -8,6 +8,7 @@ import FolderImages from './FolderImages.vue'
 import Zones from './Zones.vue'
 
 const seg = ref('cams')
+defineProps({ routeQuery: { type: String, default: '' } })
 const segs = [
   { id: 'cams', label: '摄像头', comp: Cameras,
     icon: '<rect x="2" y="5" width="9" height="7" rx="1.5"/><path d="M11 8.2l3-1.8v5.2l-3-1.8"/>' },
@@ -18,13 +19,13 @@ const segs = [
 ]
 // 深链分段：#/sources/images 等（App.vue 归一化后只保留 tab，分段在此解析）
 onMounted(() => {
-  const sub = window.location.hash.split('/')[2]
+  const sub = window.location.hash.split('?')[0].split('/')[2]
   if (segs.some((s) => s.id === sub)) seg.value = sub
   // 分段跟随浏览器 hash（同 Insights：SPA 内 hash 直进同步）
   window.addEventListener('hashchange', syncFromHash)
 })
 function syncFromHash() {
-  const sub = window.location.hash.split('/')[2]
+  const sub = window.location.hash.split('?')[0].split('/')[2]
   if (segs.some((s) => s.id === sub)) seg.value = sub
 }
 onBeforeUnmount(() => window.removeEventListener('hashchange', syncFromHash))
@@ -47,7 +48,7 @@ function pick(id) {
       </button>
     </div>
     <!-- 显式分支渲染（同 Insights：规避生产动态组件切换空渲染） -->
-    <Cameras v-if="seg === 'cams'" />
+    <Cameras v-if="seg === 'cams'" :route-query="routeQuery" />
     <FolderImages v-else-if="seg === 'images'" />
     <Zones v-else />
   </div>

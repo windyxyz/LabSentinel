@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::handlers::events::event_json;
 use crate::performance::{FrameTiming, PerformanceWindow};
@@ -84,6 +85,21 @@ impl EventSink {
         format!("{}|{}|{}", cand.evidence_key, cand.behavior, cand.track_id)
     }
 
+    fn save_snapshot(&self, camera: i64, ts: &str, jpeg: &[u8]) -> Result<String, String> {
+        std::fs::create_dir_all(&self.paths.snapshots)
+            .map_err(|e| format!("创建截图目录失败: {e}"))?;
+        let seq = SNAP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            "ev_{camera}_{}_{}{:04}.jpg",
+            ts.replace([':', '-', '.'], ""),
+            std::process::id(),
+            seq
+        );
+        let path = self.paths.snapshots.join(name);
+        std::fs::write(&path, jpeg).map_err(|e| format!("截图写入失败: {e}"))?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
     /// 候选 → 截图 → 入库 → WS 广播。返回 `Ok(Some(eid))`=已落地（供 finalize
     /// 关联），`Ok(None)`=去重命中（Python 桥静默丢弃同口径）。
     pub fn record(
@@ -117,22 +133,9 @@ impl EventSink {
                 }
             }
         }
-        let mut snapshot: Option<String> = None;
-        if let Some(jpeg) = snapshot_jpeg {
-            std::fs::create_dir_all(&self.paths.snapshots)
-                .map_err(|e| format!("创建截图目录失败: {e}"))?;
-            let seq = SNAP_SEQ.fetch_add(1, Ordering::Relaxed);
-            let name = format!(
-                "ev_{}_{}_{}{:04}.jpg",
-                cand.camera_id,
-                cand.ts_iso.replace([':', '-', '.'], ""),
-                std::process::id(),
-                seq
-            );
-            let path = self.paths.snapshots.join(name);
-            std::fs::write(&path, jpeg).map_err(|e| format!("截图写入失败: {e}"))?;
-            snapshot = Some(path.to_string_lossy().into_owned());
-        }
+        let snapshot = snapshot_jpeg
+            .map(|jpeg| self.save_snapshot(cand.camera_id, &cand.ts_iso, jpeg))
+            .transpose()?;
         let st = &self.st;
         let store = ls_store::Store::open(&st.db_path).map_err(|e| e.to_string())?;
         let ev = ls_store::NewEvent {
@@ -309,8 +312,10 @@ impl EventSink {
 
 /// Python CameraManager 重启退避序列（秒）。
 const RESTART_BACKOFFS: [u64; 4] = [1, 5, 30, 60];
-/// 存活超过该秒数后失败 → 重置重启计数（Python Manager 同口径）。
+/// 连续收到画面达到该时间后结束断流事件，并重置重连计数。
 const RESTART_ALIVE_RESET_S: u64 = 5;
+const OUTAGE_DEBOUNCE: Duration = Duration::from_secs(5);
+const COMPLIANCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 /// 默认重启上限（Python Manager.MAX_RESTARTS 同量级）。
 const DEFAULT_MAX_RESTARTS: u32 = 4;
 
@@ -383,16 +388,45 @@ impl Workers {
             .collect()
     }
 
-    fn insert(&self, cid: i64, h: Arc<WorkerHandle>) {
-        if let Ok(mut m) = self.map.lock() {
-            m.insert(cid, h);
-        }
+    fn insert(&self, cid: i64, handle: Arc<WorkerHandle>) -> bool {
+        let Ok(mut map) = self.map.lock() else {
+            return false;
+        };
+        let std::collections::hash_map::Entry::Vacant(entry) = map.entry(cid) else {
+            return false;
+        };
+        entry.insert(handle);
+        true
     }
 
-    /// 移除并请求停止（kill ffmpeg slot 解除阻塞读）；返回被停句柄。
-    pub fn remove_and_stop(&self, cid: i64) -> Option<Arc<WorkerHandle>> {
-        let h = self.map.lock().ok()?.remove(&cid)?;
-        h.stop.store(true, Ordering::SeqCst);
+    fn with_current<T>(
+        &self,
+        cid: i64,
+        handle: &Arc<WorkerHandle>,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let map = self.map.lock().ok()?;
+        Arc::ptr_eq(map.get(&cid)?, handle).then(action)
+    }
+
+    fn remove_and_stop(
+        &self,
+        store: Option<&ls_store::Store>,
+        cid: i64,
+        expected: Option<&Arc<WorkerHandle>>,
+        status: &str,
+    ) -> Option<Arc<WorkerHandle>> {
+        let mut map = self.map.lock().ok()?;
+        let handle = map.get(&cid)?;
+        if expected.is_some_and(|expected| !Arc::ptr_eq(handle, expected)) {
+            return None;
+        }
+        handle.stop.store(true, Ordering::SeqCst);
+        if let Some(store) = store {
+            let _ = store.set_camera_status(cid, status);
+        }
+        let h = map.remove(&cid)?;
+        drop(map);
         ls_ingest::Ingest::kill_slot(&h.ffmpeg);
         Some(h)
     }
@@ -541,45 +575,33 @@ impl WorkerConfig {
             .flatten()
             .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
             .unwrap_or(true);
-        // LS-043：支持从 app_settings / 环境变量读取可配 PPE 置信度阈值（灰度/红外监控调优用）
-        let ppe_v_conf = s
-            .setting_get("ppe.violation_conf")
-            .ok()
-            .flatten()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .or_else(|| {
-                std::env::var("LS_PPE_CONF")
-                    .ok()
-                    .and_then(|v| v.trim().parse::<f32>().ok())
-            })
-            .map(|v| v.clamp(0.05, 0.95))
-            .unwrap_or(0.30);
-        let ppe_w_conf = s
-            .setting_get("ppe.wearing_conf")
-            .ok()
-            .flatten()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .or_else(|| {
-                std::env::var("LS_PPE_WEARING_CONF")
-                    .ok()
-                    .and_then(|v| v.trim().parse::<f32>().ok())
-            })
-            .map(|v| v.clamp(0.05, 0.95))
-            .unwrap_or(0.20);
         let ppe = ppe_raw.and_then(|raw| {
             if !ppe_enabled {
                 return None;
             }
             let p = PathBuf::from(raw.trim());
             ls_analyzer::detector::anchor_model_file(&p).map(|model_path| {
+                let dir = crate::deploy::default_install_root().join("models");
+                let stock = bundled_ppe_model(&model_path);
+                let (violation_conf, wearing_conf) = ppe_thresholds(s, stock);
                 ls_analyzer::ppe::PpeConfig {
                     model_path,
+                    close_mask: close_mask_enabled(s).then(close_mask_assets).flatten(),
                     output_format: s.setting_get("ppe.output_format").ok().flatten().and_then(
                         |value| ls_infer::yolo::OutputFormat::parse(&value).ok().flatten(),
                     ),
                     use_gpu: detector.use_gpu,
-                    violation_conf: ppe_v_conf,
-                    wearing_conf: ppe_w_conf,
+                    violation_conf,
+                    wearing_conf,
+                    clahe_enabled: !stock,
+                    coat_confirmation: stock.then(|| {
+                        ls_analyzer::ppe::anchored_child(
+                            &dir,
+                            ls_analyzer::ppe::COAT_CONFIRMATION_FILE,
+                        )
+                        .filter(|path| path.is_file())
+                        .unwrap_or_default()
+                    }),
                     ..Default::default()
                 }
             })
@@ -608,13 +630,49 @@ impl WorkerConfig {
     }
 }
 
+pub(crate) fn bundled_ppe_model(path: &Path) -> bool {
+    let dir = crate::deploy::default_install_root().join("models");
+    ls_analyzer::ppe::anchored_child(&dir, "yolo11n_ppe.onnx")
+        .is_some_and(|bundled| path.canonicalize().is_ok_and(|active| active == bundled))
+}
+
+pub(crate) fn ppe_thresholds(store: &ls_store::Store, bundled: bool) -> (f32, f32) {
+    let threshold = |key, env, default| {
+        let parse = |v: String| v.trim().parse::<f32>().ok().filter(|v| v.is_finite());
+        store
+            .setting_get(key)
+            .ok()
+            .flatten()
+            .and_then(parse)
+            .or_else(|| std::env::var(env).ok().and_then(parse))
+            .map(|v| v.clamp(0.05, 0.95))
+            .unwrap_or(default)
+    };
+    let (violation, wearing) = if bundled { (0.50, 0.40) } else { (0.30, 0.20) };
+    (
+        threshold("ppe.violation_conf", "LS_PPE_CONF", violation),
+        threshold("ppe.wearing_conf", "LS_PPE_WEARING_CONF", wearing),
+    )
+}
+
+pub(crate) fn close_mask_enabled(store: &ls_store::Store) -> bool {
+    store
+        .setting_get("ppe.close_mask_enabled")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1")
+}
+
+pub(crate) fn close_mask_assets() -> Option<ls_analyzer::ppe::CloseMaskAssets> {
+    let dir = crate::deploy::default_install_root().join("models");
+    ls_analyzer::ppe::CloseMaskAssets::from_dir(&dir)
+}
+
 /// 启动 worker（handler 入口）：组装配置 → 注册句柄 → 起分析线程。
 /// folder 源走扫描登记线程（RA1.3），rtsp/file/usb 走 ffmpeg 帧循环。
 pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
     let cid = cfg.camera_id;
-    if st.workers.get(cid).is_some() {
-        return Err("已在运行".into());
-    }
     let handle = Arc::new(WorkerHandle {
         stop: Arc::new(AtomicBool::new(false)),
         ffmpeg: Arc::new(Mutex::new(None)),
@@ -624,25 +682,30 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         motion_total: Arc::new(AtomicU64::new(0)),
         performance: Mutex::new(PerformanceWindow::default()),
     });
-    st.workers.insert(cid, Arc::clone(&handle));
+    if !st.workers.insert(cid, Arc::clone(&handle)) {
+        return Err("已在运行".into());
+    }
     if cfg.spec.type_ == "rtsp" {
         st.go2rtc.refresh();
     }
     let st2 = Arc::clone(st);
+    let worker_handle = Arc::clone(&handle);
     let is_folder = cfg.spec.type_ == "folder";
     let spawned = if is_folder {
         std::thread::Builder::new()
             .name(format!("ls-folder-{cid}"))
-            .spawn(move || folder_loop(st2, cfg, handle))
+            .spawn(move || folder_loop(st2, cfg, worker_handle))
     } else {
         std::thread::Builder::new()
             .name(format!("ls-worker-{cid}"))
-            .spawn(move || worker_loop(st2, cfg, handle))
+            .spawn(move || worker_loop(st2, cfg, worker_handle))
     };
     match spawned {
         Ok(_) => Ok(()),
         Err(e) => {
-            st.workers.remove_and_stop(cid);
+            let store = ls_store::Store::open(&st.db_path).ok();
+            st.workers
+                .remove_and_stop(store.as_ref(), cid, Some(&handle), "error");
             Err(format!("起 worker 线程失败: {e}"))
         }
     }
@@ -651,13 +714,10 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
 /// 停止 worker（幂等）：置停标志 + kill ffmpeg slot + 状态写 stopped。
 /// 返回 False = 该路本来就没在运行。
 pub fn stop_worker(st: &Shared, cid: i64) -> bool {
-    let Some(_) = st.workers.remove_and_stop(cid) else {
-        return false;
-    };
-    if let Ok(s) = ls_store::Store::open(&st.db_path) {
-        let _ = s.set_camera_status(cid, "stopped");
-    }
-    true
+    let store = ls_store::Store::open(&st.db_path).ok();
+    st.workers
+        .remove_and_stop(store.as_ref(), cid, None, "stopped")
+        .is_some()
 }
 
 /// UX2：软重启单路（运行中才重启；配置组载失败保持停止并写 error）。
@@ -678,13 +738,16 @@ pub fn restart_camera_if_running(st: &Shared, store: &ls_store::Store, cid: i64)
             Ok(()) => true,
             Err(e) => {
                 crate::logger::error(&format!("[ls-worker] cam-{cid} 软重启失败: {e}"));
-                let _ = store.set_camera_status(cid, "error");
                 false
             }
         },
         _ => {
             crate::logger::error(&format!("[ls-worker] cam-{cid} 软重启配置载入失败"));
-            let _ = store.set_camera_status(cid, "error");
+            if let Ok(map) = st.workers.map.lock() {
+                if !map.contains_key(&cid) {
+                    let _ = store.set_camera_status(cid, "error");
+                }
+            }
             false
         }
     }
@@ -699,13 +762,14 @@ pub fn stop_all_workers(st: &Shared) -> usize {
         };
         m.keys().copied().collect()
     };
-    let mut n = 0;
-    for cid in ids {
-        if st.workers.remove_and_stop(cid).is_some() {
-            n += 1;
-        }
-    }
-    n
+    let store = ls_store::Store::open(&st.db_path).ok();
+    ids.into_iter()
+        .filter(|cid| {
+            st.workers
+                .remove_and_stop(store.as_ref(), *cid, None, "stopped")
+                .is_some()
+        })
+        .count()
 }
 
 /// UX（2026-11-21）：推理设备（runtime.ep）变更后重启**全部**运行中相机
@@ -754,44 +818,76 @@ fn restart_backoff(restarts: u32) -> std::time::Duration {
     std::time::Duration::from_secs(RESTART_BACKOFFS[(restarts - 1).min(3) as usize])
 }
 
-/// 重启判定（Python Manager 语义）：存活 >5s 重置计数；超限 → error 并退出。
-/// 返回 False = 放弃（线程应退出）。
-fn on_restart(
-    store: &ls_store::Store,
-    cfg: &WorkerConfig,
-    restarts: &mut u32,
-    alive_since: Option<std::time::Instant>,
-    last_error: &str,
-) -> bool {
-    let alive_ok = alive_since
-        .map(|t| t.elapsed().as_secs() >= RESTART_ALIVE_RESET_S)
-        .unwrap_or(false);
-    if alive_ok {
-        *restarts = 0;
-    }
-    *restarts += 1;
-    crate::logger::warn(&format!(
-        "[ls-worker] cam-{} 重连失败（第 {restarts}/{} 次）: {last_error}",
-        cfg.camera_id, cfg.max_restarts
-    ));
-    if *restarts > cfg.max_restarts {
-        let _ = store.set_camera_status(cfg.camera_id, "error");
-        crate::logger::error(&format!(
-            "[ls-worker] cam-{} 超过重启上限，放弃（given_up → error）",
-            cfg.camera_id
-        ));
-        return false;
-    }
-    true
+#[derive(Default)]
+struct CameraReconnect {
+    attempts: u32,
+    failed_since: Option<Instant>,
+    good_since: Option<Instant>,
 }
 
-/// 数据面主循环（RA1.2：结构对齐 ls-analyzer bin 的 run_camera；事件出口改为
-/// EventSink 直写，存证收尾线程回填 video）。运行在专用线程（阻塞 read_frame）。
+impl CameraReconnect {
+    fn reset_after_good_frames(&mut self, now: Instant) -> bool {
+        let first = *self.good_since.get_or_insert(now);
+        if now.saturating_duration_since(first) < Duration::from_secs(RESTART_ALIVE_RESET_S) {
+            return false;
+        }
+        self.attempts = 0;
+        self.failed_since = None;
+        true
+    }
+
+    fn failed(&mut self, now: Instant, max: u32) -> (bool, bool) {
+        self.good_since = None;
+        self.attempts = self.attempts.saturating_add(1);
+        let first = *self.failed_since.get_or_insert(now);
+        let retry = self.attempts <= max;
+        (
+            retry,
+            !retry || now.saturating_duration_since(first) >= OUTAGE_DEBOUNCE,
+        )
+    }
+}
+
+fn worker_detector(
+    st: &Shared,
+    store: &ls_store::Store,
+    cfg: &WorkerConfig,
+    handle: &Arc<WorkerHandle>,
+    api_only: bool,
+) -> Option<Box<dyn ls_analyzer::pipeline::Detector>> {
+    if st.testing && cfg.detector.model_path.is_none() {
+        return Some(Box::new(ls_analyzer::pipeline::NullDetector));
+    }
+    match ls_analyzer::detector::load_detector(&cfg.detector) {
+        Ok(detector) => Some(detector),
+        Err(_) if api_only => Some(Box::new(ls_analyzer::pipeline::NullDetector)),
+        Err(error) => {
+            crate::logger::error(&format!(
+                "[ls-worker] cam-{} 人员模型加载失败: {error}",
+                cfg.camera_id
+            ));
+            st.workers
+                .remove_and_stop(Some(store), cfg.camera_id, Some(handle), "model_error");
+            None
+        }
+    }
+}
+
+/// 数据面主循环运行在专用线程，事件经 EventSink 落库。
 fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let Ok(store) = ls_store::Store::open(&st.db_path) else {
+        st.workers
+            .remove_and_stop(None, cfg.camera_id, Some(&handle), "error");
         return;
     };
-    let _ = store.set_camera_status(cfg.camera_id, "starting");
+    let cid = cfg.camera_id;
+    let set_status = |status| {
+        st.workers
+            .with_current(cid, &handle, || store.set_camera_status(cid, status))
+    };
+    if set_status("starting").is_none() {
+        return;
+    }
     let enter = env_f64("LS_ZONE_ENTER_FRAMES", 2.0) as u32;
     let exit = env_f64("LS_ZONE_EXIT_FRAMES", 3.0) as u32;
     let mut pipe = ls_analyzer::pipeline::CameraPipeline::new(
@@ -802,7 +898,6 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         enter,
         exit,
     );
-    let mut detector = ls_analyzer::detector::make_detector(&cfg.detector);
     // LS-050：Motion Gate 运动预筛（空场景跳过 YOLO/PPE）；运行时从 app_settings 读取
     let mut motion_gate = ls_analyzer::motion::MotionGate::new(ls_analyzer::motion::MotionConfig {
         enabled: store
@@ -823,6 +918,8 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let mut motion_cfg_stamp = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     // LS-051：实时检测元数据广播节流（≤5Hz），慢客户端由 WS Lagged 丢弃
     let mut last_det_broadcast = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+    let mut last_face_sample: Option<std::time::Instant> = None;
+    let mut next_face = 0usize;
     // RA2-S1：PPE 级联注入管线（未配置模型 → None → 仅人员检测，ppe 恒 Unknown）
     let ppe_runner = cfg.ppe.as_ref().and_then(ls_analyzer::ppe::make_ppe_runner);
     pipe.set_ppe(ppe_runner);
@@ -852,15 +949,76 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         "api" => vlm_cfg.enabled = dcfg.compliance_ok(),
         _ => vlm_cfg.enabled = false, // cascade 走触发门 + 复核队列；local 零 API
     }
+    let Some(mut detector) = worker_detector(&st, &store, &cfg, &handle, vlm_cfg.enabled) else {
+        return;
+    };
     let vlm_interval = std::time::Duration::from_secs(
         (60f64 / env_f64("LS_VLM_MAX_PER_MIN", 6.0).max(0.1)).round() as u64,
     );
     // LS-043：用 Option<Instant> 替代 `Instant::now() - vlm_interval`，防 Windows 刚开机减法下溢 panic
     let mut last_vlm: Option<std::time::Instant> = None;
-    let mut restarts = 0u32;
-    let mut running_marked = false;
+    let mut reconnect = CameraReconnect::default();
+    let mut last_compliance_sample = None::<Instant>;
+    let notify_connection = |online: bool| {
+        let (behavior, level, detail) = if online {
+            ("camera_recovered", 1, "已重新收到稳定画面")
+        } else {
+            (
+                "camera_offline",
+                2,
+                "无法继续读取主码流或采集设备，请检查设备和网络",
+            )
+        };
+        let ts = ls_core::time::local_now_iso();
+        let new_event = ls_store::NewEvent {
+            camera_id: cid,
+            type_: behavior,
+            level,
+            track_id: 0,
+            detail,
+            snapshot: None,
+            ts: &ts,
+        };
+        if let Some(Ok(Some(eid))) = st.workers.with_current(cid, &handle, || {
+            store.record_camera_connection_event(online, &new_event)
+        }) {
+            if let Ok(Some(event)) = store.event_by_id(eid) {
+                let _ = st.events_tx.send(event_json(&event).to_string());
+            }
+            let candidate = ls_analyzer::pipeline::Candidate {
+                camera_id: cid,
+                zone_id: None,
+                behavior: behavior.into(),
+                level,
+                track_id: 0,
+                detail: detail.into(),
+                ts_iso: ts,
+                evidence_key: String::new(),
+            };
+            sink.deliver_deferred_pub(eid, &candidate, false);
+        }
+    };
+    let after_failure = |state: &mut CameraReconnect, reason: &str| {
+        let (retry, outage) = state.failed(Instant::now(), cfg.max_restarts);
+        crate::logger::warn(&format!(
+            "[ls-worker] cam-{cid} 重连第 {} 次: {reason}",
+            state.attempts
+        ));
+        if live_capture && outage {
+            notify_connection(false);
+        }
+        if retry {
+            let _ = set_status("reconnecting");
+        }
+        retry
+    };
     let mut live_index = 0;
     let mut use_main_stream = false;
+    let mut exit_status = "stopped";
+    let video_file = cfg.spec.type_ == "file";
+    let mut checked_frames = 0u64;
+    let mut person_frames = 0u64;
+    let mut alert_events = 0u64;
     'outer: loop {
         if handle.stop.load(Ordering::SeqCst) {
             break;
@@ -895,24 +1053,20 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     use_main_stream = true;
                     continue;
                 }
-                if !on_restart(&store, &cfg, &mut restarts, None, &format!("spawn: {e}")) {
-                    if let Ok(mut m) = st.workers.map.lock() {
-                        if m.get(&cfg.camera_id)
-                            .is_some_and(|cur| Arc::ptr_eq(cur, &handle))
-                        {
-                            m.remove(&cfg.camera_id);
-                        }
-                    }
-                    return;
+                if !after_failure(&mut reconnect, &format!("启动采集失败: {e}")) {
+                    exit_status = "error";
+                    break;
                 }
-                if !sleep_interruptible(&handle.stop, restart_backoff(restarts)) {
+                if !sleep_interruptible(&handle.stop, restart_backoff(reconnect.attempts)) {
                     break;
                 }
                 continue;
             }
         };
         let stream_index_base = live_index;
-        let alive_since = Some(std::time::Instant::now());
+        let mut running_marked = false;
+        let mut stable = false;
+        let mut stream_ended = false;
         if let Ok(mut metrics) = handle.performance.lock() {
             metrics.input_kind = input_kind;
         }
@@ -924,17 +1078,25 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             match reader.read() {
                 Ok(Some(captured)) => {
                     let received = std::time::Instant::now();
+                    if handle.stop.load(Ordering::SeqCst) {
+                        break 'outer;
+                    }
+                    if !running_marked {
+                        if set_status("running").is_none() {
+                            break 'outer;
+                        }
+                        running_marked = true;
+                    }
+                    if !stable && reconnect.reset_after_good_frames(captured.arrived) {
+                        stable = true;
+                        if live_capture {
+                            notify_connection(true);
+                        }
+                    }
                     let mut frame = captured.frame;
                     if live_capture {
                         frame.index = frame.index.saturating_add(stream_index_base);
                         live_index = frame.index;
-                    }
-                    // 存活 >5s 重置重启计数（Python Manager 口径）
-                    if alive_since
-                        .map(|t| t.elapsed().as_secs() >= RESTART_ALIVE_RESET_S)
-                        .unwrap_or(false)
-                    {
-                        restarts = 0;
                     }
                     // 先喂证据环（事件帧须已在环内；同时自动补活动录像 post 帧）
                     let jpeg_start = std::time::Instant::now();
@@ -996,22 +1158,74 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         detector.detect(&frame)
                     };
                     let detection_elapsed = detect_start.elapsed();
-                    // LS-041：实时流（rtsp/usb）使用真实本地时间，仅离线 file 回放沿用确定性时钟
-                    let ts = if cfg.spec.type_ == "file" {
-                        ls_analyzer::pipeline::frame_ts_for(frame.index, cfg.spec.analysis_fps)
-                    } else {
-                        ls_core::time::format_system_time_local_iso(captured.timestamp)
-                    };
+                    if video_file {
+                        checked_frames += 1;
+                        person_frames += u64::from(!dets.is_empty());
+                    }
+                    let ts = ls_core::time::format_system_time_local_iso(captured.timestamp);
                     let rules_start = std::time::Instant::now();
-                    let cands = pipe.process_with_frame(
+                    let sample_ppe = live_capture
+                        && mode != "api"
+                        && !motion_skip
+                        && last_compliance_sample.is_none_or(|last| {
+                            captured.arrived.saturating_duration_since(last)
+                                >= COMPLIANCE_SAMPLE_INTERVAL
+                        });
+                    let cands = pipe.process_with_ppe_sample(
                         &dets,
                         &ts,
                         Some((&frame.data, frame.width, frame.height)),
+                        sample_ppe,
                     );
+                    if !motion_skip
+                        && !dets.is_empty()
+                        && last_face_sample.is_none_or(|t| {
+                            captured.arrived.saturating_duration_since(t)
+                                >= std::time::Duration::from_secs(4)
+                        })
+                    {
+                        last_face_sample = Some(captured.arrived);
+                        if crate::local_face::match_alert_enabled(&store, cfg.camera_id) {
+                            let tracks = pipe.last_tracks();
+                            if !tracks.is_empty() {
+                                let track = &tracks[next_face % tracks.len()];
+                                next_face = next_face.wrapping_add(1);
+                                let jpeg = ev_snapshot.clone().unwrap_or_else(|| {
+                                    ls_analyzer::evidence::encode_jpeg_bgr(
+                                        &frame.data,
+                                        frame.width,
+                                        frame.height,
+                                    )
+                                    .unwrap_or_default()
+                                });
+                                crate::local_face::identify_event(
+                                    &st,
+                                    &store,
+                                    crate::local_face::MatchTarget::Alert(track.id),
+                                    cfg.camera_id,
+                                    track.bbox,
+                                    &jpeg,
+                                );
+                            }
+                        }
+                    }
                     let rules_elapsed = rules_start.elapsed();
                     let analyzed = std::time::Instant::now();
                     let analysis_elapsed = analyzed - received;
                     let inference = ls_infer::yolo::take_inference_timings();
+                    if sample_ppe && inference.calls > 0 {
+                        let sample = pipe.last_ppe_sample();
+                        if let Some(day) = ts.get(..10) {
+                            let _ = store.add_compliance_sample(
+                                cid,
+                                day,
+                                sample.compliant,
+                                sample.violations,
+                                sample.unknown,
+                            );
+                        }
+                        last_compliance_sample = Some(captured.arrived);
+                    }
                     // LS-051：≤5Hz 推送实时检测框元数据（tracks + zones）到 WS 订阅者
                     let broadcast_due =
                         last_det_broadcast.elapsed() >= std::time::Duration::from_millis(200);
@@ -1071,6 +1285,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         for cand in cands {
                             match sink.record_ext(&cand, Some(&snap), dispatch_now) {
                                 Ok(Some(eid)) => {
+                                    if video_file {
+                                        alert_events += 1;
+                                    }
                                     spawn_finalize(&st, &evidence, eid);
                                     if let Some(track) = pipe
                                         .last_tracks()
@@ -1080,7 +1297,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                         crate::local_face::identify_event(
                                             &st,
                                             &store,
-                                            eid,
+                                            crate::local_face::MatchTarget::Event(eid),
                                             cfg.camera_id,
                                             track.bbox,
                                             &snap,
@@ -1095,10 +1312,6 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 )),
                             }
                         }
-                    }
-                    if !running_marked {
-                        let _ = store.set_camera_status(cfg.camera_id, "running");
-                        running_marked = true;
                     }
                     // UX2 cascade 复核门：规则命中或人员在置信度灰区才产生 API
                     // 调用（无人/无触发帧 0 调用 = 省钱第一验收指标）；限流与
@@ -1201,6 +1414,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                             evidence_key: format!("vlm:{}:{behavior}", frame.index),
                                         };
                                         if let Ok(Some(veid)) = sink.record(&cand, Some(&jpeg)) {
+                                            if video_file {
+                                                alert_events += 1;
+                                            }
                                             spawn_finalize(&st, &evidence, veid);
                                         }
                                     }
@@ -1232,7 +1448,10 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         });
                     }
                 }
-                Ok(None) => break, // 流结束（文件源 EOF）
+                Ok(None) => {
+                    stream_ended = true;
+                    break;
+                }
                 Err(e) => {
                     crate::logger::error(&format!(
                         "[ls-worker] cam-{} 读帧失败: {e}",
@@ -1242,44 +1461,69 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 }
             }
         }
+        let file_completed = cfg.spec.type_ == "file"
+            && !cfg.spec.file_loop
+            && running_marked
+            && stream_ended
+            && reader.file_exit_ok();
         drop(reader);
         if handle.stop.load(Ordering::SeqCst) {
             break;
         }
         if cfg.spec.type_ == "file" && !cfg.spec.file_loop {
-            evidence.flush();
-            let _ = store.set_camera_status(cfg.camera_id, "stopped");
-            if let Ok(mut m) = st.workers.map.lock() {
-                m.remove(&cfg.camera_id);
-            }
-            return;
+            exit_status = if file_completed { "completed" } else { "error" };
+            break;
         }
         if let Ok(mut metrics) = handle.performance.lock() {
             metrics.reconnect();
         }
         if input_kind != "main" {
             use_main_stream = true;
+            reconnect.good_since = None;
             continue;
         }
         use_main_stream = false;
-        if !on_restart(&store, &cfg, &mut restarts, alive_since, "stream ended") {
-            evidence.flush();
-            if let Ok(mut m) = st.workers.map.lock() {
-                if m.get(&cfg.camera_id)
-                    .is_some_and(|cur| Arc::ptr_eq(cur, &handle))
-                {
-                    m.remove(&cfg.camera_id);
-                }
-            }
-            return;
+        if !after_failure(&mut reconnect, "画面流中断") {
+            exit_status = "error";
+            break;
         }
-        if !sleep_interruptible(&handle.stop, restart_backoff(restarts)) {
+        if !sleep_interruptible(&handle.stop, restart_backoff(reconnect.attempts)) {
             break;
         }
     }
     evidence.flush();
-    // given_up 路径已写 error；其余（stop/stop 打断）写 stopped
-    let _ = store.set_camera_status(cfg.camera_id, "stopped");
+    if video_file && (checked_frames > 0 || matches!(exit_status, "completed" | "error")) {
+        let outcome = match exit_status {
+            "completed" => "检查完成",
+            "error" => "检查异常",
+            _ => "检查已停止",
+        };
+        let enabled_rules = cfg.rules.iter().filter(|rule| rule.enabled).count();
+        let detail = format!(
+            "视频{outcome}。已处理 {checked_frames} 帧，{person_frames} 帧检出人员，启用规则 {enabled_rules} 条，已记录规则和模型事件 {alert_events} 条。"
+        );
+        let finished = crate::util::iso_now();
+        let latest = handle.latest_jpeg.lock().ok().and_then(|slot| slot.clone());
+        let snapshot = latest.and_then(|frame| {
+            sink.save_snapshot(cid, &finished, &frame.jpeg)
+                .map_err(|error| {
+                    crate::logger::warn(&format!("[ls-worker] cam-{cid} {error}"));
+                })
+                .ok()
+        });
+        if let Err(error) =
+            store.add_check_event(cid, "video_check", &detail, &finished, snapshot.as_deref())
+        {
+            if let Some(path) = snapshot {
+                let _ = std::fs::remove_file(path);
+            }
+            crate::logger::error(&format!(
+                "[ls-worker] cam-{cid} 无法保存视频检查记录: {error}"
+            ));
+        }
+    }
+    st.workers
+        .remove_and_stop(Some(&store), cid, Some(&handle), exit_status);
 }
 
 /// 存证收尾：candidate 时注册 ActiveRec（pre=环快照），post 帧由 worker 循环
@@ -1556,9 +1800,19 @@ fn sleep_interruptible_wake(stop: &AtomicBool, wake: &AtomicBool, d: std::time::
 
 fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let Ok(store) = ls_store::Store::open(&st.db_path) else {
+        st.workers
+            .remove_and_stop(None, cfg.camera_id, Some(&handle), "error");
         return;
     };
-    let _ = store.set_camera_status(cfg.camera_id, "starting");
+    if st
+        .workers
+        .with_current(cfg.camera_id, &handle, || {
+            store.set_camera_status(cfg.camera_id, "starting")
+        })
+        .is_none()
+    {
+        return;
+    }
     let root = PathBuf::from(cfg.spec.source.trim());
     let interval = env_f64("LS_FOLDER_POLL_S", 3.0).max(0.5);
     let scan_cfg = ls_ingest::folder::FolderScanConfig::default();
@@ -1577,13 +1831,17 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let mut marked: Option<String> = None;
     let mut set_status = |v: &str| {
         if marked.as_deref() != Some(v) {
-            let _ = store.set_camera_status(cfg.camera_id, v);
+            let _ = st.workers.with_current(cfg.camera_id, &handle, || {
+                store.set_camera_status(cfg.camera_id, v)
+            });
             marked = Some(v.into());
         }
     };
     // RA2 反思修正：识别器/管件在循环外构造一次——此前在 loop 体内，
     // 每 tick（3s）都重新加载 YOLO 模型（数百 ms 级开销 × 每 3s）
-    let mut detector = ls_analyzer::detector::make_detector(&cfg.detector);
+    let Some(mut detector) = worker_detector(&st, &store, &cfg, &handle, vlm_cfg.enabled) else {
+        return;
+    };
     let mut ppe_runner = cfg.ppe.as_ref().and_then(ls_analyzer::ppe::make_ppe_runner);
     let sink = EventSink::new(Arc::clone(&st));
     loop {
@@ -1819,22 +2077,34 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 index: 0,
             };
             let mut dets = detector.detect(&frame);
+            let mut unmasked = std::collections::HashSet::new();
             // PPE 级联：逐人框判定（LS-043：空图 0 人跳过 PPE 推理节省算力）
             if !dets.is_empty() {
                 if let Some(runner) = ppe_runner.as_mut() {
                     let boxes: Vec<[f32; 4]> = dets.iter().map(|d| d.box_).collect();
-                    let statuses = runner.statuses(&bgr, w, h, &boxes);
-                    for (d, st) in dets.iter_mut().zip(statuses) {
-                        d.ppe = st;
+                    let observations = runner.observations(&bgr, w, h, &boxes);
+                    for (index, (d, observation)) in dets.iter_mut().zip(observations).enumerate() {
+                        d.ppe = observation.coat;
+                        if observation.mask == ls_analyzer::pipeline::PpeStatus::NoPpe {
+                            unmasked.insert(index);
+                        }
                     }
                 }
             }
             // 区域锚点 = 人框底边中点（与 pipeline.rs 同口径）；逐区统计
             let mut zone_hits: Vec<serde_json::Value> = Vec::new();
             let mut in_zone_ids: std::collections::HashSet<usize> = Default::default();
-            let mut ppe_no = 0i64;
-            let mut ppe_wearing = 0i64;
+            let ppe_no = dets
+                .iter()
+                .filter(|d| d.ppe == ls_analyzer::pipeline::PpeStatus::NoPpe)
+                .count() as i64;
+            let ppe_wearing = dets
+                .iter()
+                .filter(|d| d.ppe == ls_analyzer::pipeline::PpeStatus::Wearing)
+                .count() as i64;
             let mut violations: Vec<String> = Vec::new();
+            let mut unmasked_zones = std::collections::HashSet::new();
+            let mut coat_violation_in_zone = false;
             for z in &cfg.zones {
                 let poly: Vec<ls_core::Point> = z.points.clone();
                 let mut zone_person = 0i64;
@@ -1845,14 +2115,15 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     if ls_core::point_in_polygon(&poly, anchor) {
                         zone_person += 1;
                         in_zone_ids.insert(di);
+                        if unmasked.contains(&di) {
+                            unmasked_zones.insert(z.id);
+                        }
                         match d.ppe {
                             ls_analyzer::pipeline::PpeStatus::NoPpe => {
                                 zone_no += 1;
-                                ppe_no += 1; // 跨区去重按人算，此处按统计近似（同图同人通常只在一个区）
                             }
                             ls_analyzer::pipeline::PpeStatus::Wearing => {
                                 zone_wear += 1;
-                                ppe_wearing += 1;
                             }
                             ls_analyzer::pipeline::PpeStatus::Unknown => {}
                         }
@@ -1864,12 +2135,24 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         "persons": zone_person, "no": zone_no, "wearing": zone_wear,
                     }));
                     if zone_no > 0 {
-                        violations.push("enter_no_ppe".into());
+                        coat_violation_in_zone = true;
                     }
                 }
             }
             let persons = dets.len() as i64;
             let in_zone = in_zone_ids.len() as i64;
+            if ppe_no > 0 {
+                violations.push("enter_no_ppe".into());
+            }
+            let mask_rule = cfg.rules.iter().find(|rule| {
+                rule.behavior == "no_mask"
+                    && !unmasked.is_empty()
+                    && (rule.zone_id == 0 || unmasked_zones.contains(&rule.zone_id))
+                    && ls_analyzer::pipeline::rule_active_at(rule, &processed_ts, &cfg.calendar)
+            });
+            if !unmasked.is_empty() {
+                violations.push("no_mask".into());
+            }
             // occupancy 规则（threshold < 人数 且 zone_id=0 整画面口径）
             for r in &cfg.rules {
                 if r.behavior == "occupancy_over" && r.enabled && persons > r.threshold {
@@ -1920,11 +2203,21 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             let mut ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)> = Vec::new();
             if violation {
                 for behavior in &violations {
+                    if behavior == "no_mask" && mask_rule.is_none() {
+                        continue;
+                    }
+                    if behavior == "enter_no_ppe" && !coat_violation_in_zone {
+                        continue;
+                    }
                     let cand = ls_analyzer::pipeline::Candidate {
                         camera_id: cfg.camera_id,
                         zone_id: None,
                         behavior: behavior.clone(),
-                        level: 2,
+                        level: if behavior == "no_mask" {
+                            mask_rule.map_or(2, |rule| rule.level)
+                        } else {
+                            2
+                        },
                         track_id: 0,
                         // UX（2026-11-21 用户实测反馈）：detail 人话化——
                         // 文件名截短（原始名含长哈希后缀），行为名中文化
@@ -2016,10 +2309,8 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             break;
         }
     }
-    let _ = store.set_camera_status(cfg.camera_id, "stopped");
-    if let Ok(mut m) = st.workers.map.lock() {
-        m.remove(&cfg.camera_id);
-    }
+    st.workers
+        .remove_and_stop(Some(&store), cfg.camera_id, Some(&handle), "stopped");
 }
 
 #[cfg(test)]
@@ -2409,6 +2700,7 @@ mod tests {
         std::fs::write(imgs.join("c.txt"), b"not-image").unwrap();
         let mut cfg = {
             let s = ls_store::Store::open(&st.db_path).unwrap();
+            s.migrate().unwrap();
             let cid = s
                 .add_camera_full("cam-folder", imgs.to_str().unwrap(), "folder", "")
                 .unwrap();
@@ -2424,7 +2716,7 @@ mod tests {
             let n: i64 = s
                 .conn()
                 .query_row(
-                    "SELECT COUNT(*) FROM folder_images WHERE camera_id=1",
+                    "SELECT COUNT(*) FROM folder_images WHERE camera_id=1 AND error IS NOT NULL",
                     [],
                     |r| r.get(0),
                 )
@@ -2432,7 +2724,10 @@ mod tests {
             if n >= 2 {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "5s 内应登记 2 张");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "5s 内应处理 2 张损坏图片"
+            );
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let s = ls_store::Store::open(&st.db_path).unwrap();

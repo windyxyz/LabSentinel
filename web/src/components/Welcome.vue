@@ -13,6 +13,7 @@ const msg = ref('')
 
 // 步骤 2：接入方式（相机表单）
 const form = ref({ name: '', source: '', type: 'folder', group_name: '' })
+const cameraId = ref(null)
 const fsPick = ref(null)
 function pickSource() {
   fsPick.value?.openAt(form.value.source || '')
@@ -49,7 +50,8 @@ onMounted(async () => {
   if (status.value && needsSetup.value) {
     step.value = 1
     try {
-      models.value = (await api.modelsLocal?.())?.models || []
+      const result = await api.modelsLocal?.()
+      models.value = Array.isArray(result?.models) ? result.models : []
     } catch {}
   }
 })
@@ -70,7 +72,8 @@ async function addCamera() {
   }
   busy.value = true
   try {
-    await api.addCamera({ ...form.value })
+    const added = await api.addCamera({ ...form.value })
+    cameraId.value = added?.id ?? null
     msg.value = ''
     next()
   } catch (e) {
@@ -156,10 +159,11 @@ function finish() {
 
       <div v-else-if="step === 4">
         <h2>③ 设置通知方式</h2>
-        <p class="muted">
-          事件发生后可通过企业微信/钉钉/飞书/Server 酱/PushPlus/邮件等渠道即时推送。
-          请前往「告警配置」页填写渠道参数；不配置也可正常使用（事件仍会入库与展示）。
-        </p>
+        <p class="muted">先启动监控源并打开画面确认首帧，再保存告警渠道并发送一条测试消息。</p>
+        <div class="row">
+          <a :href="cameraId ? `#/sources/cams?camera=${cameraId}` : '#/sources/cams'" @click="finish">确认首帧</a>
+          <a href="#/alerts" @click="finish">配置并测试告警</a>
+        </div>
         <div class="wfoot">
           <button class="primary" @click="finish">完成</button>
         </div>

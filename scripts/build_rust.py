@@ -21,7 +21,7 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
-from prepare_rust_assets import GO2RTC, valid_go2rtc
+from prepare_rust_assets import CLOSE_MASK_ASSETS, GO2RTC, MODELS, MODEL_ASSETS, valid_model_asset, valid_go2rtc
 
 ROOT = Path(__file__).resolve().parent.parent
 ENGINE_RS = ROOT / "engine-rs"
@@ -86,13 +86,13 @@ def assemble(strict: bool = False) -> None:
     # RA4.2：基础检测 + PPE 模型（含类别名）随包分发（--strict 缺任一即失败）
     # 2026-11-21（用户指令）：实验服模型改为随包发布——此前 Q-08 只警告，
     # 安装版用户看到「仅人员检测」且下载源 404。
-    for name in ("yolo11n.onnx", "yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt"):
-        src = ROOT / "m0-spike" / name
-        if src.exists():
+    for name in ("yolo11n.onnx", *MODEL_ASSETS, *CLOSE_MASK_ASSETS):
+        src = MODELS / name
+        if src.is_file() and (name == "yolo11n.onnx" or valid_model_asset(src)):
             shutil.copy2(src, models / name)
         else:
-            missing.append(f"模型 {src}（scripts/prepare_rust_assets.py）")
-            print(f"[警告] 缺少模型 {src}（scripts/prepare_rust_assets.py）")
+            missing.append(f"模型缺失或校验失败 {src}（scripts/prepare_rust_assets.py）")
+    shutil.copy2(ROOT / "docs/licenses/close-mask-MIT.txt", models / "close-mask-LICENSE.txt")
     # RA4.2：ffmpeg/ffprobe（RTSP/视频取流与存证）与 onnxruntime（ORT_DYLIB_PATH）
     ff_src = ROOT / "tools" / "ffmpeg"
     if ff_src.is_dir() and (ff_src / "ffmpeg.exe").is_file():
@@ -119,6 +119,7 @@ def assemble(strict: bool = False) -> None:
     notice = ROOT / "NOTICE"
     if notice.exists():
         shutil.copy2(notice, DIST / "NOTICE.txt")
+    shutil.copy2(ROOT / "LICENSE", DIST / "LICENSE")
     (DIST / "VERSION").write_text(f"{VERSION}\n", encoding="ascii")
     # RA4.2：便携启动器（双击即起服务并开控制台；数据默认落 LOCALAPPDATA）
     # UX3（2026-11-20）：无黑框——start 拉起 GUI 子系统 exe（--tray 托盘常驻），

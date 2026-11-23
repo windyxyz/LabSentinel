@@ -15,7 +15,7 @@
 ;   --archive / --rollback；健康检查用 --selftest-http。
 
 #ifndef LsAppVersion
-  #define LsAppVersion "0.5.0"
+  #define LsAppVersion "0.6.0"
 #endif
 #ifndef LsSourceDir
   ; 指向解压后的 Rust 发行包目录（labsentinel-rust-<ver>-<date>.zip 解包结果）
@@ -96,18 +96,9 @@ Name: "installservice"; Description: "{cm:ServiceTask}"; \
 Source: "{#LsSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [UninstallDelete]
-; CreateShellLink 生成的快捷方式不在 Inno 安装日志里，卸载需显式删除；
-; {group} 随安装模式（仅我/所有用户）自动指向对应用户或公共开始菜单。
-Type: files; Name: "{group}\LabSentinel.lnk"
-Type: files; Name: "{group}\Uninstall LabSentinel.lnk"
-Type: dirifempty; Name: "{group}"
-Type: files; Name: "{userdesktop}\LabSentinel.lnk"
-Type: files; Name: "{commondesktop}\LabSentinel.lnk"
 ; 0.3.1：卸载清理升级归档与旧布局遗留目录（此前 versions\<ver> 整树残留，
-; 第三方卸载检查工具会报大量文件；server/data 是修复前的相对路径残留）。
+; 第三方卸载检查工具会报大量文件）。旧版 server 中的用户数据在 [Code] 保留后再清理。
 Type: filesandordirs; Name: "{app}\versions"
-Type: filesandordirs; Name: "{app}\server"
-Type: filesandordirs; Name: "{app}\data"
 Type: files; Name: "{app}\current.txt"
 Type: files; Name: "{app}\.env"
 ; 用户数据（%LOCALAPPDATA%\LabSentinel）默认保留；卸载时可选择一并删除，
@@ -123,16 +114,6 @@ Filename: "{app}\labsentinel-server.exe"; \
   Parameters: "--launch --tray"; WorkingDir: "{app}"; \
   Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent
 
-[UninstallRun]
-; 卸载前必须结束正在运行的 labsentinel-server.exe（无参数会常驻起服务，
-; 直接 Exec 会挂住卸载器且文件被锁）。taskkill /F：进程不存在返回 1，Inno 忽略。
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM labsentinel-server.exe"; \
-  Flags: runhidden; RunOnceId: "StopLabSentinel"
-; LS-053：清理网页端开启的 HKCU 开机自启（免管理员写入的 Run 值），保证卸载零残留
-Filename: "{sys}\reg.exe"; \
-  Parameters: "delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v LabSentinel /f"; \
-  Flags: runhidden; RunOnceId: "CleanAutostart"
-
 [Code]
 // 双模式默认目录：管理员（为所有用户）→ {autopf}\LabSentinel；仅为我 → {localappdata}\Programs
 function GetDefaultDirName(Param: String): String;
@@ -143,14 +124,38 @@ begin
     Result := ExpandConstant('{localappdata}\Programs\LabSentinel');
 end;
 
+procedure StopInstalledServer;
+var
+  Locator, Wmi, Processes, Process: Variant;
+  I, ExitCode: Integer;
+  ExePath: String;
+begin
+  ExePath := ExpandConstant('{app}\labsentinel-server.exe');
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Wmi := Locator.ConnectServer('.', 'root\CIMV2');
+    Processes := Wmi.ExecQuery('SELECT ProcessId, ExecutablePath FROM Win32_Process WHERE Name="labsentinel-server.exe"');
+    for I := 0 to Processes.Count - 1 do
+    begin
+      Process := Processes.ItemIndex(I);
+      if not VarIsNull(Process.ExecutablePath) then
+        if CompareText(Process.ExecutablePath, ExePath) = 0 then
+          Exec(ExpandConstant('{sys}\taskkill.exe'),
+               '/F /T /PID ' + IntToStr(Process.ProcessId), '', SW_HIDE,
+               ewWaitUntilTerminated, ExitCode);
+    end;
+  except
+    Log('Unable to enumerate running LabSentinel processes: ' + GetExceptionMessage);
+  end;
+end;
+
 // ---- 升级/覆盖安装前自动停服（防止 labsentinel-server.exe / go2rtc.exe 占用文件）----
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
   Result := '';
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM labsentinel-server.exe',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  StopInstalledServer;
   if FileExists(ExpandConstant('{app}\labsentinel-server.exe')) then
   begin
     if (not Exec(ExpandConstant('{app}\labsentinel-server.exe'), '--archive',
@@ -238,11 +243,7 @@ begin
   end;
 end;
 
-// ---- 卸载优化（0.3.1）----
-// 1) versions/ 升级归档、旧布局 server/、data/ 由 [UninstallDelete] 清理；
-// 2) 用户数据（%LOCALAPPDATA%\LabSentinel）默认保留，交互卸载时询问是否一并删除
-//    （静默卸载用 /REMOVEDATA=1 显式删除）；
-// 3) 尽力清理 Prefetch 缓存（系统托管；仅管理员卸载时可删，失败不阻断）。
+// 用户数据默认保留。静默卸载用 /REMOVEDATA=1 显式删除。
 var
   RemoveUserData: Boolean;
 
@@ -251,7 +252,8 @@ var
   DataDir: String;
 begin
   Result := True;
-  DataDir := ExpandConstant('{localappdata}\LabSentinel');
+  DataDir := ExpandConstant('{localappdata}\LabSentinel') + #13#10 +
+             ExpandConstant('{app}\data');
   if UninstallSilent then
     RemoveUserData := ExpandConstant('{param:REMOVEDATA|0}') = '1'
   else
@@ -260,38 +262,89 @@ begin
       mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
 end;
 
-procedure DeletePrefetchMask(const Mask: String);
+procedure CleanAutostart;
 var
-  FindRec: TFindRec;
-  Dir: String;
+  RunKey, Value, ExePath: String;
 begin
-  Dir := ExpandConstant('{win}\Prefetch');
+  RunKey := 'Software\Microsoft\Windows\CurrentVersion\Run';
+  ExePath := '"' + ExpandConstant('{app}\labsentinel-server.exe') + '"';
+  if RegQueryStringValue(HKCU, RunKey, 'LabSentinel', Value) and
+     ((CompareText(Value, ExePath) = 0) or
+      (CompareText(Copy(Value, 1, Length(ExePath) + 1), ExePath + ' ') = 0)) then
+    RegDeleteValue(HKCU, RunKey, 'LabSentinel');
+end;
+
+procedure CleanShortcut(const Link: String);
+var
+  Shell, Shortcut: Variant;
+  Target: String;
+begin
+  if not FileExists(Link) then
+    Exit;
   try
-    if FindFirst(Dir + '\' + Mask, FindRec) then
-    begin
-      try
-        repeat
-          DeleteFile(Dir + '\' + FindRec.Name);
-        until not FindNext(FindRec);
-      finally
-        FindClose(FindRec);
-      end;
-    end;
+    Shell := CreateOleObject('WScript.Shell');
+    Shortcut := Shell.CreateShortcut(Link);
+    Target := Shortcut.TargetPath;
+    if (CompareText(Target, ExpandConstant('{app}\labsentinel-server.exe')) = 0) or
+       (CompareText(Target, ExpandConstant('{app}\LabSentinel.bat')) = 0) or
+       (CompareText(Target, ExpandConstant('{uninstallexe}')) = 0) then
+      DeleteFile(Link);
   except
-    // Prefetch 由系统维护，清理失败忽略
+    Log('Unable to inspect LabSentinel shortcut: ' + Link);
   end;
+end;
+
+procedure CleanShortcutsIn(const GroupDir, DesktopDir: String);
+begin
+  CleanShortcut(GroupDir + '\LabSentinel.lnk');
+  CleanShortcut(GroupDir + '\Uninstall LabSentinel.lnk');
+  CleanShortcut(DesktopDir + '\LabSentinel.lnk');
+  RemoveDir(GroupDir);
+end;
+
+procedure CleanLegacyServer;
+var
+  Previous, Preserved, DataDir: String;
+  Suffix: Integer;
+begin
+  Previous := ExpandConstant('{app}\server\data');
+  if not RemoveUserData and DirExists(Previous) then
+  begin
+    DataDir := ExpandConstant('{app}\data');
+    Preserved := DataDir + '\legacy-server-data';
+    Suffix := 0;
+    while FileExists(Preserved) or DirExists(Preserved) do
+    begin
+      Suffix := Suffix + 1;
+      Preserved := DataDir + '\legacy-server-data-' + IntToStr(Suffix);
+    end;
+    if not ForceDirectories(DataDir) or not RenameFile(Previous, Preserved) then
+    begin
+      Log('Preserving legacy LabSentinel data at ' + Previous);
+      Exit;
+    end;
+  end;
+  DelTree(ExpandConstant('{app}\server'), True, True, True);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  if CurUninstallStep = usUninstall then
+  begin
+    StopInstalledServer;
+    CleanAutostart;
+    CleanShortcutsIn(ExpandConstant('{userprograms}\LabSentinel'), ExpandConstant('{userdesktop}'));
+    if IsAdminInstallMode then
+      CleanShortcutsIn(ExpandConstant('{commonprograms}\LabSentinel'), ExpandConstant('{commondesktop}'));
+  end;
   if CurUninstallStep = usPostUninstall then
   begin
-    // 旧布局启动器锁文件（数据目录上一级 logs/）
-    DeleteFile(ExpandConstant('{localappdata}\LabSentinel\logs\launcher.lock'));
+    CleanLegacyServer;
     if RemoveUserData then
+    begin
       DelTree(ExpandConstant('{localappdata}\LabSentinel'), True, True, True);
-    DeletePrefetchMask('LABSENTINEL-SERVER.EXE-*.pf');
-    DeletePrefetchMask('GO2RTC.EXE-*.pf');
-    DeletePrefetchMask('FFMPEG.EXE-*.pf');
+      DelTree(ExpandConstant('{app}\data'), True, True, True);
+    end;
+    RemoveDir(ExpandConstant('{app}'));
   end;
 end;

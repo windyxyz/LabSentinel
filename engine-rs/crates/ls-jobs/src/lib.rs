@@ -27,6 +27,7 @@ pub mod paths;
 pub mod retention;
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -52,6 +53,19 @@ const RETRY_INTERVAL_S: u64 = 30;
 const REPORT_CHECK_S: u64 = 60;
 /// LS-053：最大重试次数（超过即 dead_letter 死信）
 pub const MAX_RETRY_ATTEMPTS: i64 = 5;
+const MAX_ALERT_JPEG: u64 = 2 * 1024 * 1024;
+
+fn event_alert_text(level: i64, event_type: &str, camera: &str, detail: &str) -> String {
+    let severity = match level {
+        3 => "严重",
+        2 => "警告",
+        _ => "提示",
+    };
+    format!(
+        "【LabSentinel·{severity}】{}\n摄像头：{camera}\n{detail}",
+        ls_dispatch::type_text(event_type),
+    )
+}
 
 /// LS-053：第 n 次重试的退避秒数（指数退避，封顶 1 小时）。
 /// 纯函数便于单测：n=0 → 30s，n=1 → 120s，n=2 → 600s，n≥3 → 1800/3600s。
@@ -133,17 +147,17 @@ pub fn report_text(
     unhandled: i64,
     top: &[(i64, i64)],
     camera_names: &std::collections::HashMap<i64, String>,
+    compliance: &ls_store::ComplianceCounts,
 ) -> String {
-    let rate = if total > 0 {
-        ((total - violation) as f64 / total as f64 * 100.0).round() as i64
-    } else {
-        100
-    };
+    let rate = compliance
+        .rate_percent()
+        .map_or_else(|| "无可用统计".into(), |p| format!("{p:.1}%"));
     let mut s = format!(
-        "【LabSentinel·{title}】\n事件总数：{total}\n违规事件（L2+）：{violation}\n未处置：{unhandled}\n合规率：{rate}%"
+        "【LabSentinel·{title}】\n事件总数：{total}\n警告及严重事件：{violation}\n未处置：{unhandled}\n实验服合规率（本地抽样）：{rate}\n已判定 {} 次，未知 {} 次，覆盖 {} 路／{} 帧",
+        compliance.checked(), compliance.unknown, compliance.cameras, compliance.frames,
     );
     if !top.is_empty() {
-        s.push_str("\n违规 Top 摄像头：");
+        s.push_str("\n告警最多的摄像头：");
         for (i, (cid, n)) in top.iter().enumerate() {
             let name = camera_names
                 .get(cid)
@@ -449,7 +463,7 @@ impl Jobs {
             .flatten()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(60);
-        if cooldown_s > 0 {
+        if cooldown_s > 0 && !matches!(ev.type_.as_str(), "camera_offline" | "camera_recovered") {
             let key = format!("{}|{}|{}", ev.camera_id, ev.type_, ev.track_id);
             let mut dedup = lock(&self.push_dedup);
             let suppressed = dedup
@@ -465,21 +479,13 @@ impl Jobs {
             }
             dedup.insert(key, Instant::now());
         }
-        // 带图开关（alert.send_image，默认开）+ 读快照字节（合法 JPEG 且 ≤2MB）
-        let send_image = store
-            .setting_get("alert.send_image")
-            .ok()
-            .flatten()
-            .map(|v| v.trim() != "0")
-            .unwrap_or(true);
-        let image: Option<Vec<u8>> = if send_image {
-            ev.snapshot_path
-                .as_deref()
-                .and_then(|p| std::fs::read(p).ok())
-                .filter(|d| d.starts_with(&[0xFF, 0xD8]) && d.len() <= 2 * 1024 * 1024)
+        let image = self.alert_image(store, ev.snapshot_path.as_deref());
+        let camera = if ev.camera_name.is_empty() {
+            format!("#{}", ev.camera_id)
         } else {
-            None
+            ev.camera_name.clone()
         };
+        let message = event_alert_text(ev.level, &ev.type_, &camera, &ev.detail);
         let mut submitted = 0;
         for (ch, ch_cfg) in &channels {
             if let Some(reason) = ls_dispatch::channel_filtered(*ch, ev, &filters) {
@@ -494,24 +500,7 @@ impl Jobs {
             if !allowed {
                 continue; // 超限：计数留待下一窗口摘要
             }
-            // UX（2026-11-21 用户实测反馈）：告警文字人话化——类型中文化、
-            // 摄像头用名称（不带内部 ID）、去掉裸时间戳行（客户端消息自带时间）
-            let level_cn = match ev.level {
-                3 => "严重",
-                2 => "警告",
-                _ => "提示",
-            };
-            let mut text = format!(
-                "【LabSentinel·{}】{}\n摄像头：{}\n{}",
-                level_cn,
-                ls_dispatch::type_text(&ev.type_),
-                if ev.camera_name.is_empty() {
-                    format!("#{}", ev.camera_id)
-                } else {
-                    ev.camera_name.clone()
-                },
-                ev.detail
-            );
+            let mut text = message.clone();
             if pending > 0 {
                 text.push_str(&format!("\n（上一窗口合并 {pending} 条）"));
             }
@@ -530,6 +519,35 @@ impl Jobs {
             }
         }
         submitted
+    }
+
+    fn alert_image(&self, store: &Store, snapshot: Option<&str>) -> Option<Vec<u8>> {
+        if store
+            .setting_get("alert.send_image")
+            .ok()
+            .flatten()
+            .is_some_and(|v| v.trim() == "0")
+        {
+            return None;
+        }
+        let root = &self.cfg.retention.data_dir;
+        let snapshot = Path::new(snapshot?);
+        let path = root
+            .join(snapshot)
+            .canonicalize()
+            .or_else(|_| snapshot.canonicalize())
+            .ok()?;
+        if !path.starts_with(root.canonicalize().ok()?) || !path.is_file() {
+            return None;
+        }
+        let mut contents = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(MAX_ALERT_JPEG + 1)
+            .read_to_end(&mut contents)
+            .ok()?;
+        (contents.starts_with(&[0xff, 0xd8]) && contents.len() as u64 <= MAX_ALERT_JPEG)
+            .then_some(contents)
     }
 
     pub fn escalate_once(&self) -> JobResult<EscalationOutcome> {
@@ -659,17 +677,19 @@ impl Jobs {
                 let _ = store.update_delivery(did, "dead_letter", attempts, Some("渠道已移除"));
                 continue;
             };
-            let text = format!(
-                "{}：{}（重试）",
-                ls_dispatch::type_text(&ev.type_),
-                ev.detail
-            );
+            let camera = store
+                .camera(ev.camera_id)
+                .ok()
+                .flatten()
+                .map_or_else(|| format!("#{}", ev.camera_id), |row| row.name);
+            let text = event_alert_text(ev.level, &ev.type_, &camera, &ev.detail);
+            let image = self.alert_image(store, ev.snapshot.as_deref());
             let d = ls_dispatch::deliver_with_backoff(
                 ch,
                 &cfg,
                 ev.level,
                 &text,
-                None,
+                image.as_deref(),
                 &[], // 消费者负责退避，每轮只投递一次
             );
             let next_attempts = attempts + 1;
@@ -720,7 +740,7 @@ impl Jobs {
             sends.extend(
                 store
                     .report_summary(&format!("{today}T00:00:00"), &format!("{today}T23:59:59"))
-                    .map(|summary| ("日报", summary)),
+                    .map(|summary| ("日报", today.clone(), summary)),
             );
         }
         if weekly_due(
@@ -732,12 +752,14 @@ impl Jobs {
             &today,
             last_weekly.as_deref(),
         ) {
-            let week_start_iso = ls_core::time::local_days_ago_iso(6);
-            let week_start = format!("{}T00:00:00", week_start_iso.get(..10).unwrap_or(&today));
+            let week_start = ls_core::time::local_days_ago_date(6);
             sends.extend(
                 store
-                    .report_summary(&week_start, &format!("{today}T23:59:59"))
-                    .map(|summary| ("周报", summary)),
+                    .report_summary(
+                        &format!("{week_start}T00:00:00"),
+                        &format!("{today}T23:59:59"),
+                    )
+                    .map(|summary| ("周报", week_start, summary)),
             );
         }
         if sends.is_empty() {
@@ -753,10 +775,13 @@ impl Jobs {
             .into_iter()
             .map(|c| (c.id, c.name))
             .collect();
-        for (title, summary) in sends {
+        for (title, from, summary) in sends {
             if self.stop.load(Ordering::SeqCst) {
                 break;
             }
+            let compliance = store
+                .compliance_counts(&from, &today, None, None)
+                .unwrap_or_default();
             let text = report_text(
                 title,
                 summary.total,
@@ -764,6 +789,7 @@ impl Jobs {
                 summary.unhandled,
                 &summary.top,
                 &names,
+                &compliance,
             );
             let mut any_ok = false;
             for (ch, cfg) in &channels {

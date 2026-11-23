@@ -37,18 +37,11 @@ pub(crate) async fn folder_images_list(
             s.count_folder_images(camera_id, key, violation, start_ts, end_ts, error_only)?;
         let names: std::collections::HashMap<i64, String> =
             s.cameras()?.into_iter().map(|c| (c.id, c.name)).collect();
-        Ok(Json(json!({"items": rows.iter().map(|r| json!({
-                "id": r.id, "camera_id": r.camera_id, "path": r.path, "name": r.name,
-                "ts": r.ts, "processed_ts": r.processed_ts, "width": r.width,
-                "height": r.height, "persons": r.persons, "in_zone": r.in_zone,
-                "ppe_no": r.ppe_no, "ppe_wearing": r.ppe_wearing, "key": r.key,
-                "violation": r.violation, "event_id": r.event_id,
-                "zones": [], "violations": if r.violation { json!(["violation"]) } else { json!([]) },
-                "thumb_url": format!("/api/folder-images/{}/thumb", r.id),
-                "file_url": format!("/api/folder-images/{}/file", r.id),
-                "snapshot": r.snapshot, "error": r.error}))
+        Ok(Json(
+            json!({"items": rows.iter().map(|r| folder_row_json(r, true))
             .collect::<Vec<_>>(), "total": total, "limit": limit, "offset": offset,
-            "camera_names": names}))
+            "camera_names": names}),
+        )
         .into_response())
     })
 }
@@ -148,12 +141,38 @@ pub(crate) async fn folder_scan(State(st): State<Shared>, AxPath(cid): AxPath<i6
 }
 
 pub(crate) fn folder_row_json(r: &ls_store::FolderImageRow, path_full: bool) -> Value {
+    let list = |raw: Option<&str>| -> Vec<Value> {
+        raw.and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default()
+    };
+    let zones: Vec<_> = list(r.zones.as_deref())
+        .into_iter()
+        .filter_map(|zone| {
+            zone.as_str()
+                .or_else(|| zone["name"].as_str())
+                .map(str::to_owned)
+        })
+        .collect();
+    let violations: Vec<_> = list(r.violations.as_deref())
+        .into_iter()
+        .filter_map(|violation| {
+            if let Some(behavior) = violation.as_str() {
+                Some(json!({"type": behavior}))
+            } else if violation["type"].is_string() {
+                Some(violation)
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut v = json!({"id": r.id, "camera_id": r.camera_id, "name": r.name,
         "ts": r.ts, "processed_ts": r.processed_ts, "width": r.width,
         "height": r.height, "persons": r.persons, "in_zone": r.in_zone,
         "ppe_no": r.ppe_no, "ppe_wearing": r.ppe_wearing, "key": r.key,
         "violation": r.violation, "event_id": r.event_id,
-        "snapshot": r.snapshot, "error": r.error});
+        "snapshot": r.snapshot, "error": r.error, "zones": zones, "violations": violations,
+        "thumb_url": format!("/api/folder-images/{}/thumb", r.id),
+        "file_url": format!("/api/folder-images/{}/file", r.id)});
     if path_full {
         v["path"] = json!(r.path);
     }

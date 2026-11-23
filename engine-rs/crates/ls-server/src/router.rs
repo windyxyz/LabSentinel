@@ -52,6 +52,8 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/share-links/verify"),
     ("GET", "/api/events"),
     ("POST", "/api/events/:id/status"),
+    ("GET", "/api/events/:id/notes"),
+    ("POST", "/api/events/:id/notes"),
     ("GET", "/api/cameras"),
     ("POST", "/api/cameras"),
     ("GET", "/api/cameras/:id/status"),
@@ -96,6 +98,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/events/:eid/thumb"), // LS-050 缩略图缓存
     // ---- stats 全套 ----
     ("GET", "/api/stats/daily"),
+    ("GET", "/api/stats/compliance"),
     ("GET", "/api/stats/weekly"),
     ("GET", "/api/stats/hourly"),
     ("GET", "/api/stats/quality"),
@@ -246,6 +249,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/share-links/verify", get(share_link_verify))
         .route("/events", get(events))
         .route("/events/:id/status", post(set_status))
+        .route("/events/:id/notes", get(event_notes).post(add_event_note))
         .route("/events/bulk-status", post(bulk_event_status))
         .route("/events/timeline", get(events_timeline))
         .route("/events/:eid/snapshot", get(event_snapshot))
@@ -273,6 +277,7 @@ pub fn build_router(state: Shared) -> Router {
         )
         .route("/stats/summary", get(stats_summary))
         .route("/stats/daily", get(stats_daily))
+        .route("/stats/compliance", get(stats_compliance))
         .route("/stats/weekly", get(stats_weekly))
         .route("/stats/hourly", get(stats_hourly))
         .route("/stats/quality", get(stats_quality))

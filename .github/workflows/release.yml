@@ -57,6 +57,7 @@ jobs:
           npm run build
       - name: 准备发行资产（模型/ffmpeg/ffprobe/onnxruntime/go2rtc，哈希校验）
         run: |
+          python -m pip install onnx==1.17.0
           python scripts/prepare_rust_assets.py
       - name: build_rust --strict --zip
         run: python scripts/build_rust.py --strict --zip
@@ -98,6 +99,7 @@ jobs:
           $userData = Join-Path $dir 'data\preserve.txt'
           New-Item -ItemType Directory -Path (Split-Path $userData) -Force | Out-Null
           'test-user-state' | Set-Content -LiteralPath $userData
+          $legacyData = Join-Path $dir 'server\data\preserve.txt'
           $rv = Start-Process -FilePath (Join-Path $dir 'labsentinel-server.exe') -ArgumentList '--rollback' -WorkingDirectory $dir -Wait -PassThru
           if ($rv.ExitCode -ne 0 -or (Get-Content (Join-Path $dir VERSION) -Raw).Trim() -ne '0.5.0' -or !(Test-Path $userData)) {
             throw "首次覆盖升级后回滚失败：rc=$($rv.ExitCode)"
@@ -112,8 +114,14 @@ jobs:
           $st = Start-Process -FilePath (Join-Path $dir "labsentinel-server.exe") `
             -ArgumentList "--selftest-http" -WorkingDirectory $dir -Wait -PassThru
           if ($st.ExitCode -ne 0) { throw "安装后 --selftest-http 失败：rc=$($st.ExitCode)" }
+          python scripts/smoke_rust.py --install-dir $dir --timeout 90
+          if ($LASTEXITCODE -ne 0) { throw "安装版照片或视频检测验收失败" }
           node web/scripts/smoke_webrtc.mjs $dir
           if ($LASTEXITCODE -ne 0) { throw "安装版 RTSP / WebRTC 冒烟失败" }
+          New-Item -ItemType Directory -Path (Split-Path $legacyData) -Force | Out-Null
+          'legacy-user-state' | Set-Content -LiteralPath $legacyData
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          New-ItemProperty -Path $runKey -Name LabSentinel -Value ('"' + (Join-Path $dir 'labsentinel-server.exe') + '" --launch --tray') -Force | Out-Null
           $u = Start-Process -FilePath (Join-Path $dir "unins000.exe") -Wait -PassThru `
             -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
           if ($u.ExitCode -ne 0) { throw "静默卸载失败：rc=$($u.ExitCode)" }
@@ -124,8 +132,21 @@ jobs:
           if (Test-Path (Join-Path $desk "LabSentinel.lnk")) { throw "卸载后桌面快捷方式残留" }
           $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{9C7B3A41-5E2D-4F86-A1C9-2B7D6E4F8A10}_is1"
           if (Test-Path $key) { throw "卸载后注册表卸载项残留" }
-          "setup.exe 冒烟通过：安装/探活/快捷方式/卸载零残留"
-      - name: RA3/RA4 契约冒烟（解包→就绪→backend/版本→前端→停止）
+          if (Get-ItemProperty -Path $runKey -Name LabSentinel -ErrorAction SilentlyContinue) { throw "卸载后自启项残留" }
+          foreach ($name in @('versions', 'server')) {
+            if (Test-Path (Join-Path $dir $name)) { throw "卸载后旧目录残留：$name" }
+          }
+          if (!(Test-Path $userData)) { throw "默认卸载删除了用户数据" }
+          if (!(Test-Path (Join-Path $dir 'data\legacy-server-data\preserve.txt'))) { throw "默认卸载丢失旧布局用户数据" }
+          $p = Start-Process -FilePath $setup.FullName -Wait -PassThru -ArgumentList $installArgs
+          if ($p.ExitCode -ne 0) { throw "保留数据后的重新安装失败：rc=$($p.ExitCode)" }
+          $u = Start-Process -FilePath (Join-Path $dir "unins000.exe") -Wait -PassThru `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /REMOVEDATA=1"
+          if ($u.ExitCode -ne 0) { throw "删除数据卸载失败：rc=$($u.ExitCode)" }
+          Start-Sleep -Seconds 10
+          if (Test-Path $dir) { throw "删除数据卸载后安装目录残留" }
+          "setup.exe 冒烟通过：安装/探活/升级/回滚/卸载及数据选择"
+      - name: 便携包冒烟（启动、前端、照片与视频检测）
         shell: pwsh
         run: |
           $zip = Get-ChildItem Resources/dist/labsentinel-rust-*.zip |
@@ -133,9 +154,13 @@ jobs:
           python scripts/smoke_rust.py --zip $zip.FullName --timeout 90
           if ($LASTEXITCODE -ne 0) { throw "便携包启动冒烟失败" }
           $portable = Join-Path $env:RUNNER_TEMP ("ls-portable-playback-" + [Guid]::NewGuid())
-          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $portable
-          node web/scripts/smoke_webrtc.mjs $portable
-          if ($LASTEXITCODE -ne 0) { throw "便携版 RTSP / WebRTC 冒烟失败" }
+          try {
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath $portable
+            node web/scripts/smoke_webrtc.mjs $portable
+            if ($LASTEXITCODE -ne 0) { throw "便携版 RTSP / WebRTC 冒烟失败" }
+          } finally {
+            if (Test-Path -LiteralPath $portable) { Remove-Item -LiteralPath $portable -Recurse -Force }
+          }
       - name: SHA256SUMS（zip + setup.exe）
         shell: pwsh
         run: |

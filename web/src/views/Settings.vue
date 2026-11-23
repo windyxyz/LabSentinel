@@ -3,8 +3,8 @@
 // 各区块整段搬移自 Cameras.vue（逻辑零改动）。
 // UX1（2026-11-20）：9 分区扩容——「模型与检测」置顶（UX2 三模式）；设备管理/
 // 人脸管理 从一级导航迁入；原「模型管理」页并入「模型与检测」的本地模型卡。
-import { computed, onMounted, ref } from 'vue'
-import { api, downloadBinary } from '../api'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { api, CHANNEL_NAMES, downloadBinary } from '../api'
 import AccessSettings from './AccessSettings.vue'
 import DetectPanel from './DetectPanel.vue'
 import Devices from './Devices.vue'
@@ -39,17 +39,17 @@ function show(id) {
   if (search.value.trim()) return hit(sections.find(s => s.id === id))
   return active.value === id
 }
-function go(id) { active.value = id; search.value = '' }
+function go(id) {
+  active.value = id
+  search.value = ''
+  history.replaceState(null, '', `#/settings/${id}`)
+}
 
 // ---- 以下为搬移的业务逻辑（零改动）----
 const cams = ref([])   // 静默窗口的摄像头下拉
 
 
 // 任务23：告警渠道状态与自测
-const CHANNEL_NAMES = {
-  wecom: '企业微信', dingtalk: '钉钉', feishu: '飞书', serverchan: 'Server酱·微信',
-  pushplus: 'PushPlus·微信', qmsg: 'Qmsg·QQ', email: '邮件',
-}
 const alertChannels = ref([])
 const alertTesting = ref(false)
 const alertTestMsg = ref('')
@@ -329,6 +329,12 @@ async function toggleAutostart() {
 const pool = ref(null)
 const poolStatus = ref('')
 const poolClass = ref('')
+const poolSet = ref('')
+const poolExcluded = ref([])
+const poolBusy = ref(false)
+const poolPage = ref(0)
+const poolPageSize = 50
+const trainingSets = { coat: '实验服', mask: '口罩', gloves: '手套', goggles: '护目镜', person: '人员' }
 const poolMessage = ref('')
 const poolClasses = ref([])
 const shares = ref([])
@@ -338,14 +344,35 @@ const shareToken = ref('')
 const annotator = ref(null)
 async function loadPool() {
   try {
-    const result = await api.datasetSamples({ status: poolStatus.value, class: poolClass.value })
+    const result = await api.datasetSamples({ status: poolStatus.value, class: poolClass.value, set: poolSet.value, limit: 2000 })
     pool.value = { total: Number(result?.total) || 0, samples: Array.isArray(result?.samples) ? result.samples : [] }
+    poolPage.value = Math.min(poolPage.value, Math.max(0, Math.ceil(pool.value.samples.length / poolPageSize) - 1))
     poolClasses.value = Array.isArray(result?.class_counts) ? result.class_counts : []
   } catch (err) { poolMessage.value = err.message }
 }
 async function exportDataset() {
-  try { await downloadBinary(api.datasetExportUrl(), 'labsentinel-yolo-dataset.zip') }
+  poolBusy.value = true
+  poolMessage.value = ''
+  try {
+    const params = { set: poolSet.value || 'all' }
+    if (poolExcluded.value.length) params.exclude = poolExcluded.value.join(',')
+    await downloadBinary(api.datasetExportUrl(params), `labsentinel-yolo-${params.set}.zip`)
+    poolMessage.value = '训练集 ZIP 已生成。'
+  }
   catch (err) { poolMessage.value = err.message }
+  finally { poolBusy.value = false }
+}
+async function removePoolSamples(ids) {
+  if (poolBusy.value || !ids.length || !window.confirm(`删除标注池中这 ${ids.length} 个样本及其标注？源图片和事件记录保留。`)) return
+  poolBusy.value = true
+  poolMessage.value = ''
+  const results = await Promise.allSettled(ids.map(id => api.datasetDelete(id)))
+  const deleted = new Set(ids.filter((_, index) => results[index].status === 'fulfilled'))
+  poolExcluded.value = poolExcluded.value.filter(id => !deleted.has(id))
+  await loadPool()
+  const failed = ids.length - deleted.size
+  poolMessage.value = `已删除 ${deleted.size} 个样本${failed ? `，${failed} 个未删除` : ''}。`
+  poolBusy.value = false
 }
 const diagnosticMessage = ref('')
 async function exportDiagnostics() {
@@ -480,13 +507,20 @@ async function onUploadZip(e) {
 async function loadCams() {
   try { cams.value = await api.cameras() } catch { /* 服务未就绪时静默 */ }
 }
-onMounted(() => {
-  loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadGo2rtc(); loadNetwork(); loadPool(); loadShares()
-  // UX1：hash 深链分区（#/settings/face 等，App.vue 旧路由重定向后落到这里）
+function syncSection() {
+  if (!window.location.hash.startsWith('#/settings')) return
   const hashSection = window.location.hash.split('/')[2]
   const sub = hashSection === 'token' ? 'access' : hashSection
-  if (sections.some((s) => s.id === sub)) active.value = sub
+  active.value = sections.some((s) => s.id === sub) ? sub : 'detect'
+  search.value = ''
+}
+
+onMounted(() => {
+  loadAlerts(); loadPlugins(); loadCams(); loadTemplate(); loadGo2rtc(); loadNetwork(); loadPool(); loadShares()
+  syncSection()
+  window.addEventListener('hashchange', syncSection)
 })
+onBeforeUnmount(() => window.removeEventListener('hashchange', syncSection))
 </script>
 
 <template>
@@ -613,7 +647,7 @@ onMounted(() => {
     <p class="muted" style="margin-top:4px">
       导出的配置不含摄像头密码（已脱敏）；导入后不会自动启动摄像头。</p>
     <hr style="border:none;border-top:1px solid var(--divider);margin:12px 0" />
-    <h3 style="margin:0 0 8px">样本标注池（数据飞轮）</h3>
+    <h3 style="margin:0 0 8px">训练数据与标注</h3>
     <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
       <select v-model="poolStatus" aria-label="样本状态筛选" @change="loadPool">
         <option value="">全部状态</option>
@@ -621,8 +655,16 @@ onMounted(() => {
         <option value="verified">已核验</option>
         <option value="ambiguous">模糊弃用</option>
       </select>
-      <button class="ghost" @click="loadPool">刷新</button>
-      <button class="ghost" @click="exportDataset">导出 YOLO 训练集 ZIP（仅已核验）</button>
+      <select v-model="poolSet" aria-label="训练集" @change="poolPage = 0; loadPool()">
+        <option value="">全部训练集</option>
+        <option v-for="(name, id) in trainingSets" :key="id" :value="id">{{ name }}</option>
+      </select>
+      <button class="ghost" :disabled="poolBusy" @click="loadPool">刷新</button>
+      <button class="ghost" :disabled="poolBusy" @click="exportDataset">导出已核验样本 ZIP</button>
+      <template v-if="poolExcluded.length">
+        <button class="ghost" :disabled="poolBusy" @click="removePoolSamples([...poolExcluded])">删除已排除的 {{ poolExcluded.length }} 项</button>
+        <button class="ghost" :disabled="poolBusy" @click="poolExcluded = []">清除排除</button>
+      </template>
       <select v-model="poolClass" aria-label="样本类别筛选" @change="loadPool">
         <option value="">所有类别</option>
         <option v-for="c in poolClasses" :key="c.class" :value="c.class">{{ c.class }}</option>
@@ -637,19 +679,27 @@ onMounted(() => {
       </div>
     </div>
     <table v-if="pool?.samples?.length" style="margin-top:8px">
-      <tr><th>ID</th><th>来源</th><th>状态</th><th>框数</th><th></th></tr>
-      <tr v-for="s in pool.samples.slice(0, 50)" :key="s.id">
+      <tr><th>排除导出</th><th>ID</th><th>来源</th><th>状态</th><th>训练集</th><th>框数</th><th></th></tr>
+      <tr v-for="s in pool.samples.slice(poolPage * poolPageSize, (poolPage + 1) * poolPageSize)" :key="s.id">
+        <td><input v-model="poolExcluded" :value="s.id" type="checkbox" :disabled="poolBusy"
+                   :aria-label="`本次不导出样本 ${s.id}`" /></td>
         <td>#{{ s.id }}</td>
         <td>{{ s.source_type }} {{ s.source_id }}</td>
         <td><span :class="s.status === 'verified' ? 'st-ok' : 'st-idle'">{{ s.status }}</span></td>
+        <td>{{ Array.isArray(s.training_sets) ? s.training_sets.map(id => trainingSets[id]).filter(Boolean).join('、') || '—' : '—' }}</td>
         <td>{{ Array.isArray(s.boxes) ? s.boxes.length : 0 }}</td>
         <td>
           <button class="ghost" @click="openAnnotator(s)">标注</button>
-          <button class="ghost" @click="api.datasetDelete(s.id).then(loadPool)">删除</button>
+          <button class="ghost" :disabled="poolBusy" @click="removePoolSamples([s.id])">删除</button>
         </td>
       </tr>
     </table>
     <p v-else class="muted" style="margin-top:8px">暂无样本——在事件详情或图片文件夹详情点「加入标注池」，或从实时画面抓拍。</p>
+    <div v-if="pool?.samples?.length > poolPageSize" class="row" style="margin-top:8px">
+      <button class="ghost" :disabled="poolPage === 0" @click="poolPage--">上一页</button>
+      <span>第 {{ poolPage + 1 }} 页</span>
+      <button class="ghost" :disabled="(poolPage + 1) * poolPageSize >= pool.samples.length" @click="poolPage++">下一页</button>
+    </div>
       </section>
       <section v-show="show('template')" class="panel">
     <h3 style="margin:14px 0 10px">告警文案模板 <span class="muted" style="font-size:12px">（网页编辑，保存即生效）</span></h3>

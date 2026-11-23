@@ -36,7 +36,7 @@ describe('首页监控状态与更新入口', () => {
     const card = view.get('.monitor-card')
     expect(card.get('.num').text()).toContain('1 / 4')
     expect(card.get('.stat-detail').text()).toBe('1 路连接中 · 1 路离线 · 1 路停止')
-    expect(card.get('a').attributes('href')).toBe('#/sources/cams')
+    expect(card.get('a').attributes('href')).toBe('#/sources/cams?status=offline')
     expect(view.text()).not.toContain('Rust')
     expect(view.text()).not.toContain('DirectML')
   })

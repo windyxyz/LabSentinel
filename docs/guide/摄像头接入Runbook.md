@@ -17,6 +17,16 @@
 | 时间 | 主机 NTP 同步（`w32tm /query /status` 核对） | 事件时间线错乱、报表按天分组漂移 |
 | 软件 | LabSentinel 已部署且 `/api/health/ready` 返回 ready | 先看 `checks` 逐项原因 |
 
+## 大华云联与乐橙
+
+在「摄像头」的添加菜单选择「大华摄像头／录像机」，填设备地址、RTSP 端口、通道和设备账号。预览使用主码流。可勾选辅码流做检测，远处白大褂或口罩太小时可改回主码流。每个录像机通道单独添加。
+
+从现场录像机或摄像头获取授权的内网 RTSP 流，可与原来的手机预览和录像并行。先记录设备型号、通道号和 IP，在部署 LabSentinel 的电脑上用 VLC 或下方的 `ffprobe` 验证一路。优先使用只拥有指定通道预览权限的设备账号。
+
+- **大华云联**。有 NVR 或 XVR 时先试录像机的局域网 IP 和实际通道。一台录像机上的多路画面在 LabSentinel 中按通道各加一条。常见地址为 `rtsp://用户名:密码@录像机IP:554/cam/realmonitor?channel=1&subtype=0`。通道从 1 起，`subtype=0` 是主码流，`subtype=1` 是辅码流。支持 RTSP 的独立摄像头通常先试其自身 IP 与通道 1。设备改过 RTSP 端口时使用实际端口。 [大华设备手册](https://pdfile.dahuatech.com/PD_PUM/PUM0001877/WEB5.0%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6.pdf)
+- **乐橙**。按具体型号和固件确认本地 RTSP 或 ONVIF。如果设备接入录像机，也可从录像机取它所在通道。支持独立取流时，用厂商手册或设备管理端给出的 RTSP 地址。局域网发现页可查支持 WS-Discovery 的设备，再用完整地址验证账号、通道和编码。 [乐橙设备能力](https://open.imou.com/document/capabilities/network/service/)
+- **仅能通过云端访问**。大华云联走大华云开发者平台的 C2B 授权。乐橙可由设备所有人按开放平台流程授权设备并生成云直播地址。当前 LabSentinel 接受 RTSP 和 RTSPS，接入云直播 HLS 需另行适配，或由已授权的媒体网关输出 RTSP。使用云方案前先测实际延迟、流量条件和断流后能否恢复。 [大华云开发者平台](https://open.cloud-dahua.com/) · [乐橙云直播](https://open.imou.com/document/guides/video/live-address/)
+
 ## 1. 接入前预检（不进系统也能做）
 
 **1a. RTSP 连通性**（用包内 ffmpeg，完整 Windows 路径可复制）：
@@ -45,7 +55,7 @@ python tools\camera_soak.py --preflight --base-url http://127.0.0.1:8000 --camer
 
 ## 2. 添加摄像头（页面操作）
 
-1. 「摄像头」页 → 添加 → 类型 `RTSP 拉流`，source 填**子码流**地址；
+1. 「监控源 → 摄像头」→ 添加 → 类型 `RTSP`，接入地址填已验证的主码流。保存后可在「分析码流 → 单独使用子码流」填同镜头、同宽高比的 H.264 辅码流。只有一条可用地址时可让分析与预览共享本机中继；
 2. **取消勾选"自动启动"**——先配区域/规则再启动（否则裸跑全画幅，误报先来一轮）；
 3. USB 摄像头：类型选 `USB`，设备下拉直接选（后台 `GET /api/cameras/usb-devices` 枚举，
    被会议软件占用的设备不出现——先关 Zoom/腾讯会议）；

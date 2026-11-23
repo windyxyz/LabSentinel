@@ -106,4 +106,22 @@ describe('LS-042 前后端契约与 P0 回归', () => {
     const [, opts] = f.mock.calls[0]
     expect(opts.headers['X-Admin-Token']).toBe('adm-xyz')
   })
+
+  it('FsPicker：视频模式返回选中的视频文件路径', async () => {
+    const path = 'D:/监控/检测样本.MP4'
+    mockFetch({
+      'GET /api/fs/list': {
+        path: 'D:/监控',
+        entries: [{ name: '检测样本.MP4', path, is_dir: false },
+          { name: 'notes.txt', path: 'D:/监控/notes.txt', is_dir: false }],
+      },
+    })
+    const view = mount(FsPicker, { props: { video: true, title: '选择视频文件' } })
+    view.vm.openAt('D:/监控')
+    await flushPromises()
+    expect(view.text()).not.toContain('notes.txt')
+    await view.findAll('button').find(button => button.text() === '选择').trigger('click')
+    expect(view.emitted('pick')).toEqual([[path]])
+    view.unmount()
+  })
 })

@@ -345,10 +345,21 @@ fn camera_allowed(store: &ls_store::Store, camera: i64, mode: FaceMode) -> bool 
     }
 }
 
+pub fn match_alert_enabled(store: &ls_store::Store, camera: i64) -> bool {
+    store
+        .setting_get(&format!("face.camera_alert.{camera}"))
+        .is_ok_and(|value| value.as_deref() == Some("1"))
+}
+
+pub enum MatchTarget {
+    Event(i64),
+    Alert(i64),
+}
+
 pub fn identify_event(
     st: &Shared,
     store: &ls_store::Store,
-    event: i64,
+    target: MatchTarget,
     camera: i64,
     bounds: [f32; 4],
     jpeg: &[u8],
@@ -380,6 +391,8 @@ pub fn identify_event(
             };
             let active = || {
                 camera_allowed(&store, camera, cfg.active.mode)
+                    && (!matches!(target, MatchTarget::Alert(_))
+                        || match_alert_enabled(&store, camera))
                     && cfg.same_recognition(&FaceSettings::load(&store, Path::new(&st.data_dir)))
             };
             if !active() {
@@ -387,10 +400,63 @@ pub fn identify_event(
             }
             if let Ok(Some(person)) = recognize(&st, &store, &cfg, &photo) {
                 if active() {
-                    let _ = store.save_face_match(event, person.id, person.similarity, unix_now());
+                    match target {
+                        MatchTarget::Event(event) => {
+                            let _ = store.save_face_match(
+                                event,
+                                person.id,
+                                person.similarity,
+                                unix_now(),
+                            );
+                        }
+                        MatchTarget::Alert(track) => {
+                            publish_match_alert(&st, &store, camera, track, &person);
+                        }
+                    }
                 }
             }
         });
+}
+
+fn publish_match_alert(
+    st: &Shared,
+    store: &ls_store::Store,
+    camera: i64,
+    track: i64,
+    person: &FaceMatch,
+) {
+    let now = SystemTime::now();
+    let ts = ls_core::time::format_system_time_local_iso(now);
+    let since = ls_core::time::format_system_time_local_iso(now - Duration::from_secs(90));
+    let event = ls_analyzer::pipeline::Candidate {
+        camera_id: camera,
+        zone_id: None,
+        behavior: "face_match".into(),
+        level: 2,
+        track_id: track,
+        detail: "检测到与已录入人员匹配的人脸，请核对事件详情".into(),
+        ts_iso: ts,
+        evidence_key: String::new(),
+    };
+    let row = ls_store::NewEvent {
+        camera_id: camera,
+        type_: &event.behavior,
+        level: event.level,
+        track_id: track,
+        detail: &event.detail,
+        snapshot: None,
+        ts: &event.ts_iso,
+    };
+    if let Ok(Some(id)) =
+        store.add_face_alert(&row, person.id, person.similarity, unix_now(), &since)
+    {
+        if let Ok(Some(row)) = store.event_by_id(id) {
+            let _ = st
+                .events_tx
+                .send(crate::handlers::events::event_json(&row).to_string());
+        }
+        crate::worker::EventSink::new(Arc::clone(st)).deliver_deferred_pub(id, &event, false);
+    }
 }
 
 pub fn start_retention(st: Shared) {

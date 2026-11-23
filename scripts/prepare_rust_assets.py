@@ -24,7 +24,8 @@ import fetch_assets  # noqa: E402
 MODELS = ROOT / "m0-spike"
 FFDIR = ROOT / "tools" / "ffmpeg"
 ORTDIR = ROOT / "tools" / "onnxruntime"
-MODEL_ASSETS = ("yolo11n.onnx", "yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt")
+MODEL_ASSETS = ("yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt", "labcoat-confirm.onnx")
+CLOSE_MASK_ASSETS = ("face_detection_yunet_2023mar.onnx", "mask_detector.onnx")
 GO2RTC = ROOT / "tools" / "go2rtc.exe"
 GO2RTC_ARCHIVE = "go2rtc_win64.zip"
 
@@ -36,6 +37,11 @@ def log(msg: str) -> None:
 def valid_go2rtc(path: Path) -> bool:
     spec = fetch_assets.load_lock()[GO2RTC_ARCHIVE]
     return path.is_file() and fetch_assets.verify(path, spec["binary_sha256"], spec["binary_size"])
+
+
+def valid_model_asset(path: Path) -> bool:
+    spec = fetch_assets.load_lock()[path.name]
+    return path.is_file() and fetch_assets.verify(path, spec["sha256"], spec["size"])
 
 
 def ensure_go2rtc(force: bool) -> None:
@@ -56,22 +62,48 @@ def ensure_go2rtc(force: bool) -> None:
     log("go2rtc.exe 已验证并就绪")
 
 
+def prepare_person_model(out: Path, force: bool) -> None:
+    """将签入锁文件的上游模型转换到随包运行库支持的 opset，验证转换后的字节。"""
+    spec = fetch_assets.load_lock()[out.name]
+    if out.is_file() and not force:
+        if not fetch_assets.verify(out, spec["sha256"], spec["size"]):
+            log(f"使用已准备的模型: {out.name}。发行冒烟会实测人物检测。")
+            return
+    try:
+        import onnx
+    except ImportError as exc:
+        raise SystemExit("请在构建环境安装 onnx==1.17.0，以转换随包人员模型") from exc
+    with tempfile.TemporaryDirectory(dir=out.parent) as work:
+        original = out
+        if force or not out.is_file():
+            original = Path(work) / out.name
+            if fetch_assets.download(out.name, original) != 0:
+                raise SystemExit("[失败] 人员模型下载失败")
+        converted = onnx.version_converter.convert_version(onnx.load(original), spec["prepared_opset"])
+        onnx.checker.check_model(converted, full_check=True)
+        temp_model = Path(work) / "converted.onnx"
+        temp_model.write_bytes(converted.SerializeToString(deterministic=True))
+        if not fetch_assets.verify(temp_model, spec["prepared_sha256"], spec["prepared_size"]):
+            raise SystemExit("[失败] 转换后的人员模型 SHA256 或大小不符")
+        temp_model.replace(out)
+    log(f"{out.name} 已转换并校验为 opset {spec['prepared_opset']}")
+
+
 def ensure_models(force: bool) -> None:
-    """模型准备：基础模型失败即退出。PPE 模型自 0.3.1 起随仓库/发行包分发
-    （m0-spike 已入库），此处仅在文件缺失时尝试锁文件下载，失败仍降级警告；
-    发行构建由 build_rust.py --strict 强制校验 PPE 是否存在。"""
+    """校验仓库内的实验服模型并准备其余随包权重。"""
     MODELS.mkdir(parents=True, exist_ok=True)
-    for name in MODEL_ASSETS:
+    prepare_person_model(MODELS / "yolo11n.onnx", force)
+    for name in CLOSE_MASK_ASSETS:
         out = MODELS / name
-        if out.is_file() and not force:
-            log(f"模型已存在: {out.name}")
+        if not force and valid_model_asset(out):
+            log(f"{name} 已存在，SHA256 一致")
             continue
-        rc = fetch_assets.download(name, out)
-        if rc != 0:
-            if name == "yolo11n.onnx":
-                raise SystemExit(f"[失败] 基础模型下载失败: {name}")
-            log(f"警告: {name} 下载失败（许可/资产源未就绪，Q-08）——"
-                "发行包不含实验服模型，用户可在网页端按需确认许可后下载")
+        if fetch_assets.download(name, out) != 0:
+            raise SystemExit(f"[失败] 近景口罩资产准备失败: {name}")
+    for name in MODEL_ASSETS:
+        if not valid_model_asset(MODELS / name):
+            raise SystemExit(f"[失败] 仓库内实验服模型缺失或不匹配: {name}")
+        log(f"{name} 已存在，SHA256 一致")
 
 
 

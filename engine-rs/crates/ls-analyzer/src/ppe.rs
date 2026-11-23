@@ -1,15 +1,33 @@
 //! PPE 级联检测器（RA2-S1 / ADR-0011）：从 bin 参数化迁出——sidecar 走 env 组装
 //! `PpeConfig`，ls-server/folder worker 从 settings 组装，共用同一实现。
 //!
-//! 判定口径与 Python `vision.ppe_boxes` 一致：违规框交集 → NoPpe；穿戴框 →
-//! Wearing；皆无 → Unknown。已知差异（有意）：Rust 每类一次整图推理（违规 1 +
-//! 穿戴 ≥1 次），Python 单次共享推理（T-301）——语义等价、性能差异。
+//! 单次整图推理解码实验服和口罩证据，各自判定，保留无法确认的状态。
 
 use std::path::{Path, PathBuf};
 
+use ls_infer::face::FaceMaskModel;
 use ls_infer::yolo::{OutputFormat, YoloModel};
 
-use crate::pipeline::{PpeRunner, PpeStatus};
+use crate::pipeline::{PpeObservation, PpeRunner, PpeStatus};
+
+pub const COAT_CONFIRMATION_FILE: &str = "labcoat-confirm.onnx";
+const COAT_CONFIRMATION_CONF: f32 = 0.55;
+
+#[derive(Debug, Clone)]
+pub struct CloseMaskAssets {
+    detector: PathBuf,
+    classifier: PathBuf,
+}
+
+impl CloseMaskAssets {
+    pub fn from_dir(dir: &Path) -> Option<Self> {
+        Some(Self {
+            detector: anchored_child(dir, "face_detection_yunet_2023mar.onnx")
+                .filter(|p| p.is_file())?,
+            classifier: anchored_child(dir, "mask_detector.onnx").filter(|p| p.is_file())?,
+        })
+    }
+}
 
 /// PPE 级联配置（模型路径须已过 `crate::detector::anchor_model_file` 锚点）。
 #[derive(Debug, Clone)]
@@ -28,6 +46,9 @@ pub struct PpeConfig {
     pub use_gpu: bool,
     /// LS-055：灰度/低照度 ROI 启用 CLAHE 局部对比度增强
     pub clahe_enabled: bool,
+    pub close_mask: Option<CloseMaskAssets>,
+    /// A bundled white-coat model must corroborate positive wearing observations.
+    pub coat_confirmation: Option<PathBuf>,
 }
 
 impl Default for PpeConfig {
@@ -45,6 +66,8 @@ impl Default for PpeConfig {
             wearing_class_names: vec!["lab coat".into()],
             use_gpu: true,
             clahe_enabled: true,
+            close_mask: None,
+            coat_confirmation: None,
         }
     }
 }
@@ -101,14 +124,97 @@ pub fn load_class_names(model_path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// YOLO PPE 级联（违规类一次整图 + 穿戴类逐类一次）。
+/// YOLO PPE 级联。
 pub struct YoloPpeRunner {
     model: YoloModel,
     violation_class: usize,
     wearing_classes: Vec<usize>,
+    mask_classes: Option<(usize, usize)>,
     violation_conf: f32,
     wearing_conf: f32,
     clahe_enabled: bool,
+    close_mask: Option<FaceMaskModel>,
+    coat_confirmation: Option<CoatConfirmation>,
+}
+
+struct CoatConfirmation {
+    model: Option<YoloModel>,
+}
+
+fn apply_coat_confirmation(
+    statuses: &mut [PpeStatus],
+    people: &[[f32; 4]],
+    detections: &[[f32; 4]],
+) {
+    let mut confirmed = vec![false; people.len()];
+    for [x1, y1, x2, y2] in detections {
+        let (x, y) = ((x1 + x2) * 0.5, (y1 + y2) * 0.5);
+        let mut owners = people.iter().enumerate().filter(|(_, b)| {
+            let height = b[3] - b[1];
+            x >= b[0] && x <= b[2] && y >= b[1] + 0.10 * height && y <= b[1] + 0.92 * height
+        });
+        if let (Some((owner, _)), None) = (owners.next(), owners.next()) {
+            confirmed[owner] = true;
+        }
+    }
+    for (status, confirmed) in statuses.iter_mut().zip(confirmed) {
+        if *status == PpeStatus::Wearing && !confirmed {
+            *status = PpeStatus::Unknown;
+        }
+    }
+}
+
+fn head_owners(person_boxes: &[[f32; 4]], x: f32, y: f32) -> impl Iterator<Item = usize> + '_ {
+    person_boxes
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, b)| {
+            (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[1] + (b[3] - b[1]) * 0.42)
+                .then_some(index)
+        })
+}
+
+fn close_mask_status([covered, uncovered]: [f32; 2]) -> PpeStatus {
+    if !covered.is_finite() || !uncovered.is_finite() {
+        return PpeStatus::Unknown;
+    }
+    // A no-mask alert needs stronger evidence than a positive wearing observation.
+    if (0.99..=1.0).contains(&uncovered) && (0.0..=0.01 + f32::EPSILON).contains(&covered) {
+        return PpeStatus::NoPpe;
+    }
+    if (0.95..=1.0).contains(&covered) && (0.0..=0.05 + f32::EPSILON).contains(&uncovered) {
+        return PpeStatus::Wearing;
+    }
+    PpeStatus::Unknown
+}
+
+fn supplement_masks(
+    model: &mut FaceMaskModel,
+    bgr: &[u8],
+    w: u32,
+    h: u32,
+    person_boxes: &[[f32; 4]],
+    masks: &mut [PpeStatus],
+) {
+    let Ok(faces) = model.faces(bgr, w, h) else {
+        return;
+    };
+    let mut associated = vec![Vec::new(); masks.len()];
+    for bounds in faces {
+        let [x1, y1, x2, y2] = bounds;
+        let mut owners = head_owners(person_boxes, (x1 + x2) as f32 / 2.0, (y1 + y2) as f32 / 2.0);
+        if let (Some(owner), None) = (owners.next(), owners.next()) {
+            associated[owner].push(bounds);
+        }
+    }
+    for (status, faces) in masks.iter_mut().zip(associated) {
+        let (PpeStatus::Unknown, [bounds]) = (*status, faces.as_slice()) else {
+            continue;
+        };
+        if let Ok(scores) = model.classify(bgr, w, *bounds) {
+            *status = close_mask_status(scores);
+        }
+    }
 }
 
 /// LS-043：升级框归属判定——要求交集占较小框面积 ≥ 0.20 或 PPE 框中心落入人框内，
@@ -167,6 +273,19 @@ impl PpeRunner for YoloPpeRunner {
         h: u32,
         person_boxes: &[[f32; 4]],
     ) -> Vec<PpeStatus> {
+        self.observations(bgr, w, h, person_boxes)
+            .into_iter()
+            .map(|observation| observation.coat)
+            .collect()
+    }
+
+    fn observations(
+        &mut self,
+        bgr: &[u8],
+        w: u32,
+        h: u32,
+        person_boxes: &[[f32; 4]],
+    ) -> Vec<PpeObservation> {
         if person_boxes.is_empty() {
             return Vec::new();
         }
@@ -176,9 +295,19 @@ impl PpeRunner for YoloPpeRunner {
         for &wc in &self.wearing_classes {
             specs.push((wc, self.wearing_conf, 0.0));
         }
-        let Ok(mut all_dets) = self.model.detect_classes(bgr, w, h, &specs) else {
-            return vec![PpeStatus::Unknown; person_boxes.len()];
+        let coat_classes = specs.len();
+        if let Some((no_mask, mask)) = self.mask_classes {
+            specs.push((no_mask, self.violation_conf, 0.0));
+            specs.push((mask, self.wearing_conf, 0.0));
+        }
+        let unknown = PpeObservation {
+            coat: PpeStatus::Unknown,
+            mask: PpeStatus::Unknown,
         };
+        let Ok(mut all_dets) = self.model.detect_classes(bgr, w, h, &specs) else {
+            return vec![unknown; person_boxes.len()];
+        };
+        let mask_dets = all_dets.split_off(coat_classes);
         let no_boxes_raw = if !all_dets.is_empty() {
             all_dets.remove(0)
         } else {
@@ -190,7 +319,38 @@ impl PpeRunner for YoloPpeRunner {
             .flat_map(|v| v.into_iter().map(|d| d.box_))
             .collect();
         let frame_area = ((w as f32) * (h as f32)).max(1.0);
-        person_boxes
+        let mut masks = vec![PpeStatus::Unknown; person_boxes.len()];
+        if let [uncovered, covered] = mask_dets.as_slice() {
+            let mut evidence = vec![(false, false); person_boxes.len()];
+            for (index, dets) in [uncovered, covered].into_iter().enumerate() {
+                for det in dets {
+                    let [x1, y1, x2, y2] = det.box_;
+                    let x = (x1 + x2) * 0.5;
+                    let y = (y1 + y2) * 0.5;
+                    let mut owners = head_owners(person_boxes, x, y);
+                    if let (Some(owner), None) = (owners.next(), owners.next()) {
+                        if index == 0 {
+                            evidence[owner].0 = true;
+                        } else {
+                            evidence[owner].1 = true;
+                        }
+                    }
+                }
+            }
+            for (mask, observed) in masks.iter_mut().zip(evidence) {
+                *mask = match observed {
+                    (true, false) => PpeStatus::NoPpe,
+                    (false, true) => PpeStatus::Wearing,
+                    _ => PpeStatus::Unknown,
+                };
+            }
+        }
+        if masks.contains(&PpeStatus::Unknown) {
+            if let Some(model) = self.close_mask.as_mut() {
+                supplement_masks(model, bgr, w, h, person_boxes, &mut masks);
+            }
+        }
+        let mut coats: Vec<_> = person_boxes
             .iter()
             .map(|pb| {
                 if no_boxes.iter().any(|nb| boxes_overlap(*nb, *pb)) {
@@ -216,7 +376,10 @@ impl PpeRunner for YoloPpeRunner {
                         } else {
                             roi
                         };
-                        if let Ok(roi_dets) = self.model.detect_classes(&roi, rw, rh, &specs) {
+                        if let Ok(roi_dets) =
+                            self.model
+                                .detect_classes(&roi, rw, rh, &specs[..coat_classes])
+                        {
                             let has_no = roi_dets.first().is_some_and(|v| !v.is_empty());
                             let has_wear = roi_dets.iter().skip(1).any(|v| !v.is_empty());
                             if has_no {
@@ -230,6 +393,27 @@ impl PpeRunner for YoloPpeRunner {
                 }
                 PpeStatus::Unknown
             })
+            .collect();
+        if let Some(confirmation) = self.coat_confirmation.as_mut() {
+            if coats.contains(&PpeStatus::Wearing) {
+                let detections = confirmation
+                    .model
+                    .as_mut()
+                    .and_then(|model| {
+                        model
+                            .detect_classes(bgr, w, h, &[(0, COAT_CONFIRMATION_CONF, 0.0)])
+                            .ok()
+                    })
+                    .and_then(|classes| classes.into_iter().next())
+                    .unwrap_or_default();
+                let boxes: Vec<_> = detections.into_iter().map(|d| d.box_).collect();
+                apply_coat_confirmation(&mut coats, person_boxes, &boxes);
+            }
+        }
+        coats
+            .into_iter()
+            .zip(masks)
+            .map(|(coat, mask)| PpeObservation { coat, mask })
             .collect()
     }
 }
@@ -245,9 +429,10 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
         return None;
     }
     let find = |name: &str| -> Option<usize> {
-        names
-            .iter()
-            .position(|n| n.eq_ignore_ascii_case(name.trim()))
+        names.iter().position(|n| {
+            n.replace(['_', '-'], " ")
+                .eq_ignore_ascii_case(&name.trim().replace(['_', '-'], " "))
+        })
     };
     let Some(violation_class) = find(&cfg.violation_class_name) else {
         println!(
@@ -279,6 +464,35 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
     ) {
         Ok(mut model) => {
             model.use_output_format(cfg.output_format);
+            let coat_confirmation = cfg.coat_confirmation.as_ref().map(|path| {
+                let model = YoloModel::load(
+                    path,
+                    640,
+                    COAT_CONFIRMATION_CONF,
+                    0.5,
+                    0.0,
+                    None,
+                    cfg.use_gpu,
+                )
+                .map(|mut model| {
+                    model.use_output_format(Some(OutputFormat::Yolo));
+                    model
+                })
+                .map_err(|error| {
+                    println!("[ls-analyzer] 白大褂复核模型不可用，穿戴状态保留未知: {error}");
+                })
+                .ok();
+                CoatConfirmation { model }
+            });
+            let close_mask = cfg.close_mask.as_ref().and_then(|assets| {
+                match FaceMaskModel::load(&assets.detector, &assets.classifier, cfg.use_gpu) {
+                    Ok(model) => Some(model),
+                    Err(error) => {
+                        println!("[ls-analyzer] 近景口罩模型加载失败: {error}");
+                        None
+                    }
+                }
+            });
             println!(
                 "[ls-analyzer] PPE 模型已加载: {}（违规类={violation_class} 穿戴类={wearing_classes:?}）",
                 cfg.model_path.display()
@@ -287,9 +501,12 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
                 model,
                 violation_class,
                 wearing_classes,
+                mask_classes: find("no mask").zip(find("mask")),
                 violation_conf: cfg.violation_conf,
                 wearing_conf: cfg.wearing_conf,
                 clahe_enabled: cfg.clahe_enabled,
+                close_mask,
+                coat_confirmation,
             }))
         }
         Err(e) => {
@@ -334,6 +551,25 @@ pub fn violation_classes(classes: &[String]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ambiguous_coat_boxes_do_not_confirm_wearing_or_suppress_an_independent_violation() {
+        let people = [
+            [0.0, 0.0, 100.0, 200.0],
+            [50.0, 0.0, 150.0, 200.0],
+            [175.0, 0.0, 275.0, 200.0],
+        ];
+        let mut status = [PpeStatus::Wearing, PpeStatus::Wearing, PpeStatus::NoPpe];
+        apply_coat_confirmation(
+            &mut status,
+            &people,
+            &[[10.0, 35.0, 45.0, 135.0], [60.0, 40.0, 90.0, 150.0]],
+        );
+        assert_eq!(
+            status,
+            [PpeStatus::Wearing, PpeStatus::Unknown, PpeStatus::NoPpe]
+        );
+    }
 
     #[test]
     fn violation_behavior_maps_known_classes() {

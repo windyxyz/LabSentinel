@@ -9,6 +9,7 @@ use axum::extract::{
 };
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
+use axum::Extension;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -22,16 +23,7 @@ pub(crate) async fn events(
         Ok(s) => s,
         Err(_) => return server_err(),
     };
-    match s.events_scoped(
-        q.limit.unwrap_or(50).clamp(0, 200),
-        q.offset.unwrap_or(0).max(0),
-        q.camera_id,
-        q.status.as_deref(),
-        browser
-            .device
-            .as_ref()
-            .and_then(|device| device.cameras.as_deref()),
-    ) {
+    match s.events_query(&q.filter(&browser, &ls_core::time::local_today_iso())) {
         Ok(rows) => Json(rows.iter().map(event_json).collect::<Vec<_>>()).into_response(),
         Err(_) => server_err(),
     }
@@ -44,6 +36,39 @@ pub(crate) struct EventsQuery {
     offset: Option<i64>,
     camera_id: Option<i64>,
     status: Option<String>,
+    level: Option<i64>,
+    #[serde(rename = "type")]
+    type_: Option<String>,
+    category: Option<String>,
+    start_ts: Option<String>,
+    end_ts: Option<String>,
+    today: Option<u8>,
+    q: Option<String>,
+    ai_verdict: Option<String>,
+}
+
+impl EventsQuery {
+    pub(super) fn filter<'a>(
+        &'a self,
+        browser: &'a crate::access::BrowserAccess,
+        today: &'a str,
+    ) -> ls_store::EventsFilter<'a> {
+        let day = (self.today == Some(1)).then_some(today);
+        ls_store::EventsFilter {
+            camera_id: self.camera_id,
+            status: self.status.as_deref(),
+            level: self.level,
+            type_: self.type_.as_deref(),
+            category: self.category.as_deref(),
+            start_ts: day.or(self.start_ts.as_deref()),
+            end_ts: day.or(self.end_ts.as_deref()),
+            search: self.q.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+            ai_verdict: self.ai_verdict.as_deref(),
+            allowed_cameras: browser.device.as_ref().and_then(|d| d.cameras.as_deref()),
+            limit: self.limit.unwrap_or(50).clamp(0, 200),
+            offset: self.offset.unwrap_or(0).max(0),
+        }
+    }
 }
 
 pub(crate) fn event_json(e: &ls_store::Event) -> Value {
@@ -53,46 +78,105 @@ pub(crate) fn event_json(e: &ls_store::Event) -> Value {
         .vlm_verdict
         .as_deref()
         .and_then(|v| serde_json::from_str::<Value>(v).ok());
+    let ai_verdict = vlm_verdict
+        .as_ref()
+        .and_then(|review| review.get("verdict"));
     json!({"id": e.id, "ts": e.ts, "camera_id": e.camera_id, "type": e.type_,
+           "category": if matches!(e.type_.as_str(), "photo_check" | "video_check") { "check" } else { "alert" },
            "level": e.level, "track_id": e.track_id, "detail": e.detail,
            "has_snapshot": e.snapshot.is_some(), "has_video": e.video.is_some(),
-           "status": e.status,
+           "status": e.status, "handled_by": e.handled_by, "handled_ts": e.handled_ts,
+           "ai_verdict": ai_verdict, "ai_review": vlm_verdict,
            "vlm_suppressed": e.vlm_suppressed != 0,
            "vlm_ts": e.vlm_ts,
            "vlm_verdict": vlm_verdict})
 }
 
-pub(crate) async fn events_count(State(st): State<Shared>) -> Json<Value> {
-    let n = ls_store::Store::open(&st.db_path)
-        .ok()
-        .and_then(|s| s.count_events().ok())
-        .unwrap_or(0);
-    Json(json!({"count": n}))
+pub(crate) async fn events_count(
+    State(st): State<Shared>,
+    Extension(browser): Extension<crate::access::BrowserAccess>,
+    Query(q): Query<EventsQuery>,
+) -> Response {
+    with_store(&st, |store| {
+        let count =
+            store.events_query_count(&q.filter(&browser, &ls_core::time::local_today_iso()))?;
+        Ok(Json(json!({"count": count})))
+    })
+}
+
+pub(crate) async fn event_notes(State(st): State<Shared>, AxPath(id): AxPath<i64>) -> Response {
+    with_store(&st, |store| {
+        if store.event_by_id(id)?.is_none() {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "事件不存在").into_response());
+        }
+        Ok(Json(store.event_notes(id)?).into_response())
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct NoteInput {
+    text: String,
+}
+
+pub(crate) async fn add_event_note(
+    State(st): State<Shared>,
+    Extension(crate::middleware::RequestActor(actor)): Extension<crate::middleware::RequestActor>,
+    AxPath(id): AxPath<i64>,
+    Json(input): Json<NoteInput>,
+) -> Response {
+    let note = input.text.trim();
+    if note.is_empty()
+        || note.chars().count() > 500
+        || note
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "交接备注需填写 1–500 字")
+            .into_response();
+    }
+    with_store(&st, |store| {
+        match store.add_event_note(id, &actor, note)? {
+            Some(note) => Ok((StatusCode::CREATED, Json(note)).into_response()),
+            None => Ok(detail_err(StatusCode::NOT_FOUND, "事件不存在").into_response()),
+        }
+    })
 }
 
 pub(crate) async fn set_status(
     State(st): State<Shared>,
+    Extension(crate::middleware::RequestActor(actor)): Extension<crate::middleware::RequestActor>,
     AxPath(id): AxPath<i64>,
     Json(body): Json<Value>,
 ) -> Response {
-    let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    if !["new", "acked", "false_positive", "ignored"].contains(&status) {
+    let status = body
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    if !["new", "acked", "false_positive", "ignored"].contains(&status.as_str()) {
         // T-505 契约对齐：Python 侧 EventStatusBody Literal → 422，两实现同契约
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "非法状态").into_response();
     }
-    let s = match ls_store::Store::open(&st.db_path) {
-        Ok(s) => s,
-        Err(_) => return server_err(),
-    };
-    match s.set_event_status(id, status, None, None) {
-        Ok(0) => detail_err(StatusCode::NOT_FOUND, "event not found").into_response(),
-        Ok(_) => Json(json!({"ok": true})).into_response(),
-        Err(_) => server_err(),
-    }
+    tokio::task::spawn_blocking(move || with_store(&st, |s| {
+        let now = iso_now();
+        let handled = status != "new";
+        if s.set_event_status(id, &status, handled.then_some(actor.as_str()), handled.then_some(now.as_str()))? == 0 {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "事件不存在").into_response());
+        }
+        let mut result = json!({"ok": true, "handled_by": handled.then_some(actor), "handled_ts": handled.then_some(now)});
+        if status == "false_positive" {
+            match super::dataset::stage_event_sample(&st, s, id, false) {
+                Ok(sample) => result["sample_id"] = json!(sample),
+                Err((_, error)) => result["sample_error"] = json!(error),
+            }
+        }
+        Ok(Json(result).into_response())
+    })).await.unwrap_or_else(|_| server_err())
 }
 
 pub(crate) async fn bulk_event_status(
     State(st): State<Shared>,
+    Extension(crate::middleware::RequestActor(actor)): Extension<crate::middleware::RequestActor>,
     Json(body): Json<Value>,
 ) -> Response {
     let status = body
@@ -116,18 +200,36 @@ pub(crate) async fn bulk_event_status(
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "非法状态或 ids 含布尔")
             .into_response();
     }
-    with_store(&st, |s| {
-        let n = s.bulk_status(&ids, &status, "admin")?;
-        let skipped = ids.len().saturating_sub(n);
-        Ok(Json(json!({
-            "ok": true,
-            "updated": n,
-            "skipped": skipped,
-            "missing": [],
-            "failed": [],
-        }))
-        .into_response())
+    tokio::task::spawn_blocking(move || {
+        with_store(&st, |s| {
+            let n = s.bulk_status(&ids, &status, &actor)?;
+            let skipped = ids.len().saturating_sub(n);
+            let mut sample_saved = 0;
+            let mut sample_missing = 0;
+            if status == "false_positive" {
+                let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+                for id in unique {
+                    if super::dataset::stage_event_sample(&st, s, id, false).is_ok() {
+                        sample_saved += 1;
+                    } else {
+                        sample_missing += 1;
+                    }
+                }
+            }
+            Ok(Json(json!({
+                "ok": true,
+                "updated": n,
+                "skipped": skipped,
+                "missing": [],
+                "failed": [],
+                "samples_saved": sample_saved,
+                "samples_unavailable": sample_missing,
+            }))
+            .into_response())
+        })
     })
+    .await
+    .unwrap_or_else(|_| server_err())
 }
 
 pub(crate) async fn events_timeline(
@@ -184,8 +286,47 @@ pub(crate) fn serve_event_media(
     }
 }
 
+pub(super) fn event_image_path(
+    st: &Shared,
+    store: &ls_store::Store,
+    event: &ls_store::Event,
+) -> Option<std::path::PathBuf> {
+    use std::path::Path;
+    if let Some(file) = event
+        .snapshot
+        .as_deref()
+        .and_then(|path| rooted_file(Path::new(&st.data_dir), Path::new(path)))
+    {
+        return Some(file);
+    }
+    let path = store.check_image_path(event.id).ok().flatten()?;
+    let folder = store
+        .camera(event.camera_id)
+        .ok()
+        .flatten()
+        .filter(|c| c.type_ == "folder")?;
+    rooted_file(Path::new(&folder.source), Path::new(&path))
+}
+
 pub(crate) async fn event_snapshot(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
-    serve_event_media(&st, eid, |e| &e.snapshot, "image/jpeg")
+    with_store(&st, |store| {
+        let file = store
+            .event_by_id(eid)?
+            .and_then(|event| event_image_path(&st, store, &event));
+        let Some(bytes) = file.and_then(|path| std::fs::read(path).ok()) else {
+            return Ok(
+                detail_err(StatusCode::NOT_FOUND, "该事件的原图或截图不可用").into_response(),
+            );
+        };
+        let content_type = match image::guess_format(&bytes) {
+            Ok(image::ImageFormat::Png) => "image/png",
+            Ok(image::ImageFormat::WebP) => "image/webp",
+            Ok(image::ImageFormat::Bmp) => "image/bmp",
+            Ok(image::ImageFormat::Tiff) => "image/tiff",
+            _ => "image/jpeg",
+        };
+        Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response())
+    })
 }
 
 pub(crate) async fn event_video(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
@@ -195,10 +336,13 @@ pub(crate) async fn event_video(State(st): State<Shared>, AxPath(eid): AxPath<i6
 /// LS-050：事件缩略图（宽 320px JPEG）——按需生成并缓存到 `data/thumbs/ev_<id>.jpg`，
 /// 列表页用它替代加载整张截图。命中缓存直接返回；否则 ffmpeg 解码缩放后编码落盘。
 pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
-    let Some(ev) = ls_store::Store::open(&st.db_path)
-        .ok()
-        .and_then(|s| s.event_by_id(eid).ok().flatten())
-    else {
+    let Some(src) = ls_store::Store::open(&st.db_path).ok().and_then(|store| {
+        store
+            .event_by_id(eid)
+            .ok()
+            .flatten()
+            .and_then(|event| event_image_path(&st, &store, &event))
+    }) else {
         return detail_err(StatusCode::NOT_FOUND, "event not found").into_response();
     };
     let dir = std::path::Path::new(&st.data_dir).join("thumbs");
@@ -206,22 +350,13 @@ pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i6
     if let Ok(bytes) = std::fs::read(&cache) {
         return ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response();
     }
-    let Some(rel) = ev.snapshot.clone().filter(|s| !s.is_empty()) else {
-        return detail_err(StatusCode::NOT_FOUND, "event has no snapshot").into_response();
-    };
-    let Some(src) = rooted_file(
-        std::path::Path::new(&st.data_dir),
-        std::path::Path::new(&rel),
-    ) else {
-        return detail_err(StatusCode::NOT_FOUND, "snapshot file not found").into_response();
-    };
     // 320×180 解码缩放（ffmpeg 自带 CREATE_NO_WINDOW，见 ls_ingest::decode_image）
     let Ok((bgr, w, h)) = ls_ingest::decode_image(&src, 320, 180) else {
         // 缩略图失败时回退原图（功能降级但列表仍可见）
-        return serve_event_media(&st, eid, |e| &e.snapshot, "image/jpeg");
+        return event_snapshot(State(st), AxPath(eid)).await;
     };
     let Ok(jpeg) = ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h) else {
-        return serve_event_media(&st, eid, |e| &e.snapshot, "image/jpeg");
+        return event_snapshot(State(st), AxPath(eid)).await;
     };
     if std::fs::create_dir_all(&dir).is_ok() {
         // 原子写：先写 .tmp 再改名，避免并发读到半截文件
@@ -475,8 +610,9 @@ pub(crate) async fn event_evidence_zip(
         };
         let mut zip = ZipWriter::new();
         let mut parts = 0usize;
-        if let Some(snap) = &ev.snapshot {
-            if let Some((name, data)) = read_media_file(&st, snap) {
+        if let Some(file) = event_image_path(&st, s, &ev) {
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            if let Ok(data) = std::fs::read(&file) {
                 zip.add_file(&format!("event-{eid}/{name}"), &data);
                 parts += 1;
             }

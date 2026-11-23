@@ -23,7 +23,8 @@ ls-analyzer = { path = "../ls-analyzer" }
 ls-infer = { path = "../ls-infer", features = ["ort"] }
 ls-ingest = { path = "../ls-ingest" }
 axum = { version = "0.7", features = ["ws", "multipart"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tower-http = { version = "0.5", features = ["fs", "cors"] }
@@ -43,6 +44,7 @@ aes = "0.8"      # 批次 4：Fernet 兼容（AES-128-CBC，与 cryptography 互
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 base64 = "0.22"  # Fernet key/token 编解码
 zip = { version = "9", default-features = false, features = ["deflate"] } # RA5：插件 zip 上传解压（>=9 修复 GHSA-q7v9-x93c-xqv3）
+tempfile = "3"
 
 # UX4（2026-11-20）：系统托盘（tauri 团队维护，纯 win32；仅 Windows 目标）
 # 不引入 Tauri/Electron 运行时——保持单二进制与体积纪律
@@ -65,7 +67,6 @@ winresource = "0.1"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
-tempfile = "3"
 rusqlite = { version = "0.41", features = ["bundled"] }
 
 [lints]

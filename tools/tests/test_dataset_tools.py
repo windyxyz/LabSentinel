@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import dataset_hub  # noqa: E402
 import merge_datasets as md  # noqa: E402
+from train_ppe import preflight_dataset  # noqa: E402
 
 from PIL import Image
 
@@ -115,6 +116,42 @@ class MergeDatasetTests(unittest.TestCase):
                 (out / "classes.txt").read_text(encoding="utf-8").splitlines(),
                 md.CANONICAL,
             )
+
+    def test_small_splits_skip_missing_images_and_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            samples = [md.Sample(root / f"source-{i}.jpg") for i in range(5)]
+            for sample in samples:
+                sample.image.write_bytes(JPEG)
+            missing = md.Sample(root / "missing.jpg")
+            for count in [1, 2, 4, 5]:
+                with self.subTest(count=count):
+                    out = root / f"output-{count}"
+                    stats = md.write_dataset([missing] + samples[:count], out)
+                    val = int(count > 1)
+                    self.assertEqual(stats, {"total": count, "train": count - val, "val": val, "missing": 1})
+                    data = out / "data.yaml"
+                    if count == 1:
+                        self.assertFalse(data.exists())
+                        self.assertTrue((out / "README.txt").is_file())
+                        with self.assertRaisesRegex(ValueError, "缺少可训练"):
+                            preflight_dataset(data)
+                        continue
+                    self.assertEqual(preflight_dataset(data)[1], {"train": count - val, "val": val})
+                    for img in (out / "images" / "val").iterdir():
+                        img.unlink()
+                    with self.assertRaisesRegex(ValueError, "val 没有图片"):
+                        preflight_dataset(data)
+
+    def test_preflight_rejects_missing_image_list_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "present.jpg").write_bytes(JPEG)
+            (root / "val.txt").write_text("./missing.jpg\n", encoding="utf-8")
+            yaml_path = root / "data.yaml"
+            yaml_path.write_text("path: .\ntrain: present.jpg\nval: [val.txt]\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "val 清单中缺少图片"):
+                preflight_dataset(yaml_path)
 
     def test_user_zip_extract(self):
         import zipfile

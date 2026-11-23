@@ -76,9 +76,9 @@ describe('Wall.vue（T-709）', () => {
   })
 })
 
-describe('Models.vue（Q-08 下载确认流程）', () => {
-  it('未勾选许可确认时不发下载请求', async () => {
-    const fetch = mockFetch({
+describe('Models.vue（模型安装）', () => {
+  it('缺少随包模型时可上传自定义模型或用安装包修复', async () => {
+    mockFetch({
       'GET /api/models/ppe/status': {
         installed: false, mode: 'person_only', license_confirmed_required: true,
         license_notice: 'Roboflow 数据集许可待确认', sha256: 'ab'.repeat(32), size_bytes: 10_673_073,
@@ -88,39 +88,8 @@ describe('Models.vue（Q-08 下载确认流程）', () => {
     const w = mount(Models)
     await flushPromises()
     expect(w.text()).toContain('仅人员检测')
-    // 找下载按钮并点击（未勾选 confirm）
-    const btn = w.findAll('button').find((b) => /下载|启用/.test(b.text()))
-    if (btn) {
-      await btn.trigger('click')
-      await flushPromises()
-    }
-    const dl = fetch.mock.calls.find(([u, o]) => (o?.method || 'GET') === 'POST')
-    expect(dl).toBeUndefined()
-  })
-
-  it('勾选许可后发起下载并展示结果', async () => {
-    const fetch = mockFetch({
-      'GET /api/models/ppe/status': {
-        installed: false, mode: 'person_only', license_confirmed_required: true,
-        license_notice: 'Roboflow 数据集许可待确认', sha256: 'ab'.repeat(32), size_bytes: 10_673_073,
-      },
-      'POST /api/models/ppe/download': { installed: true, mode: 'ppe' },
-    })
-    const Models = (await import('../src/views/Models.vue')).default
-    const w = mount(Models)
-    await flushPromises()
-    // 勾选确认复选框
-    const cb = w.find('input[type="checkbox"]')
-    expect(cb.exists()).toBe(true)
-    await cb.setValue(true)
-    const btn = w.findAll('button').find((b) => /下载|启用/.test(b.text()))
-    expect(btn).toBeTruthy()
-    await btn.trigger('click')
-    await flushPromises()
-    const dl = fetch.mock.calls.find(([u, o]) => (o?.method || 'GET') === 'POST'
-      && u.includes('/api/models/ppe/download'))
-    expect(dl).toBeTruthy()
-    expect(JSON.parse(dl[1].body).confirm_license).toBe(true)
-    expect(w.text()).toContain('人员 + 实验服检测')
+    expect(w.text()).toContain('使用完整安装包修复检测')
+    expect(w.text()).toContain('上传替换模型')
+    expect(w.findAll('button').some((b) => b.text().includes('下载'))).toBe(false)
   })
 })

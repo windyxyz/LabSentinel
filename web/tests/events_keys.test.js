@@ -34,6 +34,28 @@ const baseResponses = () => ({
 })
 
 describe('Events.vue 键盘快审（LS-052）', () => {
+  it('点击检查记录时，抽屉直接打开并显示图片预览', async () => {
+    const response = baseResponses()
+    response['GET /api/events'] = [{ ...ROWS[0], type: 'photo_check', category: 'check', status: 'recorded' }]
+    mockFetch(response)
+    const transition = vi.fn(update => {
+      update()
+      return { finished: Promise.resolve() }
+    })
+    document.startViewTransition = transition
+    const w = mount(Events)
+    try {
+      await flushPromises()
+      await w.get('.events-table tr:nth-child(2)').trigger('click')
+      await flushPromises()
+      expect(transition).not.toHaveBeenCalled()
+      expect(document.querySelector('.drawer-snap')?.getAttribute('src')).toContain('/api/events/1/snapshot')
+    } finally {
+      delete document.startViewTransition
+      w.unmount()
+    }
+  })
+
   it('J/K 上下切换抽屉，Esc 关闭', async () => {
     mockFetch(baseResponses())
     const w = mount(Events)

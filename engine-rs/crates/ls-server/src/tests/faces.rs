@@ -16,6 +16,7 @@ struct Remote {
     subject: String,
     enrolls: u32,
     allow_delete: bool,
+    recognitions: u32,
 }
 
 type SharedRemote = Arc<Mutex<Remote>>;
@@ -61,7 +62,9 @@ async fn api_faces_obey_consent_selection_and_pending_removal() {
         ))
         .route("/api/v1/recognition/recognize", post(
             |State(remote):State<SharedRemote>| async move {
-                Json(json!({"result":[{"subjects":[{"subject":remote.lock().unwrap().subject,"similarity":0.98}]}]}))
+                let mut remote = remote.lock().unwrap();
+                remote.recognitions += 1;
+                Json(json!({"result":[{"subjects":[{"subject":remote.subject,"similarity":0.98}]}]}))
             },
         )).with_state(remote.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -74,7 +77,7 @@ async fn api_faces_obey_consent_selection_and_pending_removal() {
     let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
     store.ensure_schema().unwrap();
     let st = test_state_cfg_dir(db.to_str().unwrap(), "", false, root);
-    let app = crate::build_router(st);
+    let app = crate::build_router(st.clone());
     let config = body_json(
         req(
             &app,
@@ -119,6 +122,73 @@ async fn api_faces_obey_consent_selection_and_pending_removal() {
     };
     let matched: Value = body_json(recognize().await.unwrap()).await;
     assert_eq!(matched["matched"]["subject"], "Fixture A");
+
+    let camera = store
+        .conn_add_camera("Fixture", "test.mp4", "file")
+        .unwrap();
+    let mut events = st.events_tx.subscribe();
+    let frame = ls_analyzer::evidence::encode_jpeg_bgr(&[125; 64 * 64 * 3], 64, 64).unwrap();
+    let camera_path = format!("/api/face/cameras/{camera}");
+    for permission in ["local", "local_or_api"] {
+        let camera_config = body_json(
+            req(
+                &app,
+                "PUT",
+                &camera_path,
+                Some(json!({"permission":permission, "alert_on_match":true})),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(camera_config["alert_on_match"], true);
+        crate::local_face::identify_event(
+            &st,
+            &store,
+            crate::local_face::MatchTarget::Alert(1),
+            camera,
+            [0., 0., 64., 64.],
+            &frame,
+        );
+        if permission == "local" {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), events.recv())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(remote.lock().unwrap().recognitions, 1);
+        }
+    }
+    let event: Value = serde_json::from_str(
+        &tokio::time::timeout(std::time::Duration::from_secs(3), events.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(event["type"], "face_match");
+    assert!(!event.to_string().contains("Fixture A"));
+    let event_id = event["id"].as_i64().unwrap();
+    assert_eq!(
+        store
+            .event_face_match(event_id, crate::local_face::unix_now())
+            .unwrap()
+            .unwrap()
+            .0,
+        "Fixture A"
+    );
+    crate::local_face::identify_event(
+        &st,
+        &store,
+        crate::local_face::MatchTarget::Alert(2),
+        camera,
+        [0., 0., 64., 64.],
+        &frame,
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), events.recv())
+            .await
+            .is_err()
+    );
 
     let deleted = req(&app, "DELETE", &format!("/api/face/library/{id}"), None).await;
     assert_eq!(deleted.status(), StatusCode::BAD_GATEWAY);

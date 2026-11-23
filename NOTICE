@@ -39,15 +39,26 @@ amd-quark           MIT             NPU XINT8 量化
 随发行包分发的模型与数据集署名
 ======================================================================
 
+- **近景口罩检测**：`mask_detector.onnx` 由 Dao-Dung 转换，源权重 © 2021 chandrikadeb7；
+  `face_detection_yunet_2023mar.onnx` 由 OpenCV Zoo 提供，© 2020 Shiqi Yu。两者均为 MIT，
+  固定版本链接与完整许可见发行包 `models/close-mask-LICENSE.txt`。
+
 - **人体检测模型 `yolo11n.onnx`（随发行包分发）**：
   Ultralytics YOLO 生态（AGPL-3.0），发行包随附（源代码仓库不入库权重文件）。
 - **实验服检测模型 `yolo11n_ppe.onnx`（自 0.3.1 随发行包分发）**：
-  模型文件 SHA256 `f00231e64433af05323076956d5240830a1b25207c30acfe2f45bc23a152dd6f`，
-  权重由 LAB PPE 数据集（Roboflow Universe）训练派生，数据集许可 **CC BY 4.0**
+  0.6.0 选用 LAB PPE 专项版，SHA256 `46a36b0354d0973f034a0ae9a7c81ed3071dbb1c5dd2c06b44d3003b1489de78`。
+  权重由 Roboflow Universe 上 Gavriel's Workspace 的 LAB PPE 数据集训练派生，数据集许可 **CC BY 4.0**
   （署名要求）；Ultralytics YOLO 生态（AGPL-3.0）。随发行包分发已获项目维护者确认。
+  数据来源 https://universe.roboflow.com/gavriels-workspace-e9azv/lab-ppe-p4qe4/dataset/1
+- **白大褂穿戴复核 `labcoat-confirm.onnx`**：Ultralytics YOLOE-26n，AGPL-3.0。
+  源权重 https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26n-seg.pt
+  源文本编码器 https://github.com/ultralytics/assets/releases/download/v8.4.0/mobileclip2_b.ts
+  文本编码器只用于本地生成提示嵌入，其权重不进入发行包。编码器权重许可见 https://huggingface.co/apple/MobileCLIP2-B/blob/main/LICENSE 。
+  Ultralytics 8.4.216 将提示词 `white lab coat`、`white sweater`、`casual jacket`、
+  `surgical face mask` 的嵌入导入检测头，导出固定 640 像素、opset 17 的 ONNX。导出脚本见 `tools/export_labcoat_confirm.py`。
 - 合并训练数据集（ENSI PPE 等）：仅用于开发期训练，不随发行包分发，各来源许可见 `datasets/` 内 README。
 
 ----------------------------------------------------------------------
-源代码仓库不包含模型权重与训练数据集（发布构建阶段按哈希锁拉取随包分发）；
+实验服权重与类别表随源代码仓库提供。其余模型在发布构建阶段按哈希锁准备。训练数据集独立保存。
 人脸比对模块默认关闭，开启前请阅读 `docs/guide/部署指南.md` 合规章节与
 `docs/releases/risk-register.md`。

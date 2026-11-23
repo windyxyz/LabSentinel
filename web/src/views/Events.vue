@@ -1,14 +1,16 @@
 <script setup>
 import { computed, onMounted, onUnmounted, nextTick, ref, watch } from 'vue'
-import { api, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
+import { api, CHANNEL_NAMES, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
 import AnnotatorModal from '../components/AnnotatorModal.vue'
 import AsyncState from '../components/AsyncState.vue'
 
 const rows = ref([])
 const camId = ref('')
 const level = ref('')
+const category = ref('')
 const status = ref('')
 const cams = ref([])
+const props = defineProps({ routeQuery: { type: String, default: '' } })
 const zoom = ref(null)
 const videoZoom = ref(null)
 // 任务19：分页 + 时间范围
@@ -68,8 +70,94 @@ function aiTitle(ev) {
     .replace('模型 ', '模型') + (ev.ai_review_model ? ` · ${ev.ai_review_model}` : '')
 }
 const drawer = ref(null)        // 详情抽屉：当前事件对象
+const previewUnavailable = ref(false)
+const canPreview = event => event.has_snapshot || event.type === 'photo_check'
+watch(() => drawer.value?.id, () => {
+  previewUnavailable.value = false
+  poolMsg.value = ''
+})
 const drawerEl = ref(null)      // 抽屉 DOM（焦点管理）
 const faceMatch = ref(null)
+const notes = ref([])
+const notesLoading = ref(false)
+const notesError = ref('')
+const note = ref('')
+const noteSaving = ref(false)
+const deliveriesOpen = ref(false)
+const deliveries = ref([])
+const deliveryError = ref('')
+const deliveryLoading = ref(false)
+const deliveryReload = ref(0)
+const retrying = ref(null)
+const actionNotice = ref('')
+const DELIVERY_LABELS = { ok: '已送达', pending: '等待发送', retry: '等待重试', failed: '失败', dead_letter: '重试结束' }
+const actorLabel = actor => actor === 'admin' ? '管理员' : actor === 'anonymous(auth-off)' ? '本机操作' : (actor || '—').replace(/^device:/, '')
+
+watch(() => drawer.value?.id, async (id, _, onCleanup) => {
+  notes.value = []
+  notesError.value = ''
+  note.value = ''
+  deliveriesOpen.value = false
+  if (!Number.isInteger(id)) return
+  const request = new AbortController()
+  onCleanup(() => request.abort())
+  notesLoading.value = true
+  try {
+    const data = await api.eventNotes(id, request.signal)
+    if (!request.signal.aborted) notes.value = Array.isArray(data) ? data : []
+  } catch (err) {
+    if (!request.signal.aborted) notesError.value = err.message
+  } finally {
+    if (!request.signal.aborted) notesLoading.value = false
+  }
+})
+
+watch([() => drawer.value?.id, deliveriesOpen, deliveryReload], async ([id, open], _, onCleanup) => {
+  deliveries.value = []
+  deliveryError.value = ''
+  if (!open || !Number.isInteger(id)) return
+  const request = new AbortController()
+  onCleanup(() => request.abort())
+  deliveryLoading.value = true
+  try {
+    const data = await api.alertDeliveries({ event_id: id }, request.signal)
+    if (!request.signal.aborted) deliveries.value = Array.isArray(data) ? data : []
+  } catch (err) {
+    if (!request.signal.aborted) deliveryError.value = err.message
+  } finally {
+    if (!request.signal.aborted) deliveryLoading.value = false
+  }
+})
+
+async function saveNote() {
+  const id = drawer.value?.id
+  const text = note.value.trim()
+  if (!Number.isInteger(id) || !text || notesLoading.value || noteSaving.value) return
+  noteSaving.value = true
+  notesError.value = ''
+  try {
+    const added = await api.addEventNote(id, text)
+    if (drawer.value?.id === id && Number.isInteger(added?.id)) {
+      notes.value = [added, ...notes.value].slice(0, 100)
+      note.value = ''
+    }
+  } catch (err) {
+    if (drawer.value?.id === id) notesError.value = err.message
+  } finally { noteSaving.value = false }
+}
+
+async function retryDelivery(id) {
+  const event = drawer.value?.id
+  if (retrying.value !== null) return
+  retrying.value = id
+  deliveryError.value = ''
+  try {
+    await api.alertDeliveryRetry(id)
+    if (drawer.value?.id === event) deliveryReload.value++
+  } catch (err) {
+    if (drawer.value?.id === event) deliveryError.value = err.message
+  } finally { retrying.value = null }
+}
 watch(() => drawer.value?.id, async (id, _, onCleanup) => {
   faceMatch.value = null
   if (!Number.isInteger(id)) return
@@ -114,7 +202,8 @@ async function bulk(status) {
     const failed = Array.isArray(r?.failed) ? r.failed : []
     alert(`批量处置完成：更新 ${r?.updated ?? 0}，跳过 ${r?.skipped ?? 0}` +
           (missing.length ? `，不存在 ${missing.length}` : '') +
-          (failed.length ? `，失败 ${failed.length}` : ''))
+          (failed.length ? `，失败 ${failed.length}` : '') +
+          (status === 'false_positive' ? `。标注池已有 ${r?.samples_saved ?? 0} 张，无法加入 ${r?.samples_unavailable ?? 0} 张` : ''))
     selected.value = []
     load()
   } catch (e) { alert(String(e.message || e)) }
@@ -126,8 +215,10 @@ async function load() {
   const params = { limit: PAGE_SIZE, offset: offset.value }
   if (camId.value) params.camera_id = camId.value
   if (level.value) params.level = level.value
+  if (category.value) params.category = category.value
   if (status.value) params.status = status.value
-  if (hourFilter.value) {
+  if (preset.value === 'today') params.today = 1
+  else if (hourFilter.value) {
     const hf = hourFilter.value
     params.start_ts = `${hf.date}T${pad2(hf.hour)}:00:00`
     params.end_ts = `${hf.date}T${pad2(hf.hour)}:59:59`
@@ -138,8 +229,8 @@ async function load() {
   if (q.value) params.q = q.value
   if (aiVerdict.value) params.ai_verdict = aiVerdict.value
   try {
-    const newRows = await api.events(params)
-    const newTotal = (await api.eventsCount(params)).count
+    const [newRows, count] = await Promise.all([api.events(params), api.eventsCount(params)])
+    const newTotal = count?.count
     if (seq !== loadSeq) return  // 已有更新的请求在途，丢弃旧结果
     rows.value = Array.isArray(newRows) ? newRows : []
     total.value = Number(newTotal) || 0
@@ -158,7 +249,7 @@ async function load() {
 }
 
 function clearFilters() {
-  camId.value = ''; level.value = ''; status.value = ''
+  camId.value = ''; level.value = ''; status.value = ''; category.value = ''
   startDate.value = ''; endDate.value = ''
   q.value = ''; preset.value = ''; hourFilter.value = null; aiVerdict.value = ''
   resetAndLoad()
@@ -176,8 +267,10 @@ const exportFilteredUrl = computed(() => {
   const p = new URLSearchParams()
   if (camId.value) p.set('camera_id', camId.value)
   if (level.value) p.set('level', level.value)
+  if (category.value) p.set('category', category.value)
   if (status.value) p.set('status', status.value)
-  if (hourFilter.value) {
+  if (preset.value === 'today') p.set('today', '1')
+  else if (hourFilter.value) {
     const hf = hourFilter.value
     p.set('start_ts', `${hf.date}T${pad2(hf.hour)}:00:00`)
     p.set('end_ts', `${hf.date}T${pad2(hf.hour)}:59:59`)
@@ -186,12 +279,13 @@ const exportFilteredUrl = computed(() => {
     if (endDate.value) p.set('end_ts', endDate.value)
   }
   if (q.value) p.set('q', q.value)
+  if (aiVerdict.value) p.set('ai_verdict', aiVerdict.value)
   return '/api/export/events.csv?' + p
 })
 
 let qTimer = null
 function onQInput() { clearTimeout(qTimer); qTimer = setTimeout(resetAndLoad, 300) }
-function applyPreset(v) {
+function applyPreset(v, reload = true) {
   preset.value = v
   const now = new Date()
   const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -199,12 +293,22 @@ function applyPreset(v) {
   else if (v === 'today') { startDate.value = fmt(now); endDate.value = fmt(now) }
   else if (v === 'yesterday') { const y = new Date(now - 864e5); startDate.value = endDate.value = fmt(y) }
   else { const end = fmt(now); const start = fmt(new Date(now - (v === '7d' ? 6 : 29) * 864e5)); startDate.value = start; endDate.value = end }
-  resetAndLoad()
+  if (reload) resetAndLoad()
 }
+function applyRoute() {
+  const query = new URLSearchParams(props.routeQuery)
+  const nextCategory = query.get('category')
+  category.value = ['check', 'alert'].includes(nextCategory) ? nextCategory : ''
+  const nextStatus = query.get('status')
+  status.value = Object.hasOwn(STATUS_TEXT, nextStatus) ? nextStatus : ''
+  applyPreset(query.get('today') === '1' ? 'today' : '', false)
+}
+watch(() => props.routeQuery, () => { applyRoute(); resetAndLoad() })
 onMounted(() => {
+  applyRoute()
   window.addEventListener('keydown', onKey)
   load(); loadTimeline()
-  api.cameras().then(list => { cams.value = list }).catch(() => { /* 筛选下拉留空即可 */ })
+  api.cameras().then(list => { cams.value = Array.isArray(list) ? list : [] }).catch(() => { /* 筛选下拉留空即可 */ })
 })
 onUnmounted(() => window.removeEventListener('keydown', onKey))
 
@@ -276,32 +380,16 @@ async function quickMark(status) {
   else closeDrawer()
 }
 
-// 任务135：View Transitions（尊重 prefers-reduced-motion；不支持/减少动效直接切换）
-let vtRunning = false
-
-function withViewTransition(apply) {
-  const reduce = window.matchMedia
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  if (typeof document.startViewTransition !== 'function' || reduce || vtRunning) {
-    apply()
-    return
-  }
-  vtRunning = true
-  document.startViewTransition(() => {
-    apply()
-  }).finished.finally(() => { vtRunning = false })
-}
-
 function openDetail(e, ev) {
   // 点击行打开抽屉；按钮/图片/视频区域点击不触发
   if (e.target.closest('button, img, video, a')) return
   lastFocus = document.activeElement
-  withViewTransition(() => { drawer.value = ev })
-  nextTick(() => drawerEl.value && drawerEl.value.focus())
+  drawer.value = ev
+  nextTick(() => drawerEl.value?.focus({ preventScroll: true }))
 }
 function closeDrawer() {
-  withViewTransition(() => { drawer.value = null })
-  if (lastFocus) { lastFocus.focus(); lastFocus = null }
+  drawer.value = null
+  if (lastFocus) { lastFocus.focus({ preventScroll: true }); lastFocus = null }
 }
 
 async function mark(e, status) {
@@ -309,9 +397,14 @@ async function mark(e, status) {
       !confirm(`确认把事件 #${e.id} 标记为误报？\n截图会复制到标注池（用于模型改进），事件保留但状态变更。`)) return
   if (busyEvent.value !== null) return
   busyEvent.value = e.id
+  actionNotice.value = ''
   try {
-    await api.setEventStatus(e.id, status)
-    if (drawer.value && drawer.value.id === e.id) drawer.value = { ...drawer.value, status }
+    const result = await api.setEventStatus(e.id, status)
+    if (drawer.value?.id === e.id) drawer.value = { ...drawer.value, status, handled_by: result?.handled_by, handled_ts: result?.handled_ts }
+    if (status === 'false_positive') {
+      actionNotice.value = result?.sample_id ? '已标记为误报，截图可在标注池中核验。'
+        : `已标记为误报。${result?.sample_error || '截图暂未加入标注池。'}`
+    }
     load()
   } catch (err) { alert(String(err.message || err)) }
   busyEvent.value = null
@@ -320,11 +413,17 @@ async function mark(e, status) {
 
 <template>
   <div class="panel">
+    <p v-if="actionNotice" class="muted" role="status">{{ actionNotice }}</p>
     <div class="row">
       <b>事件查询</b>
       <select v-model="camId" @change="resetAndLoad">
         <option value="">全部摄像头</option>
         <option v-for="c in cams" :key="c.id" :value="c.id">{{ c.name }}</option>
+      </select>
+      <select v-model="category" aria-label="事件分类" @change="resetAndLoad">
+        <option value="">全部分类</option>
+        <option value="check">检查记录</option>
+        <option value="alert">告警事件</option>
       </select>
       <select v-model="level" @change="resetAndLoad">
         <option value="">全部级别</option>
@@ -403,7 +502,7 @@ async function mark(e, status) {
     </details>
     <AsyncState :loading="loading" :error="error" :notice="stale ? '刷新失败，仍显示上一次数据' : ''"
                 :empty="loaded && !rows.length"
-                :empty-text="camId || level || status || startDate || endDate || q || hourFilter ? '当前筛选条件下没有事件' + (q ? `（关键词：${q}）` : '') : '暂无事件 —— 启动摄像头并配置规则后，事件会出现在这里'"
+                :empty-text="camId || category || level || status || startDate || endDate || q || hourFilter ? '当前筛选条件下没有事件' + (q ? `（关键词：${q}）` : '') : '暂无事件。图片和视频完成检查后会留下记录。规则命中时会另生成告警。'"
                 @retry="load">
       <table class="events-table">
       <tr><th class="col-time"><input type="checkbox" aria-label="全选当前页"
@@ -411,8 +510,7 @@ async function mark(e, status) {
              @change="toggleAll($event.target.checked)" /></th>
           <th>时间</th><th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
       <tr v-for="e in rows" :key="e.id"
-          :style="{ cursor: 'pointer',
-                    viewTransitionName: (drawer && drawer.id === e.id) ? 'none' : `evi-${e.id}` }"
+          style="cursor:pointer"
           @click="openDetail($event, e)">
         <td><input v-if="e.status === 'new'" type="checkbox" aria-label="选择此事件"
                :checked="selected.includes(e.id)"
@@ -423,7 +521,7 @@ async function mark(e, status) {
           <span v-if="aiBadge(e)" :class="aiBadge(e).cls" :title="aiTitle(e)"
                 style="font-size:11px; margin-left:4px; white-space:nowrap">{{ aiBadge(e).text }}</span>
         </td>
-        <td><span :class="'lv' + e.level">L{{ e.level }}</span></td>
+        <td><span v-if="e.category === 'check'" class="muted">检查记录</span><span v-else :class="'lv' + e.level">L{{ e.level }}</span></td>
         <td class="muted">{{ e.detail }}</td>
         <td>
           <span :class="'lv' + (e.status === 'new' ? 3 : e.status === 'acked' ? 1 : 2)">
@@ -480,13 +578,16 @@ async function mark(e, status) {
           <button class="ghost" @click="closeDrawer">关闭</button>
         </header>
         <div class="drawer-body">
-          <p class="muted">{{ drawer.ts }} · 摄像头 #{{ drawer.camera_id }} · track {{ drawer.track_id }}
-            · <span :class="'lv' + drawer.level">L{{ drawer.level }}</span>
+          <p class="muted">{{ drawer.ts }} · 摄像头 #{{ drawer.camera_id }}
+            <template v-if="drawer.category !== 'check'"> · track {{ drawer.track_id }} · <span :class="'lv' + drawer.level">L{{ drawer.level }}</span></template>
             · {{ STATUS_TEXT[drawer.status] || drawer.status }}</p>
           <p>{{ drawer.detail }}</p>
           <p v-if="faceMatch" class="muted">人脸辅助识别 · {{ faceMatch.subject }} · 相似度 {{ Number(faceMatch.similarity).toFixed(2) }}</p>
-          <img v-if="drawer.has_snapshot" :src="mediaUrl(`/api/events/${drawer.id}/snapshot`)" alt="事件截图大图，点击放大"
-               class="drawer-snap" @click="zoom = mediaUrl(`/api/events/${drawer.id}/snapshot`)" />
+          <img v-if="canPreview(drawer) && !previewUnavailable" :key="drawer.id"
+               :src="mediaUrl(`/api/events/${drawer.id}/snapshot`)" alt="事件图像，点击放大"
+               class="drawer-snap" @error="previewUnavailable = true"
+               @click="zoom = mediaUrl(`/api/events/${drawer.id}/snapshot`)" />
+          <p v-else-if="previewUnavailable" class="muted">事件图片已不可用。</p>
           <video v-if="drawer.has_video" :src="mediaUrl(`/api/events/${drawer.id}/video`)" controls
                  style="width:100%; border-radius:var(--overlay-radius); background:#000" />
           <div v-if="drawer.status === 'new'" class="row">
@@ -494,17 +595,53 @@ async function mark(e, status) {
             <button class="ghost" :disabled="busyEvent !== null" @click="mark(drawer, 'false_positive')">误报</button>
             <button class="ghost" :disabled="busyEvent !== null" @click="mark(drawer, 'ignored')">忽略</button>
           </div>
-          <p v-else class="muted">处理人 {{ drawer.handled_by || '-' }} · {{ drawer.handled_ts || '-' }}</p>
+          <p v-else-if="drawer.category !== 'check'" class="muted">处理人 {{ actorLabel(drawer.handled_by) }} · {{ drawer.handled_ts || '—' }}</p>
+          <p v-if="actionNotice" class="muted" role="status">{{ actionNotice }}</p>
           <!-- 任务103：单事件证据包（无媒体时仅含 event.json+README，不置灰） -->
           <a class="ghost" :href="mediaUrl(`/api/events/${drawer.id}/evidence.zip`)"
              :download="`event-${drawer.id}-evidence.zip`"
              style="display:inline-flex; align-items:center; text-decoration:none">
             <button class="ghost">下载证据包</button></a>
-          <button class="ghost" :disabled="poolBusy" @click="addToPool(drawer)">
+          <button v-if="canPreview(drawer) && !previewUnavailable" class="ghost" :disabled="poolBusy" @click="addToPool(drawer)">
             {{ poolBusy ? '加入中…' : '快速标注（加入标注池）' }}</button>
           <span v-if="poolMsg" class="muted" style="font-size:12px">{{ poolMsg }}</span>
           <p class="muted" style="font-size:12px; margin:4px 0 0">
             含事件信息+截图+视频；无媒体时仅含事件信息与说明 README。</p>
+          <section class="event-followup" aria-label="值班交接">
+            <h3>值班交接</h3>
+            <p v-if="notesLoading" class="muted" role="status">正在读取交接备注…</p>
+            <p v-else-if="!notes.length && !notesError" class="muted">暂无交接备注。</p>
+            <ol v-if="notes.length">
+              <li v-for="item in notes" :key="item.id">
+                <small class="muted">{{ actorLabel(item.actor) }} · {{ item.ts }}</small>
+                <div class="note-text">{{ item.text }}</div>
+              </li>
+            </ol>
+            <form class="note-form" @submit.prevent="saveNote">
+              <textarea v-model="note" rows="2" maxlength="500" aria-label="交接备注" placeholder="填写交接备注" />
+              <button type="submit" :disabled="!note.trim() || notesLoading || noteSaving">{{ noteSaving ? '保存中…' : '添加备注' }}</button>
+            </form>
+            <p v-if="notesError" class="st-err" role="alert">{{ notesError }}</p>
+          </section>
+          <details class="event-followup" :key="drawer.id" @toggle="deliveriesOpen = $event.target.open">
+            <summary>告警投递记录</summary>
+            <p v-if="deliveryLoading" class="muted" role="status">正在读取投递记录…</p>
+            <p v-if="deliveryError" class="st-err" role="alert">{{ deliveryError }}</p>
+            <p v-if="!deliveryLoading && !deliveryError && !deliveries.length" class="muted">该事件暂无外部渠道投递记录。</p>
+            <ul v-if="deliveries.length">
+              <li v-for="delivery in deliveries" :key="delivery.id">
+                <div class="row delivery-row">
+                  <b>{{ CHANNEL_NAMES[delivery.channel] || delivery.channel }} · {{ DELIVERY_LABELS[delivery.status] || delivery.status }}</b>
+                  <button v-if="['retry', 'failed', 'dead_letter'].includes(delivery.status)" type="button" class="ghost"
+                    :disabled="retrying !== null" @click="retryDelivery(delivery.id)">{{ retrying === delivery.id ? '重试中…' : '立即重试' }}</button>
+                </div>
+                <p v-if="delivery.last_error" class="muted">{{ delivery.last_error }}</p>
+                <ol v-if="Array.isArray(delivery.history) && delivery.history.length" class="muted">
+                  <li v-for="(attempt, index) in delivery.history" :key="index">{{ attempt.ts }} · {{ DELIVERY_LABELS[attempt.status] || attempt.status }}<span v-if="attempt.error"> · {{ attempt.error }}</span></li>
+                </ol>
+              </li>
+            </ul>
+          </details>
         </div>
       </aside>
     </div>
@@ -521,15 +658,6 @@ async function mark(e, status) {
   <AnnotatorModal v-if="annotation" :sample="annotation" :image-url="`/api/dataset/samples/${annotation.id}/image`"
     @close="annotation = null" @saved="annotation = null" />
 </template>
-
-<style>
-/* 任务135：View Transitions（仅 Events 页；不支持的浏览器自动忽略） */
-::view-transition-group(*) { animation-duration: 220ms; animation-timing-function: cubic-bezier(0.2, 0, 0, 1); }
-::view-transition-old(root), ::view-transition-new(root) { animation: none; }
-@media (prefers-reduced-motion: reduce) {
-  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
-}
-</style>
 
 <style scoped>
 /* LS-052：键盘快审提示条 */
@@ -556,17 +684,21 @@ button { min-height: 40px; }
 /* ---- 事件详情抽屉（17A）：WinUI ContentDialog 风格，全部用主线令牌 ---- */
 .drawer-mask {
   position: fixed; inset: 0; z-index: 50;
-  background: rgba(0, 0, 0, 0.4);
+  background: transparent;
   display: flex; justify-content: flex-end;
 }
 /* 2026-11-21：模态过渡改纯 CSS（遮罩淡入 + 抽屉右滑入），替代 View
    Transitions（其旧页面快照在动画禁用配置下残留，用户实测「过渡有问题」） */
-.drawer-enter-active, .drawer-leave-active { transition: opacity 0.18s ease; }
+.drawer-mask:not(.drawer-enter-from):not(.drawer-leave-to) { background-color: rgba(0, 0, 0, 0.4); }
+.drawer-enter-active, .drawer-leave-active { transition: background-color 0.22s ease; }
 .drawer-enter-active .drawer, .drawer-leave-active .drawer {
   transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1);
 }
-.drawer-enter-from, .drawer-leave-to { opacity: 0; }
-.drawer-enter-from .drawer, .drawer-leave-to .drawer { transform: translateX(60px); }
+.drawer-enter-from .drawer, .drawer-leave-to .drawer { transform: translateX(100%); }
+@media (prefers-reduced-motion: reduce) {
+  .drawer-enter-active, .drawer-leave-active,
+  .drawer-enter-active .drawer, .drawer-leave-active .drawer { transition: none; }
+}
 .drawer {
   width: min(440px, 100vw);
   height: 100%;
@@ -580,6 +712,13 @@ button { min-height: 40px; }
 }
 .drawer-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .drawer-body p { margin: 8px 0; word-break: break-word; }
+.event-followup { border-top: 1px solid var(--stroke-default); margin-top: 16px; padding-top: 12px; overflow-wrap: anywhere; }
+.event-followup summary { cursor: pointer; }
+.event-followup ol, .event-followup ul { margin: 8px 0; padding-left: 22px; }
+.note-text { white-space: pre-wrap; }
+.note-form { display: grid; gap: 8px; margin-top: 8px; }
+.note-form button { justify-self: end; }
+.delivery-row { justify-content: space-between; flex-wrap: wrap; }
 .drawer-snap { width: 100%; border-radius: var(--overlay-radius); cursor: zoom-in; margin: 8px 0; }
 @media (max-width: 480px) {
   .drawer { width: 100vw; border-radius: 0; }

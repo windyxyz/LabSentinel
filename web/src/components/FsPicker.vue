@@ -1,19 +1,23 @@
 <script setup>
 // RA5-UX：目录选择器对话框——盘符/目录两级浏览，替代手输路径。
 // 数据源 GET /api/fs/list?path=（后端 admin 门控）。
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from '../api'
 
 const props = defineProps({
   title: { type: String, default: '选择文件夹' },
+  video: Boolean,
 })
 const emit = defineEmits(['pick', 'close'])
 const open = ref(false)
 const cur = ref('')
+const parent = ref('')
 const entries = ref([])
 const drives = ref([])
 const loading = ref(false)
 const err = ref('')
+const visibleEntries = computed(() => entries.value.filter(entry =>
+  !props.video || entry.is_dir || /\.(mp4|mkv|avi|mov|ts|flv)$/i.test(entry.name || '')))
 
 async function load(path) {
   open.value = true
@@ -22,6 +26,7 @@ async function load(path) {
   try {
     const j = await api.fsList(path)
     cur.value = j?.path || path
+    parent.value = typeof j?.parent === 'string' ? j.parent : ''
     if (Array.isArray(j?.drives)) drives.value = j.drives
     entries.value = Array.isArray(j?.entries) ? j.entries : []
   } catch (e) {
@@ -36,11 +41,8 @@ function openAt(startPath) {
 }
 defineExpose({ openAt })
 
-function enter(e) {
-  if (e.is_dir) load(e.path)
-}
-function pickHere() {
-  emit('pick', cur.value)
+function choose(path) {
+  emit('pick', path)
   open.value = false
 }
 </script>
@@ -54,6 +56,7 @@ function pickHere() {
       </div>
       <div class="fsp-path">
         <code>{{ cur || '（选择盘符）' }}</code>
+        <button v-if="cur" class="ghost" type="button" @click="load(parent || '')">上一级</button>
       </div>
       <div v-if="loading" class="fsp-load">加载中…</div>
       <div v-else-if="err" class="fsp-load">{{ err }}</div>
@@ -64,16 +67,17 @@ function pickHere() {
           <button class="ghost fsp-open" @click.stop="load(d.path)">打开</button>
         </div>
         <div v-if="cur" class="fsp-sec">当前目录子项</div>
-        <div v-for="e in entries" :key="e.path" class="fsp-item" :class="{ dir: e.is_dir }"
-             @dblclick="e.is_dir && load(e.path)">
+        <div v-for="e in visibleEntries" :key="e.path" class="fsp-item" :class="{ dir: e.is_dir }"
+             @dblclick="e.is_dir ? load(e.path) : props.video && choose(e.path)">
           <span class="fsp-ico">{{ e.is_dir ? '📁' : '📄' }}</span>{{ e.name }}
           <button v-if="e.is_dir" class="ghost fsp-open" @click.stop="load(e.path)">打开</button>
+          <button v-else-if="props.video" class="ghost fsp-open" type="button" @click="choose(e.path)">选择</button>
         </div>
-        <div v-if="cur && !entries.length" class="fsp-load">（空目录）</div>
+        <div v-if="cur && !loading && !err && !visibleEntries.length" class="fsp-load">{{ props.video ? '此目录暂无支持的视频文件' : '此目录为空' }}</div>
       </div>
       <div class="fsp-foot">
-        <span class="muted">双击进入子目录</span>
-        <button class="primary" :disabled="!cur" @click="pickHere">选择此目录</button>
+        <span class="muted">{{ props.video ? '选择 MP4、MKV、AVI、MOV、TS 或 FLV 文件' : '双击进入子目录' }}</span>
+        <button v-if="!props.video" class="primary" :disabled="!cur || loading || !!err" @click="choose(cur)">选择此目录</button>
       </div>
     </div>
   </div>

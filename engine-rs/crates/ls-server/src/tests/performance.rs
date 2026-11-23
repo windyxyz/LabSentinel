@@ -289,6 +289,42 @@ fn windows_rtsp_benchmark() {
 }
 
 #[test]
+#[ignore = "uses a real ONNX model and the local FFmpeg executable"]
+fn packaged_person_model_detects_a_person_in_a_jpeg() {
+    use ls_infer::yolo::{Backend, YoloModel};
+    let model_path = PathBuf::from(
+        std::env::var_os("LS_BENCH_PERSON_MODEL").expect("path to the release ONNX model"),
+    );
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../Resources/acceptance/imgs/person-frame.jpg");
+    let (bgr, width, height) =
+        ls_ingest::decode_image(&sample, 1280, 720).expect("decode the person fixture");
+    let use_gpu = std::env::var("LS_BENCH_EP").as_deref() == Ok("dml");
+    let mut model = YoloModel::load(
+        &model_path,
+        640,
+        0.40,
+        0.50,
+        1200.0,
+        Some(Backend::Ort),
+        use_gpu,
+    )
+    .expect("load the release ONNX model");
+    let people = model
+        .detect(&bgr, width, height)
+        .expect("run the model with a real picture");
+    println!(
+        "provider={:?} people={}",
+        ls_infer::yolo::ep_used(),
+        people.len()
+    );
+    assert!(
+        !people.is_empty(),
+        "known person fixture produced no detections"
+    );
+}
+
+#[test]
 #[ignore = "replays the performance fixture using both packaged ONNX models"]
 fn windows_scene_truth_replay() {
     use ls_analyzer::detector::{make_detector, DetectorConfig};

@@ -120,11 +120,129 @@ pub(crate) async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i
         Err(_) => return server_err(),
     };
     match s.camera(id) {
-        Ok(Some(c)) => Json(json!({"id": c.id, "name": c.name, "type": c.type_,
-            "status": c.status, "analyzer": c.analyzer, "fps": null}))
-        .into_response(),
+        Ok(Some(c)) => {
+            let (frame_age, last_frame, reconnects) = capture_health(&st, id);
+            let since = s.camera_outage_since(id).ok().flatten();
+            let processed_frames = (c.type_ == "file")
+                .then(|| {
+                    let worker = st.workers.get(id)?;
+                    let metrics = worker.performance.lock().ok()?;
+                    Some(metrics.frames())
+                })
+                .flatten();
+            Json(json!({"id": c.id, "name": c.name, "type": c.type_,
+                "status": c.status, "analyzer": c.analyzer, "fps": null,
+                "offline_since": since, "frame_age_s": frame_age, "last_frame_at": last_frame,
+                "reconnect_count": reconnects, "processed_frames": processed_frames}))
+            .into_response()
+        }
         Ok(None) => detail_err(StatusCode::NOT_FOUND, "camera not found").into_response(),
         Err(_) => server_err(),
+    }
+}
+
+pub(super) fn capture_health(st: &Shared, cid: i64) -> (Option<f64>, Option<String>, u64) {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let Some(worker) = st.workers.get(cid) else {
+        return (None, None, 0);
+    };
+    let last = worker
+        .latest_jpeg
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|s| s.captured_at_ms));
+    let captured =
+        last.and_then(|ms| UNIX_EPOCH.checked_add(Duration::from_millis(u64::try_from(ms).ok()?)));
+    let age = captured
+        .and_then(|time| SystemTime::now().duration_since(time).ok())
+        .map(|diff| diff.as_secs_f64());
+    let ts = captured.map(ls_core::time::format_system_time_local_iso);
+    let reconnects = worker
+        .performance
+        .lock()
+        .map(|m| m.reconnects())
+        .unwrap_or(0);
+    (age, ts, reconnects)
+}
+
+#[derive(serde::Deserialize)]
+struct DahuaSource {
+    host: String,
+    port: u16,
+    channel: u16,
+    username: String,
+    password: String,
+    substream: bool,
+}
+
+impl DahuaSource {
+    fn urls(&self) -> Option<(String, String)> {
+        let host = url::Host::parse(self.host.trim()).ok()?;
+        if self.port == 0
+            || self.channel == 0
+            || self.username.trim().is_empty()
+            || self.password.is_empty()
+            || self
+                .username
+                .chars()
+                .chain(self.password.chars())
+                .any(char::is_control)
+        {
+            return None;
+        }
+        fn escape(value: &str) -> String {
+            use std::fmt::Write;
+            let mut encoded = String::new();
+            for byte in value.bytes() {
+                if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                    encoded.push(char::from(byte));
+                } else {
+                    let _ = write!(encoded, "%{byte:02X}");
+                }
+            }
+            encoded
+        }
+        let base = format!(
+            "rtsp://{}:{}@{host}:{}/cam/realmonitor?channel={}&subtype=",
+            escape(&self.username),
+            escape(&self.password),
+            self.port,
+            self.channel
+        );
+        let main = format!("{base}0");
+        valid_substream(&main).then(|| {
+            let sub = if self.substream {
+                format!("{base}1")
+            } else {
+                String::new()
+            };
+            (main, sub)
+        })
+    }
+}
+
+#[cfg(test)]
+mod dahua_tests {
+    use super::DahuaSource;
+
+    #[test]
+    fn recorder_channel_and_credentials_are_encoded() {
+        let mut config = DahuaSource {
+            host: "192.168.1.10".into(),
+            port: 8554,
+            channel: 7,
+            username: "lab@a".into(),
+            password: "p:#/%".into(),
+            substream: true,
+        };
+        let (main, sub) = config.urls().unwrap();
+        assert_eq!(
+            main,
+            "rtsp://lab%40a:p%3A%23%2F%25@192.168.1.10:8554/cam/realmonitor?channel=7&subtype=0"
+        );
+        assert_eq!(sub.strip_suffix('1'), main.strip_suffix('0'));
+        config.host = "192.168.1.10/other".into();
+        assert!(config.urls().is_none());
     }
 }
 
@@ -136,6 +254,21 @@ pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let mut analysis_source = String::new();
+    if let Some(dahua) = body.get("dahua") {
+        let urls = serde_json::from_value::<DahuaSource>(dahua.clone())
+            .ok()
+            .and_then(|config| config.urls());
+        let Some((main, sub)) = urls.filter(|_| type_ == "rtsp") else {
+            return detail_err(
+                StatusCode::BAD_REQUEST,
+                "请检查大华设备地址、端口、通道和设备账号",
+            )
+            .into_response();
+        };
+        source = main;
+        analysis_source = sub;
+    }
     // USB（2026-11-21 dshow 化）：入库前归一化为 ffmpeg 可用形态——
     // ① 裸数字（历史索引/手填）→ 按枚举表映射为 `video=<设备名>`（枚举失败
     //    如实 400，不收不可取流的 source）；
@@ -192,28 +325,27 @@ pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     match ls_store::Store::open(&st.db_path) {
-        Ok(s) => match s.conn_add_camera(name, &source, type_) {
-            Ok(id) => {
-                if !group_name.is_empty() {
-                    let _ = s.set_camera_group(id, group_name);
-                }
-                if type_ == "rtsp" {
-                    st.go2rtc.refresh();
-                }
-                let mut status = "stopped";
-                if autostart {
-                    if let Ok(Some(cfg)) = crate::worker::WorkerConfig::from_db(&s, id) {
-                        if crate::worker::start_worker(&st, cfg).is_ok() {
-                            status = "starting";
+        Ok(s) => {
+            match s.add_camera_with_sources(name, &source, type_, group_name, &analysis_source) {
+                Ok(id) => {
+                    if type_ == "rtsp" {
+                        st.go2rtc.refresh();
+                    }
+                    let mut status = "stopped";
+                    if autostart {
+                        if let Ok(Some(cfg)) = crate::worker::WorkerConfig::from_db(&s, id) {
+                            if crate::worker::start_worker(&st, cfg).is_ok() {
+                                status = "starting";
+                            }
                         }
                     }
-                }
-                Json(json!({"id": id, "name": name, "source": source,
+                    Json(json!({"id": id, "name": name, "source": if body.get("dahua").is_some() { "" } else { &source },
                             "type": type_, "group_name": group_name, "status": status}))
                 .into_response()
+                }
+                Err(_) => server_err(),
             }
-            Err(_) => server_err(),
-        },
+        }
         Err(_) => server_err(),
     }
 }
@@ -671,18 +803,51 @@ pub(crate) async fn copy_camera_config(
     })
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct SnapshotQuery {
+    preview: Option<u8>,
+}
+
 pub(crate) async fn camera_snapshot(
     State(st): State<Shared>,
     AxPath(cid): AxPath<i64>,
+    Query(query): Query<SnapshotQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    // 存在性校验（与 Python 同口径 404）
-    let exists = ls_store::Store::open(&st.db_path)
+    let camera = ls_store::Store::open(&st.db_path)
         .ok()
-        .and_then(|s| s.camera(cid).ok().flatten())
-        .is_some();
-    if !exists {
+        .and_then(|s| s.camera(cid).ok().flatten());
+    let Some(camera) = camera else {
         return detail_err(StatusCode::NOT_FOUND, "camera not found").into_response();
+    };
+    if query.preview == Some(1) && camera.type_ == "file" {
+        let source = std::path::PathBuf::from(camera.source);
+        return match tokio::task::spawn_blocking(move || {
+            if !source.is_file() {
+                return Err((StatusCode::NOT_FOUND, "找不到视频文件，请检查接入地址"));
+            }
+            let jpeg = ls_ingest::decode_image(&source, 1280, 720)
+                .and_then(|(bgr, w, h)| ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h));
+            jpeg.map_err(|_| {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "无法读取视频首帧，请检查视频文件是否能正常播放",
+                )
+            })
+        })
+        .await
+        {
+            Ok(Ok(jpeg)) => (
+                [
+                    ("content-type", "image/jpeg"),
+                    ("cache-control", "no-store"),
+                ],
+                jpeg,
+            )
+                .into_response(),
+            Ok(Err((status, message))) => detail_err(status, message).into_response(),
+            Err(_) => server_err(),
+        };
     }
     // RA1.2：worker 运行中 → 最新抽帧 JPEG；未运行 → 503（与 start_camera 同口径）
     match st.workers.get(cid) {

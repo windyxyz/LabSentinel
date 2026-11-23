@@ -7,7 +7,6 @@ const status = ref(null)
 const busy = ref(false)
 const uploading = ref(false)
 const msg = ref('')
-const confirmed = ref(false)
 const fileEl = ref(null)
 
 const SOURCE_TEXT = {
@@ -39,8 +38,8 @@ async function toggle(ev) {
     const r = await api.ppeConfig({ enabled })
     await load()
     msg.value = enabled
-      ? `已开启实验服检测${r.restarted ? `（${r.restarted} 路相机已重启生效）` : ''}`
-      : `已关闭实验服检测（仅人员检测）${r.restarted ? `，${r.restarted} 路相机已重启` : ''}`
+      ? `已开启 PPE 检测${r.restarted ? `（${r.restarted} 路相机已重启生效）` : ''}`
+      : `已关闭 PPE 检测（仅人员检测）${r.restarted ? `，${r.restarted} 路相机已重启` : ''}`
   } catch (e) {
     msg.value = String(e.message || e)
     await load()
@@ -94,6 +93,22 @@ async function saveFormat(event) {
     msg.value = `已保存输出格式${result.restarted ? `，已重新加载 ${result.restarted} 路相机` : ''}`
   } catch (err) {
     msg.value = String(err.message || err)
+  } finally {
+    await load()
+    busy.value = false
+  }
+}
+
+async function toggleCloseMask(event) {
+  const enabled = event.target.checked
+  busy.value = true
+  msg.value = ''
+  try {
+    const result = await api.ppeConfig({ close_mask_enabled: enabled })
+    msg.value = `${enabled ? '已开启' : '已关闭'}近景口罩检测${result.restarted ? `，已重新加载 ${result.restarted} 路相机` : ''}`
+  } catch (error) {
+    event.target.checked = status.value?.close_mask_enabled === true
+    msg.value = String(error.message || error)
   } finally {
     await load()
     busy.value = false
@@ -154,24 +169,6 @@ async function reset() {
   }
 }
 
-async function download() {
-  if (!confirmed.value) {
-    msg.value = '请先勾选许可确认'
-    return
-  }
-  busy.value = true
-  msg.value = '下载中（含 SHA256 校验）…'
-  try {
-    const r = await api.ppeDownload(true)
-    status.value = { ...(status.value || {}), ...(r || {}) }
-    msg.value = status.value?.installed ? '下载完成并已启用实验服检测' : '下载未完成'
-  } catch (e) {
-    msg.value = `下载失败: ${e.message || e}`
-  } finally {
-    busy.value = false
-  }
-}
-
 onMounted(load)
 </script>
 
@@ -185,7 +182,7 @@ onMounted(load)
         <p>
           当前模式：
           <b :class="status.mode === 'ppe' ? 'st-ok' : 'st-idle'">
-            {{ status.mode === 'ppe' ? '人员 + 实验服检测' : '仅人员检测' }}
+            {{ status.mode === 'ppe' ? '人员 + PPE 检测' : '仅人员检测' }}
           </b>
           <span class="muted">（模型来源：{{ SOURCE_TEXT[status.source] || status.source || '—' }}）</span>
           <span v-if="status.installed && !status.enabled" class="muted">
@@ -195,15 +192,28 @@ onMounted(load)
         <label v-if="status.installed" class="ppe-switch" style="display:flex;align-items:center;gap:10px;margin:10px 0">
           <input type="checkbox" :checked="status.enabled" :disabled="busy"
                  @change="toggle" />
-          <span>启用实验服检测</span>
+          <span>启用 PPE 检测</span>
         </label>
+        <p v-if="status.enabled && status.coat_confirmation === true" class="muted">
+          随包实验服模型检测未穿和已穿。已穿需要白大褂模型复核，两者无法确认时记为未知。
+        </p>
+        <template v-if="status.installed && status.close_mask_available === true">
+          <label class="ppe-switch" style="display:flex;align-items:center;gap:10px;margin:10px 0">
+            <input type="checkbox" aria-label="启用近景口罩检测"
+                   :checked="status.close_mask_enabled === true" :disabled="busy || !status.enabled"
+                   @change="toggleCloseMask" />
+            <span>启用近景口罩检测（试用）</span>
+          </label>
+          <p class="muted">适合门口和近景。基础模型缺少口罩证据时，使用清晰的人脸补判；脸部太小或被遮挡时可能无法判断。启用后影响所有使用本地 PPE 检测的来源。</p>
+        </template>
         <label v-if="status.installed && status.source !== 'bundled'" class="row">
           输出格式
           <select :value="status.output_format || 'auto'" :disabled="busy" @change="saveFormat">
             <option v-for="(label, value) in OUTPUT_FORMATS" :key="value" :value="value">{{ label }}</option>
           </select>
         </label>
-        <p class="muted" style="white-space:pre-wrap">{{ status.license_notice }}</p>
+        <p v-if="status.installed" class="muted" style="white-space:pre-wrap">{{ status.license_notice }}</p>
+        <p v-else class="muted">未找到实验服模型。使用完整安装包修复检测，或上传自定义模型。</p>
         <p v-if="status.warning" class="lv2" style="font-size:12.5px">{{ status.warning }}</p>
         <!-- LS-050：PPE 置信度阈值（改完即存，运行中相机软重启生效） -->
         <div class="ppe-thresholds" style="margin:10px 0">
@@ -227,7 +237,6 @@ onMounted(load)
         <p class="muted">
           校验 SHA256：<code>{{ status.sha256 || '—' }}</code><br />
           大小：<template v-if="status.size_bytes > 0">{{ (status.size_bytes / 1048576).toFixed(1) }} MB</template><template v-else>—</template>
-          <template v-if="!status.bundled">；来源见 assets.lock.json</template>
         </p>
         <div class="row" style="margin-top:10px;align-items:center;flex-wrap:wrap">
           <button class="ghost" :disabled="uploading" @click="pickFile">
@@ -271,15 +280,6 @@ onMounted(load)
           <button v-if="bench.candidate && !bench.candidate.error" :disabled="benchBusy" @click="activateCandidate">启用候选模型</button>
           <button class="ghost" @click="bench = null">关闭</button>
         </dialog>
-        <template v-if="!status.installed">
-          <label style="display:block;margin:10px 0">
-            <input type="checkbox" v-model="confirmed" />
-            我已阅读并接受上述数据集许可说明与用途限制
-          </label>
-          <button :disabled="busy || !confirmed" @click="download">
-            {{ busy ? '下载中…' : '确认许可并下载模型' }}
-          </button>
-        </template>
       </template>
       <p v-if="msg" class="muted" style="margin-top:8px">{{ msg }}</p>
     </div>

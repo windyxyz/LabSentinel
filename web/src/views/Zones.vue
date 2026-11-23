@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue'
 import { api, mediaUrl } from '../api'
 import SchedulePicker from '../components/SchedulePicker.vue'
 
@@ -13,6 +13,11 @@ const zones = ref([])
 const rules = ref([])
 const drawing = ref([])      // 正在绘制的顶点（显示坐标）
 const snapT = ref(0)
+const snapshotError = ref(false)
+const selectedCamera = computed(() => cams.value.find(camera => camera.id === camId.value))
+const snapshotUrl = computed(() => camId.value && snapT.value
+  ? mediaUrl(`/api/cameras/${camId.value}/snapshot?t=${snapT.value}${selectedCamera.value?.type === 'file' ? '&preview=1' : ''}`)
+  : '')
 const zname = ref('')
 const newRule = ref({ behavior: 'enter', level: 2, cooldown_s: 60, time_start: '00:00', time_end: '23:59', threshold: 0,
   days_of_week: '1,2,3,4,5,6,7', holiday_only: false })  // 任务112：星期/假期条件
@@ -75,7 +80,11 @@ async function doCopy() {
   copyBusy.value = false
 }
 
-watch(camId, load, { immediate: true })
+watch(camId, () => {
+  snapshotError.value = false
+  snapT.value = camId.value ? Date.now() : 0
+  load()
+}, { immediate: true })
 onMounted(() => {
   loadCal(); loadTpls() // 任务112/116
   window.addEventListener('keydown', onKey) // LS-052 撤销/重做
@@ -260,6 +269,7 @@ function onDblClick() {
   }
 }
 function refreshBase() {
+  snapshotError.value = false
   snapT.value = Date.now() // 时间戳防缓存，强制拉最新快照
   nextTick(draw)
 }
@@ -342,12 +352,13 @@ async function addRule(zoneId) {
       <span class="muted">单击加顶点 · 双击闭合并保存（≥3 顶点）· 拖拽已有顶点微调</span>
     </div>
     <div style="position:relative; width:640px; height:360px; background:#000; border-radius:6px">
-      <img v-if="camId" :src="mediaUrl(`/api/cameras/${camId}/snapshot?t=${snapT}`)" alt="摄像头画面（用于绘制安全区）" width="640" height="360" @error="snapT = 0" />
+      <img v-if="snapshotUrl && !snapshotError" :key="snapshotUrl" :src="snapshotUrl"
+           alt="用于绘制安全区的底图" width="640" height="360" @error="snapshotError = true" />
       <canvas id="zoneCanvas" class="zone-canvas" width="640" height="360"
               @click="onCanvasClick" @dblclick="onDblClick"
               @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseup="onMouseUp" @mouseleave="onMouseUp"></canvas>
-      <p v-if="!snapT" class="muted" style="position:absolute; top:45%; width:100%; text-align:center">
-        点击"取最新快照"显示画面后再画区
+      <p v-if="!snapshotUrl || snapshotError" class="muted" style="position:absolute; top:45%; width:100%; text-align:center; color:white" role="status">
+        {{ snapshotError ? (selectedCamera?.type === 'file' ? '无法读取视频首帧，请检查文件路径后刷新底图。' : '暂无画面，请启动监控源后刷新底图。') : '请选择有可用画面的监控源。' }}
       </p>
     </div>
     <p v-if="editError" role="status">{{ editError }}</p>
@@ -366,7 +377,8 @@ async function addRule(zoneId) {
     <h3 style="margin:14px 0 10px">告警规则</h3>
     <div class="row">
       <select v-model="newRule.behavior">
-        <option value="enter_no_ppe">进入未穿实验服</option>
+        <option value="enter_no_ppe">未穿实验服进入（白大褂）</option>
+        <option value="no_mask">未戴口罩</option>
         <option value="enter">进入安全区</option>
         <option value="exit">离开安全区</option>
         <option value="occupancy_over">在场人数超限</option>
@@ -374,7 +386,7 @@ async function addRule(zoneId) {
       </select>
       <select v-model="newRule.level"><option :value="1">L1 提示</option><option :value="2">L2 警告</option><option :value="3">L3 严重</option></select>
       <input v-model.number="newRule.cooldown_s" placeholder="冷却(秒)" style="width:90px" />
-      <input v-model.number="newRule.threshold"
+      <input v-if="['occupancy_over', 'solo_after_hours'].includes(newRule.behavior)" v-model.number="newRule.threshold"
              :placeholder="newRule.behavior === 'solo_after_hours' ? '滞留秒数' : '人数阈值'"
              style="width:100px" />
       <label class="muted"><input type="checkbox" v-model="newRule.holiday_only" />仅假期生效</label>
@@ -395,7 +407,7 @@ async function addRule(zoneId) {
     </table>
     <div class="row" style="margin-top:8px">
       <button v-for="z in zones" :key="'a' + z.id" class="ghost" @click="addRule(z.id)">给「{{ z.name }}」加此规则</button>
-      <button class="ghost" @click="addRule(null)">加为全局规则（人数超限用）</button>
+      <button class="ghost" @click="addRule(null)">加为全局规则</button>
     </div>
 
     <!-- 任务112：日期例外表 -->

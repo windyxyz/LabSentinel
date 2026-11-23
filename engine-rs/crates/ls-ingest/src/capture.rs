@@ -50,6 +50,11 @@ impl FrameReader {
             Source::Live(ingest) => ingest.read(),
         }
     }
+
+    /// Called once after the decoder closes stdout for a finite file.
+    pub fn file_exit_ok(&self) -> bool {
+        matches!(&self.0, Source::Direct(ingest) if ingest.file_exit_ok())
+    }
 }
 
 #[derive(Default)]

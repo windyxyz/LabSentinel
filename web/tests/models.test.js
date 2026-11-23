@@ -29,7 +29,22 @@ const STATUS = {
 afterEach(() => { vi.unstubAllGlobals() })
 
 describe('Models.vue（0.4.0）', () => {
-  it('关闭实验服检测：PUT /api/models/ppe/config enabled=false', async () => {
+  it('单独启用随包的近景口罩分类', async () => {
+    const fn = mockFetch({
+      'GET /api/models/ppe/status': { ...STATUS, close_mask_available: true, close_mask_enabled: false },
+      'PUT /api/models/ppe/config': { ok: true, close_mask_enabled: true, restarted: 0 },
+    })
+    const w = mount(Models)
+    await flushPromises()
+    const checkbox = w.get('input[aria-label="启用近景口罩检测"]')
+    expect(checkbox.element.checked).toBe(false)
+    await checkbox.setValue(true)
+    await flushPromises()
+    const put = fn.mock.calls.find((c) => c[1]?.method === 'PUT')
+    expect(JSON.parse(put[1].body)).toEqual({ close_mask_enabled: true })
+  })
+
+  it('关闭 PPE 检测：PUT /api/models/ppe/config enabled=false', async () => {
     const fn = mockFetch({
       'GET /api/models/ppe/status': STATUS,
       'PUT /api/models/ppe/config': { ok: true, enabled: false, restarted: 1 },
@@ -44,7 +59,7 @@ describe('Models.vue（0.4.0）', () => {
     const put = fn.mock.calls.find((c) => c[1]?.method === 'PUT')
     expect(put[0]).toContain('/api/models/ppe/config')
     expect(JSON.parse(put[1].body).enabled).toBe(false)
-    expect(w.text()).toContain('已关闭实验服检测')
+    expect(w.text()).toContain('已关闭 PPE 检测')
   })
 
   it('上传替换：POST multipart 到 /api/models/ppe/upload', async () => {

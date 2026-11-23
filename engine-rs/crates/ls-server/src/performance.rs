@@ -64,6 +64,10 @@ impl PerformanceWindow {
         self.frames
     }
 
+    pub fn reconnects(&self) -> u64 {
+        self.reconnects
+    }
+
     pub fn summary(&self) -> Value {
         let labels = [
             "read_wait_ms",
