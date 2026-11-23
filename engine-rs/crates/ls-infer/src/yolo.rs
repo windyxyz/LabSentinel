@@ -280,6 +280,36 @@ fn ort_environment() -> Result<&'static ort::environment::Environment, String> {
         .map_err(Clone::clone)
 }
 
+#[cfg(feature = "ort")]
+pub(crate) fn load_ort_session(path: &Path, use_gpu: bool) -> Result<(Session, bool), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取模型失败: {e}"))?;
+    let environment = ort_environment()?;
+    let build = |with_dml| -> Result<Session, String> {
+        let mut builder = Session::builder(environment).map_err(|e| e.to_string())?;
+        if with_dml {
+            // DirectML requires sequential execution and disables memory patterns.
+            builder = builder
+                .with_memory_pattern(false)
+                .map_err(|e| e.to_string())?
+                .with_parallel_execution(false)
+                .map_err(|e| e.to_string())?
+                .with_execution_providers([ort::ep::DirectML::default().build().error_on_failure()])
+                .map_err(|e| e.to_string())?;
+        }
+        builder
+            .commit_from_memory(&bytes)
+            .map_err(|e| format!("ORT 加载模型失败: {e}"))
+    };
+    if use_gpu {
+        let _guard = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
+        match build(true) {
+            Ok(session) => return Ok((session, true)),
+            Err(e) => eprintln!("[ls-infer] GPU(DirectML) 初始化失败，自动回落 CPU: {e}"),
+        }
+    }
+    Ok((build(false)?, false))
+}
+
 /// 实际生效的推理设备（"DirectML(GPU)" / "CPU" / "CPU(tract)"）——每次 load
 /// 成功后覆盖更新，网页切换 GPU/CPU 并软重启相机后 `/api/system` 实时反映最新设备。
 static EP_USED: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
@@ -383,42 +413,8 @@ impl YoloModel {
             Backend::Tract => return Err("tract feature 未启用".into()),
             #[cfg(feature = "ort")]
             Backend::Ort => {
-                let bytes = std::fs::read(path).map_err(|e| format!("读取模型失败: {e}"))?;
-                let environment = ort_environment()?;
-                let build = |with_dml: bool| -> Result<Session, String> {
-                    let mut b = Session::builder(environment)
-                        .map_err(|e| format!("ORT builder 失败: {e}"))?;
-                    if with_dml {
-                        // ORT-DirectML 官方必填配置：禁用 memory_pattern 与并行图执行，
-                        // 避免 DX12 command allocator 复用在并发/多算子下触发驱动死锁（事故 A1）
-                        b = b
-                            .with_memory_pattern(false)
-                            .map_err(|e| format!("DirectML memory_pattern 配置失败: {e}"))?
-                            .with_parallel_execution(false)
-                            .map_err(|e| format!("DirectML parallel_execution 配置失败: {e}"))?
-                            .with_execution_providers([ort::ep::DirectML::default()
-                                .build()
-                                .error_on_failure()])
-                            .map_err(|e| format!("DirectML EP 注册失败: {e}"))?;
-                    }
-                    b.commit_from_memory(&bytes)
-                        .map_err(|e| format!("ORT 加载模型失败: {e}"))
-                };
-                // GPU 优先 + 自动回落：驱动太老/无 DX12/虚拟机等场景对任意设备鲁棒；
-                // DirectML 建会话必须在进程级 DML_LOCK 串行保护下执行。
-                let (session, ep_used, is_dml) = if use_gpu {
-                    let _guard = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
-                    match build(true) {
-                        Ok(s) => (s, "DirectML(GPU)", true),
-                        Err(e) => {
-                            eprintln!("[ls-infer] GPU(DirectML) 初始化失败，自动回落 CPU: {e}");
-                            drop(_guard);
-                            (build(false)?, "CPU", false)
-                        }
-                    }
-                } else {
-                    (build(false)?, "CPU", false)
-                };
+                let (session, is_dml) = load_ort_session(path, use_gpu)?;
+                let ep_used = if is_dml { "DirectML(GPU)" } else { "CPU" };
                 println!("[ls-infer] ORT 推理设备: {ep_used}");
                 model.ep_is_dml = is_dml;
                 model.ort_session = Some(session);

@@ -184,6 +184,10 @@ pub(crate) async fn guard_middleware(
         "/api/share-links",
         "/api/access/settings",
         "/api/devices",
+        "/api/face/config",
+        "/api/face/persons",
+        "/api/face/library",
+        "/api/face/events",
     ];
     const PROTECTED_ADMIN_GETS: &[&str] = &[
         "/api/audit",
@@ -196,7 +200,6 @@ pub(crate) async fn guard_middleware(
         "/api/backups/status",
         "/api/maintenance",
         "/api/plugins",
-        "/api/face/persons",
     ];
     let matches_path = |p: &&str| path == *p || path.starts_with(&format!("{p}/"));
     let admin_get = ADMIN_GETS.iter().any(matches_path)

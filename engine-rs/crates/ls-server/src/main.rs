@@ -36,6 +36,7 @@ mod face;
 mod genai;
 mod go2rtc;
 mod handlers;
+mod local_face;
 mod middleware;
 mod performance;
 mod plugins;
@@ -373,6 +374,7 @@ async fn main() {
         genai: genai::GenAI::from_env(),
         go2rtc: Arc::new(go2rtc::Go2rtcSupervisor::new(true)),
         detections: Default::default(),
+        faces: Default::default(),
     });
     // R2-305：网页端配置的渠道（app_settings alert.*，Fernet 解密）注入 ls-jobs
     // escalation 发送——"网页端保存企微 webhook → rust 路径生效"的真实验收点。
@@ -428,6 +430,7 @@ async fn main() {
     st.access.load(&st.db_path);
     let app = build_router(st.clone());
     st.jobs.start();
+    crate::local_face::start_retention(Arc::clone(&st));
     // LS-051：按 app_settings 决定是否托管 go2rtc（缺失二进制优雅降级，不阻塞启动）
     let go2rtc_enabled = ls_store::Store::open(&st.db_path)
         .ok()
@@ -539,6 +542,7 @@ async fn selftest_http() -> bool {
         genai: genai::GenAI::from_env(),
         go2rtc: Arc::new(go2rtc::Go2rtcSupervisor::new(true)),
         detections: Default::default(),
+        faces: Default::default(),
     });
     // 不 start() 后台作业：自检只验 API/DB 链路（顺带消除空 DB 的 backup 噪音）
     let app = build_router(st.clone());

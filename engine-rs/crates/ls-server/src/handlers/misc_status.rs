@@ -1068,7 +1068,7 @@ pub(crate) async fn models_local(State(st): State<Shared>) -> Response {
     Json(json!({"models": items})).into_response()
 }
 
-pub(crate) async fn model_status() -> Response {
+pub(crate) async fn model_status(State(st): State<Shared>) -> Response {
     // RA2-S9：形状对齐 Python api.model_status（只读上报，不加载 ONNX）。
     let fp32 = std::env::var("LS_MODEL_FP32").unwrap_or_default();
     let ppe = std::env::var("LS_PPE_MODEL").unwrap_or_default();
@@ -1130,8 +1130,9 @@ pub(crate) async fn model_status() -> Response {
                     .unwrap_or_else(|_| "no lab coat".into()),
                 "conf": env_num("LS_PPE_CONF", 0.30f64),
                 "wearing_conf": env_num("LS_PPE_WEARING_CONF", 0.20f64)},
-        "face_enabled": std::env::var("LS_FACE_ENABLED")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false),
+        "face_enabled": ls_store::Store::open(&st.db_path).ok()
+            .is_some_and(|store| crate::face::FaceSettings::load(&store, std::path::Path::new(&st.data_dir))
+                .active_profile().is_some()),
         "backend_order": backend_order,
         "engine": {"loaded": false, "backend": null,
                    "note": "rust 控制面独立模式不加载 ONNX（worker 运行时按 LS_MODEL_PATH 加载）"},
@@ -1857,178 +1858,6 @@ pub(crate) async fn plugin_action(
             Json(json!({"id": pid, "status": status, "detail": detail})).into_response()
         }
         _ => detail_err(StatusCode::BAD_REQUEST, "未知插件动作").into_response(),
-    }
-}
-
-// ---- face（合规敏感：默认关闭。分支与 Python _face_guard 同语义） ----
-
-pub(crate) fn face_enabled() -> bool {
-    std::env::var("LS_FACE_ENABLED")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-pub(crate) fn face_guard() -> Result<(), Box<Response>> {
-    // RA2-S6：两道合规门（403 未开启 / 503 未配 key），之后放行真实现
-    if !face_enabled() {
-        return Err(Box::new(
-            detail_err(
-                StatusCode::FORBIDDEN,
-                "人脸比对功能未开启（LS_FACE_ENABLED=false）。开启方式与合规要求见 README。",
-            )
-            .into_response(),
-        ));
-    }
-    if !crate::face::FaceClient::from_env().configured() {
-        return Err(Box::new(
-            detail_err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "人脸服务未配置（缺少 LS_COMPREFACE_API_KEY）",
-            )
-            .into_response(),
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) async fn face_status() -> Json<Value> {
-    let c = crate::face::FaceClient::from_env();
-    Json(
-        json!({"enabled": face_enabled(), "configured": c.configured(),
-                "threshold": c.threshold}),
-    )
-}
-
-pub(crate) async fn face_register(
-    State(st): State<Shared>,
-    mut mp: axum::extract::Multipart,
-) -> Response {
-    if let Err(resp) = face_guard() {
-        return *resp;
-    }
-    let mut subject = String::new();
-    let mut consent = false;
-    let mut photo: Option<Vec<u8>> = None;
-    const MAX: usize = 10 * 1024 * 1024;
-    while let Ok(Some(mut field)) = mp.next_field().await {
-        let name = field.name().unwrap_or("").to_string();
-        match name.as_str() {
-            "subject" => subject = field.text().await.unwrap_or_default(),
-            "consent" => {
-                consent = matches!(
-                    field
-                        .text()
-                        .await
-                        .unwrap_or_default()
-                        .trim()
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    "true" | "1" | "on"
-                )
-            }
-            "photo" => {
-                // RA2 反思修正：流式累积 + 超限即断——原 field.bytes() 会把
-                // 任意大小的上传先全量读进内存再检查 10MB 上限（DoS 面）
-                let mut buf: Vec<u8> = Vec::new();
-                loop {
-                    match field.chunk().await {
-                        Ok(Some(chunk)) => {
-                            if buf.len() + chunk.len() > MAX {
-                                return detail_err(
-                                    StatusCode::PAYLOAD_TOO_LARGE,
-                                    "照片超过 10MB 上限",
-                                )
-                                .into_response();
-                            }
-                            buf.extend_from_slice(&chunk);
-                        }
-                        Ok(None) => break,
-                        Err(_) => {
-                            return detail_err(StatusCode::BAD_REQUEST, "照片读取失败")
-                                .into_response()
-                        }
-                    }
-                }
-                photo = Some(buf);
-            }
-            _ => {}
-        }
-    }
-    if !consent {
-        return detail_err(
-            StatusCode::BAD_REQUEST,
-            "注册人员必须 consent=true（合规留痕）",
-        )
-        .into_response();
-    }
-    let Some(data) = photo else {
-        return detail_err(StatusCode::BAD_REQUEST, "照片为空").into_response();
-    };
-    if data.is_empty() || subject.trim().is_empty() {
-        return detail_err(StatusCode::BAD_REQUEST, "照片为空或 subject 必填").into_response();
-    }
-    let client = crate::face::FaceClient::from_env();
-    if let Err(e) = client.add_person(subject.trim(), &data) {
-        return detail_err(StatusCode::BAD_GATEWAY, &e).into_response();
-    }
-    // 同意记录落本地库（只存 subject/ts，不落人脸图片）
-    let ts = crate::genai::chrono_now();
-    if let Ok(s) = ls_store::Store::open(&st.db_path) {
-        let _ = s.add_face_consent(subject.trim(), &ts);
-    }
-    Json(json!({"ok": true, "subject": subject.trim(), "consent_ts": ts})).into_response()
-}
-
-pub(crate) async fn face_persons_list(State(st): State<Shared>) -> Response {
-    if let Err(resp) = face_guard() {
-        return *resp;
-    }
-    let client = crate::face::FaceClient::from_env();
-    let persons = match client.list_persons() {
-        Ok(p) => p,
-        Err(e) => return detail_err(StatusCode::BAD_GATEWAY, &e).into_response(),
-    };
-    // Python：CompreFace subjects ∩ 本地 face_consents（带同意时间戳）
-    with_store(&st, |s| {
-        let consents: std::collections::HashMap<String, String> =
-            s.face_consents().unwrap_or_default().into_iter().collect();
-        let rows: Vec<Value> = persons
-            .iter()
-            .map(|p| json!({"subject": p, "consent_ts": consents.get(p)}))
-            .collect();
-        Ok(Json(rows).into_response())
-    })
-}
-
-pub(crate) async fn face_clear_all(State(st): State<Shared>) -> Response {
-    if let Err(resp) = face_guard() {
-        return *resp;
-    }
-    let client = crate::face::FaceClient::from_env();
-    let mut errors = Vec::new();
-    match client.list_persons() {
-        Ok(persons) => {
-            for p in persons {
-                if let Err(e) = client.delete_person(&p) {
-                    errors.push(format!("{p}: {e}"));
-                }
-            }
-        }
-        Err(e) => errors.push(e),
-    }
-    if let Ok(s) = ls_store::Store::open(&st.db_path) {
-        let _ = s.clear_face_consents();
-    }
-    Json(json!({"ok": errors.is_empty(), "errors": errors})).into_response()
-}
-
-pub(crate) async fn face_delete(AxPath(subject): AxPath<String>) -> Response {
-    if let Err(resp) = face_guard() {
-        return *resp;
-    }
-    match crate::face::FaceClient::from_env().delete_person(&subject) {
-        Ok(()) => Json(json!({"ok": true})).into_response(),
-        Err(e) => detail_err(StatusCode::BAD_GATEWAY, &e).into_response(),
     }
 }
 

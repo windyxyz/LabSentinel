@@ -122,14 +122,14 @@ Resources/       效果演示/插件示例/数据集/构建产物（见 Resource
 | LS_PPE_MODEL | 实验服 PPE 模型 | 包内 `models/yolo11n_ppe.onnx`（自 0.3.1 随包提供，未设时自动使用） |
 | LS_VLM_URL / LS_VLM_KEY / LS_VLM_MODEL | 外部联网视觉模型（OpenAI 兼容端点） | 未配置 |
 | LS_ANALYSIS_FPS | 每路分析帧率上限 | 5.0 |
-| LS_FACE_ENABLED | 人脸比对开关 | **false** |
+| LS_FACE_ENABLED | 旧版 CompreFace 初始开关，网页保存后应用网页设置 | **false** |
 
 告警渠道推荐在网页端配置（保存即生效、密钥加密存储），无需改环境变量。
 
 ## ⚖️ 开源协议与合规
 
 AGPL-3.0（与 Ultralytics 生态联动决策见 [docs/adr/0001](docs/adr/0001-agpl-and-ultralytics.md)）。实验服 PPE 模型自 0.3.1 随发行包分发（LAB PPE 数据集 CC BY 4.0，署名与哈希见 `NOTICE`）；其余模型与数据集不入库。
-人脸比对模块**默认关闭**；开启前必读部署指南合规章节。部署摄像头请设置显著提示标识，遵守 PIPL 与相关法规。
+人脸比对模块**默认关闭**，可在网页选择本地或 CompreFace。模型配置、录入授权及撤回见 [人脸模型与人员录入](docs/guide/人脸模型.md)。
 
 ## 🛡️ 已知限制
 

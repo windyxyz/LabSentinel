@@ -2,11 +2,19 @@
 
 ## Latest Handoff Snapshot
 
-- **Task-ID / Task-Name**：`LS-066`（`ACTIVE`）/ 人脸关闭、本地及 API、模型管理与人员录入。
+- **Task-ID / Task-Name**：`LS-067`（`ACTIVE`）/ 告警投递与值班交接、合规报表、小样本训练预检。
 - **基线**：`main`，`LS-060` 和 `LS-061` 已通过本机实施验收。`LS-062`、`LS-063` 的业务实现有单项实测，独立 EXE 播放联测保留为发布门禁。GitHub 公开 Release 为 `v0.5.0`。
 - **范围**：用户指示全部作为 `v0.6.0`，计划后直接实施，全部验收通过后发布 GitHub。任务 `LS-060`～`LS-068` 逐项推进。
-- **当前重点**。建立本地 YuNet／SFace 与 CompreFace 管理入口，落实计时、录入同意、停止和撤回，再接入相机，保留分析与登录的独立行为。
-- **Next First Command**：`rg -n 'FaceClient|face_guard|face_consents' engine-rs/crates`。
+- **当前重点**。先完成投递重试与证据、小样本导出和无人 Cascade 夹具，再核对值班、相机健康和合规样本口径。
+- **Next First Command**：`rg -n 'LS-058-(07|08|11|12)' findings.md`。
+
+---
+
+## Previous Handoff Snapshot · LS-066
+
+- **实现**。关闭、本地 YuNet／SFace、多个 CompreFace 配置可热切换。网页支持录入、撤回、阈值设置、试识别及模型回退，默认关闭。授权相机可为事件附带身份线索，人员名单与匹配结果限管理端。本地加密模板、有效期和 API 删除重试随 v19 启用。
+- **实测**。Windows GNU `cargo fmt --all -- --check`、Clippy 全目标全特性及 `cargo test --workspace --all-features --no-fail-fast` 通过，196 项，3 项默认忽略。旧库缺少分析码流列时仍能读取及导入相机。单独运行本地人脸夹具的 CPU 和 Radeon 880M DirectML 场景均通过，同人分数 0.556、异人 0.163，CPU 57.80–76.87 ms，DirectML 47.93–77.93 ms。模拟 CompreFace 的录入、切换、撤回及删除重试通过。
+- **前端与发布检查**。Vitest 99 项、生产构建、契约 137 条 API 与 175 条路由登记通过。真实 Chromium 在 375/1440 px 使用模拟接口验证本地选择、录入和试识别。正式包媒体数据路径、实际外部 CompreFace 和用于准确率、误接受率及误拒率的代表样本验证纳入 `LS-068`。
 
 ---
 

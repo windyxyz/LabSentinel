@@ -479,8 +479,17 @@ async fn batch3_import_evidence_and_status() {
     // plugins：未知 pid → 404（rust 无插件管理器，真实结果）
     let r = req(&app, "GET", "/api/plugins/p1/logs", None).await;
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
-    // face 默认关闭 → 403（真实配置状态）
+    // 人员名单要求管理权限，默认关闭时管理员仍收到配置提示。
     let r = req(&app, "GET", "/api/face/persons", None).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = req_hdr(
+        &app,
+        "GET",
+        "/api/face/persons",
+        None,
+        &[("x-admin-token", "adm")],
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
     let r = req(&app, "GET", "/api/face/status", None).await;
     assert_eq!(body_json(r).await["enabled"], false);

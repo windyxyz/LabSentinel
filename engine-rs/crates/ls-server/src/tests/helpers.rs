@@ -56,6 +56,7 @@ pub(crate) fn test_state_custom(
         genai: crate::genai::GenAI::from_env(),
         go2rtc: Arc::new(crate::go2rtc::Go2rtcSupervisor::new(false)),
         detections: Default::default(),
+        faces: Default::default(),
     })
 }
 

@@ -8,5 +8,8 @@
 pub mod post;
 pub mod preprocess;
 
+#[cfg(feature = "ort")]
+pub mod face;
+
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub mod yolo;

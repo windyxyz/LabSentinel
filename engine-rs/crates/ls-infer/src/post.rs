@@ -149,7 +149,7 @@ pub fn nms(dets: Vec<Det>, iou_thres: f32) -> Vec<Det> {
     keep
 }
 
-fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+pub(crate) fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let area_a = (a[2] - a[0]) * (a[3] - a[1]);
     let area_b = (b[2] - b[0]) * (b[3] - b[1]);
     let ix = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);

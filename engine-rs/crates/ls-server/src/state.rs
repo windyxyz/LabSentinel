@@ -36,6 +36,7 @@ pub struct AppState {
     pub go2rtc: crate::go2rtc::SharedGo2rtc,
     /// LS-051：实时检测元数据广播（≤5Hz，WS /ws/detections/:cid 消费）
     pub(crate) detections: DetectionStreams,
+    pub(crate) faces: crate::local_face::FaceRuntime,
 }
 
 #[derive(Default)]

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, nextTick, ref } from 'vue'
+import { computed, onMounted, onUnmounted, nextTick, ref, watch } from 'vue'
 import { api, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
 import AnnotatorModal from '../components/AnnotatorModal.vue'
 import AsyncState from '../components/AsyncState.vue'
@@ -69,6 +69,19 @@ function aiTitle(ev) {
 }
 const drawer = ref(null)        // 详情抽屉：当前事件对象
 const drawerEl = ref(null)      // 抽屉 DOM（焦点管理）
+const faceMatch = ref(null)
+watch(() => drawer.value?.id, async (id, _, onCleanup) => {
+  faceMatch.value = null
+  if (!Number.isInteger(id)) return
+  const request = new AbortController()
+  onCleanup(() => request.abort())
+  try {
+    const data = await api.faceEventMatch(id, request.signal)
+    if (!request.signal.aborted && typeof data?.matched?.subject === 'string') {
+      faceMatch.value = data.matched
+    }
+  } catch { /* 无身份记录或当前会话无管理权限 */ }
+})
 let lastFocus = null
 // 任务66：三态 + 按钮防重复
 const loading = ref(true)
@@ -471,6 +484,7 @@ async function mark(e, status) {
             · <span :class="'lv' + drawer.level">L{{ drawer.level }}</span>
             · {{ STATUS_TEXT[drawer.status] || drawer.status }}</p>
           <p>{{ drawer.detail }}</p>
+          <p v-if="faceMatch" class="muted">人脸辅助识别 · {{ faceMatch.subject }} · 相似度 {{ Number(faceMatch.similarity).toFixed(2) }}</p>
           <img v-if="drawer.has_snapshot" :src="mediaUrl(`/api/events/${drawer.id}/snapshot`)" alt="事件截图大图，点击放大"
                class="drawer-snap" @click="zoom = mediaUrl(`/api/events/${drawer.id}/snapshot`)" />
           <video v-if="drawer.has_video" :src="mediaUrl(`/api/events/${drawer.id}/video`)" controls

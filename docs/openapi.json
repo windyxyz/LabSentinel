@@ -3254,6 +3254,130 @@
         }
       }
     },
+    "/api/face/config": {
+      "get": {
+        "summary": "人脸模型与各路相机权限",
+        "responses": { "200": { "description": "活动模型、上一个模型、本地状态、API 档案与相机权限" } }
+      },
+      "put": {
+        "summary": "启停并配置本地模型或 CompreFace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": { "enum": ["off", "local", "api"] },
+                  "api": { "type": "string" },
+                  "restore_previous": { "type": "boolean" },
+                  "local_enabled": { "type": "boolean" },
+                  "local_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+                  "retention_days": { "type": "integer", "minimum": 1, "maximum": 365 },
+                  "profile": {
+                    "type": "object",
+                    "required": ["name", "url", "enabled", "threshold", "timeout_s"],
+                    "properties": {
+                      "id": { "type": "string" },
+                      "name": { "type": "string" },
+                      "url": { "type": "string", "format": "uri" },
+                      "api_key": { "type": "string", "writeOnly": true },
+                      "enabled": { "type": "boolean" },
+                      "threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+                      "timeout_s": { "type": "integer", "minimum": 1, "maximum": 15 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "设置已生效，返回脱敏的配置" },
+          "422": { "description": "模型、地址或参数无效" }
+        }
+      }
+    },
+    "/api/face/models/local/install": {
+      "post": {
+        "summary": "下载并校验本地 YuNet 和 SFace",
+        "responses": {
+          "200": { "description": "本地模型文件就绪" },
+          "502": { "description": "模型下载或校验失败" }
+        }
+      }
+    },
+    "/api/face/models/{id}/test": {
+      "post": {
+        "summary": "测试指定 CompreFace 档案",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "连接测试成功，返回耗时与远程条目数" },
+          "502": { "description": "无法连接远程服务" }
+        }
+      }
+    },
+    "/api/face/cameras/{id}": {
+      "put": {
+        "summary": "设置事件人脸辅助识别的相机权限",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object", "required": ["permission"],
+                "properties": { "permission": { "enum": ["off", "local", "local_or_api"] } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "相机权限已更新" } }
+      }
+    },
+    "/api/face/recognize": {
+      "post": {
+        "summary": "试识别一张有处理授权的照片",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object", "required": ["consent", "photo"],
+                "properties": {
+                  "consent": { "type": "boolean" },
+                  "photo": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "匹配的登记人员或空结果，以及识别耗时" },
+          "403": { "description": "人脸模式已关闭" }
+        }
+      }
+    },
+    "/api/face/library": {
+      "get": {
+        "summary": "列出已授权登记人员和待撤回记录",
+        "responses": { "200": { "description": "各模型的人员、样本数和同意有效期" } }
+      }
+    },
+    "/api/face/library/{id}": {
+      "delete": {
+        "summary": "撤回人员授权并删除模板",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": {
+          "200": { "description": "已删除" },
+          "502": { "description": "匹配已撤回，远程删除待重试" }
+        }
+      }
+    },
+    "/api/face/events/{id}": {
+      "get": {
+        "summary": "读取管理端可见的事件身份辅助结果",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "仍在同意期限内的匹配结果，或空结果" } }
+      }
+    },
     "/api/face/status": {
       "get": {
         "summary": "Face Status",

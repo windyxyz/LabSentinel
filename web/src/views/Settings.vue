@@ -410,7 +410,9 @@ const pluginLog = ref(null)
 
 async function loadPlugins() {
   try {
-    plugins.value = (await api.pluginsList()).plugins
+    const result = await api.pluginsList()
+    if (!Array.isArray(result?.plugins)) throw new Error('插件列表格式异常')
+    plugins.value = result.plugins
     pluginsError.value = ''
     pluginsLoaded.value = true
   } catch (e) {
@@ -586,7 +588,7 @@ onMounted(() => {
       <section v-if="show('devices')" class="panel">
         <Devices />
       </section>
-      <section v-show="show('face')" class="panel">
+      <section v-if="show('face')" class="panel">
         <Face />
       </section>
       <section v-show="show('data')" class="panel">

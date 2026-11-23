@@ -158,6 +158,15 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/plugins/:pid/start"),
     ("POST", "/api/plugins/:pid/stop"),
     ("GET", "/api/face/status"),
+    ("GET", "/api/face/config"),
+    ("PUT", "/api/face/config"),
+    ("POST", "/api/face/models/local/install"),
+    ("POST", "/api/face/models/:id/test"),
+    ("PUT", "/api/face/cameras/:id"),
+    ("POST", "/api/face/recognize"),
+    ("GET", "/api/face/library"),
+    ("DELETE", "/api/face/library/:id"),
+    ("GET", "/api/face/events/:id"),
     ("POST", "/api/face/persons"),
     ("GET", "/api/face/persons"),
     ("DELETE", "/api/face/persons/all"),
@@ -333,11 +342,22 @@ pub fn build_router(state: Shared) -> Router {
         .route("/plugins/:pid/start", post(plugin_action))
         .route("/plugins/:pid/stop", post(plugin_action))
         .route("/face/status", get(face_status))
+        .route("/face/config", get(face_config).put(face_update_config))
+        .route("/face/models/local/install", post(face_install_local))
+        .route("/face/models/:id/test", post(face_test_api))
+        .route("/face/cameras/:id", put(face_set_camera))
+        .route(
+            "/face/recognize",
+            post(face_recognize).layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024)),
+        )
+        .route("/face/library", get(face_library))
+        .route("/face/library/:id", delete(face_remove_from_library))
+        .route("/face/events/:id", get(face_event_match))
         .route(
             "/face/persons",
             get(face_persons_list)
                 .post(face_register)
-                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
+                .layer(axum::extract::DefaultBodyLimit::max(26 * 1024 * 1024)),
         )
         .route("/face/persons/all", delete(face_clear_all))
         .route("/face/persons/:subject", delete(face_delete))

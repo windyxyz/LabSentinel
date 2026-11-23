@@ -176,7 +176,7 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                     .get("analysis_shared")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                if analysis.is_empty() || super::cameras::valid_substream(analysis) {
+                if super::cameras::valid_substream(analysis) || (analysis.is_empty() && shared) {
                     s.set_camera_analysis_source(cid, analysis, shared)?;
                 }
             }

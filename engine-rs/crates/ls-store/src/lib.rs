@@ -7,9 +7,12 @@
 use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
+mod faces;
+pub use faces::{FacePerson, FaceTemplate};
+
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 18;
+pub const SCHEMA_VERSION_LATEST: i64 = 19;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
@@ -56,6 +59,22 @@ pub struct Camera {
     pub analyzer: String,
     pub analysis_source: String,
     pub analysis_shared: bool,
+}
+
+impl Camera {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            source: row.get(2)?,
+            type_: row.get(3)?,
+            status: row.get(4)?,
+            group_name: row.get(5)?,
+            analyzer: row.get(6)?,
+            analysis_source: row.get(7)?,
+            analysis_shared: row.get(8)?,
+        })
+    }
 }
 
 pub struct Store {
@@ -108,7 +127,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(18, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(19, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -175,6 +194,7 @@ impl Store {
                created_ts TEXT NOT NULL, expires_ts TEXT NOT NULL, \
                revoked INTEGER DEFAULT 0);",
         )?;
+        self.conn.execute_batch(faces::SCHEMA)?;
         Ok(true)
     }
 
@@ -263,6 +283,11 @@ impl Store {
             [],
         )?;
         transaction.commit()?;
+        self.conn.execute_batch(faces::SCHEMA)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(19, 'rust-ls066-face-models')",
+            [],
+        )?;
         self.schema_version()
     }
 
@@ -426,28 +451,33 @@ impl Store {
     }
 
     // ---- cameras ----
-    pub fn cameras(&self) -> rusqlite::Result<Vec<Camera>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id,name,source,type,status,COALESCE(group_name,''),COALESCE(analyzer,'python'),analysis_source,analysis_shared FROM cameras ORDER BY id")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Camera {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                source: r.get(2)?,
-                type_: r.get(3)?,
-                status: r.get(4)?,
-                group_name: r.get(5)?,
-                analyzer: r.get(6)?,
-                analysis_source: r.get(7)?,
-                analysis_shared: r.get(8)?,
+    fn camera_query(&self, suffix: &str) -> rusqlite::Result<rusqlite::Statement<'_>> {
+        let fields =
+            "id,name,source,type,status,COALESCE(group_name,''),COALESCE(analyzer,'python')";
+        self.conn
+            .prepare(&format!(
+                "SELECT {fields},analysis_source,analysis_shared FROM cameras {suffix}"
+            ))
+            .or_else(|error| {
+                if error.to_string().starts_with("no such column: analysis_") {
+                    self.conn
+                        .prepare(&format!("SELECT {fields},'',0 FROM cameras {suffix}"))
+                } else {
+                    Err(error)
+                }
             })
-        })?;
+    }
+
+    pub fn cameras(&self) -> rusqlite::Result<Vec<Camera>> {
+        let mut stmt = self.camera_query("ORDER BY id")?;
+        let rows = stmt.query_map([], Camera::from_row)?;
         rows.collect()
     }
 
     pub fn camera(&self, id: i64) -> rusqlite::Result<Option<Camera>> {
-        let cams = self.cameras()?;
-        Ok(cams.into_iter().find(|c| c.id == id))
+        let mut stmt = self.camera_query("WHERE id=?")?;
+        use rusqlite::OptionalExtension;
+        stmt.query_row([id], Camera::from_row).optional()
     }
 
     pub fn set_camera_analysis_source(
@@ -493,6 +523,12 @@ impl Store {
 
     pub fn clear_face_consents(&self) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM face_consents", [])?;
+        Ok(())
+    }
+
+    pub fn delete_face_consent(&self, subject: &str) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM face_consents WHERE subject=?", [subject])?;
         Ok(())
     }
 

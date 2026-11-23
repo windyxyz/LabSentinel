@@ -1072,6 +1072,20 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             match sink.record_ext(&cand, Some(&snap), dispatch_now) {
                                 Ok(Some(eid)) => {
                                     spawn_finalize(&st, &evidence, eid);
+                                    if let Some(track) = pipe
+                                        .last_tracks()
+                                        .iter()
+                                        .find(|track| track.id == cand.track_id)
+                                    {
+                                        crate::local_face::identify_event(
+                                            &st,
+                                            &store,
+                                            eid,
+                                            cfg.camera_id,
+                                            track.bbox,
+                                            &snap,
+                                        );
+                                    }
                                     ev_round.push((eid, cand));
                                 }
                                 Ok(None) => {} // 去重命中
