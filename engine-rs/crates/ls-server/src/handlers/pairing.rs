@@ -196,7 +196,7 @@ pub(crate) fn permit_device(
     let permitted_operation =
         (method == Method::POST && matches!(field, "status" | "notes") && device.can_triage())
             || ((method == Method::GET || method == Method::HEAD)
-                && (matches!(field, "thumb" | "snapshot" | "video")
+                && (matches!(field, "thumb" | "snapshot" | "video" | "overlay")
                     || (field == "notes" && device.can_triage())));
     permitted_operation
         && ls_store::Store::open(&st.db_path)

@@ -27,7 +27,6 @@ pub mod paths;
 pub mod retention;
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -53,7 +52,7 @@ const RETRY_INTERVAL_S: u64 = 30;
 const REPORT_CHECK_S: u64 = 60;
 /// LS-053：最大重试次数（超过即 dead_letter 死信）
 pub const MAX_RETRY_ATTEMPTS: i64 = 5;
-const MAX_ALERT_JPEG: u64 = 2 * 1024 * 1024;
+pub mod media;
 
 fn event_alert_text(level: i64, event_type: &str, camera: &str, detail: &str) -> String {
     let severity = match level {
@@ -540,14 +539,7 @@ impl Jobs {
         if !path.starts_with(root.canonicalize().ok()?) || !path.is_file() {
             return None;
         }
-        let mut contents = Vec::new();
-        std::fs::File::open(path)
-            .ok()?
-            .take(MAX_ALERT_JPEG + 1)
-            .read_to_end(&mut contents)
-            .ok()?;
-        (contents.starts_with(&[0xff, 0xd8]) && contents.len() as u64 <= MAX_ALERT_JPEG)
-            .then_some(contents)
+        media::snapshot_jpeg(&path)
     }
 
     pub fn escalate_once(&self) -> JobResult<EscalationOutcome> {

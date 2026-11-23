@@ -39,7 +39,7 @@ argon2 = "0.5.3"
 subtle = "2.6"
 ureq = "3"       # R2-309 批次 3：ppe/download 与 alert-test 真实 HTTP（rustls 0.23）
 url = "2.5.9"
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 aes = "0.8"      # 批次 4：Fernet 兼容（AES-128-CBC，与 cryptography 互操作）
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 base64 = "0.22"  # Fernet key/token 编解码
@@ -49,6 +49,8 @@ tempfile = "3"
 # UX4（2026-11-20）：系统托盘（tauri 团队维护，纯 win32；仅 Windows 目标）
 # 不引入 Tauri/Electron 运行时——保持单二进制与体积纪律
 [target.'cfg(windows)'.dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
 tray-icon = { version = "0.21", default-features = false }
 # UX3/UX4：控制台附着（--console）/致命错误 MessageBox/托盘消息泵 FFI
 # （0.61 与 tray-icon/muda 传递版本同线，不新增版本分叉）

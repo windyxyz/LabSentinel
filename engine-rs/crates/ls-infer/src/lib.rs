@@ -11,5 +11,8 @@ pub mod preprocess;
 #[cfg(feature = "ort")]
 pub mod face;
 
+#[cfg(feature = "ort")]
+pub mod ort_session;
+
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub mod yolo;

@@ -3269,6 +3269,13 @@
         }
       }
     },
+    "/api/events/{eid}/overlay": {
+      "parameters": [{"name": "eid", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "get": {
+        "summary": "Read the coordinates associated with an event snapshot",
+        "responses": {"200": {"description": "Image dimensions, optional person box and zone vertices, or null"}}
+      }
+    },
     "/api/events/{eid}/snapshot": {
       "get": {
         "summary": "Event Snapshot",

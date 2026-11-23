@@ -21,6 +21,8 @@ use ort::value::{TensorElementType, ValueType};
 #[cfg(feature = "tract")]
 use tract_onnx::prelude::*;
 
+#[cfg(feature = "ort")]
+use crate::ort_session::OrtSession;
 use crate::post::{self, Det, LetterboxGeom};
 
 #[derive(Clone, Copy, Default)]
@@ -275,19 +277,8 @@ impl InferBackend for TractBackend {
 
 #[cfg(feature = "ort")]
 struct OrtBackend {
-    session: Option<Session>,
-    is_dml: bool,
+    session: OrtSession,
     fp16: bool,
-}
-
-#[cfg(feature = "ort")]
-impl Drop for OrtBackend {
-    fn drop(&mut self) {
-        if self.is_dml && self.session.is_some() {
-            let _guard = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
-            self.session.take();
-        }
-    }
 }
 
 #[cfg(feature = "ort")]
@@ -298,7 +289,6 @@ impl InferBackend for OrtBackend {
         width: u32,
         height: u32,
     ) -> Result<(Vec<usize>, Vec<f32>), String> {
-        let session = self.session.as_mut().ok_or("ORT 会话未初始化")?;
         let dims = [1usize, 3, height as usize, width as usize];
         let tensor = if self.fp16 {
             let data = data
@@ -310,43 +300,41 @@ impl InferBackend for OrtBackend {
             ort::value::Tensor::from_array((dims, data)).map(|tensor| tensor.into_dyn())
         }
         .map_err(|e| format!("输入张量创建失败: {e}"))?;
-        // 事故 A1 防护：DirectML 推理必须跨线程串行；CPU 推理不加锁。
         let waiting_since = std::time::Instant::now();
-        let _dml_guard = if self.is_dml {
-            Some(dml_lock().lock().unwrap_or_else(|e| e.into_inner()))
-        } else {
-            None
-        };
-        let run_started = std::time::Instant::now();
-        let outputs = session.run(ort::inputs![tensor]);
+        let is_dml = self.session.is_gpu();
+        let (result, wait, run) = self.session.with(None, move |session| {
+            let run_started = std::time::Instant::now();
+            let outputs = session.run(ort::inputs![tensor]);
+            let run = run_started.elapsed();
+            let result = outputs
+                .map_err(|e| format!("推理失败: {e}"))
+                .and_then(|outputs| {
+                    let (_name, v) = outputs.iter().next().ok_or("模型无输出")?;
+                    if let Ok((shape, flat)) = v.try_extract_tensor::<f32>() {
+                        Ok((shape.iter().map(|&d| d as usize).collect(), flat.to_vec()))
+                    } else {
+                        let (shape, flat) = v
+                            .try_extract_tensor::<half::f16>()
+                            .map_err(|e| format!("输出类型错误: {e}"))?;
+                        Ok((
+                            shape.iter().map(|&d| d as usize).collect(),
+                            flat.iter().map(|v| v.to_f32()).collect(),
+                        ))
+                    }
+                });
+            Ok((result, run_started - waiting_since, run))
+        })?;
         INFERENCE_TIMINGS.with(|metrics| {
             let mut totals = metrics.get();
-            totals.run += run_started.elapsed();
-            if self.is_dml {
-                totals.directml_wait += run_started - waiting_since;
+            totals.run += run;
+            if is_dml {
+                totals.directml_wait += wait;
                 totals.directml_calls += 1;
             }
             totals.calls += 1;
             metrics.set(totals);
         });
-        let outputs = outputs.map_err(|e| format!("推理失败: {e}"))?;
-        // YOLO 单输出：取首个输出（SessionOutputs 可迭代，取第一个键值对）
-        let (_name, v) = outputs.iter().next().ok_or("模型无输出")?;
-        let result = if let Ok((shape, flat)) = v.try_extract_tensor::<f32>() {
-            (shape.iter().map(|&d| d as usize).collect(), flat.to_vec())
-        } else {
-            let (shape, flat) = v
-                .try_extract_tensor::<half::f16>()
-                .map_err(|e| format!("输出类型错误: {e}"))?;
-            (
-                shape.iter().map(|&d| d as usize).collect(),
-                flat.iter().map(|v| v.to_f32()).collect(),
-            )
-        };
-        drop(v);
-        drop(outputs);
-        drop(_dml_guard);
-        Ok(result)
+        result
     }
 }
 
@@ -362,59 +350,9 @@ pub struct YoloModel {
     min_box_area: f32,
 }
 
-/// 进程级 DirectML 串行锁（事故 A1 防护：AMD/DX12 驱动下 ORT DirectML
-/// `Session::run` / 建会话 / 释放严禁跨线程并发，否则导致 Windows 整机冻结）。
-/// CPU 与 tract 路径不加此锁。
+/// Same process-wide guard as the DirectML scheduler, exposed for diagnostics.
 #[cfg(feature = "ort")]
-pub fn dml_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    &LOCK
-}
-
-#[cfg(feature = "ort")]
-fn ort_environment() -> Result<&'static ort::environment::Environment, String> {
-    static ENVIRONMENT: std::sync::OnceLock<Result<ort::environment::Environment, String>> =
-        std::sync::OnceLock::new();
-    ENVIRONMENT
-        .get_or_init(|| {
-            ort::environment::init()
-                .with_name("labsentinel")
-                .build()
-                .map_err(|e| format!("ORT 环境初始化失败: {e}（ORT_DYLIB_PATH 是否设置？）"))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-#[cfg(feature = "ort")]
-pub(crate) fn load_ort_session(path: &Path, use_gpu: bool) -> Result<(Session, bool), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("读取模型失败: {e}"))?;
-    let environment = ort_environment()?;
-    let build = |with_dml| -> Result<Session, String> {
-        let mut builder = Session::builder(environment).map_err(|e| e.to_string())?;
-        if with_dml {
-            // DirectML requires sequential execution and disables memory patterns.
-            builder = builder
-                .with_memory_pattern(false)
-                .map_err(|e| e.to_string())?
-                .with_parallel_execution(false)
-                .map_err(|e| e.to_string())?
-                .with_execution_providers([ort::ep::DirectML::default().build().error_on_failure()])
-                .map_err(|e| e.to_string())?;
-        }
-        builder
-            .commit_from_memory(&bytes)
-            .map_err(|e| format!("ORT 加载模型失败: {e}"))
-    };
-    if use_gpu {
-        let _guard = dml_lock().lock().unwrap_or_else(|e| e.into_inner());
-        match build(true) {
-            Ok(session) => return Ok((session, true)),
-            Err(e) => eprintln!("[ls-infer] GPU(DirectML) 初始化失败，自动回落 CPU: {e}"),
-        }
-    }
-    Ok((build(false)?, false))
-}
+pub use crate::ort_session::dml_lock;
 
 /// 实际生效的推理设备（"DirectML(GPU)" / "CPU" / "CPU(tract)"）——每次 load
 /// 成功后覆盖更新，网页切换 GPU/CPU 并软重启相机后 `/api/system` 实时反映最新设备。
@@ -502,31 +440,31 @@ impl YoloModel {
                 Backend::Tract => return Err("tract feature 未启用".into()),
                 #[cfg(feature = "ort")]
                 Backend::Ort => {
-                    let (session, is_dml) = load_ort_session(path, use_gpu)?;
-                    let ep_used = if is_dml { "DirectML(GPU)" } else { "CPU" };
+                    let mut session = OrtSession::load(path, use_gpu)?;
+                    let ep_used = if session.is_gpu() {
+                        "DirectML(GPU)"
+                    } else {
+                        "CPU"
+                    };
                     println!("[ls-infer] ORT 推理设备: {ep_used}");
-                    let mut runtime = OrtBackend {
-                        session: Some(session),
-                        is_dml,
-                        fp16: false,
-                    };
-                    let session = runtime.session.as_ref().ok_or("ORT 会话未初始化")?;
-                    let output_format = match format_override {
-                        Some(format) => format,
-                        None => OutputFormat::from_metadata(session)?,
-                    };
-                    let input = session.inputs().first().ok_or("ORT 模型无输入")?;
-                    let ValueType::Tensor { ty, shape, .. } = input.dtype() else {
-                        return Err("ORT 模型输入必须是图像张量".into());
-                    };
-                    runtime.fp16 = match ty {
-                        TensorElementType::Float16 => true,
-                        TensorElementType::Float32 => false,
-                        _ => return Err(format!("不支持的输入类型: {ty:?}")),
-                    };
-                    let shape = input_size(shape, fallback)?;
+                    let (output_format, fp16, shape) = session.with(None, move |session| {
+                        let output_format = match format_override {
+                            Some(format) => format,
+                            None => OutputFormat::from_metadata(session)?,
+                        };
+                        let input = session.inputs().first().ok_or("ORT 模型无输入")?;
+                        let ValueType::Tensor { ty, shape, .. } = input.dtype() else {
+                            return Err("ORT 模型输入必须是图像张量".into());
+                        };
+                        let fp16 = match ty {
+                            TensorElementType::Float16 => true,
+                            TensorElementType::Float32 => false,
+                            _ => return Err(format!("不支持的输入类型: {ty:?}")),
+                        };
+                        Ok((output_format, fp16, input_size(shape, fallback)?))
+                    })?;
                     set_ep_used(ep_used);
-                    (Box::new(runtime), shape, output_format)
+                    (Box::new(OrtBackend { session, fp16 }), shape, output_format)
                 }
                 #[cfg(not(feature = "ort"))]
                 Backend::Ort => return Err("ort feature 未启用".into()),

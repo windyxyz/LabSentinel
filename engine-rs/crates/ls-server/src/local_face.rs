@@ -104,6 +104,7 @@ pub fn assets_present(data_dir: &str) -> bool {
 
 struct ModelCache {
     gpu: bool,
+    adapter: Option<i32>,
     model: LocalFaceModel,
 }
 
@@ -156,16 +157,24 @@ impl FaceRuntime {
         photo: &Photo,
     ) -> Result<Vec<f32>, String> {
         let gpu = store.setting_get("infer.use_gpu").ok().flatten().as_deref() != Some("0")
-            && std::env::var("LS_GPU").as_deref() != Ok("0");
+            && crate::detect::runtime_ep_pref(store) == "dml";
+        let adapter = gpu.then(ls_infer::ort_session::directml_adapter).flatten();
         let mut cache = self.model.lock().map_err(|_| "人脸模型暂不可用")?;
-        if cache.as_ref().is_none_or(|model| model.gpu != gpu) {
+        if cache
+            .as_ref()
+            .is_none_or(|model| model.gpu != gpu || model.adapter != adapter)
+        {
             let directory = model_directory(data_dir);
             let files = MODELS.map(|model| directory.join(model.filename));
             for (asset, file) in MODELS.into_iter().zip(&files) {
                 asset.verify(file)?;
             }
             let model = LocalFaceModel::load(&files[0], &files[1], gpu)?;
-            *cache = Some(ModelCache { gpu, model });
+            *cache = Some(ModelCache {
+                gpu,
+                adapter,
+                model,
+            });
         }
         cache
             .as_mut()

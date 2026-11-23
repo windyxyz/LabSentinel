@@ -17,7 +17,7 @@ pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 23;
+pub const SCHEMA_VERSION_LATEST: i64 = 24;
 
 #[derive(Debug)]
 pub struct StoredZone {
@@ -45,6 +45,8 @@ pub struct Event {
     pub ai_review: Option<String>,
     pub ai_review_ts: Option<String>,
     pub ai_review_model: Option<String>,
+    pub detections_json: Option<String>,
+    pub snapshot_sha256: Option<String>,
     /// UX2 cascade：VLM 复核判定（完整 JSON 文本；None=未复核）
     pub vlm_verdict: Option<String>,
     /// UX2 cascade：复核时间
@@ -67,9 +69,16 @@ pub struct NewEvent<'a> {
     pub ts: &'a str,
 }
 
+#[derive(Default)]
+pub struct EventEvidence<'a> {
+    pub bbox: Option<[f32; 4]>,
+    pub detections_json: Option<&'a str>,
+    pub snapshot_sha256: Option<&'a str>,
+}
+
 const EVENT_COLUMNS: &str = "id,ts,camera_id,type,level,track_id,detail,snapshot,video,\
     COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0),handled_by,handled_ts,\
-    ai_review,ai_review_ts,ai_review_model";
+    ai_review,ai_review_ts,ai_review_model,detections_json,snapshot_sha256";
 
 pub const ALERT_EVENTS_SQL: &str = "type NOT IN ('photo_check','video_check')";
 
@@ -161,7 +170,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(23, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(24, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -186,6 +195,7 @@ impl Store {
                level INTEGER, track_id INTEGER, detail TEXT, snapshot TEXT, video TEXT, \
                status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, \
                escalated_ts TEXT, ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT, \
+               detections_json TEXT, snapshot_sha256 TEXT, \
                vlm_verdict TEXT, vlm_ts TEXT, vlm_suppressed INTEGER DEFAULT 0);
              CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
              CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);
@@ -339,7 +349,13 @@ impl Store {
             .prepare("PRAGMA table_info(events)")?
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
-        for column in ["ai_review", "ai_review_ts", "ai_review_model"] {
+        for column in [
+            "ai_review",
+            "ai_review_ts",
+            "ai_review_model",
+            "detections_json",
+            "snapshot_sha256",
+        ] {
             if !event_columns.contains(column) {
                 tx.execute(&format!("ALTER TABLE events ADD COLUMN {column} TEXT"), [])?;
             }
@@ -410,6 +426,10 @@ impl Store {
             "INSERT OR IGNORE INTO schema_version VALUES(23, 'rust-ls082-spatial-policy')",
             [],
         )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(24, 'rust-ls083-snapshot-evidence')",
+            [],
+        )?;
         tx.commit()?;
         self.schema_version()
     }
@@ -431,11 +451,34 @@ impl Store {
 
     // ---- events ----
     pub fn add_event(&self, ev: &NewEvent) -> rusqlite::Result<i64> {
-        self.conn.execute(
-            "INSERT INTO events(ts,camera_id,type,level,track_id,detail,snapshot) VALUES(?,?,?,?,?,?,?)",
-            params![ev.ts, ev.camera_id, ev.type_, ev.level, ev.track_id, ev.detail,
-                    ev.snapshot])?;
-        Ok(self.conn.last_insert_rowid())
+        self.add_event_with_evidence(ev, EventEvidence::default())
+    }
+
+    pub fn add_event_with_evidence(
+        &self,
+        ev: &NewEvent,
+        evidence: EventEvidence,
+    ) -> rusqlite::Result<i64> {
+        let tx = evidence
+            .bbox
+            .map(|_| self.conn.unchecked_transaction())
+            .transpose()?;
+        let conn = tx.as_deref().unwrap_or(&self.conn);
+        conn.execute(
+            "INSERT INTO events(ts,camera_id,type,level,track_id,detail,snapshot,detections_json,snapshot_sha256)
+             VALUES(?,?,?,?,?,?,?,?,?)",
+            params![ev.ts, ev.camera_id, ev.type_, ev.level, ev.track_id, ev.detail, ev.snapshot,
+                    evidence.detections_json, evidence.snapshot_sha256],
+        )?;
+        let id = conn.last_insert_rowid();
+        if let (Some(bbox), Some(tx)) = (evidence.bbox, tx) {
+            tx.execute(
+                "INSERT INTO event_locations(event_id,bbox) VALUES(?,?)",
+                params![id, serde_json::json!(bbox).to_string()],
+            )?;
+            tx.commit()?;
+        }
+        Ok(id)
     }
 
     pub fn add_check_event(
@@ -446,10 +489,22 @@ impl Store {
         ts: &str,
         snapshot: Option<&str>,
     ) -> rusqlite::Result<i64> {
+        self.add_check_event_with_digest(camera_id, kind, detail, ts, snapshot, None)
+    }
+
+    pub fn add_check_event_with_digest(
+        &self,
+        camera_id: i64,
+        kind: &str,
+        detail: &str,
+        ts: &str,
+        snapshot: Option<&str>,
+        digest: Option<&str>,
+    ) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO events(ts,camera_id,type,level,track_id,detail,status,snapshot)
-             VALUES(?,?,?,0,0,?,'recorded',?)",
-            params![ts, camera_id, kind, detail, snapshot],
+            "INSERT INTO events(ts,camera_id,type,level,track_id,detail,status,snapshot,snapshot_sha256)
+             VALUES(?,?,?,0,0,?,'recorded',?,?)",
+            params![ts, camera_id, kind, detail, snapshot, digest],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -2619,6 +2674,8 @@ fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
         ai_review: r.get(15)?,
         ai_review_ts: r.get(16)?,
         ai_review_model: r.get(17)?,
+        detections_json: r.get(18)?,
+        snapshot_sha256: r.get(19)?,
     })
 }
 

@@ -35,6 +35,7 @@ mod envfile;
 mod face;
 mod genai;
 mod go2rtc;
+mod gpu_enum;
 mod handlers;
 mod local_face;
 mod middleware;
@@ -427,6 +428,9 @@ async fn main() {
             }
             Err(e) => eprintln!("[ls-server] schema 自举失败: {e}"),
         }
+    }
+    if let Ok(store) = ls_store::Store::open(&st.db_path) {
+        ls_infer::ort_session::select_directml_adapter(crate::detect::runtime_adapter(&store));
     }
     st.access.load(&st.db_path);
     let app = build_router(st.clone());

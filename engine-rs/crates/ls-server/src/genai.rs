@@ -315,6 +315,6 @@ pub fn parse_review(text: &str) -> Result<Value, String> {
 
 /// JPEG 截图 → base64（长边压缩留给后续；当前直接编码，契约等价）。
 pub fn snapshot_b64(path: &str) -> Option<String> {
-    let raw = std::fs::read(path).ok()?;
+    let raw = ls_jobs::media::snapshot_jpeg(std::path::Path::new(path))?;
     Some(base64::engine::general_purpose::STANDARD.encode(&raw))
 }

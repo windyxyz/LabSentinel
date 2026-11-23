@@ -1,4 +1,4 @@
-use crate::{NewEvent, Store};
+use crate::Store;
 use ls_core::Point;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -115,17 +115,6 @@ impl Store {
             "DELETE FROM camera_masks WHERE camera_id=? AND id=?",
             params![camera_id, id],
         )
-    }
-
-    pub fn add_located_event(&self, event: &NewEvent<'_>, bbox: [f32; 4]) -> rusqlite::Result<i64> {
-        let tx = self.conn().unchecked_transaction()?;
-        let id = self.add_event(event)?;
-        tx.execute(
-            "INSERT INTO event_locations(event_id,bbox) VALUES(?,?)",
-            params![id, serde_json::json!(bbox).to_string()],
-        )?;
-        tx.commit()?;
-        Ok(id)
     }
 
     pub fn remember_false_positive(&self, event_id: i64) -> rusqlite::Result<Option<(i64, i64)>> {

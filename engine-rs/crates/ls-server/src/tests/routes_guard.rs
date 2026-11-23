@@ -774,7 +774,7 @@ async fn spatial_masks_and_false_positive_spots_round_trip() {
     let app = build_router(test_state(db.to_str().unwrap()));
     let bounds = [30.0, 35.0, 100.0, 110.0];
     let eid = store
-        .add_located_event(
+        .add_event_with_evidence(
             &ls_store::NewEvent {
                 camera_id: cid,
                 type_: "no_mask",
@@ -784,7 +784,10 @@ async fn spatial_masks_and_false_positive_spots_round_trip() {
                 snapshot: None,
                 ts: "2026-11-24T12:00:00",
             },
-            bounds,
+            ls_store::EventEvidence {
+                bbox: Some(bounds),
+                ..Default::default()
+            },
         )
         .unwrap();
     let remember = format!("/api/events/{eid}/remember-spot");

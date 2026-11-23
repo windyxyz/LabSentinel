@@ -57,6 +57,25 @@ pub struct EventSink {
     dedup: Mutex<Dedup>,
 }
 
+struct SavedSnapshot {
+    path: String,
+    sha256: String,
+}
+
+fn detection_overlay(
+    width: u32,
+    height: u32,
+    bbox: Option<[f32; 4]>,
+    zone: Option<&ls_analyzer::pipeline::ZoneSpec>,
+) -> Option<String> {
+    (bbox.is_some() || zone.is_some()).then(|| {
+        serde_json::json!({
+            "width": width, "height": height, "box": bbox, "zone": zone.map(|zone| &zone.points),
+        })
+        .to_string()
+    })
+}
+
 impl EventSink {
     pub fn new(st: Shared) -> Self {
         Self {
@@ -85,19 +104,39 @@ impl EventSink {
         format!("{}|{}|{}", cand.evidence_key, cand.behavior, cand.track_id)
     }
 
-    fn save_snapshot(&self, camera: i64, ts: &str, jpeg: &[u8]) -> Result<String, String> {
+    fn save_snapshot(&self, camera: i64, ts: &str, jpeg: &[u8]) -> Result<SavedSnapshot, String> {
+        use image::ImageEncoder;
+        use sha2::{Digest, Sha256};
+        let image = ls_jobs::media::decode_image(jpeg)
+            .ok_or("无法解码事件截图")?
+            .into_rgb8();
+        let mut webp = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|error| format!("事件截图 WebP 编码失败: {error}"))?;
         std::fs::create_dir_all(&self.paths.snapshots)
             .map_err(|e| format!("创建截图目录失败: {e}"))?;
         let seq = SNAP_SEQ.fetch_add(1, Ordering::Relaxed);
         let name = format!(
-            "ev_{camera}_{}_{}{:04}.jpg",
+            "ev_{camera}_{}_{}{:04}.webp",
             ts.replace([':', '-', '.'], ""),
             std::process::id(),
             seq
         );
         let path = self.paths.snapshots.join(name);
-        std::fs::write(&path, jpeg).map_err(|e| format!("截图写入失败: {e}"))?;
-        Ok(path.to_string_lossy().into_owned())
+        if let Err(error) = std::fs::write(&path, &webp) {
+            let _ = std::fs::remove_file(&path);
+            return Err(format!("截图写入失败: {error}"));
+        }
+        Ok(SavedSnapshot {
+            path: path.to_string_lossy().into_owned(),
+            sha256: format!("{:x}", Sha256::digest(webp)),
+        })
     }
 
     /// 候选 → 截图 → 入库 → WS 广播。返回 `Ok(Some(eid))`=已落地（供 finalize
@@ -119,7 +158,7 @@ impl EventSink {
         snapshot_jpeg: Option<&[u8]>,
         dispatch: bool,
     ) -> Result<Option<i64>, String> {
-        self.record_located(cand, snapshot_jpeg, dispatch, None)
+        self.record_located(cand, snapshot_jpeg, dispatch, None, None)
     }
 
     fn record_located(
@@ -128,6 +167,7 @@ impl EventSink {
         snapshot_jpeg: Option<&[u8]>,
         dispatch: bool,
         bbox: Option<[f32; 4]>,
+        overlay: Option<&str>,
     ) -> Result<Option<i64>, String> {
         {
             let mut d = self.dedup.lock().map_err(|_| "dedup poison")?;
@@ -143,29 +183,41 @@ impl EventSink {
                 }
             }
         }
-        let snapshot = snapshot_jpeg
-            .map(|jpeg| self.save_snapshot(cand.camera_id, &cand.ts_iso, jpeg))
-            .transpose()?;
         let st = &self.st;
         let store = ls_store::Store::open(&st.db_path).map_err(|e| e.to_string())?;
+        let snapshot = snapshot_jpeg.and_then(|jpeg| {
+            self.save_snapshot(cand.camera_id, &cand.ts_iso, jpeg)
+                .map_err(|error| {
+                    crate::logger::warn(&format!("[ls-worker] cam-{} {error}", cand.camera_id));
+                })
+                .ok()
+        });
+        let path = snapshot.as_ref().map(|image| image.path.as_str());
         let ev = ls_store::NewEvent {
             camera_id: cand.camera_id,
             type_: &cand.behavior,
             level: cand.level,
             track_id: cand.track_id,
             detail: &cand.detail,
-            snapshot: snapshot.as_deref(),
+            snapshot: path,
             ts: &cand.ts_iso,
         };
-        let eid = match bbox.filter(|_| crate::spatial::spatial_rule(&cand.behavior)) {
-            Some(bounds) => store.add_located_event(&ev, bounds),
-            None => store.add_event(&ev),
-        }
-        .map_err(|e| e.to_string())?;
+        let evidence = ls_store::EventEvidence {
+            bbox: bbox
+                .filter(|_| snapshot.is_some() && crate::spatial::spatial_rule(&cand.behavior)),
+            detections_json: overlay.filter(|_| snapshot.is_some()),
+            snapshot_sha256: snapshot.as_ref().map(|image| image.sha256.as_str()),
+        };
+        let eid = store
+            .add_event_with_evidence(&ev, evidence)
+            .map_err(|error| {
+                if let Some(path) = path {
+                    let _ = std::fs::remove_file(path);
+                }
+                error.to_string()
+            })?;
         // RA2-S5：AI 复核入队（默认 provider=none 零开销；只写 ai_review 标记）
-        let _ = st
-            .genai
-            .maybe_enqueue(eid, snapshot.as_deref(), cand.level, &st.db_path);
+        let _ = st.genai.maybe_enqueue(eid, path, cand.level, &st.db_path);
         // WS 广播：行口径与 /api/events 完全一致（绝对路径不外泄——event_json
         // 只出 has_snapshot/has_video 布尔，与 Python 桥 pop(snapshot/video) 等价）
         if let Ok(Some(row)) = store.event_by_id(eid) {
@@ -178,13 +230,7 @@ impl EventSink {
             .map(|c| c.name)
             .unwrap_or_default();
         if dispatch {
-            self.deliver_deferred(
-                eid,
-                cand,
-                &cam_name,
-                snapshot.is_some(),
-                snapshot.as_deref(),
-            );
+            self.deliver_deferred(eid, cand, &cam_name, snapshot.is_some(), path);
         }
         Ok(Some(eid))
     }
@@ -1032,6 +1078,12 @@ fn load_worker_ppe(
 }
 
 fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
+    use ls_infer::ort_session::{set_thread_gpu_priority, GpuPriority};
+    set_thread_gpu_priority(if cfg.spec.type_ == "file" {
+        GpuPriority::Normal
+    } else {
+        GpuPriority::Live
+    });
     let Ok(store) = ls_store::Store::open(&st.db_path) else {
         st.workers
             .remove_and_stop(None, cfg.camera_id, Some(&handle), "error");
@@ -1529,11 +1581,20 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             .unwrap_or_default(),
                         };
                         for cand in cands {
+                            let bounds = tracked_box(cand.track_id);
+                            let overlay = detection_overlay(
+                                frame.width,
+                                frame.height,
+                                bounds,
+                                cand.zone_id
+                                    .and_then(|id| policy.zones.iter().find(|zone| zone.id == id)),
+                            );
                             match sink.record_located(
                                 &cand,
                                 Some(&snap),
                                 dispatch_now,
-                                tracked_box(cand.track_id),
+                                bounds,
+                                overlay.as_deref(),
                             ) {
                                 Ok(Some(eid)) => {
                                     if video_file {
@@ -1764,11 +1825,16 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 })
                 .ok()
         });
-        if let Err(error) =
-            store.add_check_event(cid, "video_check", &detail, &finished, snapshot.as_deref())
-        {
-            if let Some(path) = snapshot {
-                let _ = std::fs::remove_file(path);
+        if let Err(error) = store.add_check_event_with_digest(
+            cid,
+            "video_check",
+            &detail,
+            &finished,
+            snapshot.as_ref().map(|image| image.path.as_str()),
+            snapshot.as_ref().map(|image| image.sha256.as_str()),
+        ) {
+            if let Some(image) = snapshot {
+                let _ = std::fs::remove_file(image.path);
             }
             crate::logger::error(&format!(
                 "[ls-worker] cam-{cid} 无法保存视频检查记录: {error}"
@@ -2052,6 +2118,7 @@ fn sleep_interruptible_wake(stop: &AtomicBool, wake: &AtomicBool, d: std::time::
 }
 
 fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
+    ls_infer::ort_session::set_thread_gpu_priority(ls_infer::ort_session::GpuPriority::Background);
     let Ok(store) = ls_store::Store::open(&st.db_path) else {
         st.workers
             .remove_and_stop(None, cfg.camera_id, Some(&handle), "error");
@@ -2560,9 +2627,14 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     ts_iso: processed_ts.clone(),
                     evidence_key: format!("folder:{iid}:{}", rule.id),
                 };
-                if let Ok(Some(eid)) =
-                    sink.record_located(&cand, snapshot_jpeg.as_deref(), dispatch_now, target)
-                {
+                let overlay = detection_overlay(w, h, target, zone);
+                if let Ok(Some(eid)) = sink.record_located(
+                    &cand,
+                    snapshot_jpeg.as_deref(),
+                    dispatch_now,
+                    target,
+                    overlay.as_deref(),
+                ) {
                     let _ = store.set_folder_image_event(iid, eid);
                     ev_round.push((eid, cand));
                 }
@@ -2667,9 +2739,9 @@ mod tests {
             SinkPaths::from_data_dir(tmp.path().to_str().unwrap()),
         );
         let mut rx = st.events_tx.subscribe();
-        let jpeg: &[u8] = b"\xff\xd8\xff\xe0FAKEJPEG";
+        let jpeg = ls_analyzer::evidence::encode_jpeg_bgr(&[110; 8 * 8 * 3], 8, 8).unwrap();
         let eid = sink
-            .record(&cand(1, "cam:1:100"), Some(jpeg))
+            .record(&cand(1, "cam:1:100"), Some(&jpeg))
             .unwrap()
             .expect("首条不应去重");
         // DB 行 + 截图文件
@@ -2679,10 +2751,24 @@ mod tests {
         assert_eq!(row.track_id, 7);
         let snap = row.snapshot.expect("截图路径已入库");
         assert!(std::path::Path::new(&snap).is_file(), "截图文件真实存在");
+        let webp = std::fs::read(&snap).unwrap();
+        assert_eq!(
+            image::guess_format(&webp).unwrap(),
+            image::ImageFormat::WebP
+        );
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            row.snapshot_sha256.as_deref(),
+            Some(format!("{:x}", Sha256::digest(&webp)).as_str())
+        );
+        let jpeg = ls_jobs::media::snapshot_jpeg(std::path::Path::new(&snap)).unwrap();
+        assert_eq!(
+            image::guess_format(&jpeg).unwrap(),
+            image::ImageFormat::Jpeg
+        );
         // WS 广播行口径与 /api/events 一致（无绝对路径泄漏）
         let payload = rx.try_recv().unwrap();
         assert!(payload.contains("\"has_snapshot\":true"), "{payload}");
-        assert!(!payload.contains("FAKEJPEG"));
         assert!(!payload.contains(&snap), "绝对路径不外泄");
     }
 

@@ -10,6 +10,7 @@ license.workspace = true
 ls-core = { path = "../ls-core" }
 ls-store = { path = "../ls-store" }
 ls-dispatch = { path = "../ls-dispatch" }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -7,6 +7,7 @@ API/前端断言 → 停止 → 清理。对齐 smoke_portable.py 的判定口�
 退出码 0 = 全部 PASS。失败自动保留现场（--keep 可强制保留）。
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -132,8 +133,10 @@ def check_file_detection(base: str, pkg: Path, sandbox: Path, timeout: int) -> t
     if len(events) != 1 or events[0]["type"] != "video_check" or events[0]["status"] != "recorded":
         return False, "无规则视频只应有一条检查记录"
     _, image = http_get(f"{base}/api/events/{events[0]['id']}/snapshot")
-    if not events[0]["has_snapshot"] or not image.startswith(b"\xff\xd8"):
-        return False, "视频检查记录没有检查截图"
+    if not events[0]["has_snapshot"] or image[:4] != b"RIFF" or image[8:12] != b"WEBP":
+        return False, "视频检查记录没有可预览的 WebP 截图"
+    if hashlib.sha256(image).hexdigest() != events[0]["snapshot_sha256"]:
+        return False, "视频检查截图与记录摘要不符"
 
     _, body = http_post(f"{base}/api/zones", {
         "camera_id": video_id, "name": "验收区域",
@@ -159,10 +162,38 @@ def check_file_detection(base: str, pkg: Path, sandbox: Path, timeout: int) -> t
             if len(checks) != 2 or any(event["type"] != "video_check" or event["status"] != "recorded" for event in checks):
                 return False, "视频检查结果没有独立留痕"
             _, body = http_get(f"{base}/api/events?camera_id={video_id}&category=alert")
-            if {event["type"] for event in json.loads(body)} != {"enter"}:
+            alerts = json.loads(body)
+            if {event["type"] for event in alerts} != {"enter"}:
                 return False, "告警分类混入检查结果"
+            event_url = f"{base}/api/events/{alerts[0]['id']}"
+            _, overlay = http_get(f"{event_url}/overlay")
+            overlay = json.loads(overlay)
+            if not alerts[0]["has_overlay"] or not overlay.get("box") or not overlay.get("zone"):
+                return False, "视频告警没有与截图对应的检测框或区域"
+            _, thumb = http_get(f"{event_url}/thumb")
+            if not thumb.startswith(b"\xff\xd8"):
+                return False, "WebP 告警未生成兼容的 JPEG 缩略图"
+            http_post(f"{base}/api/cameras/{video_id}/masks", {
+                "name": "只用于验收的目标遮罩", "kind": "object_filter",
+                "polygon": [[0, 0], [1280, 0], [1280, 720], [0, 720]],
+            })
+            http_post(f"{base}/api/cameras/{video_id}/start", {})
+            mask_deadline = time.monotonic() + timeout
+            while time.monotonic() < mask_deadline:
+                _, payload = http_get(f"{base}/api/events?camera_id={video_id}&category=check")
+                if len(json.loads(payload)) == 3:
+                    break
+                time.sleep(0.25)
+            else:
+                return False, "启用目标过滤遮罩后，视频没有正常完成检查"
+            _, payload = http_get(f"{base}/api/events?camera_id={video_id}&category=alert")
+            _, audit = http_get(f"{base}/api/review/suppressions?camera_id={video_id}")
+            if len(json.loads(payload)) != len(alerts) or not any(
+                row["reason"] == "filter_mask" and row["behavior"] == "enter" for row in json.loads(audit)
+            ):
+                return False, "目标过滤未抑制区域告警，或抑制未留痕"
             check_failed_detection(base, pkg, sandbox, clip, timeout)
-            return True, "检查留痕、视频预览、照片规则和推理失败对照通过"
+            return True, "检查留痕、视频预览、告警截图与叠框、遮罩审计、照片规则和推理失败对照通过"
         if state in ("error", "model_error"):
             return False, f"视频检查失败，状态 {state}"
         time.sleep(0.5)
@@ -417,8 +448,14 @@ def main() -> int:
                     _, status = http_get(f"{base}/api/models/ppe/status")
                     ppe_ok &= (json.loads(changed).get("close_mask_enabled") is enabled
                                and json.loads(status).get("close_mask_enabled") is enabled)
-            ok4 = st == 200 and j.get("backend") == "rust" and ver_ok and ppe_ok
-            detail = f"backend={j.get('backend')} version={got_ver} (want={want_ver}) ppe_enabled={j_ppe.get('enabled')}"
+            _, body_runtime = http_get(f"{base}/api/detect/config", timeout=8)
+            runtime = json.loads(body_runtime).get("runtime", {})
+            adapters = runtime.get("adapters")
+            runtime_ok = runtime.get("ep") in {"cpu", "dml"} and isinstance(adapters, list)
+            vulkan_count = sum(adapter.get("vulkan_index") is not None for adapter in adapters or [])
+            ok4 = st == 200 and j.get("backend") == "rust" and ver_ok and ppe_ok and runtime_ok
+            detail = (f"backend={j.get('backend')} version={got_ver} (want={want_ver}) "
+                      f"ppe_enabled={j_ppe.get('enabled')} GPU={len(adapters or [])} Vulkan={vulkan_count}")
         except (OSError, ValueError) as e:
             detail = repr(e)
         print(f"[{'PASS' if ok4 else 'FAIL'}] 4 /api/system + PPE —— {detail}")

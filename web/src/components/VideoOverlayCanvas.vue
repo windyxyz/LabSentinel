@@ -14,6 +14,7 @@ const props = defineProps({
   imgW: { type: Number, default: 1280 },
   imgH: { type: Number, default: 720 },
   visible: { type: Boolean, default: true },
+  debug: { type: Boolean, default: false },
 })
 
 const canvasEl = ref(null)
@@ -109,12 +110,29 @@ function draw() {
     ctx.strokeStyle = color
     ctx.lineWidth = 2
     ctx.strokeRect(r.x, r.y, r.w, r.h)
-    const label = `#${t.id}`
+    const confidence = Number.isFinite(t.conf) ? ` · ${Math.round(t.conf * 100)}%` : ''
+    const label = props.debug ? `#${t.id}${confidence}${t.occluded ? ' · 遮挡' : ''}` : `#${t.id}`
     const tw = ctx.measureText(label).width + 8
     ctx.fillStyle = color
     ctx.fillRect(r.x, Math.max(0, r.y - 18), tw, 18)
     ctx.fillStyle = '#0b0f14'
     ctx.fillText(label, r.x + 4, Math.max(12, r.y - 5))
+    if (props.debug) {
+      ctx.beginPath()
+      ctx.arc(r.x + r.w / 2, r.y + r.h, 3, 0, 2 * Math.PI)
+      ctx.fillStyle = '#fde047'
+      ctx.fill()
+    }
+  }
+  if (props.debug) {
+    for (const object of Array.isArray(latest.objects) ? latest.objects : []) {
+      const r = mapBox(object?.bbox, iw, ih, dispW, dispH)
+      if (!r) continue
+      ctx.strokeStyle = '#f9a8d4'
+      ctx.strokeRect(r.x, r.y, r.w, r.h)
+      ctx.fillStyle = '#f9a8d4'
+      ctx.fillText(object.label || '物体', r.x + 2, Math.max(12, r.y - 4))
+    }
   }
 }
 
@@ -149,7 +167,7 @@ watch(() => props.cameraId, () => {
   resetOverlay()
   connect()
 })
-watch(() => [props.visible, props.imgW, props.imgH], scheduleDraw, { flush: 'post' })
+watch(() => [props.visible, props.debug, props.imgW, props.imgH], scheduleDraw, { flush: 'post' })
 
 onMounted(() => {
   const parent = canvasEl.value?.parentElement

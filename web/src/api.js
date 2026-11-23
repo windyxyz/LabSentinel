@@ -185,6 +185,7 @@ export const api = {
   addCameraMask: (cid, data) => req('POST', `/api/cameras/${cid}/masks`, data),
   deleteCameraMask: (cid, id) => req('DELETE', `/api/cameras/${cid}/masks/${id}`),
   rememberEventSpot: (id) => req('POST', `/api/events/${id}/remember-spot`),
+  eventOverlay: (id) => req('GET', `/api/events/${id}/overlay`),
   deleteFpSpot: (cid, id) => req('DELETE', `/api/cameras/${cid}/fp-spots/${id}`),
   delZone: (id) => req('DELETE', `/api/zones/${id}`),
   copyConfig: (cid, payload) => req('POST', `/api/cameras/${cid}/copy-config`, payload),

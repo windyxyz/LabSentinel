@@ -511,7 +511,12 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
                       "budget": usage.budget, "exhausted": usage.exhausted()},
             // UX（2026-11-21）：推理设备（DirectML——DX12 统一层，N/A/Intel 卡
             // 与核显全通吃；dml 初始化失败自动回落 CPU）
-            "runtime": {"ep": runtime_ep_pref(s), "last_loaded_ep": ls_infer::yolo::ep_used()},
+            "runtime": {
+                "ep": runtime_ep_pref(s),
+                "last_loaded_ep": ls_infer::yolo::ep_used(),
+                "adapter_index": runtime_adapter(s),
+                "adapters": crate::gpu_enum::adapters(),
+            },
         }))
         .into_response())
     })
@@ -550,6 +555,15 @@ pub fn runtime_ep_pref(s: &ls_store::Store) -> String {
             }
             .into()
         })
+}
+
+pub(crate) fn runtime_adapter(store: &ls_store::Store) -> Option<i32> {
+    store
+        .setting_get("runtime.adapter_index")
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse().ok())
+        .filter(|index| *index >= 0)
 }
 
 const SENSITIVITY_KEYS: [&str; 3] = ["detector.conf", "ppe.violation_conf", "ppe.wearing_conf"];
@@ -704,6 +718,13 @@ pub(crate) async fn detect_config_put(
         }
         // runtime.ep：推理设备切换（dml|cpu）——先校验再落盘，避免半写入
         let mut ep_write: Option<(String, bool)> = None;
+        let mut adapter_changed = false;
+        static RUNTIME_UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _runtime_guard = body.get("runtime").map(|_| {
+            RUNTIME_UPDATE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        });
         if let Some(rt) = body.get("runtime") {
             if let Some(ep) = rt.get("ep").and_then(|x| x.as_str()) {
                 let ep_l = ep.trim().to_ascii_lowercase();
@@ -716,6 +737,32 @@ pub(crate) async fn detect_config_put(
                 }
                 let cur = runtime_ep_pref(s);
                 ep_write = Some((ep_l.clone(), cur != ep_l));
+            }
+            if let Some(value) = rt.get("adapter_index") {
+                let adapter = if value.is_null() {
+                    None
+                } else if let Some(index) = value
+                    .as_i64()
+                    .and_then(|index| i32::try_from(index).ok())
+                    .filter(|index| {
+                        crate::gpu_enum::adapters()
+                            .iter()
+                            .any(|adapter| adapter.dxgi_index == Some(*index))
+                    })
+                {
+                    Some(index)
+                } else {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "请选择列表中可用的 GPU",
+                    )
+                    .into_response());
+                };
+                adapter_changed = adapter != runtime_adapter(s);
+                writes.push((
+                    "runtime.adapter_index".into(),
+                    adapter.map_or_else(|| "-1".into(), |index| index.to_string()),
+                ));
             }
         }
         if let Some(c) = cascade {
@@ -831,8 +878,14 @@ pub(crate) async fn detect_config_put(
             s.setting_set(k, v)?;
         }
         tx.commit()?;
+        if adapter_changed {
+            ls_infer::ort_session::select_directml_adapter(runtime_adapter(s));
+        }
+        if ep_changed || adapter_changed {
+            st.faces.reset_model();
+        }
         // 即时生效：EP 变化时全部重启（避免先 restart_following_global 再 restart_all_running 双重重启）
-        let restarted = if ep_changed || sensitivity.is_some() {
+        let restarted = if ep_changed || adapter_changed || sensitivity.is_some() {
             crate::worker::restart_all_running(&st, s)
         } else {
             crate::worker::restart_following_global(&st, s)

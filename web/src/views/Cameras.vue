@@ -1,8 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, mediaUrl } from '../api'
-import CameraPreview from '../components/CameraPreview.vue'
-import VideoOverlayCanvas from '../components/VideoOverlayCanvas.vue'
+import LiveCameraViewer from '../components/LiveCameraViewer.vue'
 import AsyncState from '../components/AsyncState.vue'
 import FsPicker from '../components/FsPicker.vue'
 
@@ -563,10 +562,7 @@ function watchLive(cam) {
 
   <div v-if="live" style="position:fixed; inset:0; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="live = null">
     <div style="width:min(92vw, 960px); cursor:default" @click.stop>
-      <div style="position:relative; height:min(70vh, 54vw)">
-        <CameraPreview :camera-id="live.id" :camera-type="live.type" :name="live.name" />
-        <VideoOverlayCanvas :camera-id="live.id" />
-      </div>
+      <LiveCameraViewer :camera="live" />
       <p class="muted" style="text-align:center; margin-top:8px">{{ live.name }} · 点击空白处关闭</p>
     </div>
   </div>

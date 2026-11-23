@@ -6,14 +6,24 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_call: {}  # release.yml 复用本工作流作为发布门禁
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      regression:
+        type: boolean
+        default: true  # release.yml 复用本工作流作为发布门禁
 
 permissions:
   contents: read
 
 jobs:
   rust:
-    runs-on: windows-latest
+    if: github.event_name == 'workflow_dispatch' || inputs.regression == true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -34,12 +44,16 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: npm ci + test + build
+      - name: npm ci
         working-directory: web
-        run: |
-          npm ci
-          npm test
-          npm run build
+        run: npm ci
+      - name: frontend regression
+        if: github.event_name == 'workflow_dispatch' || inputs.regression == true
+        working-directory: web
+        run: npm test
+      - name: frontend build
+        working-directory: web
+        run: npm run build
       - name: frontend-backend contract audit
         run: python3 scripts/contract_audit.py
       - name: npm audit (production deps)

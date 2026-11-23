@@ -1,4 +1,4 @@
-# T-335：Rust 工作区 CI——双平台 cargo test + clippy -D warnings + fmt
+# Rust 工作区 CI——双平台 Clippy、格式与构建门禁
 # + cargo-deny（许可证/公告/来源）+ cargo-audit + 路由覆盖率。
 # 契约/向量/单元测试全部离线（ffmpeg 相关测试在缺 ffmpeg 时自动 skip）。
 # 交叉编译矩阵已移除：ring/protoc 等 build script 需要目标平台 cc，仅做 check 也不成立。
@@ -33,15 +33,7 @@ jobs:
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
         with:
           workspaces: engine-rs
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
-        with:
-          tool: cargo-nextest
-      # R2-505/N-32: --all-features brings the tract AND ort inference paths into
-      # CI (ls-analyzer enables both indirectly, but explicit is required so a
-      # feature-gated regression cannot hide behind default features).
-      - name: cargo nextest run（workspace --all-features：契约/向量/单元）
-        working-directory: engine-rs
-        run: cargo nextest run --workspace --all-features
+      # Full regression is dispatched through tests.yml at milestone boundaries.
       - name: clippy -D warnings（手写 crate 零告警；生成代码在 ls-proto 内豁免）
         working-directory: engine-rs
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

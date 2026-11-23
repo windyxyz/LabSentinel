@@ -92,6 +92,7 @@ pub(crate) fn event_json(e: &ls_store::Event) -> Value {
            "category": if matches!(e.type_.as_str(), "photo_check" | "video_check") { "check" } else { "alert" },
            "level": e.level, "track_id": e.track_id, "detail": e.detail,
            "has_snapshot": e.snapshot.is_some(), "has_video": e.video.is_some(),
+           "has_overlay": e.detections_json.is_some(), "snapshot_sha256": e.snapshot_sha256,
            "status": e.status, "handled_by": e.handled_by, "handled_ts": e.handled_ts,
            "ai_verdict": ai_verdict, "ai_review": review,
            "ai_review_ts": review_ts, "ai_review_model": review_model,
@@ -348,31 +349,42 @@ pub(crate) async fn event_video(State(st): State<Shared>, AxPath(eid): AxPath<i6
     serve_event_media(&st, eid, |e| &e.video, "video/mp4")
 }
 
+pub(crate) async fn event_overlay(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
+    with_store(&st, |store| {
+        let metadata = store
+            .event_by_id(eid)?
+            .and_then(|event| event.detections_json)
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        Ok(Json(metadata).into_response())
+    })
+}
+
 /// LS-050：事件缩略图（宽 320px JPEG）——按需生成并缓存到 `data/thumbs/ev_<id>.jpg`，
-/// 列表页用它替代加载整张截图。命中缓存直接返回；否则 ffmpeg 解码缩放后编码落盘。
+/// 列表页使用较小的截图；缓存缺失时在阻塞线程内解码和缩放。
 pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
-    let Some(src) = ls_store::Store::open(&st.db_path).ok().and_then(|store| {
+    let shared = st.clone();
+    match tokio::task::spawn_blocking(move || load_event_thumb(&shared, eid)).await {
+        Ok(Some(bytes)) => ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response(),
+        _ => event_snapshot(State(st), AxPath(eid)).await,
+    }
+}
+
+fn load_event_thumb(st: &Shared, eid: i64) -> Option<Vec<u8>> {
+    let src = ls_store::Store::open(&st.db_path).ok().and_then(|store| {
         store
             .event_by_id(eid)
             .ok()
             .flatten()
-            .and_then(|event| event_image_path(&st, &store, &event))
-    }) else {
-        return detail_err(StatusCode::NOT_FOUND, "event not found").into_response();
-    };
+            .and_then(|event| event_image_path(st, &store, &event))
+    })?;
     let dir = std::path::Path::new(&st.data_dir).join("thumbs");
     let cache = dir.join(format!("ev_{eid}.jpg"));
     if let Ok(bytes) = std::fs::read(&cache) {
-        return ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response();
+        return Some(bytes);
     }
-    // 320×180 解码缩放（ffmpeg 自带 CREATE_NO_WINDOW，见 ls_ingest::decode_image）
-    let Ok((bgr, w, h)) = ls_ingest::decode_image(&src, 320, 180) else {
-        // 缩略图失败时回退原图（功能降级但列表仍可见）
-        return event_snapshot(State(st), AxPath(eid)).await;
-    };
-    let Ok(jpeg) = ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h) else {
-        return event_snapshot(State(st), AxPath(eid)).await;
-    };
+    let raw = ls_jobs::media::read_snapshot(&src)?;
+    let thumbnail = ls_jobs::media::decode_image(&raw)?.thumbnail(320, 180);
+    let jpeg = ls_jobs::media::encode_jpeg(&thumbnail, 82)?;
     if std::fs::create_dir_all(&dir).is_ok() {
         // 原子写：先写 .tmp 再改名，避免并发读到半截文件
         let tmp = dir.join(format!("ev_{eid}_{}.jpg.tmp", uuid_like()));
@@ -383,7 +395,7 @@ pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i6
             let _ = std::fs::remove_file(&tmp);
         }
     }
-    ([(header::CONTENT_TYPE, "image/jpeg")], jpeg).into_response()
+    Some(jpeg)
 }
 
 /// P0-1 修复（安全审计）：WS 握手校验——此前零鉴权（CSWSH：恶意网页可
@@ -733,6 +745,8 @@ pub(crate) async fn event_evidence_zip(
             "id": ev.id, "ts": ev.ts, "camera_id": ev.camera_id, "type": ev.type_,
             "level": ev.level, "track_id": ev.track_id, "detail": ev.detail,
             "status": ev.status,
+            "snapshot_sha256": ev.snapshot_sha256,
+            "detections": ev.detections_json.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok()),
         });
         zip.add_file(
             &format!("event-{eid}/evidence.json"),

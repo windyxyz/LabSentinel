@@ -40,6 +40,10 @@ const testResult = ref(null)
 const apiCardEl = ref(null)
 const urlInputEl = ref(null)
 const runtimeEp = ref('dml')
+const runtimeAdapter = ref(null)
+const adapters = computed(() => Array.isArray(cfg.value?.runtime?.adapters) ? cfg.value.runtime.adapters : [])
+const directMlAdapters = computed(() => adapters.value.filter(adapter => Number.isInteger(adapter?.dxgi_index)))
+const selectedAdapter = computed(() => directMlAdapters.value.find(adapter => adapter.dxgi_index === runtimeAdapter.value))
 const sensitivityPresets = [
   { id: 'conservative', label: '保守' },
   { id: 'balanced', label: '平衡' },
@@ -113,6 +117,7 @@ async function load() {
     onNegative.value = d.cascade?.on_negative || 'keep'
     usage.value = d.usage
     runtimeEp.value = d.runtime?.ep || 'dml'
+    runtimeAdapter.value = Number.isInteger(d.runtime?.adapter_index) ? d.runtime.adapter_index : null
     vlmPrompt.value = d.vlm_prompt || ''
     motionGate.value = !!d.perf?.motion_gate_enabled
     motionThreshold.value = d.perf?.motion_threshold ?? 2
@@ -304,16 +309,20 @@ async function runTest() {
 }
 
 // 推理设备切换（GPU/CPU）：保存后全部运行中相机软重启（模型重新加载）
-async function saveRuntimeEp(ep) {
+async function saveRuntimeEp(ep, includeAdapter = false) {
   busy.value = true
   msg.value = ''
   try {
-    const r = await api.saveDetectConfig({ runtime: { ep } })
+    const runtime = includeAdapter ? { ep, adapter_index: runtimeAdapter.value } : { ep }
+    const r = await api.saveDetectConfig({ runtime })
     await load()
     msg.value = ep === 'dml'
       ? `已切换 GPU 推理（DirectML）——${r.restarted || 0} 路相机已重启生效`
       : `已切换仅 CPU 推理——${r.restarted || 0} 路相机已重启生效`
-  } catch (e) { msg.value = String(e.message || e) }
+  } catch (e) {
+    await load()
+    msg.value = String(e.message || e)
+  }
   busy.value = false
 }
 
@@ -377,12 +386,25 @@ onMounted(load)
         <h3>本地模型</h3>
         <div class="row" style="align-items:center; margin-bottom:10px">
           <span class="muted" style="flex-shrink:0">推理设备：</span>
-          <label style="cursor:pointer"><input type="radio" value="dml" v-model="runtimeEp"
+          <label style="cursor:pointer"><input type="radio" value="dml" v-model="runtimeEp" :disabled="busy"
             @change="saveRuntimeEp('dml')" /> GPU（推荐——DirectML，N 卡/A 卡/Intel 卡/核显通用）</label>
-          <label style="cursor:pointer; margin-left:16px"><input type="radio" value="cpu" v-model="runtimeEp"
+          <label style="cursor:pointer; margin-left:16px"><input type="radio" value="cpu" v-model="runtimeEp" :disabled="busy"
             @change="saveRuntimeEp('cpu')" /> 仅 CPU</label>
           <span v-if="runtimeEp === 'dml'" class="muted" style="font-size:12px">
             GPU 初始化失败会自动回落 CPU（看服务日志）</span>
+        </div>
+        <div v-if="runtimeEp === 'dml' && (directMlAdapters.length || runtimeAdapter !== null)" class="row">
+          <label>显卡
+            <select v-model="runtimeAdapter" :disabled="busy" @change="saveRuntimeEp('dml', true)">
+              <option :value="null">自动选择</option>
+              <option v-for="adapter in directMlAdapters" :key="adapter.dxgi_index" :value="adapter.dxgi_index">{{ adapter.name }}</option>
+              <option v-if="!selectedAdapter && runtimeAdapter !== null" :value="runtimeAdapter" disabled>已配置显卡当前不可用</option>
+            </select>
+          </label>
+          <span v-if="selectedAdapter?.budget_bytes" class="muted">
+            显存预算 {{ (selectedAdapter.budget_bytes / (1024 ** 3)).toFixed(1) }} GB
+          </span>
+          <span v-if="selectedAdapter?.vulkan_index != null" class="muted">支持 Vulkan</span>
         </div>
         <p class="muted">最近加载的推理设备 {{ cfg?.runtime?.last_loaded_ep || '尚无会话数据' }}</p>
         <div class="row" role="group" aria-label="检测灵敏度">

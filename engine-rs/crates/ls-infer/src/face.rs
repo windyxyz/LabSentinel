@@ -3,9 +3,10 @@
 
 use std::path::Path;
 
-use ort::session::{Session, SessionOutputs};
+use ort::session::SessionOutputs;
 use ort::value::{Tensor, TensorElementType, ValueType};
 
+use crate::ort_session::{GpuPriority, OrtSession};
 use crate::{post, yolo};
 
 const DETECTOR_SIDE: usize = 640;
@@ -21,53 +22,38 @@ const LANDMARKS: [[f32; 2]; 5] = [
 ];
 
 struct FaceSession {
-    session: Option<Session>,
-    gpu: bool,
+    session: OrtSession,
 }
 
 impl FaceSession {
     fn load(path: &Path, gpu: bool, expected: [i64; 4]) -> Result<Self, String> {
-        let (session, gpu) = yolo::load_ort_session(path, gpu)?;
-        let model = Self {
-            session: Some(session),
-            gpu,
-        };
-        let inputs = model.session.as_ref().expect("loaded").inputs();
-        if !matches!(inputs.first().map(|i| i.dtype()), Some(ValueType::Tensor {
-            ty: TensorElementType::Float32, shape, ..
-        }) if shape.as_ref() == expected || (expected[0] == 1 && shape.len() == 4 && shape[0] == -1 && shape[1..] == expected[1..]))
-        {
-            return Err(format!("人脸 ONNX 输入必须是 FP32 {expected:?}"));
-        }
-        Ok(model)
+        let mut session = OrtSession::load(path, gpu)?;
+        session.with(None, move |session| {
+            if !matches!(session.inputs().first().map(|i| i.dtype()), Some(ValueType::Tensor {
+                ty: TensorElementType::Float32, shape, ..
+            }) if shape.as_ref() == expected || (expected[0] == 1 && shape.len() == 4 && shape[0] == -1 && shape[1..] == expected[1..]))
+            {
+                return Err(format!("人脸 ONNX 输入必须是 FP32 {expected:?}"));
+            }
+            Ok(())
+        })?;
+        Ok(Self { session })
     }
 
-    fn run<T>(
+    fn run<T: Send + 'static>(
         &mut self,
         shape: [usize; 4],
         image: Vec<f32>,
-        read: impl FnOnce(&SessionOutputs<'_>) -> Result<T, String>,
+        read: impl FnOnce(&SessionOutputs<'_>) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
         let tensor = Tensor::from_array((shape, image)).map_err(|e| e.to_string())?;
-        let _guard = self
-            .gpu
-            .then(|| yolo::dml_lock().lock().unwrap_or_else(|e| e.into_inner()));
-        let outputs = self
-            .session
-            .as_mut()
-            .expect("loaded")
-            .run(ort::inputs![tensor])
-            .map_err(|e| format!("人脸模型推理失败: {e}"))?;
-        read(&outputs)
-    }
-}
-
-impl Drop for FaceSession {
-    fn drop(&mut self) {
-        if self.gpu {
-            let _guard = yolo::dml_lock().lock().unwrap_or_else(|e| e.into_inner());
-            self.session.take();
-        }
+        self.session
+            .with(Some(GpuPriority::Background), move |session| {
+                let outputs = session
+                    .run(ort::inputs![tensor])
+                    .map_err(|e| format!("人脸模型推理失败: {e}"))?;
+                read(&outputs)
+            })
     }
 }
 
@@ -97,7 +83,10 @@ impl LocalFaceModel {
     }
 
     pub fn devices(&self) -> [bool; 2] {
-        [self.detector.gpu, self.embedder.gpu]
+        [
+            self.detector.session.is_gpu(),
+            self.embedder.session.is_gpu(),
+        ]
     }
 
     pub fn embedding(&mut self, bgr: &[u8], w: u32, h: u32) -> Result<Vec<f32>, String> {

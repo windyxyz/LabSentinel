@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, nextTick, ref, watch } from 'vue'
 import { api, CHANNEL_NAMES, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
 import AnnotatorModal from '../components/AnnotatorModal.vue'
 import AsyncState from '../components/AsyncState.vue'
+import SnapshotOverlay from '../components/SnapshotOverlay.vue'
 
 const rows = ref([])
 const camId = ref('')
@@ -597,10 +598,9 @@ async function rememberSpot(event) {
             · {{ STATUS_TEXT[drawer.status] || drawer.status }}</p>
           <p>{{ drawer.detail }}</p>
           <p v-if="faceMatch" class="muted">人脸辅助识别 · {{ faceMatch.subject }} · 相似度 {{ Number(faceMatch.similarity).toFixed(2) }}</p>
-          <img v-if="canPreview(drawer) && !previewUnavailable" :key="drawer.id"
-               :src="mediaUrl(`/api/events/${drawer.id}/snapshot`)" alt="事件图像，点击放大"
-               class="drawer-snap" @error="previewUnavailable = true"
-               @click="zoom = mediaUrl(`/api/events/${drawer.id}/snapshot`)" />
+          <SnapshotOverlay v-if="canPreview(drawer) && !previewUnavailable" :key="drawer.id"
+               :eid="drawer.id" :src="mediaUrl(`/api/events/${drawer.id}/snapshot`)" :available="drawer.has_overlay === true"
+               @error="previewUnavailable = true" @zoom="url => zoom = url" />
           <p v-else-if="previewUnavailable" class="muted">事件图片已不可用。</p>
           <video v-if="drawer.has_video" :src="mediaUrl(`/api/events/${drawer.id}/video`)" controls
                  style="width:100%; border-radius:var(--overlay-radius); background:#000" />
@@ -735,7 +735,6 @@ button { min-height: 40px; }
 .note-form { display: grid; gap: 8px; margin-top: 8px; }
 .note-form button { justify-self: end; }
 .delivery-row { justify-content: space-between; flex-wrap: wrap; }
-.drawer-snap { width: 100%; border-radius: var(--overlay-radius); cursor: zoom-in; margin: 8px 0; }
 @media (max-width: 480px) {
   .drawer { width: 100vw; border-radius: 0; }
 }

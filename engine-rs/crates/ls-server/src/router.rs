@@ -100,6 +100,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/events/bulk-status"),
     ("GET", "/api/events/timeline"),
     ("GET", "/api/events/:eid/snapshot"),
+    ("GET", "/api/events/:eid/overlay"),
     ("GET", "/api/events/:eid/video"),
     ("GET", "/api/events/:eid/thumb"), // LS-050 缩略图缓存
     // ---- stats 全套 ----
@@ -259,6 +260,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/events/bulk-status", post(bulk_event_status))
         .route("/events/timeline", get(events_timeline))
         .route("/events/:eid/snapshot", get(event_snapshot))
+        .route("/events/:eid/overlay", get(event_overlay))
         .route("/events/:eid/video", get(event_video))
         .route("/events/:eid/thumb", get(event_thumb))
         .route("/cameras", get(cameras).post(add_camera))

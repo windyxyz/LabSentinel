@@ -76,6 +76,13 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
 | DELETE | /api/cameras/{id}/fp-spots/{spot_id} | 移除误报点 |
 | GET | /api/review/suppressions | 抑制记录，支持 `camera_id`、`before_id`、`limit`。同来源、原因和规则的记录按 30 秒聚合 |
 
+新生成的事件快照采用 WebP，旧记录仍按实际格式返回。事件行的
+`snapshot_sha256` 对应保存的文件，`has_overlay` 表示可使用
+`GET /api/events/{id}/overlay` 读取截图尺寸和可用的目标或区域坐标。
+`GET /api/detect/config` 的 `runtime.adapters` 列出显卡，
+`PUT /api/detect/config` 接受 `runtime.adapter_index` 作为 DirectML 使用的 DXGI 显卡编号，`null` 恢复自动选择。
+支持 `VK_EXT_memory_budget` 时读取 Vulkan 的本地显存预算，否则使用可用的 DXGI 数据。显卡映射以 LUID 为准。[Vulkan 显存预算](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_memory_budget.html) · [DXGI 显存查询](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/nf-dxgi1_4-idxgiadapter3-queryvideomemoryinfo)
+
 `Zone`: `{id, camera_id, name, polygon: [[x,y],...]}`（1280×720 像素坐标）
 
 ## 4. 规则
