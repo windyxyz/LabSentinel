@@ -21,7 +21,10 @@ use crate::handlers::events::event_json;
 
 mod cascade;
 mod episodes;
+mod fall;
 mod lab;
+mod provenance;
+mod tamper;
 mod visual_scan;
 use crate::performance::{FrameTiming, PerformanceWindow};
 use crate::state::Shared;
@@ -64,6 +67,7 @@ pub struct EventSink {
     paths: SinkPaths,
     dedup: Mutex<Dedup>,
     legacy_review: bool,
+    provenance: Mutex<Option<(String, String)>>,
 }
 
 struct SavedSnapshot {
@@ -96,6 +100,7 @@ impl EventSink {
             paths: SinkPaths::from_data_dir(&st.data_dir),
             st,
             legacy_review: true,
+            provenance: Mutex::default(),
             dedup: Mutex::new(Dedup {
                 seen: HashSet::new(),
                 order: VecDeque::new(),
@@ -114,6 +119,7 @@ impl EventSink {
             st,
             paths,
             legacy_review: true,
+            provenance: Mutex::default(),
             dedup: Mutex::new(Dedup {
                 seen: HashSet::new(),
                 order: VecDeque::new(),
@@ -231,8 +237,15 @@ impl EventSink {
             snapshot_sha256: snapshot.as_ref().map(|image| image.sha256.as_str()),
             episode_id,
         };
+        let provenance = self.provenance.lock().ok().and_then(|value| value.clone());
         let eid = store
-            .add_event_with_evidence(&ev, evidence)
+            .add_event_with_provenance(
+                &ev,
+                evidence,
+                provenance
+                    .as_ref()
+                    .map(|(hash, settings)| (hash.as_str(), settings.as_str())),
+            )
             .map_err(|error| {
                 if let Some(path) = path {
                     let _ = std::fs::remove_file(path);
@@ -438,6 +451,7 @@ pub struct WorkerHandle {
     pub(crate) performance: Mutex<PerformanceWindow>,
     ppe_loaded: OnceLock<bool>,
     pub(crate) applied_policy_revision: AtomicU64,
+    image_health: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Clone)]
@@ -458,6 +472,13 @@ pub struct Workers {
 static NEXT_REVIEW_SOURCE: AtomicU64 = AtomicU64::new(1);
 
 impl Workers {
+    pub(crate) fn image_health(&self, camera: i64) -> Option<&'static str> {
+        let handle = self.get(camera)?;
+        Some(tamper::ImageHealth::label(
+            handle.image_health.load(Ordering::Relaxed),
+        ))
+    }
+
     pub(crate) fn notify_policy_changed(&self) -> u64 {
         let revision = self.policy_revision.fetch_add(1, Ordering::AcqRel) + 1;
         if let Ok(map) = self.map.lock() {
@@ -599,16 +620,16 @@ fn parse_polygon(polygon_json: &str) -> Option<Vec<(i64, i64)>> {
 }
 
 #[derive(Clone)]
-struct CameraPolicy {
+pub(crate) struct CameraPolicy {
     zones: Vec<ls_analyzer::pipeline::ZoneSpec>,
-    rules: Vec<ls_analyzer::pipeline::RuleSpec>,
-    calendar: HashMap<String, String>,
+    pub(crate) rules: Vec<ls_analyzer::pipeline::RuleSpec>,
+    pub(crate) calendar: HashMap<String, String>,
     spatial: crate::spatial::SpatialPolicy,
     rule_grace: HashMap<i64, ls_analyzer::episode::GraceWindow>,
     lab: ls_core::lab::LabRules,
 }
 
-fn read_camera_policy(s: &ls_store::Store, cid: i64) -> Result<CameraPolicy, String> {
+pub(crate) fn read_camera_policy(s: &ls_store::Store, cid: i64) -> Result<CameraPolicy, String> {
     let tx = s
         .conn()
         .unchecked_transaction()
@@ -763,15 +784,16 @@ impl WorkerConfig {
             .or(model_env)
             .or(bundled_model)
             .map(PathBuf::from);
+        let model_root = crate::deploy::default_install_root().join("models");
         detector.coco_context = detector
             .model_path
             .as_deref()
             .and_then(ls_analyzer::detector::anchor_model_file)
-            .zip(ls_analyzer::ppe::anchored_child(
-                &crate::deploy::default_install_root().join("models"),
-                "yolo11n.onnx",
-            ))
-            .is_some_and(|(active, bundled)| active == bundled);
+            .is_some_and(|active| {
+                ["yolo11n.onnx", "yolo26n.onnx"].into_iter().any(|name| {
+                    ls_analyzer::ppe::anchored_child(&model_root, name).as_ref() == Some(&active)
+                })
+            });
         // UX（2026-11-21）：推理设备偏好（app_settings runtime.ep；默认 dml=GPU，
         // DML 初始化失败 ls-infer 自动回落 CPU——任意厂商 GPU 鲁棒）
         detector.use_gpu = crate::detect::runtime_ep_pref(s) == "dml";
@@ -948,6 +970,7 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         performance: Mutex::new(PerformanceWindow::default()),
         ppe_loaded: OnceLock::new(),
         applied_policy_revision: AtomicU64::new(u64::MAX),
+        image_health: Default::default(),
     });
     if !st.workers.insert(cid, Arc::clone(&handle)) {
         return Err("已在运行".into());
@@ -1243,6 +1266,8 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     pipe.set_continuous_ppe(continuous_ppe);
     let mut episodes = episodes::EpisodeRuntime::default();
     let mut geometry_rules = lab::GeometryRules::default();
+    let mut image_monitor = tamper::ImageMonitor::default();
+    let mut image_alarm = false;
     let mut fixed_rules = lab::FixedRules::default();
     let stream_started = std::time::Instant::now();
     let mut last_episode_check = None;
@@ -1258,6 +1283,14 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         return;
     };
     let api_prompt = crate::vlm::monitor_prompt(&dcfg.effective_prompt());
+    let provenance = provenance::Inputs::new(
+        &cfg,
+        &st.version,
+        &mode,
+        &api_prompt,
+        handle.ppe_loaded.get() == Some(&true),
+    );
+    provenance.update(&sink, &policy);
     let mut api_window = visual_scan::Window::default();
     let mut api_counts = visual_scan::Counts::default();
     let scanner = visual_scan::Scanner {
@@ -1384,6 +1417,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 continue;
             }
         };
+        let mut falls = fall::Falls::default();
         let stream_index_base = live_index;
         let mut running_marked = false;
         let mut stable = false;
@@ -1424,6 +1458,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             );
                         }
                         policy = updated;
+                        provenance.update(&sink, &policy);
                         handle
                             .applied_policy_revision
                             .store(revision, Ordering::Release);
@@ -1495,7 +1530,72 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             heartbeat_frames: ls_analyzer::motion::DEFAULT_HEARTBEAT_FRAMES,
                         });
                     }
+                    let ts = ls_core::time::format_system_time_local_iso(captured.timestamp);
+                    if let Some(health) = live_capture
+                        .then(|| image_monitor.observe(&frame, captured.arrived))
+                        .flatten()
+                    {
+                        handle.image_health.store(health as u8, Ordering::Relaxed);
+                        let abnormal = health.description();
+                        let rule = policy
+                            .rules
+                            .iter()
+                            .filter(|r| {
+                                r.behavior == "camera_tamper"
+                                    && ls_analyzer::pipeline::rule_active_at(
+                                        r,
+                                        &ts,
+                                        &policy.calendar,
+                                    )
+                            })
+                            .max_by_key(|r| r.level);
+                        let outcome = if let (Some(detail), Some(rule), false) =
+                            (abnormal, rule, image_alarm)
+                        {
+                            Some(("camera_tamper", rule.level, detail))
+                        } else if abnormal.is_none() && image_alarm {
+                            Some(("alert_resolved", 1, "机位画面已恢复稳定"))
+                        } else {
+                            None
+                        };
+                        if let Some((behavior, level, detail)) = outcome {
+                            let cand = ls_analyzer::pipeline::Candidate {
+                                camera_id: cid,
+                                zone_id: None,
+                                behavior: behavior.into(),
+                                level,
+                                track_id: 0,
+                                detail: detail.into(),
+                                ts_iso: ts.clone(),
+                                evidence_key: format!("camera-health:{}", frame.index),
+                            };
+                            let jpeg = ev_snapshot.clone().or_else(|| {
+                                ls_analyzer::evidence::encode_jpeg_bgr(
+                                    &frame.data,
+                                    frame.width,
+                                    frame.height,
+                                )
+                                .ok()
+                            });
+                            if sink
+                                .record_ext(&cand, jpeg.as_deref(), abnormal.is_some())
+                                .is_ok()
+                            {
+                                image_alarm = abnormal.is_some();
+                            }
+                        }
+                    }
+                    let watch_falls = mode != "api"
+                        && policy.rules.iter().any(|rule| {
+                            rule.behavior == "person_fall"
+                                && ls_analyzer::pipeline::rule_active_at(
+                                    rule,
+                                    &ts,
+                                    &policy.calendar,
+                                )
+                        });
                     let mut motion_skip = live_capture
+                        && !watch_falls
                         && consecutive_failures == 0
                         && motion_gate.should_skip(
                             &frame.data,
@@ -1503,7 +1603,6 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             frame.height,
                             pipe.active_track_count() > 0 && !stationary_only,
                         );
-                    let ts = ls_core::time::format_system_time_local_iso(captured.timestamp);
                     let audit_frame = crate::spatial::AuditFrame {
                         data_dir: &st.data_dir,
                         jpeg: ev_snapshot.as_deref(),
@@ -1617,6 +1716,14 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         &episode_frame,
                         !motion_skip,
                     ));
+                    if mode != "api" && !motion_skip {
+                        cands.extend(falls.observe(
+                            &policy,
+                            &pipe,
+                            &episode_frame,
+                            cfg.detector.use_gpu,
+                        ));
+                    }
                     if mode != "local" {
                         fixed_rules.observe(&policy, &episode_frame, &dcfg, &sink, &evidence);
                     }
@@ -1724,6 +1831,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                     "ppe_state": state,
                                     "conf": track.confidence,
                                     "occluded": track.occluded,
+                                    "coat_diagnostic": pipe.ppe_readings().iter().find(|reading| reading.track_id == track.id).map(|reading| reading.observation.coat_diagnostic),
                                 })
                             })
                             .collect();
@@ -1787,6 +1895,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                         serde_json::json!({
                                             "person_confidence": track.confidence,
                                             "occluded": track.occluded,
+                                            "coat_diagnostic": pipe.ppe_readings().iter().find(|reading| reading.track_id == track.id).map(|reading| reading.observation.coat_diagnostic),
                                         })
                                     }),
                             );
@@ -2192,6 +2301,14 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let mut ppe_runner = load_worker_ppe(&cfg, &handle);
     let mut policy = cfg.policy.clone();
     let sink = EventSink::new(Arc::clone(&st)).use_cascade(mode != "local");
+    let provenance = provenance::Inputs::new(
+        &cfg,
+        &st.version,
+        &mode,
+        &api_prompt,
+        handle.ppe_loaded.get() == Some(&true),
+    );
+    provenance.update(&sink, &policy);
     loop {
         if handle.stop.load(Ordering::SeqCst) {
             break;
@@ -2201,6 +2318,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             changed_camera_policy(&st, &store, cfg.camera_id, &handle)
         {
             policy = updated;
+            provenance.update(&sink, &policy);
             handle
                 .applied_policy_revision
                 .store(revision, Ordering::Release);

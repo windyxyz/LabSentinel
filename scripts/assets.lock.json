@@ -55,6 +55,20 @@
       "sha256": "0e73ac56ae72dc9741f99263fef9663c2f674923464892c3a8dafb691bbb1e2c",
       "size": 9818911
     },
+    "yolo26n.onnx": {
+      "version": "v8.4.0",
+      "license": "Ultralytics AGPL-3.0",
+      "urls": ["https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.onnx"],
+      "sha256": "2e947b787d9e787b93a16772a5f55b1d4d8c4d86f53146149c5d6a642442d6f7",
+      "size": 9941957
+    },
+    "yolo26n-pose.onnx": {
+      "version": "v8.4.0",
+      "license": "Ultralytics AGPL-3.0",
+      "urls": ["https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-pose.onnx"],
+      "sha256": "93fc5e1d6b7690f33b4e1d60d6e9aec1cea14bdbc361bfae11778969be662078",
+      "size": 12125856
+    },
     "yolo11n.onnx": {
       "version": "v8.3.0",
       "license": "Ultralytics AGPL-3.0 (bundled with the portable zip; see NOTICE)",

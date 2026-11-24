@@ -485,6 +485,7 @@ function watchLive(cam) {
                :href="`#/events?camera_id=${c.id}&category=check`">查看检查记录</a>
             <div v-if="v.last_error" class="st-error-line" :title="v.last_error">{{ v.last_error.slice(0, 60) }}</div>
             <div v-if="v.status === 'running' && v.frame_age_s != null && v.frame_age_s > 10" class="st-warn-line">画面停滞 {{ Math.round(v.frame_age_s) }} 秒</div>
+            <div v-if="v.status === 'running' && ['dark', 'bright', 'frozen'].includes(v.image_health)" class="st-warn-line">{{ ({ dark: '画面持续近黑', bright: '画面持续过亮', frozen: '画面疑似冻结' })[v.image_health] }}</div>
             <div v-if="v.offline_since && v.status !== 'stopped'" class="muted">断流于 {{ v.offline_since }}</div>
             <div v-if="v.reconnect_count > 0" class="muted">重连 {{ v.reconnect_count }} 次</div>
             <!-- 任务114：守护状态 -->

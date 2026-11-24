@@ -14,5 +14,8 @@ pub mod face;
 #[cfg(feature = "ort")]
 pub mod ort_session;
 
+#[cfg(feature = "ort")]
+pub mod pose;
+
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub mod yolo;

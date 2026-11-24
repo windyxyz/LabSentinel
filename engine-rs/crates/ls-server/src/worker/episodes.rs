@@ -279,6 +279,7 @@ impl EpisodeRuntime {
                             "gloves": reading.observation.gloves, "goggles": reading.observation.goggles,
                             "violation_confidence": episode.peak_confidence,
                             "assignment_gap": if rule.behavior == "enter_no_ppe" { reading.observation.coat_assignment_gap } else { None },
+                            "coat_diagnostic": reading.observation.coat_diagnostic,
                             "rule_id": rule.id,
                         })),
                     ),

@@ -37,7 +37,7 @@
         <VideoOverlayCanvas v-if="c.type !== 'folder'" :camera-id="c.id" :visible="overlay"
           @tracks="n => tracks[c.id] = n" />
         <button v-if="!readonly && c.type !== 'folder'" class="ghost capture" @click="capture(c.id)">抓拍入池</button>
-        <div class="meta">{{ c.name }} · {{ c.status }}</div>
+        <div class="meta">{{ c.name }} · {{ ({ running: '运行中', reconnecting: '重连中', stopped: '已停止' })[c.status] || c.status }}<template v-if="c.status === 'running' && ['dark', 'bright', 'frozen'].includes(c.image_health)"> · {{ ({ dark: '画面持续近黑', bright: '画面持续过亮', frozen: '画面疑似冻结' })[c.image_health] }}</template></div>
       </div>
     </div>
     <aside>

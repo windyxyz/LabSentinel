@@ -213,6 +213,8 @@ pub fn type_text(type_: &str) -> String {
         "ppe_policy" => "防护穿戴不符合当前区域策略".to_string(),
         "hood_lean" => "疑似探身进入通风橱".to_string(),
         "sash_limit" => "通风橱拉门高于安全基准".to_string(),
+        "person_fall" => "疑似跌倒".to_string(),
+        "thermal_overheat" => "温度传感器超限".to_string(),
         "incubator_door_open" => "培养箱门持续开启".to_string(),
         "spill_or_leak" => "疑似泼洒或泄漏".to_string(),
         "glove_contamination" => "疑似手套交叉污染".to_string(),
@@ -227,6 +229,7 @@ pub fn type_text(type_: &str) -> String {
         "solo_after_hours" => "单人留守超时".to_string(),
         "camera_offline" => "摄像头断流".to_string(),
         "camera_recovered" => "摄像头恢复".to_string(),
+        "camera_tamper" => "摄像头画面异常".to_string(),
         other => other.to_string(),
     }
 }

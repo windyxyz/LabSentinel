@@ -8,6 +8,56 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 
+pub(crate) async fn stats_hotspots(
+    State(st): State<Shared>,
+    axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let date = query
+        .get("date")
+        .cloned()
+        .unwrap_or_else(ls_core::time::local_today_iso);
+    if date.len() != 10
+        || ls_core::time::parse_local_datetime(&format!("{date}T00:00:00"))
+            .is_none_or(|day| ls_core::time::format_date(day) != date)
+    {
+        return detail_err(StatusCode::BAD_REQUEST, "统计日期无效");
+    }
+    let camera = query.get("camera_id").and_then(|id| id.parse::<i64>().ok());
+    with_store(&st, |store| {
+        let sql = format!("SELECT c.id,c.name,COALESCE(({}),0) AS zid,
+            MAX(CASE WHEN json_valid(detections_json) THEN json_extract(detections_json,'$.zone_policy.name') END),
+            CAST(substr(ts,12,2) AS INTEGER) AS hour,COUNT(*)
+            FROM events e JOIN cameras c ON c.id=e.camera_id
+            WHERE ts>=?1 AND ts<date(?1,'+1 day') AND (?2 IS NULL OR c.id=?2) AND {}
+            GROUP BY c.id,zid,hour ORDER BY c.id,zid,hour", ls_store::EVENT_ZONE_SQL, ls_store::ALERT_EVENTS_SQL.replace("type", "e.type"));
+        let mut stmt = store.conn().prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![date, camera], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })?;
+        let mut cells = Vec::new();
+        for row in rows {
+            let (id, name, zone_id, zone, hour, count) = row?;
+            if (0..24).contains(&hour)
+                && browser
+                    .device
+                    .as_ref()
+                    .is_none_or(|device| device.allows_camera(id))
+            {
+                cells.push(json!({"camera_id": id, "camera": name, "zone_id": zone_id, "zone": zone, "hour": hour, "count": count}));
+            }
+        }
+        Ok(Json(json!({"date": date, "cells": cells})))
+    })
+}
+
 pub(crate) async fn stats_compliance(
     State(st): State<Shared>,
     axum::Extension(browser): axum::Extension<crate::access::BrowserAccess>,

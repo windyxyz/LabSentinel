@@ -22,7 +22,8 @@ pub(crate) async fn cameras(
                 .filter(|camera| browser.device.as_ref().is_none_or(|device| device.allows_camera(camera.id)))
                 .map(|c| {
                     let mut value = json!({"id": c.id, "name": c.name, "type": c.type_, "status": c.status,
-                        "group_name": c.group_name, "analyzer": c.analyzer});
+                        "group_name": c.group_name, "analyzer": c.analyzer,
+                        "image_health": st.workers.image_health(c.id)});
                     if browser.device.is_none() && !browser.share {
                         value["source"] = json!(redact_camera_source(&c.source));
                         value["analysis_mode"] = json!(if !c.analysis_source.is_empty() {
@@ -144,6 +145,7 @@ pub(crate) async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i
                 "status": c.status, "analyzer": c.analyzer, "fps": null,
                 "offline_since": since, "frame_age_s": frame_age, "last_frame_at": last_frame,
                 "reconnect_count": reconnects, "processed_frames": processed_frames,
+                "image_health": st.workers.image_health(id),
                 "policy_revision": revision, "applied_policy_revision": applied}))
             .into_response()
         }

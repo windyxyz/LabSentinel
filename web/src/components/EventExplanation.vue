@@ -13,6 +13,10 @@ const labels = {
   recovered: '确认恢复', left_zone: '确认离场', interrupted: '观测中断',
   person_review_window: '同一人员在复核间隔内已有送审记录',
   target_not_isolated: '人物重叠，当前画面无法单独复核',
+  no_detection: '整图和可用裁剪中未检出明确证据', conflicting_labels: '穿戴类别证据冲突',
+  overlapping_people: '人员重叠，无法唯一归属', model_error: '穿戴模型推理失败',
+  confirmation_error: '末级复核不可用', confirmation_no_match: '末级复核未找到此人的有效证据',
+  confirmation_not_positive: '末级复核的正向证据不足', classified: '已取得明确穿戴证据',
   local_geometry_rule: '由本地规则判断', budget_exhausted: '今日复核额度已用完',
   local_candidate: '本地画面提示', local_confirmed: '本地规则已确认', vision_confirmed: '图像复核已确认',
 }
@@ -45,12 +49,21 @@ async function load() {
     <p v-if="busy && !value" role="status">正在读取依据…</p>
     <p v-if="message" role="status">{{ message }}</p>
     <dl v-if="value">
+      <template v-if="value.provenance?.settings">
+        <dt>当时使用的配置</dt>
+        <dd>版本 {{ value.provenance.settings.version }} · 推理首选 {{ value.provenance.settings.requested_backend }}</dd>
+        <dd v-if="value.provenance.settings.person_model">人员模型 {{ value.provenance.settings.person_model.name }}</dd>
+        <dd v-if="value.provenance.settings.ppe_model">穿戴模型 {{ value.provenance.settings.ppe_model.name }}</dd>
+        <dd>配置摘要 <code :title="value.provenance.sha256">{{ value.provenance.sha256?.slice(0, 12) }}</code></dd>
+      </template>
       <template v-if="visual">
         <dt>本地检测</dt>
         <dd v-if="visual.person_confidence != null">人员置信度 {{ percent(visual.person_confidence) }}</dd>
         <dd v-if="visual.violation_confidence != null">违规证据置信度 {{ percent(visual.violation_confidence) }}</dd>
         <dd v-if="visual.assignment_gap != null">服装归属重叠差值 {{ percent(visual.assignment_gap) }}</dd>
         <dd v-if="visual.coat != null">实验服 {{ label(visual.coat) }}</dd>
+        <dd v-if="visual.coat_diagnostic?.result">{{ visual.coat_diagnostic.input === 'person_crop' ? '人员裁剪' : '整图' }} · {{ label(visual.coat_diagnostic.result) }}</dd>
+        <dd v-if="Array.isArray(visual.coat_diagnostic?.confirmation_scores)">末级正证据 {{ percent(visual.coat_diagnostic.confirmation_scores[0]) }} · 反证 {{ percent(visual.coat_diagnostic.confirmation_scores[1]) }}</dd>
         <dd v-if="visual.mask != null">口罩 {{ label(visual.mask) }}</dd>
         <dd v-if="visual.gloves != null">手套 {{ label(visual.gloves) }}</dd>
         <dd v-if="visual.goggles != null">护目镜 {{ label(visual.goggles) }}</dd>

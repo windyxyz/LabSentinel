@@ -260,12 +260,17 @@ fn response(
     max_tokens: u32,
     structured: bool,
 ) -> Result<String, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let agent_config = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(cfg.timeout_s)))
         .http_status_as_error(false)
-        .max_redirects(0)
-        .build()
-        .into();
+        .max_redirects(0);
+    let agent: ureq::Agent = if is_loopback(&cfg.url) {
+        agent_config.proxy(None)
+    } else {
+        agent_config
+    }
+    .build()
+    .into();
     let imgs: Vec<String> = frames
         .iter()
         .map(|f| base64::engine::general_purpose::STANDARD.encode(f))

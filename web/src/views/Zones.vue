@@ -34,6 +34,41 @@ const newGraceSeconds = ref(0)
 const newWarningPercent = ref(70)
 const ruleMessage = ref('')
 const graceBusy = ref(false)
+const scenePacks = ref([])
+const sceneId = ref('')
+const sceneZone = ref(null)
+const replaceScenePpe = ref(false)
+const scenePreview = ref(null)
+const sceneMessage = ref('')
+const sceneBusy = ref(false)
+const sceneAction = { add: '新增', replace: '替换穿戴组合', unchanged: '已有相同规则', conflict: '与现有规则冲突' }
+const scenePpeName = { coat: '实验服', mask: '口罩', gloves: '手套', goggles: '护目镜' }
+const showPpeChoices = (policy) => Array.isArray(policy?.alternatives)
+  ? policy.alternatives.filter(Array.isArray).map(group => group.map(item => scenePpeName[item] || item).join('、')).join(' 或 ')
+  : ''
+
+watch([camId, sceneId, sceneZone, replaceScenePpe], () => { scenePreview.value = null })
+onMounted(() => api.scenePacks().then(result => { scenePacks.value = Array.isArray(result?.packs) ? result.packs : [] }).catch(() => {}))
+
+async function updateScene(apply) {
+  sceneMessage.value = ''
+  const request = { pack_id: sceneId.value, targets: [{ camera_id: camId.value, zone_id: sceneZone.value }], replace_existing_policy: replaceScenePpe.value }
+  const target = JSON.stringify(request)
+  sceneBusy.value = true
+  try {
+    if (apply) {
+      const result = await api.applyScenePack({ ...request, preview_hash: scenePreview.value?.preview_hash })
+      scenePreview.value = null
+      sceneMessage.value = result?.applied ? '场景规则已保存，运行中的摄像头会采用新配置。' : '所选范围已有相同规则。'
+      await load()
+    } else {
+      const result = await api.previewScenePack(request)
+      const current = JSON.stringify({ pack_id: sceneId.value, targets: [{ camera_id: camId.value, zone_id: sceneZone.value }], replace_existing_policy: replaceScenePpe.value })
+      if (current === target && typeof result?.preview_hash === 'string' && Array.isArray(result?.changes)) scenePreview.value = result
+    }
+  } catch (error) { sceneMessage.value = error.message; scenePreview.value = null }
+  finally { sceneBusy.value = false }
+}
 const supportsGrace = (behavior) => ['enter_no_ppe', 'no_mask'].includes(behavior)
 const warningPercent = (rule) => Math.round((rule.warn_ratio ?? 0.70) * 100)
 
@@ -596,11 +631,14 @@ async function addRule(zoneId) {
         <option value="exit">离开安全区</option>
         <option value="occupancy_over">在场人数超限</option>
         <option value="solo_after_hours">单人留守超时（非工作时段）</option>
+        <option value="person_fall">疑似跌倒（实时流或视频）</option>
+        <option value="thermal_overheat">温度传感器超限（整画面）</option>
+        <option value="camera_tamper">摄像头画面异常（实时流）</option>
       </select>
       <select v-model="newRule.level"><option :value="1">L1 提示</option><option :value="2">L2 警告</option><option :value="3">L3 严重</option></select>
       <input v-model.number="newRule.cooldown_s" placeholder="冷却(秒)" style="width:90px" />
-      <input v-if="['occupancy_over', 'solo_after_hours'].includes(newRule.behavior)" v-model.number="newRule.threshold"
-             :placeholder="newRule.behavior === 'solo_after_hours' ? '滞留秒数' : '人数阈值'"
+      <input v-if="['occupancy_over', 'solo_after_hours', 'person_fall', 'thermal_overheat'].includes(newRule.behavior)" v-model.number="newRule.threshold"
+             :placeholder="({ solo_after_hours: '滞留秒数', person_fall: '静止秒数（默认 3）', thermal_overheat: '摄氏度（默认 55）' })[newRule.behavior] || '人数阈值'"
              style="width:100px" />
       <label class="muted"><input type="checkbox" v-model="newRule.holiday_only" />仅假期生效</label>
     </div>
@@ -690,6 +728,26 @@ async function addRule(zoneId) {
       </table>
     </details>
 
+    <template v-if="scenePacks.length">
+      <h3>场景模板</h3>
+      <div class="row">
+        <select v-model="sceneId" :disabled="sceneBusy" aria-label="场景模板"><option value="">选择场景</option><option v-for="pack in scenePacks" :key="pack.id" :value="pack.id">{{ pack.name }}</option></select>
+        <select v-model="sceneZone" :disabled="sceneBusy" aria-label="场景区域"><option :value="null">整画面</option><option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option></select>
+        <label><input v-model="replaceScenePpe" :disabled="sceneBusy || sceneId === 'after_hours_unattended'" type="checkbox" />替换冲突的穿戴组合</label>
+        <button type="button" class="ghost" :disabled="!camId || !sceneId || sceneBusy" @click="updateScene(false)">预览变更</button>
+      </div>
+      <div v-if="scenePreview">
+        <p>{{ scenePreview.pack?.description }}</p>
+        <ul>
+          <li v-for="change in scenePreview.changes" :key="`${change.target?.camera_id}:${change.target?.zone_id}`">
+            {{ change.camera }} · {{ change.zone || '整画面' }} · {{ sceneAction[change.action] }}
+            <span v-if="change.existing_ppe && change.action !== 'unchanged'" class="muted">（现有组合 {{ showPpeChoices(change.existing_ppe) }}）</span>
+          </li>
+        </ul>
+        <button type="button" :disabled="sceneBusy || scenePreview.changes.some(change => change.action === 'conflict')" @click="updateScene(true)">应用预览的变更</button>
+      </div>
+      <p v-if="sceneMessage" role="status">{{ sceneMessage }}</p>
+    </template>
     <h3 style="margin:14px 0 10px">复制到其他摄像头</h3>
     <div v-if="cams.length <= 1" class="muted">只有一路摄像头——先在「摄像头」页添加更多，再来复制配置。</div>
     <template v-else>

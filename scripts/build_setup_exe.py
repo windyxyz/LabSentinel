@@ -47,7 +47,7 @@ def main() -> int:
         print("[失败] 未找到 ISCC.exe（设置 ISCC 环境变量，或安装 Inno Setup 6/7）")
         return 2
 
-    src = Path(a.source)
+    src = Path(a.source).resolve()
     if not (src / "labsentinel-server.exe").is_file():
         print(f"[失败] staging 缺 labsentinel-server.exe：{src}（先跑 scripts/build_rust.py）")
         return 2
@@ -57,7 +57,7 @@ def main() -> int:
         print(f"[失败] {iss} 缺少 UTF-8 BOM（Inno Setup 7 中文页面将乱码）")
         return 2
 
-    out = Path(a.out)
+    out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     cmd = [
         str(iscc),

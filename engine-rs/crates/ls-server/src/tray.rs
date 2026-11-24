@@ -31,6 +31,7 @@ pub fn graceful_shutdown(st: &Shared, source: &str) {
         bus.stop();
     }
     st.go2rtc.stop(); // LS-051：停 go2rtc（Job Object 兜底杀残留）
+    st.local_vlm.stop();
     if let Ok(s) = ls_store::Store::open(&st.db_path) {
         let _ = s.checkpoint_wal();
     }

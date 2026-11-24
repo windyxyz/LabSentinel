@@ -104,11 +104,18 @@ impl Store {
     }
 
     pub fn replace_lab_rules(&self, camera: i64, rules: &LabRules) -> rusqlite::Result<()> {
+        let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
+        self.write_lab_rules(camera, rules)?;
+        tx.commit()
+    }
+
+    /// The caller holds a transaction for the entire policy change.
+    pub fn write_lab_rules(&self, camera: i64, rules: &LabRules) -> rusqlite::Result<()> {
         rules
             .validate()
             .map_err(|message| rusqlite::Error::InvalidParameterName(message.into()))?;
-        let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
-        let _id: i64 = tx.query_row("SELECT id FROM cameras WHERE id=?", [camera], |row| {
+        let conn = self.conn();
+        let _id: i64 = conn.query_row("SELECT id FROM cameras WHERE id=?", [camera], |row| {
             row.get(0)
         })?;
         for sql in [
@@ -116,10 +123,10 @@ impl Store {
             "DELETE FROM camera_ppe_policies WHERE camera_id=?",
             "DELETE FROM camera_vlm_sop WHERE camera_id=?",
         ] {
-            tx.execute(sql, [camera])?;
+            conn.execute(sql, [camera])?;
         }
         write_rows(
-            &tx,
+            conn,
             "INSERT INTO ref_lines(camera_id,idx,zone_id,config_json) VALUES(?,?,?,?)",
             camera,
             rules
@@ -128,17 +135,16 @@ impl Store {
                 .map(|rule| (rule.zone_id, rule)),
         )?;
         write_rows(
-            &tx,
+            conn,
             "INSERT INTO camera_ppe_policies(camera_id,idx,zone_id,config_json) VALUES(?,?,?,?)",
             camera,
             rules.ppe_policies.iter().map(|rule| (rule.zone_id, rule)),
         )?;
         write_rows(
-            &tx,
+            conn,
             "INSERT INTO camera_vlm_sop(camera_id,idx,zone_id,config_json) VALUES(?,?,?,?)",
             camera,
             rules.fixed_checks.iter().map(|rule| (None, rule)),
-        )?;
-        tx.commit()
+        )
     }
 }

@@ -2501,6 +2501,34 @@
         "responses": {"200": {"description": "Masks and spots"}, "404": {"description": "Camera not found"}}
       }
     },
+    "/api/scene-packs": {
+      "get": {"summary": "List versioned laboratory scene templates", "responses": {"200": {"description": "Available packs"}}}
+    },
+    "/api/scene-packs/preview": {
+      "post": {"summary": "Preview changes and conflicts for selected cameras and zones", "responses": {"200": {"description": "Proposed changes and preview hash"}, "422": {"description": "Invalid target"}}}
+    },
+    "/api/scene-packs/apply": {
+      "post": {"summary": "Apply the reviewed preview in one transaction", "responses": {"200": {"description": "Policy revision and applied count"}, "409": {"description": "Stale preview or policy conflict"}}}
+    },
+    "/api/stats/hotspots": {
+      "get": {"summary": "Alert counts by authorized camera, recorded zone, and local hour", "responses": {"200": {"description": "Date and matching nonempty time cells"}}}
+    },
+    "/api/detect/local-vlm": {
+      "get": {"summary": "Check the managed loopback visual runtime", "responses": {"200": {"description": "Runtime status"}}}
+    },
+    "/api/detect/local-vlm/start": {
+      "post": {"summary": "Start the optional managed llama.cpp process", "requestBody": {"required": true, "content": {"application/json": {"example": {"model": "vision-Q6_K.gguf", "projector": "mmproj-F16.gguf", "gpu_layers": 10}}}}, "responses": {"200": {"description": "Loopback server ready and profile saved"}, "422": {"description": "Invalid, missing, or unsupported runtime or model"}}}
+    },
+    "/api/detect/local-vlm/stop": {
+      "post": {"summary": "Stop the managed loopback visual runtime", "responses": {"200": {"description": "Runtime stopped"}}}
+    },
+    "/api/telemetry/thermal": {
+      "post": {
+        "summary": "Submit a temperature reading to an existing camera's active thermal rule",
+        "requestBody": {"required": true, "content": {"application/json": {"example": {"camera_id": 1, "celsius": 56.2}}}},
+        "responses": {"200": {"description": "Reading acceptance, latch state and newly recorded event ID"}, "404": {"description": "Camera not found"}, "422": {"description": "Invalid sensor reading"}, "503": {"description": "Unable to record the alert"}}
+      }
+    },
     "/api/cameras/{cid}/lab-rules": {
       "parameters": [{"name": "cid", "in": "path", "required": true, "schema": {"type": "integer"}}],
       "get": {

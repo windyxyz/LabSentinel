@@ -7,6 +7,82 @@ use serde_json::json;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn scene_pack_preview_protects_custom_rules_and_is_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("scenes.db");
+    let path = db.to_str().unwrap();
+    let store = ls_store::Store::open(path).unwrap();
+    store.ensure_schema().unwrap();
+    let first = store.conn_add_camera("First", "input.mp4", "file").unwrap();
+    let second = store
+        .conn_add_camera("Second", "input.mp4", "file")
+        .unwrap();
+    let app = build_router(test_state(path));
+    let new_choice =
+        |pack| json!({"pack_id": pack, "targets": [{"camera_id": first}, {"camera_id": second} ]});
+    let mut first_choice = new_choice("wet_chem");
+    let preview = body_json(
+        req(
+            &app,
+            "POST",
+            "/api/scene-packs/preview",
+            Some(first_choice.clone()),
+        )
+        .await,
+    )
+    .await;
+    first_choice["preview_hash"] = preview["preview_hash"].clone();
+    let applied = body_json(
+        req(
+            &app,
+            "POST",
+            "/api/scene-packs/apply",
+            Some(first_choice.clone()),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(applied["applied"], 2);
+    assert_eq!(
+        store.lab_rules(first).unwrap().ppe_policies,
+        store.lab_rules(second).unwrap().ppe_policies
+    );
+    assert_eq!(
+        req(
+            &app,
+            "POST",
+            "/api/scene-packs/apply",
+            Some(first_choice.clone())
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let no_change = body_json(
+        req(
+            &app,
+            "POST",
+            "/api/scene-packs/preview",
+            Some(new_choice("wet_chem")),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(no_change["changes"][0]["action"], "unchanged");
+    let conflict = body_json(
+        req(
+            &app,
+            "POST",
+            "/api/scene-packs/preview",
+            Some(new_choice("biosafety")),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(conflict["changes"][0]["action"], "conflict");
+}
+
+#[tokio::test]
 async fn laboratory_rules_validate_and_apply_atomically() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("lab.db");

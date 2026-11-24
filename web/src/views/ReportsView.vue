@@ -10,6 +10,19 @@ const camId = ref('')
 const cams = ref([])
 const daily = ref([])
 const hourly = ref([])
+const hotspotCells = ref([])
+const hotspotRows = computed(() => {
+  const grouped = new Map()
+  for (const cell of hotspotCells.value) {
+    if (!Number.isInteger(cell?.hour) || cell.hour < 0 || cell.hour >= 24 || !Number.isFinite(cell.count)) continue
+    const key = `${cell.camera_id}:${cell.zone_id}`
+    const row = grouped.get(key) ?? { ...cell, values: Array(24).fill(0) }
+    row.values[cell.hour] = cell.count
+    grouped.set(key, row)
+  }
+  return [...grouped.values()]
+})
+const hotspotLink = (row, hour) => '#/events?' + new URLSearchParams({ category: 'alert', camera_id: row.camera_id, zone_id: row.zone_id, date: hourDate.value, hour })
 // 2026-10-30 审阅修复：toISOString() 是 UTC 日期，东八区早 8 点前"今日"实为昨天——改本地日期
 function localToday() {
   const d = new Date()
@@ -66,6 +79,10 @@ async function load() {
     if (seq !== loadSeq) return  // 已有更新请求在途，丢弃旧结果
     summary.value = s || { total: 0, by_level: {}, top_days: [] }
     hourly.value = h
+    hotspotCells.value = []
+    api.statsHotspots({ date: hourDate.value, ...base }).then(result => {
+      if (seq === loadSeq && result?.date === hourDate.value) hotspotCells.value = Array.isArray(result.cells) ? result.cells : []
+    }).catch(() => {})
     if (viewMode.value === 'week') weekly.value = w
     else daily.value = d
     // 任务102：处置质量（独立容错——旧服务端无此端点时只隐藏卡片，不影响图表）
@@ -244,6 +261,18 @@ function barGeom(h) {
                 :empty="summary && summary.total === 0"
                 empty-text="所选区间没有事件数据 —— 试试更换日期范围、选择全部摄像头，或先去摄像头页启动采集"
                 @retry="load">
+      <div class="panel" v-if="hotspotRows.length">
+        <b>{{ hourDate }} 告警热点</b>
+        <div style="overflow-x:auto;margin-top:8px">
+          <div v-for="row in hotspotRows" :key="`${row.camera_id}:${row.zone_id}`" style="display:grid;grid-template-columns:minmax(9rem,1fr) repeat(24,minmax(1.7rem,auto));gap:2px;align-items:center">
+            <span>{{ row.camera }} · {{ row.zone || '整画面' }}</span>
+            <template v-for="(count, hour) in row.values" :key="hour">
+              <a v-if="count" class="ghost" style="border-bottom:2px solid var(--accent);text-align:center" :href="hotspotLink(row, hour)" :title="`${hour}:00  ${count} 条告警`">{{ count }}</a>
+              <span v-else class="muted" style="text-align:center" :title="`${hour}:00  0 条告警`">·</span>
+            </template>
+          </div>
+        </div>
+      </div>
       <div class="panel">
       <b>{{ viewMode === 'week' ? '每周事件趋势' : '每日事件趋势' }}</b>
       <svg :viewBox="`0 0 ${W} ${H}`" style="width:100%; margin-top:8px">

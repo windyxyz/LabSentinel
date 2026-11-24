@@ -1042,6 +1042,15 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
 pub(crate) async fn models_local(State(st): State<Shared>) -> Response {
     let mut items: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = Default::default();
+    let install_models = crate::deploy::default_install_root().join("models");
+    for name in ["yolo11n.onnx", "yolo26n.onnx"] {
+        if let Some(path) =
+            ls_analyzer::ppe::anchored_child(&install_models, name).filter(|path| path.is_file())
+        {
+            seen.insert(name.into());
+            items.push(json!({"name": name, "path": path, "kind": "bundled_person", "trial": name == "yolo26n.onnx"}));
+        }
+    }
     // 扫描目录：data_dir/models/（按需下载/自备模型落位）+ env 指向项
     let models_dir = std::path::Path::new(&st.data_dir).join("models");
     if let Ok(rd) = std::fs::read_dir(&models_dir) {
@@ -1082,7 +1091,11 @@ pub(crate) async fn models_local(State(st): State<Shared>) -> Response {
             }
         }
     }
-    Json(json!({"models": items})).into_response()
+    let selected = ls_store::Store::open(&st.db_path)
+        .ok()
+        .and_then(|store| store.setting_get("model.active").ok().flatten())
+        .filter(|path| !path.is_empty());
+    Json(json!({"models": items, "active_person_model": selected})).into_response()
 }
 
 pub(crate) async fn model_status(State(st): State<Shared>) -> Response {

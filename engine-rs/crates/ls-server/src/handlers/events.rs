@@ -35,6 +35,7 @@ pub(crate) struct EventsQuery {
     limit: Option<i64>,
     offset: Option<i64>,
     camera_id: Option<i64>,
+    zone_id: Option<i64>,
     status: Option<String>,
     level: Option<i64>,
     #[serde(rename = "type")]
@@ -56,6 +57,7 @@ impl EventsQuery {
         let day = (self.today == Some(1)).then_some(today);
         ls_store::EventsFilter {
             camera_id: self.camera_id,
+            zone_id: self.zone_id,
             status: self.status.as_deref(),
             level: self.level,
             type_: self.type_.as_deref(),
@@ -379,6 +381,11 @@ pub(crate) async fn event_explain(State(st): State<Shared>, AxPath(eid): AxPath<
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
         let row = event_json(&event);
+        let provenance = store.event_provenance(eid)?.and_then(|(hash, settings)| {
+            serde_json::from_str::<Value>(&settings)
+                .ok()
+                .map(|settings| json!({"sha256": hash, "settings": settings}))
+        });
         let section = event
             .episode_id
             .map(|id| store.episode_context(id))
@@ -394,6 +401,7 @@ pub(crate) async fn event_explain(State(st): State<Shared>, AxPath(eid): AxPath<
             "confidence_stage": event.confidence_stage,
             "suggestion_tts": event.suggestion_tts,
             "visual": recorded.as_ref().and_then(|data| data.get("visual")),
+            "provenance": provenance,
             "zone": recorded.as_ref().and_then(|data| data.get("zone_policy")),
             "evidence": {
                 "has_snapshot": event.snapshot.is_some(),

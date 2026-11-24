@@ -355,7 +355,55 @@ async function savePerf() {
   busy.value = false
 }
 
-onMounted(load)
+const localRuntime = ref(null)
+const bundledPeople = ref([])
+const personSelection = ref('')
+const personMessage = ref('')
+const personBusy = ref(false)
+const localModel = ref('')
+const localProjector = ref('')
+const localLayers = ref(0)
+const localBusy = ref(false)
+const localMessage = ref('')
+const localStates = { stopped: '已停止', starting: '加载中', cpu: 'CPU 已就绪', cpu_fallback: '已回退至 CPU', gpu_requested: '已加载，已请求 GPU offload' }
+
+async function refreshLocal() {
+  try { localRuntime.value = await api.localVlm() } catch { localRuntime.value = null }
+}
+
+async function refreshPersonModels() {
+  const result = await api.modelsLocal().catch(() => null)
+  bundledPeople.value = Array.isArray(result?.models) ? result.models.filter(model => model?.kind === 'bundled_person' && typeof model.path === 'string') : []
+  const current = typeof result?.active_person_model === 'string' ? result.active_person_model : ''
+  personSelection.value = bundledPeople.value.some(model => model.path === current) ? current : (current ? 'custom' : '')
+}
+
+async function selectPersonModel(path) {
+  personBusy.value = true
+  try {
+    await api.setModelActive(path)
+    personMessage.value = '人员检测模型已切换。'
+  } catch (error) { personMessage.value = error.message }
+  finally { await refreshPersonModels(); personBusy.value = false }
+}
+
+async function changeLocal(start) {
+  localBusy.value = true
+  localMessage.value = ''
+  try {
+    if (start) {
+      await api.startLocalVlm({ model: localModel.value.trim(), projector: localProjector.value.trim(), gpu_layers: localLayers.value })
+      localMessage.value = '本机档案已保存，可在 API 服务中启用。'
+      await load()
+    } else {
+      await api.stopLocalVlm()
+      localMessage.value = '离线视觉服务已停止。'
+    }
+  } catch (error) { localMessage.value = error.message }
+  finally { await refreshLocal(); localBusy.value = false }
+}
+
+onMounted(() => { load(); refreshLocal(); refreshPersonModels() })
 </script>
 
 <template>
@@ -420,6 +468,29 @@ onMounted(load)
       </div>
 
       <!-- API 服务（多接入档案） -->
+      <div v-if="bundledPeople.length" class="panel">
+        <label>人员检测模型
+          <select :value="personSelection" :disabled="personBusy" @change="selectPersonModel($event.target.value)">
+            <option value="">跟随默认配置</option>
+            <option v-if="personSelection === 'custom'" value="custom" disabled>自定义模型</option>
+            <option v-for="model in bundledPeople" :key="model.path" :value="model.path">{{ model.name }}{{ model.trial ? '（试用）' : '' }}</option>
+          </select>
+        </label>
+        <p v-if="personMessage" role="status">{{ personMessage }}</p>
+      </div>
+      <div v-if="localRuntime" class="panel">
+        <h3>离线视觉服务</h3>
+        <p class="muted">{{ localStates[localRuntime.status] || '等待状态' }}。将官方 llama.cpp 运行时放入软件的 tools/llama 目录，将 GGUF 权重和视觉投影放在数据目录 models/local-vlm 下。</p>
+        <div class="row">
+          <label>模型文件 <input v-model="localModel" placeholder="视觉模型.gguf" /></label>
+          <label>视觉投影 <input v-model="localProjector" placeholder="mmproj-F16.gguf" /></label>
+          <label>GPU 层数 <input v-model.number="localLayers" type="number" min="0" max="128" /></label>
+          <button type="button" :disabled="localBusy || !localRuntime.runtime_available || !localModel.trim() || !localProjector.trim()" @click="changeLocal(true)">启动</button>
+          <button type="button" class="ghost" :disabled="localBusy || localRuntime.status === 'stopped'" @click="changeLocal(false)">停止</button>
+        </div>
+        <p v-if="!localRuntime.runtime_available" class="muted">等待安装 llama.cpp 运行时。</p>
+        <p v-if="localBusy || localMessage" role="status">{{ localBusy ? '正在处理离线服务…' : localMessage }}</p>
+      </div>
       <div class="card" ref="apiCardEl">
         <h3>API 服务
           <span v-if="mode === 'local'" class="muted" style="font-size:12px; font-weight:400">

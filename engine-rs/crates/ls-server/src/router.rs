@@ -58,6 +58,10 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/cameras"),
     ("POST", "/api/cameras"),
     ("GET", "/api/cameras/:id/status"),
+    ("POST", "/api/telemetry/thermal"),
+    ("GET", "/api/detect/local-vlm"),
+    ("POST", "/api/detect/local-vlm/start"),
+    ("POST", "/api/detect/local-vlm/stop"),
     ("GET", "/api/stats/summary"),
     ("GET", "/api/config/summary"),
     ("GET", "/api/backups/status"),
@@ -99,6 +103,9 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("DELETE", "/api/rules/:rid"),
     ("PUT", "/api/rules/:rid"),
     ("GET", "/api/rule-templates"),
+    ("GET", "/api/scene-packs"),
+    ("POST", "/api/scene-packs/preview"),
+    ("POST", "/api/scene-packs/apply"),
     ("POST", "/api/rule-templates"),
     ("PUT", "/api/rule-templates/:tid"),
     ("DELETE", "/api/rule-templates/:tid"),
@@ -115,6 +122,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/stats/compliance"),
     ("GET", "/api/stats/weekly"),
     ("GET", "/api/stats/hourly"),
+    ("GET", "/api/stats/hotspots"),
     ("GET", "/api/stats/quality"),
     // ---- 配对/设备（T-620） ----
     ("POST", "/api/pairing"),
@@ -285,6 +293,10 @@ pub fn build_router(state: Shared) -> Router {
         .route("/cameras", get(cameras).post(add_camera))
         .route("/cameras/:id", delete(delete_camera))
         .route("/cameras/:id/status", get(camera_status))
+        .route("/telemetry/thermal", post(thermal_sample))
+        .route("/detect/local-vlm", get(local_vlm::local_vlm_status))
+        .route("/detect/local-vlm/start", post(local_vlm::local_vlm_start))
+        .route("/detect/local-vlm/stop", post(local_vlm::local_vlm_stop))
         .route("/cameras/:id/group", put(set_camera_group))
         .route("/cameras/:id/analyzer", put(set_camera_analyzer))
         .route("/cameras/:id/analysis-source", put(set_analysis_source))
@@ -316,6 +328,9 @@ pub fn build_router(state: Shared) -> Router {
         .route("/rules", get(rules_list).post(add_rule))
         .route("/rules/:rid", delete(delete_rule).put(update_rule_grace))
         .route("/rule-templates", get(templates_list).post(add_template))
+        .route("/scene-packs", get(scene_packs))
+        .route("/scene-packs/preview", post(scene_preview))
+        .route("/scene-packs/apply", post(scene_apply))
         .route(
             "/rule-templates/:tid",
             put(update_template).delete(delete_template),
@@ -325,6 +340,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/stats/compliance", get(stats_compliance))
         .route("/stats/weekly", get(stats_weekly))
         .route("/stats/hourly", get(stats_hourly))
+        .route("/stats/hotspots", get(stats_hotspots))
         .route("/stats/quality", get(stats_quality))
         .route("/config/summary", get(config_summary))
         .route("/backups/status", get(backups_status))

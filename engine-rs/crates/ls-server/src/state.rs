@@ -37,6 +37,8 @@ pub struct AppState {
     /// LS-051：实时检测元数据广播（≤5Hz，WS /ws/detections/:cid 消费）
     pub(crate) detections: DetectionStreams,
     pub(crate) faces: crate::local_face::FaceRuntime,
+    pub(crate) thermal: crate::handlers::telemetry::ThermalRuntime,
+    pub(crate) local_vlm: crate::local_vlm::LocalVlm,
 }
 
 #[derive(Default)]

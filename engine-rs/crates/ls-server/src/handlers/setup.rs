@@ -253,11 +253,13 @@ pub(crate) async fn models_active(
         .trim()
         .to_string();
     if path.is_empty() {
-        // 空 = 清除选择（回退 env/NullDetector）
-        if let Ok(s) = ls_store::Store::open(&st.db_path) {
-            let _ = s.setting_set("model.active", "");
-        }
-        return Json(json!({"ok": true, "cleared": true})).into_response();
+        return with_store(&st, |store| {
+            store.setting_set("model.active", "")?;
+            let restarted = crate::worker::restart_all_running(&st, store);
+            Ok(Json(
+                json!({"ok": true, "cleared": true, "restarted": restarted}),
+            ))
+        });
     }
     let p = std::path::Path::new(&path);
     if !p.is_file() || p.extension().map(|x| x != "onnx").unwrap_or(true) {

@@ -23,6 +23,7 @@ const total = ref(0)
 const startDate = ref('')
 const endDate = ref('')
 const hourFilter = ref(null)  // 任务136：时间线点击的小时（{date:'YYYY-MM-DD',hour:N}）
+const zoneFilter = ref(null)
 const pad2 = n => String(n).padStart(2, '0')
 const q = ref('')            // 任务84 关键词
 const aiVerdict = ref('')    // 任务132：AI 复核筛选（likely_true|likely_false|uncertain|none）
@@ -217,6 +218,7 @@ async function load() {
   const seq = ++loadSeq  // 2026-10-30 审阅：快速切换筛选时旧响应可能后到覆盖新结果
   const params = { limit: PAGE_SIZE, offset: offset.value }
   if (camId.value) params.camera_id = camId.value
+  if (zoneFilter.value != null) params.zone_id = zoneFilter.value
   if (level.value) params.level = level.value
   if (category.value) params.category = category.value
   if (status.value) params.status = status.value
@@ -252,6 +254,7 @@ async function load() {
 }
 
 function clearFilters() {
+  zoneFilter.value = null
   camId.value = ''; level.value = ''; status.value = ''; category.value = ''
   startDate.value = ''; endDate.value = ''
   q.value = ''; preset.value = ''; hourFilter.value = null; aiVerdict.value = ''
@@ -269,6 +272,7 @@ function prevPage() { offset.value = Math.max(0, offset.value - PAGE_SIZE); load
 const exportFilteredUrl = computed(() => {
   const p = new URLSearchParams()
   if (camId.value) p.set('camera_id', camId.value)
+  if (zoneFilter.value != null) p.set('zone_id', zoneFilter.value)
   if (level.value) p.set('level', level.value)
   if (category.value) p.set('category', category.value)
   if (status.value) p.set('status', status.value)
@@ -305,6 +309,13 @@ function applyRoute() {
   const nextStatus = query.get('status')
   status.value = Object.hasOwn(STATUS_TEXT, nextStatus) ? nextStatus : ''
   applyPreset(query.get('today') === '1' ? 'today' : '', false)
+  const camera = Number(query.get('camera_id'))
+  camId.value = Number.isSafeInteger(camera) && camera > 0 ? camera : ''
+  const day = query.get('date')
+  const hour = Number(query.get('hour'))
+  hourFilter.value = query.has('hour') && /^\d{4}-\d\d-\d\d$/.test(day ?? '') && Number.isInteger(hour) && hour >= 0 && hour < 24 ? { date: day, hour } : null
+  const zone = Number(query.get('zone_id'))
+  zoneFilter.value = query.has('zone_id') && Number.isSafeInteger(zone) && zone >= 0 ? zone : null
 }
 async function openLinkedEvent() {
   const id = Number(new URLSearchParams(props.routeQuery).get('event'))
@@ -320,7 +331,7 @@ async function openLinkedEvent() {
     if (query === props.routeQuery) actionNotice.value = error.message
   }
 }
-watch(() => props.routeQuery, () => { applyRoute(); resetAndLoad(); openLinkedEvent() })
+watch(() => props.routeQuery, () => { applyRoute(); resetAndLoad({ keepHour: true }); openLinkedEvent() })
 onMounted(() => {
   applyRoute()
   window.addEventListener('keydown', onKey)
@@ -448,7 +459,7 @@ async function rememberSpot(event) {
     <p v-if="actionNotice" class="muted" role="status">{{ actionNotice }}</p>
     <div class="row">
       <b>事件查询</b>
-      <select v-model="camId" @change="resetAndLoad">
+      <select v-model="camId" @change="zoneFilter = null; resetAndLoad()">
         <option value="">全部摄像头</option>
         <option v-for="c in cams" :key="c.id" :value="c.id">{{ c.name }}</option>
       </select>
@@ -458,6 +469,7 @@ async function rememberSpot(event) {
         <option value="alert">告警事件</option>
         <option value="recovery">恢复记录</option>
       </select>
+      <button v-if="zoneFilter != null" type="button" class="ghost" @click="zoneFilter = null; resetAndLoad({ keepHour: true })">{{ zoneFilter ? `区域 #${zoneFilter}` : '整画面' }} ×</button>
       <select v-model="level" @change="resetAndLoad">
         <option value="">全部级别</option>
         <option value="1">L1 提示</option>

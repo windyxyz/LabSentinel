@@ -21,7 +21,17 @@ pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 26;
+pub const SCHEMA_VERSION_LATEST: i64 = 28;
+const PROVENANCE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS provenance_snapshots(hash TEXT PRIMARY KEY, settings TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS event_provenance(event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+        hash TEXT NOT NULL REFERENCES provenance_snapshots(hash));
+    CREATE INDEX IF NOT EXISTS idx_event_provenance_hash ON event_provenance(hash);
+    CREATE TRIGGER IF NOT EXISTS remove_unreferenced_provenance AFTER DELETE ON event_provenance
+    BEGIN DELETE FROM provenance_snapshots WHERE hash=OLD.hash
+          AND NOT EXISTS(SELECT 1 FROM event_provenance WHERE hash=OLD.hash); END;";
+const SCENE_PACK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scene_pack_applications(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+    zone_id INTEGER, pack_id TEXT NOT NULL, pack_version INTEGER NOT NULL, preview_hash TEXT NOT NULL, applied_ts TEXT NOT NULL);";
 
 #[derive(Debug)]
 pub struct StoredZone {
@@ -102,6 +112,7 @@ const EVENT_COLUMNS: &str = "id,ts,camera_id,type,level,track_id,detail,snapshot
     error_code,severity,confidence_stage,suggestion_tts,vlm_model,vlm_prompt_hash";
 
 pub const ALERT_EVENTS_SQL: &str = "type NOT IN ('photo_check','video_check','alert_resolved')";
+pub const EVENT_ZONE_SQL: &str = "CASE WHEN json_valid(detections_json) THEN json_extract(detections_json,'$.zone_policy.id') END";
 
 pub const AI_VERDICT_SQL: &str = "COALESCE(
     CASE WHEN json_valid(ai_review) THEN CASE json_extract(ai_review,'$.verdict')
@@ -191,7 +202,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(26, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(28, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -273,6 +284,8 @@ impl Store {
         self.conn.execute_batch(episodes::SCHEMA)?;
         self.conn.execute_batch(lab::SCHEMA)?;
         self.conn.execute_batch(assistant::SCHEMA)?;
+        self.conn.execute_batch(PROVENANCE_SCHEMA)?;
+        self.conn.execute_batch(SCENE_PACK_SCHEMA)?;
         Ok(true)
     }
 
@@ -509,6 +522,16 @@ impl Store {
             "INSERT OR IGNORE INTO schema_version VALUES(26, 'rust-ls087-ls088-lab-rules-and-ai')",
             [],
         )?;
+        tx.execute_batch(PROVENANCE_SCHEMA)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(27, 'rust-ls091-provenance')",
+            [],
+        )?;
+        tx.execute_batch(SCENE_PACK_SCHEMA)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(28, 'rust-ls094-scene-packs')",
+            [],
+        )?;
         tx.commit()?;
         self.schema_version()
     }
@@ -538,9 +561,17 @@ impl Store {
         ev: &NewEvent,
         evidence: EventEvidence,
     ) -> rusqlite::Result<i64> {
-        let tx = evidence
-            .bbox
-            .map(|_| self.conn.unchecked_transaction())
+        self.add_event_with_provenance(ev, evidence, None)
+    }
+
+    pub fn add_event_with_provenance(
+        &self,
+        ev: &NewEvent,
+        evidence: EventEvidence,
+        provenance: Option<(&str, &str)>,
+    ) -> rusqlite::Result<i64> {
+        let tx = (evidence.bbox.is_some() || provenance.is_some())
+            .then(|| self.conn.unchecked_transaction())
             .transpose()?;
         let conn = tx.as_deref().unwrap_or(&self.conn);
         let description = ls_core::lab::alarm_description(ev.type_);
@@ -567,14 +598,33 @@ impl Store {
                     description.as_ref().map(|value| value.stage), description.map(|value| value.suggestion)],
         )?;
         let id = conn.last_insert_rowid();
-        if let (Some(bbox), Some(tx)) = (evidence.bbox, tx) {
-            tx.execute(
+        if let Some(bbox) = evidence.bbox {
+            conn.execute(
                 "INSERT INTO event_locations(event_id,bbox) VALUES(?,?)",
                 params![id, serde_json::json!(bbox).to_string()],
             )?;
+        }
+        if let Some((hash, settings)) = provenance {
+            conn.execute(
+                "INSERT OR IGNORE INTO provenance_snapshots(hash,settings) VALUES(?,?)",
+                params![hash, settings],
+            )?;
+            conn.execute(
+                "INSERT INTO event_provenance(event_id,hash) VALUES(?,?)",
+                params![id, hash],
+            )?;
+        }
+        if let Some(tx) = tx {
             tx.commit()?;
         }
         Ok(id)
+    }
+
+    pub fn event_provenance(&self, id: i64) -> rusqlite::Result<Option<(String, String)>> {
+        self.conn.query_row(
+            "SELECT p.hash,p.settings FROM event_provenance e JOIN provenance_snapshots p USING(hash) WHERE e.event_id=?",
+            [id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()
     }
 
     pub fn add_check_event(
@@ -1091,6 +1141,7 @@ pub struct Template {
 #[derive(Default)]
 pub struct EventsFilter<'a> {
     pub camera_id: Option<i64>,
+    pub zone_id: Option<i64>,
     pub status: Option<&'a str>,
     pub level: Option<i64>,
     pub type_: Option<&'a str>,
@@ -1119,6 +1170,10 @@ impl EventsFilter<'_> {
         }
         if let Some(v) = self.camera_id {
             sql.push_str(" AND camera_id=?");
+            args.push(Box::new(v));
+        }
+        if let Some(v) = self.zone_id {
+            sql.push_str(&format!(" AND COALESCE(({EVENT_ZONE_SQL}),0)=?"));
             args.push(Box::new(v));
         }
         if let Some(v) = self.level {

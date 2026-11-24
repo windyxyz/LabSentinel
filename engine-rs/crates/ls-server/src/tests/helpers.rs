@@ -57,6 +57,8 @@ pub(crate) fn test_state_custom(
         go2rtc: Arc::new(crate::go2rtc::Go2rtcSupervisor::new(false)),
         detections: Default::default(),
         faces: Default::default(),
+        thermal: Default::default(),
+        local_vlm: Default::default(),
     })
 }
 

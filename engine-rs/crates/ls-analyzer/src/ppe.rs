@@ -164,7 +164,7 @@ fn apply_coat_confirmation(
     statuses: &mut [PpeStatus],
     people: &[[f32; 4]],
     detections: &[Vec<Det>],
-) {
+) -> Vec<[f32; 2]> {
     let mut evidence = vec![[0.0_f32; 2]; people.len()];
     for (class, boxes) in detections.iter().enumerate() {
         for detection in boxes {
@@ -174,11 +174,12 @@ fn apply_coat_confirmation(
             }
         }
     }
-    for (status, [positive, negative]) in statuses.iter_mut().zip(evidence) {
+    for (status, &[positive, negative]) in statuses.iter_mut().zip(&evidence) {
         if *status == PpeStatus::Wearing && positive <= negative {
             *status = PpeStatus::Unknown;
         }
     }
+    evidence
 }
 
 fn head_owners(person_boxes: &[[f32; 4]], x: f32, y: f32) -> impl Iterator<Item = usize> + '_ {
@@ -432,9 +433,17 @@ impl PpeRunner for YoloPpeRunner {
                 start
             })
         });
-        let unknown = PpeObservation::default();
         let Ok(mut all_dets) = self.model.detect_classes(bgr, w, h, &specs) else {
-            return vec![unknown; person_boxes.len()];
+            return vec![
+                PpeObservation {
+                    coat_diagnostic: crate::pipeline::CoatDiagnostic {
+                        result: "model_error",
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                person_boxes.len()
+            ];
         };
         let bounded = |start: Option<usize>| start.and_then(|index| all_dets.get(index..index + 2));
         let gloves = accessory_evidence(person_boxes, bounded(accessory_indices[0]), true);
@@ -509,6 +518,8 @@ impl PpeRunner for YoloPpeRunner {
                 coat_hits[owner].1 = true;
             }
         }
+        let mut inputs = vec!["frame"; person_boxes.len()];
+        let mut reasons = vec!["no_detection"; person_boxes.len()];
         let mut coats: Vec<_> = person_boxes
             .iter()
             .enumerate()
@@ -516,7 +527,10 @@ impl PpeRunner for YoloPpeRunner {
                 match coat_hits[index] {
                     (true, false) => return PpeStatus::NoPpe,
                     (false, true) => return PpeStatus::Wearing,
-                    (true, true) => return PpeStatus::Unknown,
+                    (true, true) => {
+                        reasons[index] = "conflicting_labels";
+                        return PpeStatus::Unknown;
+                    }
                     (false, false) => (),
                 }
                 // LS-043：远景/灰度图整图无检出时，对较小人框裁切 ROI 二次精检（提升远景召回率）
@@ -525,8 +539,12 @@ impl PpeRunner for YoloPpeRunner {
                     .iter()
                     .enumerate()
                     .any(|(other, bounds)| index != other && overlapping_people(*pb, *bounds));
+                if occluded {
+                    reasons[index] = "overlapping_people";
+                }
                 if !occluded && box_area / frame_area < 0.35 {
                     if let Some((roi, rw, rh)) = crop_bgr_roi(bgr, w, h, *pb) {
+                        inputs[index] = "person_crop";
                         // LS-055：灰度/低照度 ROI 先做 CLAHE 增强（仅灰度图触发，避免彩色失真）
                         let roi = if self.clahe_enabled
                             && ls_infer::preprocess::looks_grayscale(&roi, rw, rh)
@@ -553,35 +571,56 @@ impl PpeRunner for YoloPpeRunner {
                                     PpeStatus::NoPpe
                                 }
                                 (false, true) => PpeStatus::Wearing,
+                                (true, true) => {
+                                    reasons[index] = "conflicting_labels";
+                                    PpeStatus::Unknown
+                                }
                                 _ => PpeStatus::Unknown,
                             };
                         }
+                        reasons[index] = "model_error";
                     }
                 }
                 PpeStatus::Unknown
             })
             .collect();
+        let initial = coats.clone();
+        let mut confirmation_scores = vec![None; person_boxes.len()];
         if let Some(confirmation) = self.coat_confirmation.as_mut() {
             if coats.contains(&PpeStatus::Wearing) {
-                let detections = confirmation
-                    .model
-                    .as_mut()
-                    .and_then(|model| {
-                        model
-                            .detect_classes(
-                                bgr,
-                                w,
-                                h,
-                                &[
-                                    (0, COAT_CONFIRMATION_CONF, 0.0),
-                                    (1, COAT_CONFIRMATION_CONF, 0.0),
-                                    (2, COAT_CONFIRMATION_CONF, 0.0),
-                                ],
-                            )
-                            .ok()
-                    })
-                    .unwrap_or_default();
-                apply_coat_confirmation(&mut coats, person_boxes, &detections);
+                let detections = confirmation.model.as_mut().and_then(|model| {
+                    model
+                        .detect_classes(
+                            bgr,
+                            w,
+                            h,
+                            &[
+                                (0, COAT_CONFIRMATION_CONF, 0.0),
+                                (1, COAT_CONFIRMATION_CONF, 0.0),
+                                (2, COAT_CONFIRMATION_CONF, 0.0),
+                            ],
+                        )
+                        .ok()
+                });
+                let scores = apply_coat_confirmation(
+                    &mut coats,
+                    person_boxes,
+                    detections.as_deref().unwrap_or_default(),
+                );
+                for (index, scores) in scores.into_iter().enumerate() {
+                    if initial[index] == PpeStatus::Wearing {
+                        if detections.is_some() {
+                            confirmation_scores[index] = Some(scores);
+                        }
+                        reasons[index] = if detections.is_none() {
+                            "confirmation_error"
+                        } else if scores == [0.0, 0.0] {
+                            "confirmation_no_match"
+                        } else {
+                            "confirmation_not_positive"
+                        };
+                    }
+                }
             }
         }
         coats
@@ -590,10 +629,14 @@ impl PpeRunner for YoloPpeRunner {
             .zip(coat_confidence.into_iter().zip(mask_confidence))
             .zip(coat_assignment_gap)
             .zip(gloves.into_iter().zip(goggles))
+            .enumerate()
             .map(
                 |(
-                    (((coat, mask), (coat_confidence, mask_confidence)), gap),
-                    ((gloves, glove_confidence), (goggles, goggle_confidence)),
+                    index,
+                    (
+                        (((coat, mask), (coat_confidence, mask_confidence)), gap),
+                        ((gloves, glove_confidence), (goggles, goggle_confidence)),
+                    ),
                 )| PpeObservation {
                     coat,
                     mask,
@@ -612,6 +655,16 @@ impl PpeRunner for YoloPpeRunner {
                     glove_violation_confidence: glove_confidence,
                     goggle_violation_confidence: goggle_confidence,
                     coat_assignment_gap: if coat == PpeStatus::NoPpe { gap } else { None },
+                    coat_diagnostic: crate::pipeline::CoatDiagnostic {
+                        input: inputs[index],
+                        before_confirmation: initial[index],
+                        result: if coat == PpeStatus::Unknown {
+                            reasons[index]
+                        } else {
+                            "classified"
+                        },
+                        confirmation_scores: confirmation_scores[index],
+                    },
                 },
             )
             .collect()

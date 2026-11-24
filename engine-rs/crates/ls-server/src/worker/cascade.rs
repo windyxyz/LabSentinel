@@ -131,6 +131,7 @@ pub(super) fn keep_geometry_local(
                 | "solo_after_hours"
                 | "hood_lean"
                 | "sash_limit"
+                | "person_fall"
                 | "ppe_policy"
         ) {
             return true;

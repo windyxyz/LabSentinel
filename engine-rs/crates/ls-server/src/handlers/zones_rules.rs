@@ -262,13 +262,29 @@ pub(crate) async fn add_rule(State(st): State<Shared>, Json(body): Json<Value>) 
             .into_response();
     }
     with_store(&st, |s| {
-        if s.camera(cid)?.is_none() {
+        let Some(camera) = s.camera(cid)? else {
             return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
+        };
+        if behavior == "person_fall" && camera.type_ == "folder" {
+            return Ok(
+                detail_err(StatusCode::UNPROCESSABLE_ENTITY, "跌倒检测需要连续视频画面")
+                    .into_response(),
+            );
         }
+        if behavior == "camera_tamper" && !matches!(camera.type_.as_str(), "rtsp" | "usb") {
+            return Ok(detail_err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "画面健康告警需要实时摄像头",
+            )
+            .into_response());
+        }
+        let zone_id = (!matches!(behavior.as_str(), "thermal_overheat" | "camera_tamper"))
+            .then(|| body.get("zone_id").and_then(|v| v.as_i64()))
+            .flatten();
         let tx = s.conn().unchecked_transaction()?;
         let rid = s.add_rule_with_schedule(
             cid,
-            body.get("zone_id").and_then(|v| v.as_i64()),
+            zone_id,
             &behavior,
             body.get("level").and_then(|v| v.as_i64()).unwrap_or(2),
             body.get("cooldown_s").and_then(|v| v.as_i64()).unwrap_or(0),

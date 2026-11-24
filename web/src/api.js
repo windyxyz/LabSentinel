@@ -136,6 +136,9 @@ export const api = {
   modelsLocal: () => req('GET', '/api/models/local'),
   // UX2（2026-11-20）：检测模式全局策略（local/api/cascade）
   detectConfig: () => req('GET', '/api/detect/config'),
+  localVlm: () => req('GET', '/api/detect/local-vlm'),
+  startLocalVlm: (payload) => req('POST', '/api/detect/local-vlm/start', payload),
+  stopLocalVlm: () => req('POST', '/api/detect/local-vlm/stop', {}),
   saveDetectConfig: (d) => req('PUT', '/api/detect/config', d),
   detectTest: () => req('POST', '/api/detect/test', {}),
   detectUsage: () => req('GET', '/api/detect/usage'),
@@ -194,6 +197,9 @@ export const api = {
   updateZoneSpatial: (id, settings) => req('PUT', `/api/zones/${id}`, settings),
   spatialSettings: (cid) => req('GET', `/api/cameras/${cid}/spatial`),
   cameraLabRules: (cid) => req('GET', `/api/cameras/${cid}/lab-rules`),
+  scenePacks: () => req('GET', '/api/scene-packs'),
+  previewScenePack: (choice) => req('POST', '/api/scene-packs/preview', choice),
+  applyScenePack: (choice) => req('POST', '/api/scene-packs/apply', choice),
   saveCameraLabRules: (cid, data) => req('PUT', `/api/cameras/${cid}/lab-rules`, data),
   addCameraMask: (cid, data) => req('POST', `/api/cameras/${cid}/masks`, data),
   deleteCameraMask: (cid, id) => req('DELETE', `/api/cameras/${cid}/masks/${id}`),
@@ -322,6 +328,7 @@ export const api = {
   statsSummary: (params = {}) => req('GET', '/api/stats/summary?' + new URLSearchParams(params)),
   statsQuality: (params = {}) => req('GET', '/api/stats/quality?' + new URLSearchParams(params)),
   statsHourly: (params = {}) => req('GET', '/api/stats/hourly?' + new URLSearchParams(params)),
+  statsHotspots: (params = {}) => req('GET', '/api/stats/hotspots?' + new URLSearchParams(params)),
 }
 
 export const TYPE_TEXT = {
@@ -329,6 +336,8 @@ export const TYPE_TEXT = {
   ppe_policy: '区域穿戴不合规',
   hood_lean: '通风橱探身',
   sash_limit: '通风橱拉门过高',
+  person_fall: '疑似跌倒',
+  thermal_overheat: '温度传感器超限',
   incubator_door_open: '培养箱门持续开启',
   spill_or_leak: '泼洒或泄漏',
   glove_contamination: '手套疑似交叉接触',
@@ -346,6 +355,7 @@ export const TYPE_TEXT = {
   no_mask: '未戴口罩',
   camera_offline: '摄像头断流',
   camera_recovered: '摄像头恢复',
+  camera_tamper: '摄像头画面异常',
 }
 
 export const CHANNEL_NAMES = {

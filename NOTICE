@@ -45,6 +45,8 @@ amd-quark           MIT             NPU XINT8 量化
 
 - **人体检测模型 `yolo11n.onnx`（随发行包分发）**：
   Ultralytics YOLO 生态（AGPL-3.0），发行包随附（源代码仓库不入库权重文件）。
+- **可选人员检测 `yolo26n.onnx`**。Ultralytics 官方 COCO 通用检测 ONNX（AGPL-3.0），可在网页试用。版本、来源和 SHA-256 见 `scripts/assets.lock.json`。
+- **姿态估计模型 `yolo26n-pose.onnx`**。Ultralytics 官方 YOLO26n Pose ONNX（AGPL-3.0），使用 COCO 17 点人体姿态。固定来源与哈希见 `scripts/assets.lock.json`。
 - **实验服检测模型 `yolo11n_ppe.onnx`（自 0.3.1 随发行包分发）**：
   0.6.0 选用 LAB PPE 专项版，SHA256 `46a36b0354d0973f034a0ae9a7c81ed3071dbb1c5dd2c06b44d3003b1489de78`。
   权重由 Roboflow Universe 上 Gavriel's Workspace 的 LAB PPE 数据集训练派生，数据集许可 **CC BY 4.0**

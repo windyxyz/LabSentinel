@@ -2,6 +2,13 @@
 
 ## Latest Handoff Snapshot
 
+- **品牌与版本**。GitHub `main @ d5d4e0f` 的有字图已按远端 blob 摘要核对。无字图进入网页、PWA、托盘、主程序与安装器。`LS-101` 已登记 1.0.0 发布前按项目实况重写 README。
+- **`v0.8.0` 本地验收**。`fmt`、全特性 Clippy、Rust 236 项通过（5 忽略），前端 104 项、构建及解包冒烟通过。独立实例验证溯源、热点、温度超限和低比特 GGUF 拒绝。Ghost Downloader 获取并校验了 `llama.cpp b11193` Vulkan、SmolVLM-256M Q8_0 和 F16 投影。独立实例启动进程、写入加密档案并完成一张图的真实回环复核。
+- **`v0.8.5` 本地验收**。修正后再次执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 和 `cargo test --workspace --all-features`，237 项通过（6 忽略）。`npx vitest run` 104 项通过，`npm run build` 通过。最终产物的 `scripts/contract_audit.py` 匹配 171 条前端 API，`scripts/rust_route_coverage.py --fail-under 100` 覆盖 159/159。包内 ORT 核验了姿态 ONNX 的 CPU 和 GPU 偏好。独立包核验四套场景、过期预览返回 409、YOLO26n 切换、实际照片检查和恢复默认。两个 Windows 可执行文件和 ZIP 网页图标均与新图标一致。Vite 的表格、配置和 jsdom Canvas 仍有既有警告。
+- **`v0.8.5` 产物回归**。首次解包用例发现，已选择的人员模型文件丢失时静默回退，导致失败的视频被显示为检查完成。恢复原有模型错误状态后，`python -X utf8 -B scripts/build_rust.py --strict --zip`、`python -X utf8 -B scripts/build_setup_exe.py`、`python -X utf8 -B scripts/smoke_rust.py --zip Resources/dist/labsentinel-rust-0.8.5-20261124.zip --timeout 55` 全部通过，覆盖照片和视频留痕、视频预览、告警截图、叠框、推理失败对照及优雅退出。安装器交互安装、升级与卸载待独立环境验收。
+- **`v0.8.5` 最终文件**。`Resources/dist/labsentinel-rust-0.8.5-20261124.zip` 为 139335435 字节，SHA-256 `65923952fdebf90a06db375e02c89b25cf1bdeea6bb33f6d1618ac3077b7e252`。`Resources/dist/LabSentinel-setup-0.8.5.exe` 为 111931949 字节，SHA-256 `1ae61b3684ff6e8e50f75af87660e654a62c031c413d5c0cb81f9a9cacc3c69f`，文件属性版本为 `0.8.5`。
+- **`v0.8.0` 本地文件**。`Resources/dist/labsentinel-rust-0.8.0-20261124.zip` 为 130480214 字节，SHA-256 `60cfbbfbf9e25cf2ce2f1423016d3fe130d4ab0a049cbc1922608e9d7c994c3a`。`Resources/dist/LabSentinel-setup-0.8.0.exe` 为 103497338 字节，SHA-256 `7e25dd22a9d5aec56e225ac1c03d0dd8e6525ce084ed0cc9293609e0ce4adeb2`。
+- **Vulkan 灰度条件**。Radeon 880M 对照中 ncnn FP16 一路和四路约 91 / 143 fps。YOLO26n DirectML 一路和四路约 86 / 109 fps，两者是不同权重的独立短测。`LS-093` 已完成可选人员模型对照，Vulkan CV 等其他厂商设备、包体与同卡稳定性条件。GitHub Release 暂停。
 - **范围变更（2026-11-24）· 放开非商业/学术数据集随包限制**。用户确认本项目仅作非商业自用与学习研究，允许 `SH17`（CC BY-NC-SA）、`FASDD`、`URFD/Le2i` 等非商业/学术数据集参与训练、评测与随包权重发布；取消 `LS-095` 中的 NC 硬拦截（`exit 2`），改为自动登记来源与原许可证并写入 `NOTICE`。已同步更新 [docs/plan/v1.0.0-roadmap.md](docs/plan/v1.0.0-roadmap.md)、[task_plan.md](task_plan.md)、[task_registry.md](task_registry.md)。下一实施任务仍从 `LS-089` 接续。
 - **同类项目工程做法规划审阅**。`LS-097` 保持 `READY`。对照 `v0.7.5` 源码和同类项目原始资料，更新[路线图版本图与 §2.2](docs/plan/v1.0.0-roadmap.md#22-同类项目的工程做法与验收)。补入机位健康、历史证据、场景模板、录像回放、告警回执和权限验收。复用实时最新帧、已有预览池与断线补发。此轮为文档更新，下一实施任务仍从 `LS-089` 接续。
 - **文档验证**。`git diff --check` 通过，核对了 10 个版本图节点、22 项原有任务与 7 行新增验收的版本归属。

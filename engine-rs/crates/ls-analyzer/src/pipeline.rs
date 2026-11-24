@@ -28,7 +28,7 @@ pub struct CameraSpec {
     pub file_loop: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ZoneSpec {
     pub id: i64,
     pub camera_id: i64,
@@ -37,7 +37,7 @@ pub struct ZoneSpec {
     pub spatial: ZoneSpatial,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct RuleSpec {
     pub id: i64,
     pub camera_id: i64,
@@ -76,6 +76,15 @@ pub struct PpeObservation {
     pub glove_violation_confidence: f32,
     pub goggle_violation_confidence: f32,
     pub coat_assignment_gap: Option<f32>,
+    pub coat_diagnostic: CoatDiagnostic,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize)]
+pub struct CoatDiagnostic {
+    pub input: &'static str,
+    pub before_confirmation: PpeStatus,
+    pub result: &'static str,
+    pub confirmation_scores: Option<[f32; 2]>,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -26,7 +26,8 @@ FFDIR = ROOT / "tools" / "ffmpeg"
 ORTDIR = ROOT / "tools" / "onnxruntime"
 MODEL_ASSETS = ("yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt", "labcoat-confirm.onnx")
 CLOSE_MASK_ASSETS = ("face_detection_yunet_2023mar.onnx", "mask_detector.onnx")
-PORTABLE_MODEL_ASSETS = ("yolo11n.onnx", *MODEL_ASSETS, *CLOSE_MASK_ASSETS)
+PUBLIC_MODEL_ASSETS = (*CLOSE_MASK_ASSETS, "yolo26n-pose.onnx", "yolo26n.onnx")
+PORTABLE_MODEL_ASSETS = ("yolo11n.onnx", *MODEL_ASSETS, *PUBLIC_MODEL_ASSETS)
 GO2RTC = ROOT / "tools" / "go2rtc.exe"
 GO2RTC_ARCHIVE = "go2rtc_win64.zip"
 
@@ -95,13 +96,13 @@ def ensure_models(force: bool) -> None:
     """校验仓库内的实验服模型并准备其余随包权重。"""
     MODELS.mkdir(parents=True, exist_ok=True)
     prepare_person_model(MODELS / "yolo11n.onnx", force)
-    for name in CLOSE_MASK_ASSETS:
+    for name in PUBLIC_MODEL_ASSETS:
         out = MODELS / name
         if not force and valid_model_asset(out):
             log(f"{name} 已存在，SHA256 一致")
             continue
         if fetch_assets.download(name, out) != 0:
-            raise SystemExit(f"[失败] 近景口罩资产准备失败: {name}")
+            raise SystemExit(f"[失败] 随包模型准备失败: {name}")
     for name in MODEL_ASSETS:
         if not valid_model_asset(MODELS / name):
             raise SystemExit(f"[失败] 仓库内实验服模型缺失或不匹配: {name}")
