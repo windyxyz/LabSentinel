@@ -60,7 +60,7 @@ impl EpisodeRuntime {
         pipe: &CameraPipeline,
         policy: &CameraPolicy,
         frame: &EpisodeFrame<'_>,
-    ) -> Result<Vec<(i64, Candidate, bool)>, String> {
+    ) -> Result<Vec<(i64, Candidate)>, String> {
         let applicable: Vec<_> = policy
             .rules
             .iter()
@@ -189,7 +189,7 @@ impl EpisodeRuntime {
         reading: PpeReading,
         episode: &Episode,
         better_evidence: bool,
-    ) -> Result<Option<(i64, Candidate, bool)>, String> {
+    ) -> Result<Option<(i64, Candidate)>, String> {
         let evidence = EpisodeEvidence {
             first_ts: &episode.first_ts,
             last_ts: &episode.last_ts,
@@ -297,14 +297,16 @@ impl EpisodeRuntime {
             evidence_key: format!("episode:{}", persisted.episode_id),
         };
         if let Some(event_id) = persisted.event_id {
-            store
+            let reviewed = store
                 .promote_episode_event(event_id, level, &candidate.detail)
                 .map_err(|e| e.to_string())?;
             if let Some(event) = store.event_by_id(event_id).map_err(|e| e.to_string())? {
                 let mut payload = super::event_json(&event);
                 payload["op"] = serde_json::json!("episode_update");
                 let _ = sink.st.events_tx.send(payload.to_string());
-                if frame.dispatch {
+                // The first review owns delivery while pending. If it finishes first,
+                // the already-reviewed event can send its normal escalation.
+                if frame.dispatch || reviewed {
                     sink.deliver(
                         event_id,
                         &candidate,
@@ -316,7 +318,7 @@ impl EpisodeRuntime {
                 }
             }
             persisted.sent_tier = episode.tier;
-            return Ok(Some((event_id, candidate, false)));
+            return Ok(None);
         }
         let peak = persisted.peak.as_ref();
         let id = sink.record_located(
@@ -331,7 +333,7 @@ impl EpisodeRuntime {
             persisted.event_id = Some(id);
             persisted.sent_tier = episode.tier;
             persisted.peak = None;
-            return Ok(Some((id, candidate, true)));
+            return Ok(Some((id, candidate)));
         }
         Ok(None)
     }
@@ -511,8 +513,47 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ten_minute_episode_uses_one_event_and_records_recovery() {
+    #[tokio::test]
+    async fn ten_minute_episode_sends_one_image_and_reviews_a_new_episode() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::{json, Value};
+        use std::sync::Mutex;
+        use tokio::{net::TcpListener, sync::Notify};
+
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let allow_first_reply = Arc::new(Notify::new());
+        let upstream = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post({
+                    let gate = Arc::clone(&allow_first_reply);
+                    move |State(requests): State<Arc<Mutex<Vec<Value>>>>,
+                          Json(body): Json<Value>| {
+                        let gate = Arc::clone(&gate);
+                        async move {
+                            let index = {
+                                let mut captured = requests.lock().unwrap();
+                                captured.push(body);
+                                captured.len()
+                            };
+                            if index == 1 {
+                                gate.notified().await;
+                            }
+                            let result = if index == 1 {
+                                json!({"persons":1,"violations":["no_mask"]})
+                            } else {
+                                json!({"persons":1,"compliant":["no_mask"],"violations":[]})
+                            };
+                            Json(json!({"choices":[{"message":{"content":result.to_string()}}]}))
+                        }
+                    }
+                }),
+            )
+            .with_state(Arc::clone(&requests));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let mock = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("episodes.db");
         seed_schema(&db);
@@ -527,7 +568,7 @@ mod tests {
         store.set_rule_grace(rule, 10, 0.7).unwrap();
         let policy = super::super::read_camera_policy(&store, cid).unwrap();
         let state = test_state_custom(db.to_str().unwrap(), "", false, root, true, "");
-        let sink = EventSink::new(state);
+        let sink = EventSink::new(state).use_cascade(true);
         let mut pipe = CameraPipeline::new(
             CameraSpec {
                 id: cid,
@@ -551,6 +592,35 @@ mod tests {
             width: 64,
             height: 64,
             data: vec![108; 64 * 64 * 3],
+        };
+        let jpeg =
+            ls_analyzer::evidence::encode_jpeg_bgr(&frame.data, frame.width, frame.height).unwrap();
+        let cfg = crate::detect::DetectCfg {
+            url,
+            provider: "openai_compat".into(),
+            model: "mock".into(),
+            vlm_prompt: "fixture custom prompt".into(),
+            timeout_s: 10,
+            daily_budget: 2,
+            ..Default::default()
+        };
+        let review = |events: Vec<(i64, Candidate)>| {
+            if !events.is_empty() {
+                super::super::submit_cascade_review(
+                    &store,
+                    &sink,
+                    super::super::CascadeReview {
+                        camera_id: cid,
+                        cfg: cfg.clone(),
+                        jpeg: jpeg.clone(),
+                        detected_people: 1,
+                        ev_round: events,
+                        suppress: true,
+                        evidence: None,
+                        evidence_key_prefix: "fixture".into(),
+                    },
+                );
+            }
         };
         let det = PersonDetection {
             box_: [6.0, 6.0, 45.0, 58.0],
@@ -595,9 +665,41 @@ mod tests {
         let id = warning[0].0;
         let initial = store.event_by_id(id).unwrap().unwrap();
         assert_eq!(initial.alert_tier, "warning");
-        let upgraded = sample(10);
-        assert_eq!(upgraded[0].0, id);
-        assert_eq!(upgraded[0].1.level, 3);
+        review(warning);
+        let promotion = sample(10);
+        assert!(
+            promotion.is_empty(),
+            "a promotion must not queue a second review"
+        );
+        review(promotion);
+        assert_eq!(store.event_by_id(id).unwrap().unwrap().level, 3);
+        assert!(store
+            .event_by_id(id)
+            .unwrap()
+            .unwrap()
+            .vlm_verdict
+            .is_none());
+        allow_first_reply.notify_one();
+        let wait_review = |eid| {
+            let store = &store;
+            async move {
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    loop {
+                        let event = store.event_by_id(eid).unwrap().unwrap();
+                        if let Some(verdict) = event.vlm_verdict.as_deref() {
+                            break (
+                                event.vlm_suppressed,
+                                serde_json::from_str::<Value>(verdict).unwrap(),
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(wait_review(id).await.1["verdict"], "likely_true");
         stage.store(1, Ordering::Relaxed);
         for sec in (12..=600).step_by(2) {
             assert!(sample(sec).is_empty());
@@ -623,5 +725,56 @@ mod tests {
         assert_eq!(history[0].type_, "alert_resolved");
         assert_eq!(history[0].episode_id, closed.episode_id);
         assert_eq!(history.len(), 2);
+
+        stage.store(0, Ordering::Relaxed);
+        for second in [604, 606, 608, 610] {
+            assert!(sample(second).is_empty());
+        }
+        let repeat = sample(612);
+        assert_eq!(repeat.len(), 1);
+        let repeat_id = repeat[0].0;
+        assert_ne!(repeat_id, id);
+        review(repeat);
+        let (suppressed, verdict) = wait_review(repeat_id).await;
+        assert_eq!(suppressed, 1);
+        assert_eq!(verdict["verdict"], "likely_false");
+        assert!(sample(614).is_empty());
+        assert_eq!(
+            store
+                .event_by_id(repeat_id)
+                .unwrap()
+                .unwrap()
+                .vlm_suppressed,
+            1
+        );
+        stage.store(2, Ordering::Relaxed);
+        sample(616);
+        sample(617);
+        stage.store(0, Ordering::Relaxed);
+        for second in [618, 620, 622, 624] {
+            assert!(sample(second).is_empty());
+        }
+        let over_budget = sample(626);
+        assert_eq!(over_budget.len(), 1);
+        let over_budget_id = over_budget[0].0;
+        review(over_budget);
+        let (suppressed, verdict) = wait_review(over_budget_id).await;
+        assert_eq!(suppressed, 0);
+        assert_eq!(verdict["reason"], "budget_exhausted");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            let parts = request["messages"][0]["content"].as_array().unwrap();
+            assert_eq!(parts.len(), 2);
+            assert!(parts[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("fixture custom prompt"));
+            assert!(parts[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/jpeg;base64,"));
+        }
+        mock.abort();
     }
 }

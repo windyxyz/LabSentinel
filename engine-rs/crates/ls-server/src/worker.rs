@@ -19,9 +19,11 @@ use std::time::{Duration, Instant};
 
 use crate::handlers::events::event_json;
 
+mod cascade;
 mod episodes;
 use crate::performance::{FrameTiming, PerformanceWindow};
 use crate::state::Shared;
+use cascade::{finish_cascade_events, keep_geometry_local, submit_cascade_review, CascadeReview};
 
 /// 事件去重窗口容量（Python sidecar_events.SEEEN_MAX 同值）。
 const DEDUP_MAX: usize = 4096;
@@ -57,6 +59,7 @@ pub struct EventSink {
     st: Shared,
     paths: SinkPaths,
     dedup: Mutex<Dedup>,
+    legacy_review: bool,
 }
 
 struct SavedSnapshot {
@@ -88,6 +91,7 @@ impl EventSink {
         Self {
             paths: SinkPaths::from_data_dir(&st.data_dir),
             st,
+            legacy_review: true,
             dedup: Mutex::new(Dedup {
                 seen: HashSet::new(),
                 order: VecDeque::new(),
@@ -95,11 +99,17 @@ impl EventSink {
         }
     }
 
+    fn use_cascade(mut self, cascade: bool) -> Self {
+        self.legacy_review = !cascade;
+        self
+    }
+
     #[cfg(test)]
     fn with_paths(st: Shared, paths: SinkPaths) -> Self {
         Self {
             st,
             paths,
+            legacy_review: true,
             dedup: Mutex::new(Dedup {
                 seen: HashSet::new(),
                 order: VecDeque::new(),
@@ -230,7 +240,7 @@ impl EventSink {
                 error.to_string()
             })?;
         // RA2-S5：AI 复核入队（默认 provider=none 零开销；只写 ai_review 标记）
-        if cand.behavior != "alert_resolved" {
+        if self.legacy_review && cand.behavior != "alert_resolved" {
             let _ = st.genai.maybe_enqueue(eid, path, cand.level, &st.db_path);
         }
         // WS 广播：行口径与 /api/events 完全一致（绝对路径不外泄——event_json
@@ -1201,6 +1211,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     // 限流（默认 6 次/分钟/路）；cascade 模式走异步复核队列（见下方触发门）。
     let dcfg = crate::detect::DetectCfg::load(&store, Path::new(&st.data_dir));
     let mode = crate::detect::effective_mode(&cfg.analyzer, &dcfg.mode);
+    let sink = sink.use_cascade(mode == "cascade");
     let continuous_ppe = mode != "api";
     pipe.set_continuous_ppe(continuous_ppe);
     let mut episodes = episodes::EpisodeRuntime::default();
@@ -1222,6 +1233,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     );
     // LS-043：用 Option<Instant> 替代 `Instant::now() - vlm_interval`，防 Windows 刚开机减法下溢 panic
     let mut last_vlm: Option<std::time::Instant> = None;
+    let mut reviewed_tracks = HashSet::new();
     let mut reconnect = CameraReconnect::default();
     let mut last_compliance_sample = None::<Instant>;
     let notify_connection = |online: bool| {
@@ -1384,7 +1396,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     }
                     // 先喂证据环（事件帧须已在环内；同时自动补活动录像 post 帧）
                     let jpeg_start = std::time::Instant::now();
-                    let ev_snapshot: Option<Vec<u8>> = evidence.feed(frame.index, || {
+                    let mut ev_snapshot: Option<Vec<u8>> = evidence.feed(frame.index, || {
                         ls_analyzer::evidence::encode_jpeg_bgr(
                             &frame.data,
                             frame.width,
@@ -1674,11 +1686,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         };
                         match episodes.process(&store, &sink, &pipe, &policy, &episode_frame) {
                             Ok(events) => {
-                                for (id, candidate, created) in events {
-                                    if created {
-                                        spawn_finalize(&st, &evidence, id);
-                                        alert_events += u64::from(video_file);
-                                    }
+                                for (id, candidate) in events {
+                                    spawn_finalize(&st, &evidence, id);
+                                    alert_events += u64::from(video_file);
                                     ev_round.push((id, candidate));
                                 }
                             }
@@ -1690,8 +1700,8 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     let rules_hit = !cands.is_empty() || !ev_round.is_empty();
                     if !cands.is_empty() {
                         // 事件帧快照：优先复用本帧抽帧结果，未命中 stride 则现编
-                        let snap = match ev_snapshot {
-                            Some(j) if !j.is_empty() => j,
+                        let snap = match ev_snapshot.as_ref() {
+                            Some(j) if !j.is_empty() => j.clone(),
                             _ => ls_analyzer::evidence::encode_jpeg_bgr(
                                 &frame.data,
                                 frame.width,
@@ -1753,62 +1763,67 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 )),
                             }
                         }
+                        ev_snapshot = Some(snap);
                     }
-                    // UX2 cascade 复核门：规则命中或人员在置信度灰区才产生 API
-                    // 调用（无人/无触发帧 0 调用 = 省钱第一验收指标）；限流与
-                    // 预算（detect.cascade.daily_budget）双重闸；复核异步不阻塞帧循环。
                     if mode == "cascade" {
-                        let persons = dets.len() as i64;
-                        let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
-                        let mut dispatched_to_review = false;
-                        if crate::detect::cascade_should_review(&dcfg, persons, max_conf, rules_hit)
-                            && last_vlm.is_none_or(|t| t.elapsed() >= vlm_interval)
-                        {
-                            last_vlm = Some(std::time::Instant::now());
-                            let ring_frames: Vec<Vec<u8>> = evidence
-                                .ring
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .as_ref()
-                                .map(|r| r.snapshot().into_iter().map(|f| f.data).collect())
-                                .unwrap_or_default();
-                            let sampled = crate::vlm::sample_frames(&ring_frames, 8);
-                            if !sampled.is_empty() {
-                                let usage = crate::detect::usage_today(&store, &dcfg);
-                                if usage.exhausted() {
-                                    // 预算耗尽 → 自动降级 local-only：事件标 unreviewed，
-                                    // 下方统一放行暂扣的派发（丢告警比多花 API 更糟）
-                                    let ts = crate::util::iso_now();
-                                    for (eid, _) in &ev_round {
-                                        let _ = store.set_event_vlm(
-                                            *eid,
-                                            r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
-                                            &ts,
-                                        );
-                                    }
-                                } else {
-                                    spawn_cascade_review(CascadeReview {
-                                        st: Arc::clone(&st),
-                                        camera_id: cfg.camera_id,
-                                        cfg: dcfg.clone(),
-                                        frames: sampled,
-                                        ev_round: ev_round.clone(),
-                                        suppress: cascade_suppress,
-                                        evidence: Some(Arc::clone(&evidence)),
-                                        evidence_key_prefix: format!("vlmc:{}", frame.index),
-                                    });
-                                    dispatched_to_review = true;
-                                }
-                            }
+                        keep_geometry_local(&store, &sink, &mut ev_round, cascade_suppress);
+                        let tracks = pipe.last_tracks();
+                        reviewed_tracks.retain(|id| pipe.can_resume_track(*id));
+                        let gray: Vec<_> = tracks
+                            .iter()
+                            .filter(|track| {
+                                !motion_skip
+                                    && !track.occluded
+                                    && !reviewed_tracks.contains(&track.id)
+                                    && crate::detect::cascade_should_review(
+                                        &dcfg,
+                                        1,
+                                        track.confidence,
+                                        false,
+                                    )
+                            })
+                            .map(|track| track.id)
+                            .collect();
+                        let rule_review = !ev_round.is_empty() && dcfg.trigger != "persons";
+                        let gray_review = !gray.is_empty()
+                            && (!ev_round.is_empty()
+                                || last_vlm.is_none_or(|t| t.elapsed() >= vlm_interval));
+                        if rule_review || gray_review {
+                            last_vlm = Some(Instant::now());
+                            reviewed_tracks.extend(gray);
+                            reviewed_tracks
+                                .extend(ev_round.iter().map(|(_, event)| event.track_id));
+                            let jpeg = ev_snapshot.filter(|jpeg| !jpeg.is_empty()).or_else(|| {
+                                ls_analyzer::evidence::encode_jpeg_bgr(
+                                    &frame.data,
+                                    frame.width,
+                                    frame.height,
+                                )
+                                .ok()
+                            });
+                            submit_cascade_review(
+                                &store,
+                                &sink,
+                                CascadeReview {
+                                    camera_id: cid,
+                                    cfg: dcfg.clone(),
+                                    jpeg: jpeg.unwrap_or_default(),
+                                    detected_people: dets.len(),
+                                    ev_round,
+                                    suppress: cascade_suppress,
+                                    evidence: Some(Arc::clone(&evidence)),
+                                    evidence_key_prefix: format!("vlmc:{}", frame.index),
+                                },
+                            );
+                        } else if !ev_round.is_empty() {
+                            finish_cascade_events(
+                                &store,
+                                &sink,
+                                &ev_round,
+                                cascade_suppress,
+                                &serde_json::json!({"status":"unreviewed","reason":"trigger_not_met"}),
+                            );
                         }
-                        // LS-041：suppress 模式下若本帧未进入复核（冷却限流/未命中复核门/预算耗尽），
-                        // 必须立即放行暂扣事件，严禁静默吞告警。
-                        if cascade_suppress && !dispatched_to_review {
-                            for (eid, cand) in &ev_round {
-                                sink.deliver_deferred_pub(*eid, cand, true);
-                            }
-                        }
-                        ev_round.clear();
                     } else if vlm_cfg.enabled
                         && last_vlm.is_none_or(|t| t.elapsed() >= vlm_interval)
                     {
@@ -2032,177 +2047,6 @@ fn spawn_finalize(st: &Shared, evidence: &Arc<ls_analyzer::evidence::Evidence>, 
     }
 }
 
-// ---- UX2 cascade（2026-11-20）：本地+API 协作复核队列 ----
-
-/// UX2 cascade：异步复核任务（不阻塞帧循环；VLM HTTP 在复核线程同步执行，
-/// 频率受 vlm_interval 限流 + detect.cascade.daily_budget 预算双重闸）。
-pub(crate) struct CascadeReview {
-    st: Shared,
-    camera_id: i64,
-    /// 发起时刻的配置快照（复核期间 PUT 不影响本轮）
-    cfg: crate::detect::DetectCfg,
-    /// 送审帧（视频=证据环 ≤8 帧采样；folder=单图）
-    frames: Vec<Vec<u8>>,
-    /// 本轮本地事件 (eid, 候选)——verdict 回填/抑制对象
-    ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)>,
-    /// on_negative=suppress（否定时抑制不投递）
-    suppress: bool,
-    /// 视频路带证据环（VLM 新发现的违规可回填录像）；folder=None
-    evidence: Option<Arc<ls_analyzer::evidence::Evidence>>,
-    /// VLM 独立事件的 evidence_key 前缀（去重键）
-    evidence_key_prefix: String,
-}
-
-pub(crate) fn spawn_cascade_review(r: CascadeReview) {
-    let spawned = std::thread::Builder::new()
-        .name(format!("ls-cascade-{}", r.camera_id))
-        .spawn(move || cascade_review_run(r));
-    if let Err(e) = spawned {
-        crate::logger::error(&format!("[ls-cascade] 复核线程创建失败: {e}"));
-    }
-}
-
-/// VLM 否定 = 明确无人且无违规（抑制仅对「明确否定」生效，模糊/错误不吞告警）。
-fn cascade_is_negative(v: &serde_json::Value, violations: &[String]) -> bool {
-    v["persons"].as_i64().unwrap_or(0) == 0 && violations.is_empty()
-}
-
-fn cascade_review_run(r: CascadeReview) {
-    let ts = crate::util::iso_now();
-    let store = match ls_store::Store::open(&r.st.db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::logger::error(&format!(
-                "[ls-cascade] cam-{} DB 打不开，复核中止: {e}",
-                r.camera_id
-            ));
-            return;
-        }
-    };
-    let sink = EventSink::new(Arc::clone(&r.st));
-    // LS-041：合规红线前置到扣减预算之前（未授权绝不白耗额度，也不外发截图）
-    if !r.cfg.compliance_ok() {
-        crate::logger::warn(&format!(
-            "[ls-cascade] cam-{} 外部服务未授权（远程未确认），本轮复核跳过",
-            r.camera_id
-        ));
-        for (eid, _) in &r.ev_round {
-            let _ = store.set_event_vlm(
-                *eid,
-                r#"{"status":"error","reason":"remote_not_allowed"}"#,
-                &ts,
-            );
-        }
-        if r.suppress {
-            for (eid, cand) in &r.ev_round {
-                sink.deliver_deferred_pub(*eid, cand, true);
-            }
-        }
-        return;
-    }
-    // 原子扣减预算（LS-041 修复 off-by-one：先判超限再自增；超预算 → unreviewed + suppress 放行）
-    let (blocked, _n) = crate::detect::usage_try_consume(&store, &r.cfg, true);
-    if blocked {
-        crate::logger::warn(&format!(
-            "[ls-cascade] cam-{} 今日预算耗尽——降级 local-only（{} 事件标 unreviewed）",
-            r.camera_id,
-            r.ev_round.len()
-        ));
-        for (eid, cand) in &r.ev_round {
-            let _ = store.set_event_vlm(
-                *eid,
-                r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
-                &ts,
-            );
-            if r.suppress {
-                sink.deliver_deferred_pub(*eid, cand, true);
-            }
-        }
-        return;
-    }
-    let mut vlm_cfg = r.cfg.to_vlm_cfg();
-    vlm_cfg.enabled = true; // 合规门已过（上方 compliance_ok）；enabled 仅是通路开关
-    let started = std::time::Instant::now();
-    match crate::vlm::analyze_frames(&vlm_cfg, crate::vlm::VLM_PROMPT, &r.frames) {
-        Ok(v) => {
-            let persons = v["persons"].as_i64().unwrap_or(0);
-            let violations: Vec<String> = v["violations"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let verdict_s = v.to_string();
-            let negative = cascade_is_negative(&v, &violations);
-            // 本轮本地事件：verdict 回填；suppress 策略按判定放行/抑制
-            for (eid, cand) in &r.ev_round {
-                let _ = store.set_event_vlm(*eid, &verdict_s, &ts);
-                if r.suppress {
-                    if negative {
-                        let _ = store.set_event_vlm_suppressed(*eid);
-                    } else {
-                        sink.deliver_deferred_pub(*eid, cand, true);
-                    }
-                }
-            }
-            // VLM 独立发现（本地漏报的违规类型）→ 补建事件走全链（去重键独立）
-            let local_behaviors: HashSet<String> =
-                r.ev_round.iter().map(|(_, c)| c.behavior.clone()).collect();
-            let jpeg = r.frames.last().cloned().unwrap_or_default();
-            for behavior in &violations {
-                if local_behaviors.contains(behavior) {
-                    continue; // 本地已建同类型事件，verdict 已回填，不再重复
-                }
-                let cand = ls_analyzer::pipeline::Candidate {
-                    camera_id: r.camera_id,
-                    zone_id: None,
-                    behavior: behavior.clone(),
-                    level: 2,
-                    track_id: 0,
-                    detail: format!(
-                        "AI 精判：{}（画面中约 {} 人）— {}",
-                        ls_dispatch::type_text(behavior),
-                        persons,
-                        v["summary"].as_str().unwrap_or("")
-                    ),
-                    ts_iso: ts.clone(),
-                    evidence_key: format!("{}:{behavior}", r.evidence_key_prefix),
-                };
-                if let Ok(Some(veid)) =
-                    sink.record(&cand, if jpeg.is_empty() { None } else { Some(&jpeg) })
-                {
-                    if let Some(ev) = &r.evidence {
-                        spawn_finalize(&r.st, ev, veid);
-                    }
-                }
-            }
-            println!(
-                "[ls-cascade] cam-{} 复核完成（{}ms）：persons={persons} violations={violations:?} → 回填 {} 事件",
-                r.camera_id,
-                started.elapsed().as_millis(),
-                r.ev_round.len()
-            );
-        }
-        Err(e) => {
-            // 判定失败：verdict 记 error（绝不误报）；suppress 放行（fail-open，
-            // 合规/网络故障不应静默吞掉本地告警）
-            let err_s = serde_json::json!({"status": "error", "reason": e}).to_string();
-            for (eid, cand) in &r.ev_round {
-                let _ = store.set_event_vlm(*eid, &err_s, &ts);
-                if r.suppress {
-                    sink.deliver_deferred_pub(*eid, cand, false);
-                }
-            }
-            crate::logger::error(&format!(
-                "[ls-cascade] cam-{} 复核失败（降级跳过）: {e}",
-                r.camera_id
-            ));
-        }
-    }
-}
-
 /// post 等待 = VIDEO_POST_S + 0.5s 容差（evidence.feed 的 done 判定同值）+ 1s 余量。
 const VIDEO_POST_WAIT_S: f64 = ls_analyzer::evidence::VIDEO_POST_S + 1.5;
 
@@ -2294,7 +2138,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     };
     let mut ppe_runner = load_worker_ppe(&cfg, &handle);
     let mut policy = cfg.policy.clone();
-    let sink = EventSink::new(Arc::clone(&st));
+    let sink = EventSink::new(Arc::clone(&st)).use_cascade(mode == "cascade");
     loop {
         if handle.stop.load(Ordering::SeqCst) {
             break;
@@ -2786,47 +2630,38 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     ev_round.push((eid, cand));
                 }
             }
-            // UX2 cascade 复核门：本地扫到人（灰区置信）或规则命中才送 API 精判；
-            // 空场景 0 调用 = 省钱第一验收指标
             if mode == "cascade" {
+                keep_geometry_local(&store, &sink, &mut ev_round, cascade_suppress);
                 let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
-                let mut dispatched_to_review = false;
-                if crate::detect::cascade_should_review(&dcfg, persons, max_conf, violation)
-                    && last_review.is_none_or(|t| t.elapsed() >= review_interval)
+                let has_event = !ev_round.is_empty();
+                if crate::detect::cascade_should_review(&dcfg, persons, max_conf, has_event)
+                    && (has_event || last_review.is_none_or(|t| t.elapsed() >= review_interval))
                 {
-                    last_review = Some(std::time::Instant::now());
-                    let review_jpeg =
-                        ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h).unwrap_or_default();
-                    if !review_jpeg.is_empty() {
-                        let usage = crate::detect::usage_today(&store, &dcfg);
-                        if usage.exhausted() {
-                            let ts = crate::util::iso_now();
-                            for (eid, _) in &ev_round {
-                                let _ = store.set_event_vlm(
-                                    *eid,
-                                    r#"{"status":"unreviewed","reason":"budget_exhausted"}"#,
-                                    &ts,
-                                );
-                            }
-                        } else {
-                            spawn_cascade_review(CascadeReview {
-                                st: Arc::clone(&st),
-                                camera_id: cfg.camera_id,
-                                cfg: dcfg.clone(),
-                                frames: vec![review_jpeg],
-                                ev_round: ev_round.clone(),
-                                suppress: cascade_suppress,
-                                evidence: None,
-                                evidence_key_prefix: format!("vlmc-f:{iid}"),
-                            });
-                            dispatched_to_review = true;
-                        }
-                    }
-                }
-                if cascade_suppress && !dispatched_to_review {
-                    for (eid, cand) in &ev_round {
-                        sink.deliver_deferred_pub(*eid, cand, true);
-                    }
+                    last_review = Some(Instant::now());
+                    let jpeg = snapshot_jpeg
+                        .or_else(|| ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h).ok());
+                    submit_cascade_review(
+                        &store,
+                        &sink,
+                        CascadeReview {
+                            camera_id: cfg.camera_id,
+                            cfg: dcfg.clone(),
+                            jpeg: jpeg.unwrap_or_default(),
+                            detected_people: dets.len(),
+                            ev_round,
+                            suppress: cascade_suppress,
+                            evidence: None,
+                            evidence_key_prefix: format!("vlmc-f:{iid}"),
+                        },
+                    );
+                } else if has_event {
+                    finish_cascade_events(
+                        &store,
+                        &sink,
+                        &ev_round,
+                        cascade_suppress,
+                        &serde_json::json!({"status":"unreviewed","reason":"trigger_not_met"}),
+                    );
                 }
             }
             scanned += 1;

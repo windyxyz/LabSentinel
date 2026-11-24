@@ -5,7 +5,7 @@
 //! vlm_verdict/vlm_ts/vlm_suppressed 三列）。
 
 use ls_core::{AnchorMode, ZoneSpatial};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 mod episodes;
@@ -639,6 +639,24 @@ impl Store {
             params![verdict_json, ts, eid],
         )?;
         Ok(())
+    }
+
+    /// Finish a review once and return the event's level and detail at that instant.
+    pub fn finish_event_vlm(
+        &self,
+        eid: i64,
+        verdict: &str,
+        ts: &str,
+        suppressed: bool,
+    ) -> rusqlite::Result<Option<(i64, String)>> {
+        self.conn
+            .query_row(
+                "UPDATE events SET vlm_verdict=?,vlm_ts=?,vlm_suppressed=?
+                 WHERE id=? AND vlm_verdict IS NULL RETURNING level,detail",
+                params![verdict, ts, suppressed, eid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
     }
 
     /// UX2 cascade：VLM 明确否定且 on_negative=suppress → 标记抑制（不投递）。

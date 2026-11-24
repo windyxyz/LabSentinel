@@ -176,12 +176,13 @@ impl Store {
         eid: i64,
         level: i64,
         detail: &str,
-    ) -> rusqlite::Result<()> {
-        self.conn().execute(
-            "UPDATE events SET level=MAX(level,?),detail=?,alert_tier='alert' WHERE id=? AND episode_id IS NOT NULL",
+    ) -> rusqlite::Result<bool> {
+        self.conn().query_row(
+            "UPDATE events SET level=MAX(level,?),detail=?,alert_tier='alert' WHERE id=? AND episode_id IS NOT NULL
+             RETURNING vlm_verdict IS NOT NULL AND vlm_suppressed=0",
             params![level,detail,eid],
-        )?;
-        Ok(())
+            |row| row.get(0),
+        )
     }
 
     pub fn refresh_episode_snapshot(

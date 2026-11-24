@@ -523,7 +523,7 @@ onMounted(load)
       <div v-show="mode === 'cascade'" class="card">
         <h3>协作策略</h3>
         <p class="muted" style="margin-top:0">
-          本地先扫到人与可疑才送 API 精判——空场景零 API 调用。</p>
+          本地先检查穿戴。持续的同一段违规只提交一张图，恢复后再次违规会单独复核。</p>
         <div class="row" style="align-items:center; flex-wrap:wrap">
           <label class="muted">触发条件
             <select v-model="trigger" aria-label="触发条件">
@@ -545,7 +545,7 @@ onMounted(load)
           <button :disabled="busy" @click="saveCascade">保存策略</button>
         </div>
         <p class="muted" style="font-size:12px; margin-bottom:0">
-          触发帧还会经过置信度灰区过滤（本地已高置信判定不再送 API）；预算耗尽自动降级仅本地并在次日恢复。</p>
+          人员触发只送置信度灰区的轨迹。进出区、人数和留守由本地规则判定。预算耗尽或画面看不清时保留本地告警。</p>
       </div>
     </template>
   </div>

@@ -306,6 +306,10 @@ impl CameraPipeline {
         &self.last_tracks
     }
 
+    pub fn can_resume_track(&self, id: i64) -> bool {
+        self.tracker.can_resume(id)
+    }
+
     pub fn last_ppe_sample(&self) -> &PpeSample {
         &self.last_ppe_sample
     }

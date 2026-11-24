@@ -357,18 +357,18 @@ pub fn parse_verdict(text: &str) -> Result<Value, String> {
             }
         })
         .map_err(|_| "VLM 输出不是 JSON".to_string())?;
-    const ALLOWED: [&str; 2] = ["no_ppe", "zone_intrusion"];
-    let violations: Vec<String> = v
-        .get("violations")
-        .and_then(|x| x.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str())
-                .filter(|s| ALLOWED.contains(s))
-                .map(|s| s.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+    let labels = |field: &str, allowed: &[&str]| -> Vec<String> {
+        v[field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|s| allowed.contains(s))
+            .map(str::to_owned)
+            .collect()
+    };
+    let violations = labels("violations", &["no_ppe", "no_mask", "zone_intrusion"]);
+    let compliant = labels("compliant", &["no_ppe", "no_mask"]);
     let persons = v
         .get("persons")
         .and_then(|x| x.as_i64())
@@ -383,6 +383,7 @@ pub fn parse_verdict(text: &str) -> Result<Value, String> {
         "persons": persons,
         "no_ppe": no_ppe,
         "violations": violations,
+        "compliant": compliant,
         "summary": v.get("summary").and_then(|x| x.as_str()).unwrap_or("").chars().take(200).collect::<String>(),
     }))
 }

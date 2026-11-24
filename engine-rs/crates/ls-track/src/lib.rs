@@ -466,6 +466,13 @@ impl ByteTrack {
             .retain(|track| !ids.contains(&track.external_track_id));
     }
 
+    pub fn can_resume(&self, id: i64) -> bool {
+        self.tracked
+            .iter()
+            .chain(&self.lost)
+            .any(|track| track.external_track_id == id)
+    }
+
     /// 输入一批检测（tlbr+score），返回激活轨迹 [(tlbr, external_id)]。
     pub fn update(&mut self, detections: &[Detection]) -> Vec<([f32; 4], i64)> {
         self.frame_id += 1;
