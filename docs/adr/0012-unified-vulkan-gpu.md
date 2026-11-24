@@ -36,3 +36,23 @@
 
 - **正面**：彻底统一 CV 与 VLM 跨厂商 GPU 底座（Windows + Linux 通用），摆脱 DirectML 单锁并发天花板与驱动脆弱性，实现 CV 与 VLM 显存预算显式协同或双卡分流。
 - **代价**：若 `ncnn-vulkan` 胜出，训练工具链需支持 ONNX + `pnnx`/ncnn 双格式导出（在 `tools/export_onnx.py` 自动化，不增加用户使用门槛）；须在 `ls-infer` 单文件内严格收口动态库 FFI 并遵守 `unsafe_code = "deny"` 规范。
+
+## 2026-11-24 Radeon 880M 实测
+
+Windows 驱动 `32.0.32015.16001` 提供 Vulkan `1.4.359`。系统另有虚拟显示适配器。本轮使用仓库的两张 `1280×720` 验收图片和随包人员、PPE 两个模型，统一输入 `640×640`，先热身再测单路和四路。两份验收图片只用于小样本数值对照。
+
+| 实验 | 人员单路 / 四路 | PPE 单路 / 四路 | 观察 |
+| --- | ---: | ---: | --- |
+| Rust 当前 DirectML | 52.25 / 60.83 fps | 94.58 / 126.44 fps | 人员 p95 为 20.55 / 70.78 ms，PPE p95 为 11.53 / 33.01 ms。DirectML 调用在既有专用线程上串行执行。 |
+| Rust 动态 ncnn FP32 | 56.29 / 75.30 fps | 59.38 / 80.67 fps | 已复现 DLL 提前卸载后的退出异常。保持库映射至进程退出后，两套模型的 FP32 和 FP16 各完成单路、四路短测且进程正常退出。 |
+| Rust 动态 ncnn FP16 | 77.08 / 152.92 fps | 105.85 / 177.32 fps | p95 分别为 14.43 / 39.92 ms 和 10.05 / 30.17 ms。该轮每路 12 帧，另有编译任务，数据用于候选筛选。 |
+| ORT 1.32.0 + Dawn 0.6.0 | 47.56 / 47.87 fps | — | 前向与回读计时，独立于 Rust 整帧口径。严格 GPU 图初始化拒绝 CPU 节点。启用混合图后，人员模型两帧共执行 474 个 WebGPU 算子和 82 个 CPU 算子。 |
+| Burn 0.23.0-pre.2 + wgpu | — | — | 两个 ONNX 都转换和链接成功。设备固定 Vulkan，两个模型均在首轮推理触发 CubeCL `MaybeVectorizedType` panic。 |
+
+人员模型的 ncnn FP32、FP16 和 Dawn 都与同样输入的 ORT CPU 对照匹配 10/10 个框，PPE 模型的 ncnn FP32、FP16 均匹配 2/2 个框。匹配要求类别一致、IoU 至少 `0.95`、单框置信度差最多 `0.02`。FP16 人员、PPE 模型所有锚点中最大置信度差分别为 `0.01490` 和 `0.03998`。这组数据用于检查转换与推理口径，现场准确率仍需另行验收。
+
+SDK 取 GitHub `20261020` 的 Windows VS2019 共享构建，由 Ghost Downloader 下载后核对 SHA-256。按发行 ZIP 的 Deflate 6 配方，x64 DLL 加两套 FP16 参数与权重共增加 `15,882,223` 字节，当前方案超出 `15 MiB`。生产版继续使用 DirectML 和 CPU 回退。ncnn FP16 留作首选候选，晋级仍依据包体复测、NVIDIA 和 Intel 真机以及四小时 CV 与 VLM 同卡稳定性门禁。
+
+本地复现使用 `cargo build -p ls-infer --features vulkan-spike --example vulkan_spike --release`。`vulkan_spike.exe` 接收 `cpu`、`dml`、`ncnn`、`ncnn-fp16`、模型、每路次数以及 BGR 原始帧。ncnn 通过 `LS_NCNN_DLL` 指定 SDK DLL，`LS_NCNN_ADAPTER` 默认为 `0`，模型由 `pnnx` 从同一 ONNX 导出，参数使用 `.ncnn.param` 和 `.ncnn.bin`。`python tools/vulkan_spike.py` 提供 ORT CPU 数值对照、ncnn 全类别框比对和 Dawn Vulkan 分区计数。Dawn 使用 `--allow-dawn-cpu-ops --dawn-profile <输出前缀>` 记录混合图实际执行情况。
+
+[ncnn Windows SDK](https://github.com/Tencent/ncnn/releases/tag/20261020) · [ORT WebGPU 执行提供器](https://onnxruntime.ai/docs/execution-providers/WebGPU-ExecutionProvider.html) · [Burn ONNX 导入](https://burn.dev/books/burn/onnx-import.html)

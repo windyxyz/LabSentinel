@@ -485,7 +485,7 @@ async fn live_and_system_contract() {
         .unwrap();
     let j = body_json(r2).await;
     assert_eq!(j["version"], "0.2.0");
-    assert_eq!(j["schema_version"], 14);
+    assert_eq!(j["schema_version"], ls_store::SCHEMA_VERSION_LATEST);
 }
 
 #[tokio::test]

@@ -88,6 +88,14 @@ fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
     .is_ok()
 }
 
+fn exclude_open_episodes(has_episodes: bool) -> &'static str {
+    if has_episodes {
+        "AND NOT EXISTS(SELECT 1 FROM violation_episodes ep WHERE ep.id=events.episode_id AND ep.closed_ts IS NULL)"
+    } else {
+        ""
+    }
+}
+
 /// 将 DB 中存储的媒体路径解析为绝对路径：相对路径按 `data_dir` 拼接，避免安装版 CWD 漂移误判孤儿。
 fn resolve_under_data_dir(path: &str, data_dir: &Path) -> PathBuf {
     let p = Path::new(path);
@@ -122,14 +130,17 @@ fn referenced_media_paths(
     conn: &rusqlite::Connection,
     data_dir: &Path,
 ) -> JobResult<HashSet<String>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT snapshot FROM events WHERE snapshot IS NOT NULL \
-             UNION SELECT video FROM events WHERE video IS NOT NULL \
-             UNION SELECT snapshot FROM folder_images WHERE snapshot IS NOT NULL
-             UNION SELECT path FROM suppression_images",
-        )
-        .map_err(|e| e.to_string())?;
+    let mut sql = String::from(
+        "SELECT snapshot FROM events WHERE snapshot IS NOT NULL
+         UNION SELECT video FROM events WHERE video IS NOT NULL",
+    );
+    if table_exists(conn, "folder_images") {
+        sql.push_str(" UNION SELECT snapshot FROM folder_images WHERE snapshot IS NOT NULL");
+    }
+    if table_exists(conn, "suppression_images") {
+        sql.push_str(" UNION SELECT path FROM suppression_images");
+    }
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(0))
         .map_err(|e| e.to_string())?;
@@ -228,14 +239,14 @@ pub fn preview_cleanup_with(
     let mut ev_count = 0usize;
     let mut ev_bytes = 0u64;
     let mut last_id = 0i64;
+    let exclude_open = exclude_open_episodes(table_exists(conn, "violation_episodes"));
+    let sql = format!(
+        "SELECT id, snapshot, video FROM events WHERE ts < ? AND id > ?
+                       {exclude_open} ORDER BY id ASC LIMIT ?"
+    );
     loop {
         let rows = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, snapshot, video FROM events WHERE ts < ? AND id > ? \
-                     ORDER BY id ASC LIMIT ?",
-                )
-                .map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
             let it = stmt
                 .query_map(rusqlite::params![cutoff, last_id, BATCH as i64], |r| {
                     Ok((
@@ -329,20 +340,19 @@ pub fn run_cleanup_with(
     let conn = store.conn();
     let mut stats = CleanupStats::default();
     let cutoff = cutoff_iso(cfg.retention_events_days);
-    store
-        .delete_suppressions_older_than(&cutoff)
-        .map_err(|error| error.to_string())?;
+    if table_exists(conn, "suppression_audit") {
+        store
+            .delete_suppressions_older_than(&cutoff)
+            .map_err(|error| error.to_string())?;
+    }
 
     // 1) 过期事件：先删文件再删行
+    let has_episodes = table_exists(conn, "violation_episodes");
+    let exclude_open = exclude_open_episodes(has_episodes);
+    let sql = format!("SELECT id, snapshot, video FROM events WHERE ts < ? {exclude_open} ORDER BY id ASC LIMIT ?");
     loop {
         let rows = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, snapshot, video FROM events WHERE ts < ?
-                     AND NOT EXISTS(SELECT 1 FROM violation_episodes ep WHERE ep.id=events.episode_id AND ep.closed_ts IS NULL)
-                     ORDER BY id ASC LIMIT ?",
-                )
-                .map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
             let it = stmt
                 .query_map(rusqlite::params![cutoff, BATCH as i64], |r| {
                     Ok((
@@ -376,9 +386,11 @@ pub fn run_cleanup_with(
         }
     }
 
-    store
-        .delete_unreferenced_episodes_older_than(&cutoff)
-        .map_err(|error| error.to_string())?;
+    if has_episodes {
+        store
+            .delete_unreferenced_episodes_older_than(&cutoff)
+            .map_err(|error| error.to_string())?;
+    }
 
     // 2) 误报标注池过期文件（按修改时间）
     let pool_cutoff = SystemTime::now()

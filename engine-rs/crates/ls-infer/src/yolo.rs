@@ -369,6 +369,20 @@ pub fn set_ep_used(val: impl Into<String>) {
 }
 
 impl YoloModel {
+    #[cfg(feature = "vulkan-spike")]
+    pub fn spike_backend(backend: Box<dyn InferBackend>) -> Self {
+        Self {
+            backend,
+            output_format: OutputFormat::Yolo,
+            input_w: 640,
+            input_h: 640,
+            person_class: 0,
+            conf: 0.25,
+            iou: 0.45,
+            min_box_area: 0.0,
+        }
+    }
+
     pub fn use_output_format(&mut self, format: Option<OutputFormat>) {
         if let Some(format) = format {
             self.output_format = format;

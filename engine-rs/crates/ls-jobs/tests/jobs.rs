@@ -154,6 +154,38 @@ fn retention_orphan_grace_reference_and_limit() {
 }
 
 #[test]
+fn retention_keeps_referenced_suppression_evidence_until_its_audit_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let snapshot = data.join("snapshots/suppression.jpg");
+    fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    fs::write(&snapshot, b"fixture").unwrap();
+    touch_old(&snapshot, 7200);
+    let db = data.join("labsentinel.db");
+    let store = Store::open(db.to_str().unwrap()).unwrap();
+    store.ensure_schema().unwrap();
+    let (id, _) = store
+        .add_suppression(1, "filter_mask", 1, "no_mask", "2999-01-01T00:00:00")
+        .unwrap();
+    store
+        .attach_suppression_snapshot(id, snapshot.to_str().unwrap())
+        .unwrap();
+    let cfg = RetentionConfig::for_data_dir(data);
+    retention::run_cleanup_with(&store, &cfg, &|_| GB100).unwrap();
+    assert!(snapshot.exists());
+    store
+        .conn()
+        .execute(
+            "UPDATE suppression_audit SET ts='2000-01-01T00:00:00' WHERE id=?",
+            [id],
+        )
+        .unwrap();
+    let cleanup = retention::run_cleanup_with(&store, &cfg, &|_| GB100).unwrap();
+    assert_eq!(cleanup.deleted_orphans, 1);
+    assert!(!snapshot.exists());
+}
+
+#[test]
 fn retention_preview_is_read_only() {
     let dir = tempfile::tempdir().unwrap();
     let db = make_db(dir.path());
@@ -218,13 +250,27 @@ fn retention_emergency_tier1_clears_handled_video_only() {
     let stats = retention::run_cleanup_with(&store, &cfg, &free).unwrap();
     assert_eq!(stats.deleted_events, 0, "档①只删文件，不删行");
 
-    let got = store.event_by_id(handled).unwrap().unwrap();
-    assert!(got.video.is_none(), "已处置事件的 video 引用应置 NULL");
-    assert!(got.snapshot.is_some(), "同一轮不应删 snapshot（档②）");
+    let (video_path, snapshot_path): (Option<String>, Option<String>) = store
+        .conn()
+        .query_row(
+            "SELECT video,snapshot FROM events WHERE id=?",
+            [handled],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(video_path.is_none(), "已处置事件的 video 引用应置 NULL");
+    assert!(snapshot_path.is_some(), "同一轮不应删 snapshot（档②）");
     assert!(!video.exists());
     assert!(snap.exists());
     assert!(
-        store.event_by_id(pending).unwrap().is_some(),
+        store
+            .conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE id=?)",
+                [pending],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
         "未处置事件不受影响"
     );
 }

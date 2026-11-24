@@ -113,19 +113,19 @@ describe('connectEvents WS 子协议', () => {
 
   it('无令牌时不传 protocols', () => {
     const wsSpy = makeWs()
-    vi.stubGlobal('location', { protocol: 'http:', host: '127.0.0.1:8000' })
+    vi.stubGlobal('location', { protocol: 'http:', href: 'http://127.0.0.1:8000/' })
     const stop = connectEvents(() => {}, () => {})
-    expect(wsSpy.mock.calls[0][0]).toBe('ws://127.0.0.1:8000/ws/events')
+    expect(wsSpy.mock.calls[0][0]).toBe('ws://127.0.0.1:8000/ws/events?since=latest')
     expect(wsSpy.mock.calls[0][1]).toBeUndefined()
     stop()
   })
 
   it('有令牌时用 labsentinel + bearer.<token> 子协议', () => {
     const wsSpy = makeWs()
-    vi.stubGlobal('location', { protocol: 'https:', host: 'ls.example' })
+    vi.stubGlobal('location', { protocol: 'https:', href: 'https://ls.example/' })
     adminToken.set('s3cret')
     const stop = connectEvents(() => {}, () => {})
-    expect(wsSpy.mock.calls[0][0]).toBe('wss://ls.example/ws/events')
+    expect(wsSpy.mock.calls[0][0]).toBe('wss://ls.example/ws/events?since=latest')
     expect(wsSpy.mock.calls[0][1]).toEqual(['labsentinel', 'bearer.s3cret'])
     stop()
   })
