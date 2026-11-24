@@ -250,7 +250,7 @@ fn intersection(a: [f32; 4], b: [f32; 4]) -> f32 {
     ])
 }
 
-pub(crate) fn overlapping_people(a: [f32; 4], b: [f32; 4]) -> bool {
+pub fn overlapping_people(a: [f32; 4], b: [f32; 4]) -> bool {
     let overlap = intersection(a, b);
     overlap > 0.0 && overlap >= 0.35 * (area(a) + area(b) - overlap)
 }

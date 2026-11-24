@@ -11,6 +11,9 @@ const labels = {
   covered: '已穿戴', wearing: '已穿戴', no_ppe: '未穿戴', unknown: '看不清',
   likely_true: '疑似真实', likely_false: '疑似误报', uncertain: '不确定',
   recovered: '确认恢复', left_zone: '确认离场', interrupted: '观测中断',
+  person_review_window: '同一人员在复核间隔内已有送审记录',
+  target_not_isolated: '人物重叠，当前画面无法单独复核',
+  local_geometry_rule: '由本地规则判断', budget_exhausted: '今日复核额度已用完',
 }
 const percent = (value) => typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 100) + '%' : '—'
 const visual = computed(() => value.value?.visual)
@@ -60,9 +63,10 @@ async function load() {
         <dd v-if="episode.context?.close_reason">{{ label(episode.context.close_reason) }} · {{ episode.context.closed_ts }}</dd>
       </template>
       <dt>AI 复核</dt>
-      <dd v-if="review">{{ label(review.verdict) }} · {{ percent(review.confidence) }}<template v-if="value.review_model"> · {{ value.review_model }}</template></dd>
+      <dd v-if="review?.verdict">{{ label(review.verdict) }} · {{ percent(review.confidence) }}<template v-if="value.review_model"> · {{ value.review_model }}</template></dd>
+      <dd v-else-if="review?.status === 'unreviewed'">已保留本地检测结果</dd>
       <dd v-else>待复核</dd>
-      <dd v-if="typeof review?.reason === 'string'">{{ review.reason }}</dd>
+      <dd v-if="typeof review?.reason === 'string'">{{ labels[review.reason] || review.reason }}</dd>
       <dd v-if="value.delivery_suppressed">复核后已抑制告警投递</dd>
     </dl>
     <button class="ghost" type="button" :disabled="busy" @click="load">刷新依据</button>

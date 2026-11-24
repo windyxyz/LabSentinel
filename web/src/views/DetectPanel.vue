@@ -33,6 +33,7 @@ const profileBusy = ref(false)
 // ---- 协作策略卡 ----
 const trigger = ref('both')
 const dailyBudget = ref(200)
+const personWindow = ref(300)
 const onNegative = ref('keep')
 
 const testBusy = ref(false)
@@ -114,6 +115,7 @@ async function load() {
     cfg.value = d
     trigger.value = d.cascade?.trigger || 'both'
     dailyBudget.value = d.cascade?.daily_budget ?? 200
+    personWindow.value = d.cascade?.person_window_s ?? 300
     onNegative.value = d.cascade?.on_negative || 'keep'
     usage.value = d.usage
     runtimeEp.value = d.runtime?.ep || 'dml'
@@ -292,6 +294,7 @@ function saveCascade() {
   save({ cascade: {
     trigger: trigger.value,
     daily_budget: dailyBudget.value,
+    person_window_s: personWindow.value,
     on_negative: onNegative.value,
   } }, '协作策略已保存')
 }
@@ -523,7 +526,7 @@ onMounted(load)
       <div v-show="mode === 'cascade'" class="card">
         <h3>协作策略</h3>
         <p class="muted" style="margin-top:0">
-          本地先检查穿戴。持续的同一段违规只提交一张图，恢复后再次违规会单独复核。</p>
+          每个人在复核窗口内最多提交一张图。再次出现或出现另一种违规时，仍照常记录本地事件。</p>
         <div class="row" style="align-items:center; flex-wrap:wrap">
           <label class="muted">触发条件
             <select v-model="trigger" aria-label="触发条件">
@@ -536,6 +539,9 @@ onMounted(load)
             <input v-model.number="dailyBudget" type="number" min="0" step="10" aria-label="每日预算" style="width:90px" />
           </label>
           <span class="muted">0 = 不限</span>
+          <label class="muted">同人复核间隔（秒）
+            <input v-model.number="personWindow" type="number" min="0" max="3600" step="1" aria-label="同人复核间隔" style="width:90px" />
+          </label>
           <label class="muted">VLM 否定时
             <select v-model="onNegative" aria-label="否定策略">
               <option value="keep">照常推送（保守）</option>
@@ -545,7 +551,7 @@ onMounted(load)
           <button :disabled="busy" @click="saveCascade">保存策略</button>
         </div>
         <p class="muted" style="font-size:12px; margin-bottom:0">
-          人员触发只送置信度灰区的轨迹。进出区、人数和留守由本地规则判定。预算耗尽或画面看不清时保留本地告警。</p>
+          跨轨迹按已录入的本机人脸匹配。未匹配的人员按当前轨迹计算。间隔填 0 可关闭按人限频。</p>
       </div>
     </template>
   </div>

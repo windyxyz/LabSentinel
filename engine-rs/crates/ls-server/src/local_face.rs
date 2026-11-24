@@ -192,6 +192,18 @@ pub struct Photo {
 
 impl Photo {
     pub fn decode(raw: &[u8], bounds: Option<[f32; 4]>) -> Result<Self, String> {
+        Self::decode_cropped(raw, bounds, true)
+    }
+
+    pub(super) fn decode_person(raw: &[u8], bounds: Option<[f32; 4]>) -> Result<Self, String> {
+        Self::decode_cropped(raw, bounds, false)
+    }
+
+    fn decode_cropped(
+        raw: &[u8],
+        bounds: Option<[f32; 4]>,
+        face_only: bool,
+    ) -> Result<Self, String> {
         if raw.is_empty() || raw.len() > MAX_PHOTO {
             return Err("请选择不超过 5 MB 的 JPEG 或 PNG 照片".into());
         }
@@ -214,10 +226,13 @@ impl Photo {
         if let Some([x1, y1, x2, y2]) = bounds {
             let height = y2 - y1;
             let width = x2 - x1;
-            let x = (x1 - width * 0.12).clamp(0.0, image.width() as f32) as u32;
-            let y = (y1 - height * 0.09).clamp(0.0, image.height() as f32) as u32;
-            let right = (x2 + width * 0.12).clamp(0.0, image.width() as f32) as u32;
-            let bottom = (y1 + height * 0.46).clamp(0.0, image.height() as f32) as u32;
+            let x_pad = if face_only { width * 0.12 } else { 0.0 };
+            let y_pad = if face_only { height * 0.09 } else { 0.0 };
+            let x = (x1 - x_pad).clamp(0.0, image.width() as f32) as u32;
+            let y = (y1 - y_pad).clamp(0.0, image.height() as f32) as u32;
+            let right = (x2 + x_pad).clamp(0.0, image.width() as f32) as u32;
+            let bottom = (if face_only { y1 + height * 0.46 } else { y2 })
+                .clamp(0.0, image.height() as f32) as u32;
             if right <= x || bottom <= y {
                 return Err("人物区域无可用人脸画面".into());
             }
@@ -352,6 +367,28 @@ fn camera_allowed(store: &ls_store::Store, camera: i64, mode: FaceMode) -> bool 
         FaceMode::Api => permission == "local_or_api",
         FaceMode::Off => false,
     }
+}
+
+/// Use only the enabled local recognizer for matching review windows.
+pub(super) fn review_subject(
+    st: &Shared,
+    store: &ls_store::Store,
+    camera: i64,
+    jpeg: &[u8],
+    bounds: Option<[f32; 4]>,
+) -> Option<FaceMatch> {
+    if !camera_allowed(store, camera, FaceMode::Local) {
+        return None;
+    }
+    let cfg = FaceSettings::load(store, Path::new(&st.data_dir));
+    if cfg.active.mode != FaceMode::Local || cfg.active_profile().is_none() {
+        return None;
+    }
+    let photo = Photo::decode(jpeg, bounds).ok()?;
+    let person = recognize(st, store, &cfg, &photo).ok()??;
+    (camera_allowed(store, camera, FaceMode::Local)
+        && cfg.same_recognition(&FaceSettings::load(store, Path::new(&st.data_dir))))
+    .then_some(person)
 }
 
 pub fn match_alert_enabled(store: &ls_store::Store, camera: i64) -> bool {

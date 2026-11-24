@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ten_minute_episode_sends_one_image_and_reviews_a_new_episode() {
+    async fn ten_minute_episode_obeys_person_review_window() {
         use axum::{extract::State, routing::post, Json, Router};
         use serde_json::{json, Value};
         use std::sync::Mutex;
@@ -540,9 +540,9 @@ mod tests {
                                 gate.notified().await;
                             }
                             let result = if index == 1 {
-                                json!({"persons":1,"violations":["no_mask"]})
+                                json!({"persons":1,"violations":["no_mask"],"compliant":["no_ppe"]})
                             } else {
-                                json!({"persons":1,"compliant":["no_mask"],"violations":[]})
+                                json!({"persons":1,"compliant":[],"violations":[]})
                             };
                             Json(json!({"choices":[{"message":{"content":result.to_string()}}]}))
                         }
@@ -593,8 +593,14 @@ mod tests {
             height: 64,
             data: vec![108; 64 * 64 * 3],
         };
-        let jpeg =
-            ls_analyzer::evidence::encode_jpeg_bgr(&frame.data, frame.width, frame.height).unwrap();
+        let front = (
+            include_bytes!("../../../../../Resources/acceptance/imgs/person-frame.jpg").as_slice(),
+            [598.0, 218.0, 724.0, 585.0],
+        );
+        let back = (
+            include_bytes!("../../../../../Resources/acceptance/imgs/empty-frame.jpg").as_slice(),
+            [628.0, 5.0, 1279.0, 709.0],
+        );
         let cfg = crate::detect::DetectCfg {
             url,
             provider: "openai_compat".into(),
@@ -604,15 +610,18 @@ mod tests {
             daily_budget: 2,
             ..Default::default()
         };
-        let review = |events: Vec<(i64, Candidate)>| {
+        let review = |events: Vec<(i64, Candidate)>, (jpeg, bounds): (&[u8], [f32; 4])| {
             if !events.is_empty() {
+                let track = events[0].1.track_id;
                 super::super::submit_cascade_review(
                     &store,
                     &sink,
                     super::super::CascadeReview {
                         camera_id: cid,
                         cfg: cfg.clone(),
-                        jpeg: jpeg.clone(),
+                        jpeg: axum::body::Bytes::copy_from_slice(jpeg),
+                        bounds: Some(bounds),
+                        track_scope: Some((1, track)),
                         detected_people: 1,
                         ev_round: events,
                         suppress: true,
@@ -628,10 +637,10 @@ mod tests {
             ppe: PpeStatus::Unknown,
         };
         let mut runtime = EpisodeRuntime::default();
-        let mut sample = |seconds| {
+        let mut observe = |seconds, detection| {
             let timestamp = format!("2026-11-24T10:{:02}:{:02}", seconds / 60, seconds % 60);
             let events = pipe.process_with_recheck(
-                &[det],
+                &[detection],
                 &timestamp,
                 Some((&frame.data, frame.width, frame.height)),
                 false,
@@ -656,6 +665,7 @@ mod tests {
                 )
                 .unwrap()
         };
+        let mut sample = |seconds| observe(seconds, det);
         for sec in [0, 2, 4, 6] {
             assert!(sample(sec).is_empty());
         }
@@ -663,15 +673,16 @@ mod tests {
         assert_eq!(warning.len(), 1);
         assert_eq!(warning[0].1.level, 2);
         let id = warning[0].0;
+        let first_track = warning[0].1.track_id;
         let initial = store.event_by_id(id).unwrap().unwrap();
         assert_eq!(initial.alert_tier, "warning");
-        review(warning);
+        review(warning, front);
         let promotion = sample(10);
         assert!(
             promotion.is_empty(),
             "a promotion must not queue a second review"
         );
-        review(promotion);
+        review(promotion, front);
         assert_eq!(store.event_by_id(id).unwrap().unwrap().level, 3);
         assert!(store
             .event_by_id(id)
@@ -734,10 +745,10 @@ mod tests {
         assert_eq!(repeat.len(), 1);
         let repeat_id = repeat[0].0;
         assert_ne!(repeat_id, id);
-        review(repeat);
+        review(repeat, front);
         let (suppressed, verdict) = wait_review(repeat_id).await;
-        assert_eq!(suppressed, 1);
-        assert_eq!(verdict["verdict"], "likely_false");
+        assert_eq!(suppressed, 0);
+        assert_eq!(verdict["reason"], "person_review_window");
         assert!(sample(614).is_empty());
         assert_eq!(
             store
@@ -745,35 +756,70 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .vlm_suppressed,
-            1
+            0
         );
         stage.store(2, Ordering::Relaxed);
         sample(616);
         sample(617);
         stage.store(0, Ordering::Relaxed);
-        for second in [618, 620, 622, 624] {
-            assert!(sample(second).is_empty());
+        let other = PersonDetection {
+            box_: [47.0, 4.0, 63.0, 62.0],
+            ..det
+        };
+        let (second, different_picture) = (618..=632)
+            .step_by(2)
+            .find_map(|sec| {
+                let events = observe(sec, other);
+                (!events.is_empty()).then_some((sec, events))
+            })
+            .expect("a different track must get an independent event");
+        assert_eq!(different_picture.len(), 1);
+        assert_ne!(different_picture[0].1.track_id, first_track);
+        let different_picture_id = different_picture[0].0;
+        review(different_picture, back);
+        let (suppressed, verdict) = wait_review(different_picture_id).await;
+        assert_eq!(suppressed, 0);
+        assert_eq!(verdict["verdict"], "uncertain");
+        stage.store(2, Ordering::Relaxed);
+        observe(second + 2, other);
+        observe(second + 3, other);
+        stage.store(0, Ordering::Relaxed);
+        store
+            .setting_set("detect.cascade.person_window_s", "0")
+            .unwrap();
+        for offset in [4, 6, 8, 10] {
+            assert!(observe(second + offset, other).is_empty());
         }
-        let over_budget = sample(626);
+        let over_budget = observe(second + 12, other);
         assert_eq!(over_budget.len(), 1);
         let over_budget_id = over_budget[0].0;
-        review(over_budget);
+        review(over_budget, back);
         let (suppressed, verdict) = wait_review(over_budget_id).await;
         assert_eq!(suppressed, 0);
         assert_eq!(verdict["reason"], "budget_exhausted");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        for request in requests.iter() {
+        for (request, (bytes, bounds)) in requests.iter().zip([front, back]) {
+            use base64::Engine;
             let parts = request["messages"][0]["content"].as_array().unwrap();
             assert_eq!(parts.len(), 2);
             assert!(parts[0]["text"]
                 .as_str()
                 .unwrap()
                 .contains("fixture custom prompt"));
-            assert!(parts[1]["image_url"]["url"]
+            let encoded = parts[1]["image_url"]["url"]
                 .as_str()
                 .unwrap()
-                .starts_with("data:image/jpeg;base64,"));
+                .strip_prefix("data:image/jpeg;base64,")
+                .unwrap();
+            let sent = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            let expected = crate::local_face::Photo::decode_person(bytes, Some(bounds))
+                .unwrap()
+                .jpeg()
+                .unwrap();
+            assert_eq!(sent, expected);
         }
         mock.abort();
     }

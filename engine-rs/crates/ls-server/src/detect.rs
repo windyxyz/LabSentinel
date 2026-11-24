@@ -73,6 +73,15 @@ fn db_get(s: &ls_store::Store, key: &str) -> Option<String> {
         .filter(|v| !v.trim().is_empty())
 }
 
+pub const MAX_PERSON_REVIEW_WINDOW_S: u64 = 3_600;
+
+pub fn person_review_window(s: &ls_store::Store) -> u64 {
+    db_get(s, "detect.cascade.person_window_s")
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(300)
+        .min(MAX_PERSON_REVIEW_WINDOW_S)
+}
+
 fn env_get(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
@@ -501,6 +510,7 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
                 "conf_lo": cfg.conf_lo,
                 "conf_hi": cfg.conf_hi,
                 "daily_budget": cfg.daily_budget,
+                "person_window_s": person_review_window(s),
                 "on_negative": cfg.on_negative,
             },
             // LS-050：自定义 VLM 提示词（空=内置默认）；性能开关（Motion Gate）
@@ -792,6 +802,12 @@ pub(crate) async fn detect_config_put(
             }
             if let Some(b) = c.get("daily_budget").and_then(|x| x.as_u64()) {
                 writes.push(("detect.cascade.daily_budget".into(), b.to_string()));
+            }
+            if let Some(seconds) = c.get("person_window_s").and_then(|x| x.as_u64()) {
+                writes.push((
+                    "detect.cascade.person_window_s".into(),
+                    seconds.min(MAX_PERSON_REVIEW_WINDOW_S).to_string(),
+                ));
             }
             if let Some(o) = c.get("on_negative").and_then(|x| x.as_str()) {
                 writes.push(("detect.cascade.on_negative".into(), o.into()));

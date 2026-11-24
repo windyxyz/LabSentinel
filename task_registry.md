@@ -47,7 +47,7 @@
 | LS-085 | v0.7.0 · 统一 AI Review 可解释性抽屉与抑制审视面板 | P1 | DONE | 2026-11-24 | 解释、权限、审计截图和重复入池保护通过定向验证。 |
 | LS-086 | v0.7.0 · 统一 Vulkan CV 引擎选型 Spike（`ncnn-vulkan` vs `ort-webgpu` vs `wgpu/Burn`）& 真机对比基准 | P0 | ACTIVE | 2026-11-24 | 核对现有素材、系统显卡和三端运行时，先在 Radeon 880M 上建立可复现的候选基准。 |
 | LS-087 | v0.7.5 · 实验室专项规则（1D 通风橱 `ref_lines` / OR-of-ANDs PPE 策略矩阵 / 协议无关固定机位规则） | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-087`（Schema `v26`） |
-| LS-088 | v0.7.5 · 防幻觉 VLM 2.0 统一引擎 + 性价比带识图 AI 辅助报告、多轮历史问答与持久化记录（DeepSeek/Qwen-VL-Flash 等） | P0 | READY | 2026-11-24 | 单图协作复核定向验收已通过。继续统一复核引擎、角色路由、持久化报告和问答（Schema `v26`）。 |
+| LS-088 | v0.7.5 · 防幻觉 VLM 2.0 统一引擎 + 性价比带识图 AI 辅助报告、多轮历史问答与持久化记录（DeepSeek/Qwen-VL-Flash 等） | P0 | READY | 2026-11-24 | 人员时间窗口和单图复核通过两次回环精测；继续统一引擎、角色路由、持久化报告和问答（Schema `v26`）。 |
 | LS-089 | v0.8.0 · 零 NC 数据集 COCO-Pose 姿态跌倒/昏迷检测 + 可选红外热成像温度遥测钩子 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-089`（Schema `v27`） |
 | LS-090 | v0.8.0 · 摄像头防篡改检测（`tamper.rs`）+ 可选 FFmpeg 音频尖峰旁路 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-090` |
 | LS-091 | v0.8.0 · 全链路模型/阈值/提示词 SHA-256 溯源（`open-nvr` 模式）+ 机位×时段热点热力图 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-091`（Schema `v27`） |

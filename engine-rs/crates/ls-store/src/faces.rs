@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS face_event_matches (
     similarity REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_face_matches_person ON face_event_matches(person_id);
+CREATE TABLE IF NOT EXISTS face_review_windows (
+    person_id INTEGER PRIMARY KEY,
+    sent_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS face_remote_removals (
     profile TEXT NOT NULL,
     remote_subject TEXT NOT NULL,
@@ -208,6 +212,7 @@ impl Store {
     pub fn delete_face_person(&self, id: i64) -> rusqlite::Result<()> {
         let tx = self.conn().unchecked_transaction()?;
         tx.execute("DELETE FROM face_event_matches WHERE person_id=?", [id])?;
+        tx.execute("DELETE FROM face_review_windows WHERE person_id=?", [id])?;
         tx.execute("DELETE FROM face_templates WHERE person_id=?", [id])?;
         tx.execute("DELETE FROM face_people WHERE id=?", [id])?;
         tx.commit()
@@ -225,6 +230,26 @@ impl Store {
              SELECT ?,id,? FROM face_people WHERE id=? AND removing=0 AND expires_at>?
                 AND EXISTS(SELECT 1 FROM events WHERE id=?)",
             params![event, similarity, person, now, event],
+        )?;
+        Ok(())
+    }
+
+    pub fn face_review_sent_at(&self, person: i64) -> rusqlite::Result<Option<i64>> {
+        self.conn()
+            .query_row(
+                "SELECT w.sent_at FROM face_review_windows w WHERE w.person_id=?",
+                [person],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn record_face_review(&self, person: i64, sent_at: i64, now: i64) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT INTO face_review_windows(person_id,sent_at)
+             SELECT id,? FROM face_people WHERE id=? AND removing=0 AND expires_at>?
+             ON CONFLICT(person_id) DO UPDATE SET sent_at=MAX(sent_at,excluded.sent_at)",
+            params![sent_at, person, now],
         )?;
         Ok(())
     }

@@ -23,7 +23,9 @@ mod cascade;
 mod episodes;
 use crate::performance::{FrameTiming, PerformanceWindow};
 use crate::state::Shared;
-use cascade::{finish_cascade_events, keep_geometry_local, submit_cascade_review, CascadeReview};
+use cascade::{
+    finish_cascade_events, group_events, keep_geometry_local, submit_cascade_review, CascadeReview,
+};
 
 /// 事件去重窗口容量（Python sidecar_events.SEEEN_MAX 同值）。
 const DEDUP_MAX: usize = 4096;
@@ -448,7 +450,10 @@ pub struct Snapshot {
 pub struct Workers {
     map: Mutex<HashMap<i64, Arc<WorkerHandle>>>,
     pub(crate) policy_revision: AtomicU64,
+    review_windows: cascade::ReviewWindows,
 }
+
+static NEXT_REVIEW_SOURCE: AtomicU64 = AtomicU64::new(1);
 
 impl Workers {
     pub(crate) fn notify_policy_changed(&self) -> u64 {
@@ -1233,6 +1238,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     );
     // LS-043：用 Option<Instant> 替代 `Instant::now() - vlm_interval`，防 Windows 刚开机减法下溢 panic
     let mut last_vlm: Option<std::time::Instant> = None;
+    let review_source = NEXT_REVIEW_SOURCE.fetch_add(1, Ordering::Relaxed);
     let mut reviewed_tracks = HashSet::new();
     let mut reconnect = CameraReconnect::default();
     let mut last_compliance_sample = None::<Instant>;
@@ -1769,60 +1775,77 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         keep_geometry_local(&store, &sink, &mut ev_round, cascade_suppress);
                         let tracks = pipe.last_tracks();
                         reviewed_tracks.retain(|id| pipe.can_resume_track(*id));
-                        let gray: Vec<_> = tracks
-                            .iter()
-                            .filter(|track| {
-                                !motion_skip
-                                    && !track.occluded
-                                    && !reviewed_tracks.contains(&track.id)
-                                    && crate::detect::cascade_should_review(
-                                        &dcfg,
-                                        1,
-                                        track.confidence,
-                                        false,
-                                    )
-                            })
-                            .map(|track| track.id)
-                            .collect();
-                        let rule_review = !ev_round.is_empty() && dcfg.trigger != "persons";
-                        let gray_review = !gray.is_empty()
-                            && (!ev_round.is_empty()
-                                || last_vlm.is_none_or(|t| t.elapsed() >= vlm_interval));
-                        if rule_review || gray_review {
-                            last_vlm = Some(Instant::now());
-                            reviewed_tracks.extend(gray);
-                            reviewed_tracks
-                                .extend(ev_round.iter().map(|(_, event)| event.track_id));
-                            let jpeg = ev_snapshot.filter(|jpeg| !jpeg.is_empty()).or_else(|| {
-                                ls_analyzer::evidence::encode_jpeg_bgr(
-                                    &frame.data,
-                                    frame.width,
-                                    frame.height,
+                        let gray = |track: &ls_analyzer::pipeline::LiveTrack| {
+                            !motion_skip
+                                && !track.occluded
+                                && crate::detect::cascade_should_review(
+                                    &dcfg,
+                                    1,
+                                    track.confidence,
+                                    false,
                                 )
-                                .ok()
-                            });
-                            submit_cascade_review(
-                                &store,
-                                &sink,
-                                CascadeReview {
-                                    camera_id: cid,
-                                    cfg: dcfg.clone(),
-                                    jpeg: jpeg.unwrap_or_default(),
-                                    detected_people: dets.len(),
-                                    ev_round,
-                                    suppress: cascade_suppress,
-                                    evidence: Some(Arc::clone(&evidence)),
-                                    evidence_key_prefix: format!("vlmc:{}", frame.index),
-                                },
+                        };
+                        let mut groups = group_events(ev_round);
+                        if groups.is_empty() && last_vlm.is_none_or(|t| t.elapsed() >= vlm_interval)
+                        {
+                            if let Some(target) = tracks
+                                .iter()
+                                .find(|track| gray(track) && !reviewed_tracks.contains(&track.id))
+                            {
+                                groups.insert(target.id, Vec::new());
+                            }
+                        }
+                        if !groups.is_empty() {
+                            last_vlm = Some(Instant::now());
+                            let jpeg = axum::body::Bytes::from(
+                                ev_snapshot
+                                    .filter(|jpeg| !jpeg.is_empty())
+                                    .or_else(|| {
+                                        ls_analyzer::evidence::encode_jpeg_bgr(
+                                            &frame.data,
+                                            frame.width,
+                                            frame.height,
+                                        )
+                                        .ok()
+                                    })
+                                    .unwrap_or_default(),
                             );
-                        } else if !ev_round.is_empty() {
-                            finish_cascade_events(
-                                &store,
-                                &sink,
-                                &ev_round,
-                                cascade_suppress,
-                                &serde_json::json!({"status":"unreviewed","reason":"trigger_not_met"}),
-                            );
+                            for (track_id, events) in groups {
+                                let track = tracks
+                                    .iter()
+                                    .find(|track| track.id == track_id && !track.occluded);
+                                if dcfg.trigger == "persons" && !track.is_some_and(gray) {
+                                    finish_cascade_events(
+                                        &store,
+                                        &sink,
+                                        &events,
+                                        cascade_suppress,
+                                        &serde_json::json!({"status":"unreviewed","reason":"trigger_not_met"}),
+                                    );
+                                    continue;
+                                }
+                                reviewed_tracks.insert(track_id);
+                                submit_cascade_review(
+                                    &store,
+                                    &sink,
+                                    CascadeReview {
+                                        camera_id: cid,
+                                        cfg: dcfg.clone(),
+                                        jpeg: jpeg.clone(),
+                                        bounds: track.map(|track| track.bbox),
+                                        track_scope: (track_id > 0)
+                                            .then_some((review_source, track_id)),
+                                        detected_people: dets.len(),
+                                        ev_round: events,
+                                        suppress: cascade_suppress,
+                                        evidence: Some(Arc::clone(&evidence)),
+                                        evidence_key_prefix: format!(
+                                            "vlmc:{}:{track_id}",
+                                            frame.index
+                                        ),
+                                    },
+                                );
+                            }
                         }
                     } else if vlm_cfg.enabled
                         && last_vlm.is_none_or(|t| t.elapsed() >= vlm_interval)
@@ -2510,37 +2533,39 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             if !unmasked.is_empty() {
                 violations.push("no_mask".into());
             }
-            let matches: Vec<_> = policy
-                .rules
-                .iter()
-                .filter_map(|rule| {
-                    if !ls_analyzer::pipeline::rule_active_at(rule, &processed_ts, &policy.calendar)
-                    {
-                        return None;
+            let mut matches = Vec::new();
+            for rule in &policy.rules {
+                if !ls_analyzer::pipeline::rule_active_at(rule, &processed_ts, &policy.calendar) {
+                    continue;
+                }
+                let zone_id = (rule.zone_id != 0).then_some(rule.zone_id);
+                let count = zone_id.map_or(persons, |id| occupancy.get(&id).copied().unwrap_or(0));
+                let hits = match rule.behavior.as_str() {
+                    "enter_no_ppe" => &uncoated,
+                    "no_mask" => &unmasked,
+                    "occupancy_over" if rule.threshold >= 0 && count > rule.threshold => {
+                        matches.push((rule, zone_id, count, None));
+                        continue;
                     }
-                    let zone_id = (rule.zone_id != 0).then_some(rule.zone_id);
-                    let count =
-                        zone_id.map_or(persons, |id| occupancy.get(&id).copied().unwrap_or(0));
-                    let hits = match rule.behavior.as_str() {
-                        "enter_no_ppe" => &uncoated,
-                        "no_mask" => &unmasked,
-                        "occupancy_over" => {
-                            return (rule.threshold >= 0 && count > rule.threshold)
-                                .then_some((rule, zone_id, count, None))
-                        }
-                        _ => return None,
-                    };
-                    let members = zone_id.and_then(|id| zone_members.get(&id));
-                    let mut targets = hits.iter().filter(|index| {
-                        zone_id.is_none()
-                            && (rule.behavior != "enter_no_ppe" || in_zone_ids.contains(index))
-                            || members.is_some_and(|people| people.contains(index))
-                    });
-                    let first = *targets.next()?;
-                    let target = targets.next().is_none().then_some(dets[first].box_);
-                    Some((rule, zone_id, count, target))
-                })
-                .collect();
+                    _ => continue,
+                };
+                let members = zone_id.and_then(|id| zone_members.get(&id));
+                let mut targets = hits.iter().copied().filter(|index| {
+                    zone_id.is_none()
+                        && (rule.behavior != "enter_no_ppe" || in_zone_ids.contains(index))
+                        || members.is_some_and(|people| people.contains(index))
+                });
+                if mode == "cascade" {
+                    matches.extend(targets.map(|index| (rule, zone_id, 1, Some(index))));
+                } else if let Some(first) = targets.next() {
+                    matches.push((
+                        rule,
+                        zone_id,
+                        count,
+                        targets.next().is_none().then_some(first),
+                    ));
+                }
+            }
             for (rule, _, _, _) in &matches {
                 violations.push(rule.behavior.clone());
             }
@@ -2586,15 +2611,18 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             // UX2 cascade：suppress 策略下先不派发，VLM 复核后放行/抑制
             let dispatch_now = !cascade_suppress;
             let mut ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)> = Vec::new();
-            for (rule, zone_id, count, target) in matches {
+            for (rule, zone_id, count, target_index) in matches {
                 let zone = policy.zones.iter().find(|zone| Some(zone.id) == zone_id);
                 let behavior = &rule.behavior;
+                let target = target_index.map(|index| dets[index].box_);
                 let cand = ls_analyzer::pipeline::Candidate {
                     camera_id: cfg.camera_id,
                     zone_id,
                     behavior: behavior.clone(),
                     level: if rule.level > 0 { rule.level } else { 2 },
-                    track_id: 0,
+                    track_id: target_index
+                        .filter(|_| mode == "cascade")
+                        .map_or(0, |index| index as i64 + 1),
                     // UX（2026-11-21 用户实测反馈）：detail 人话化——
                     // 文件名截短（原始名含长哈希后缀），行为名中文化
                     detail: format!(
@@ -2632,36 +2660,62 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
             }
             if mode == "cascade" {
                 keep_geometry_local(&store, &sink, &mut ev_round, cascade_suppress);
-                let max_conf = dets.iter().map(|d| d.score).fold(0.0f32, f32::max);
-                let has_event = !ev_round.is_empty();
-                if crate::detect::cascade_should_review(&dcfg, persons, max_conf, has_event)
-                    && (has_event || last_review.is_none_or(|t| t.elapsed() >= review_interval))
-                {
+                let gray = |score| crate::detect::cascade_should_review(&dcfg, 1, score, false);
+                let mut groups = group_events(ev_round);
+                if groups.is_empty() && last_review.is_none_or(|t| t.elapsed() >= review_interval) {
+                    if let Some((index, _)) = dets
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, det)| gray(det.score))
+                        .max_by(|(_, a), (_, b)| a.score.total_cmp(&b.score))
+                    {
+                        groups.insert(index as i64 + 1, Vec::new());
+                    }
+                }
+                if !groups.is_empty() {
                     last_review = Some(Instant::now());
-                    let jpeg = snapshot_jpeg
-                        .or_else(|| ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h).ok());
-                    submit_cascade_review(
-                        &store,
-                        &sink,
-                        CascadeReview {
-                            camera_id: cfg.camera_id,
-                            cfg: dcfg.clone(),
-                            jpeg: jpeg.unwrap_or_default(),
-                            detected_people: dets.len(),
-                            ev_round,
-                            suppress: cascade_suppress,
-                            evidence: None,
-                            evidence_key_prefix: format!("vlmc-f:{iid}"),
-                        },
+                    let jpeg = axum::body::Bytes::from(
+                        snapshot_jpeg
+                            .or_else(|| ls_analyzer::evidence::encode_jpeg_bgr(&bgr, w, h).ok())
+                            .unwrap_or_default(),
                     );
-                } else if has_event {
-                    finish_cascade_events(
-                        &store,
-                        &sink,
-                        &ev_round,
-                        cascade_suppress,
-                        &serde_json::json!({"status":"unreviewed","reason":"trigger_not_met"}),
-                    );
+                    for (track_id, events) in groups {
+                        let target = track_id
+                            .checked_sub(1)
+                            .and_then(|index| dets.get(index as usize));
+                        if dcfg.trigger == "persons" && !target.is_some_and(|det| gray(det.score)) {
+                            finish_cascade_events(
+                                &store,
+                                &sink,
+                                &events,
+                                cascade_suppress,
+                                &serde_json::json!({"status":"unreviewed","reason":"trigger_not_met"}),
+                            );
+                            continue;
+                        }
+                        let bounds = target.map(|det| det.box_).filter(|bounds| {
+                            !dets.iter().any(|other| {
+                                other.box_ != *bounds
+                                    && ls_analyzer::ppe::overlapping_people(*bounds, other.box_)
+                            })
+                        });
+                        submit_cascade_review(
+                            &store,
+                            &sink,
+                            CascadeReview {
+                                camera_id: cfg.camera_id,
+                                cfg: dcfg.clone(),
+                                jpeg: jpeg.clone(),
+                                bounds,
+                                track_scope: None,
+                                detected_people: dets.len(),
+                                ev_round: events,
+                                suppress: cascade_suppress,
+                                evidence: None,
+                                evidence_key_prefix: format!("vlmc-f:{iid}:{track_id}"),
+                            },
+                        );
+                    }
                 }
             }
             scanned += 1;
