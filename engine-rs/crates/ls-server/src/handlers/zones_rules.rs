@@ -170,27 +170,29 @@ pub(crate) async fn update_zone(
     })
 }
 
-#[allow(clippy::type_complexity)]
-pub(crate) fn rule_json(
-    t: &(
-        i64,
-        i64,
-        Option<i64>,
-        String,
-        i64,
-        i64,
-        Option<String>,
-        Option<String>,
-        i64,
-        i64,
-        Option<String>, // days_of_week（RA1.1 补列，与 Python store.rules 同口径）
-        bool,           // holiday_only（RA4.2 补列，节假日限定规则）
-    ),
-) -> Value {
+pub(crate) fn rule_json(t: &ls_store::RuleFullRow) -> Value {
     json!({"id": t.0, "camera_id": t.1, "zone_id": t.2, "behavior": t.3,
            "level": t.4, "cooldown_s": t.5, "time_start": t.6, "time_end": t.7,
            "threshold": t.8, "enabled": t.9 != 0, "days_of_week": t.10,
-           "holiday_only": t.11})
+           "holiday_only": t.11, "grace_s": t.12, "warn_ratio": t.13})
+}
+
+pub(super) fn parse_rule_grace(body: &Value) -> Result<(u32, f64), &'static str> {
+    let seconds = match body.get("grace_s") {
+        Some(value) => value
+            .as_u64()
+            .filter(|value| *value <= 3600)
+            .ok_or("宽限必须是 0 至 3600 秒的整数")? as u32,
+        None => 0,
+    };
+    let ratio = match body.get("warn_ratio") {
+        Some(value) => value
+            .as_f64()
+            .filter(|value| (0.01..=0.99).contains(value))
+            .ok_or("提前提示比例须在 1% 至 99%")?,
+        None => 0.70,
+    };
+    Ok((seconds, ratio))
 }
 
 pub(crate) async fn rules_list(
@@ -219,10 +221,19 @@ pub(crate) async fn add_rule(State(st): State<Shared>, Json(body): Json<Value>) 
     if behavior.is_empty() {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "behavior 必填").into_response();
     }
+    let (grace, ratio) = match parse_rule_grace(&body) {
+        Ok(settings) => settings,
+        Err(error) => return detail_err(StatusCode::UNPROCESSABLE_ENTITY, error).into_response(),
+    };
+    if grace > 0 && !matches!(behavior.as_str(), "enter_no_ppe" | "no_mask") {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "此规则不支持穿戴宽限")
+            .into_response();
+    }
     with_store(&st, |s| {
         if s.camera(cid)?.is_none() {
             return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
         }
+        let tx = s.conn().unchecked_transaction()?;
         let rid = s.add_rule_with_schedule(
             cid,
             body.get("zone_id").and_then(|v| v.as_i64()),
@@ -240,11 +251,34 @@ pub(crate) async fn add_rule(State(st): State<Shared>, Json(body): Json<Value>) 
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
         )?;
+        s.set_rule_grace(rid, grace, ratio)?;
+        tx.commit()?;
         let revision = st.workers.notify_policy_changed();
         Ok(Json(
             json!({"id": rid, "camera_id": cid, "behavior": behavior, "policy_revision": revision}),
         )
         .into_response())
+    })
+}
+
+pub(crate) async fn update_rule_grace(
+    State(st): State<Shared>,
+    AxPath(rid): AxPath<i64>,
+    Json(body): Json<Value>,
+) -> Response {
+    let (grace, ratio) = match parse_rule_grace(&body) {
+        Ok(settings) if body.get("grace_s").is_some() => settings,
+        Ok(_) => {
+            return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "请输入宽限秒数").into_response()
+        }
+        Err(error) => return detail_err(StatusCode::UNPROCESSABLE_ENTITY, error).into_response(),
+    };
+    with_store(&st, |s| {
+        if s.set_rule_grace(rid, grace, ratio)? == 0 {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "找不到支持宽限的规则").into_response());
+        }
+        let revision = st.workers.notify_policy_changed();
+        Ok(Json(json!({"ok": true, "policy_revision": revision})).into_response())
     })
 }
 
@@ -416,7 +450,14 @@ pub(crate) async fn apply_rule_template(
                     skipped += 1;
                     continue;
                 }
-                s.add_rule_with_schedule(
+                let (grace, ratio) = match parse_rule_grace(r) {
+                    Ok(settings) => settings,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let rid = s.add_rule_with_schedule(
                     *cid,
                     zone_id,
                     behavior,
@@ -429,6 +470,7 @@ pub(crate) async fn apply_rule_template(
                     days,
                     holiday,
                 )?;
+                s.set_rule_grace(rid, grace, ratio)?;
                 created += 1;
             }
         }

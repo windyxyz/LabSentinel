@@ -431,6 +431,9 @@ async fn main() {
     }
     if let Ok(store) = ls_store::Store::open(&st.db_path) {
         ls_infer::ort_session::select_directml_adapter(crate::detect::runtime_adapter(&store));
+        if let Err(error) = store.interrupt_open_episodes(&ls_core::time::local_now_iso()) {
+            crate::logger::error(&format!("[start] 未能关闭上次运行中断的事件段: {error}"));
+        }
     }
     st.access.load(&st.db_path);
     let app = build_router(st.clone());

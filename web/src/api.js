@@ -191,6 +191,7 @@ export const api = {
   copyConfig: (cid, payload) => req('POST', `/api/cameras/${cid}/copy-config`, payload),
   rules: (cid) => req('GET', `/api/rules?camera_id=${cid}`),
   addRule: (d) => req('POST', '/api/rules', d),
+  updateRuleGrace: (id, data) => req('PUT', `/api/rules/${id}`, data),
   delRule: (id) => req('DELETE', `/api/rules/${id}`),
   calendar: () => req('GET', '/api/calendar'),
   setCalendar: (d) => req('POST', '/api/calendar', d),
@@ -299,6 +300,7 @@ export const api = {
 }
 
 export const TYPE_TEXT = {
+  alert_resolved: '违规已恢复',
   photo_check: '图片检查',
   video_check: '视频检查',
   face_match: '识别到已录入人员',
@@ -328,7 +330,7 @@ export const STATUS_TEXT = {
   ignored: '忽略',
 }
 
-export function connectEvents(onEvent, onState) {
+export function connectEvents(onEvent, onState, onUpdate) {
   let ws, timer, closed = false
   let cursor = null
   function open() {
@@ -348,6 +350,8 @@ export function connectEvents(onEvent, onState) {
         const event = JSON.parse(m.data)
         if (Number.isSafeInteger(event?.stream_cursor)) {
           cursor = event.stream_cursor
+        } else if (event?.op === 'episode_update' && Number.isSafeInteger(event.id)) {
+          onUpdate?.(event)
         } else if (Number.isSafeInteger(event?.id) && (cursor === null || event.id > cursor)) {
           cursor = event.id
           onEvent(event)

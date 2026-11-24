@@ -43,8 +43,8 @@
 | LS-081 | v0.6.1 · 并发流硬上限（≤5）+ WS `?since=` 断线重放 + 分阶段耗时 HUD + 敏感度三档预设 | P0 | DONE | 2026-11-24 | 值守功能和基线缺陷通过定向验证，见 `progress.md`。 |
 | LS-082 | v0.6.2 · 空间智能防误报（4 锚点/死区/12 帧离场宽限/Motion+Filter 双遮罩/静止降频/一键记住误报点/抑制审计） | P0 | DONE | 2026-11-24 | 旧库迁移、遮罩心跳、规则与误报点 API 及前端定向验证通过。 |
 | LS-083 | v0.6.2 · 共享 `GpuScheduler` + Vulkan 物理设备枚举 + 干净 WebP 叠框 + Debug 叠层/Digital PTZ | P0 | DONE | 2026-11-24 | 实机 DirectML 共用会话、显卡枚举、证据转换及 ZIP 实测通过。接续 `LS-084` 时从事件段与持续重检开始。 |
-| LS-084 | v0.7.0 · 违规事件段聚合（`duration_s`/峰值截图）+ 两级宽限倒计时 + 合规恢复自动消警（`alert_resolved`） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-084`（Schema `v25`） |
-| LS-085 | v0.7.0 · 统一 AI Review 可解释性抽屉与抑制审视面板 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-085` |
+| LS-084 | v0.7.0 · 违规事件段聚合（`duration_s`/峰值截图）+ 两级宽限倒计时 + 合规恢复自动消警（`alert_resolved`） | P0 | DONE | 2026-11-24 | 10 分钟受控序列、历史库迁移、宽限配置、断线重放和前端定向通过，现场回归归入 0.7.0。 |
+| LS-085 | v0.7.0 · 统一 AI Review 可解释性抽屉与抑制审视面板 | P1 | ACTIVE | 2026-11-24 | 对照事件证据、抑制审计及标注池入口，建立同一份解释与抑制数据。 |
 | LS-086 | v0.7.0 · 统一 Vulkan CV 引擎选型 Spike（`ncnn-vulkan` vs `ort-webgpu` vs `wgpu`）& 真机对比基准 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-086` 与 `docs/adr/0012-unified-vulkan-gpu.md` |
 | LS-087 | v0.7.5 · 实验室专项规则（1D 通风橱 `ref_lines` / OR-of-ANDs PPE 策略矩阵 / 协议无关固定机位规则） | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-087`（Schema `v26`） |
 | LS-088 | v0.7.5 · 防幻觉 VLM 2.0 统一引擎 + 性价比带识图 AI 辅助报告、多轮历史问答与持久化记录（DeepSeek/Qwen-VL-Flash 等） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-088`（Schema `v26`） |

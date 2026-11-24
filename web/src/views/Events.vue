@@ -299,7 +299,7 @@ function applyPreset(v, reload = true) {
 function applyRoute() {
   const query = new URLSearchParams(props.routeQuery)
   const nextCategory = query.get('category')
-  category.value = ['check', 'alert'].includes(nextCategory) ? nextCategory : ''
+  category.value = ['check', 'alert', 'recovery'].includes(nextCategory) ? nextCategory : ''
   const nextStatus = query.get('status')
   status.value = Object.hasOwn(STATUS_TEXT, nextStatus) ? nextStatus : ''
   applyPreset(query.get('today') === '1' ? 'today' : '', false)
@@ -439,6 +439,7 @@ async function rememberSpot(event) {
         <option value="">全部分类</option>
         <option value="check">检查记录</option>
         <option value="alert">告警事件</option>
+        <option value="recovery">恢复记录</option>
       </select>
       <select v-model="level" @change="resetAndLoad">
         <option value="">全部级别</option>
@@ -536,7 +537,11 @@ async function rememberSpot(event) {
           <span v-if="aiBadge(e)" :class="aiBadge(e).cls" :title="aiTitle(e)"
                 style="font-size:11px; margin-left:4px; white-space:nowrap">{{ aiBadge(e).text }}</span>
         </td>
-        <td><span v-if="e.category === 'check'" class="muted">检查记录</span><span v-else :class="'lv' + e.level">L{{ e.level }}</span></td>
+        <td>
+          <span v-if="e.category === 'check'" class="muted">检查记录</span>
+          <span v-else-if="e.category === 'recovery' || e.resolved_ts" class="muted">已恢复</span>
+          <span v-else :class="'lv' + e.level">{{ e.alert_tier === 'warning' ? '宽限提示' : `L${e.level}` }}</span>
+        </td>
         <td class="muted">{{ e.detail }}</td>
         <td>
           <span :class="'lv' + (e.status === 'new' ? 3 : e.status === 'acked' ? 1 : 2)">
@@ -594,9 +599,13 @@ async function rememberSpot(event) {
         </header>
         <div class="drawer-body">
           <p class="muted">{{ drawer.ts }} · 摄像头 #{{ drawer.camera_id }}
-            <template v-if="drawer.category !== 'check'"> · track {{ drawer.track_id }} · <span :class="'lv' + drawer.level">L{{ drawer.level }}</span></template>
+            <template v-if="drawer.category === 'alert'"> · 轨迹 {{ drawer.track_id }} · <span :class="'lv' + drawer.level">L{{ drawer.level }}</span></template>
             · {{ STATUS_TEXT[drawer.status] || drawer.status }}</p>
           <p>{{ drawer.detail }}</p>
+          <p v-if="drawer.episode_id" class="muted">
+            事件段 #{{ drawer.episode_id }} · {{ Number(drawer.duration_s || 0).toFixed(1) }} 秒 · {{ drawer.hit_count }} 次检出
+            <template v-if="drawer.resolved_ts"> · 恢复于 {{ drawer.resolved_ts }}</template>
+          </p>
           <p v-if="faceMatch" class="muted">人脸辅助识别 · {{ faceMatch.subject }} · 相似度 {{ Number(faceMatch.similarity).toFixed(2) }}</p>
           <SnapshotOverlay v-if="canPreview(drawer) && !previewUnavailable" :key="drawer.id"
                :eid="drawer.id" :src="mediaUrl(`/api/events/${drawer.id}/snapshot`)" :available="drawer.has_overlay === true"

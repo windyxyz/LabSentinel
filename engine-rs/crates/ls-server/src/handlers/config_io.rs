@@ -72,7 +72,8 @@ pub(crate) async fn config_export(
                        "behavior": r.3, "level": r.4, "cooldown_s": r.5,
                        "time_start": r.6, "time_end": r.7, "threshold": r.8,
                        "enabled": r.9 != 0,
-                       "days_of_week": r.10, "holiday_only": r.11})
+                       "days_of_week": r.10, "holiday_only": r.11,
+                       "grace_s": r.12, "warn_ratio": r.13})
             })
             .collect();
         Ok(Json(json!({"version": st.version, "cameras": cameras,
@@ -246,7 +247,14 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                 }
                 _ => None,
             };
-            s.add_rule_with_schedule(
+            let (grace, ratio) = match super::zones_rules::parse_rule_grace(r) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    skipped_rule.push(format!("{cname}/{behavior}（{error}）"));
+                    continue;
+                }
+            };
+            let rid = s.add_rule_with_schedule(
                 cid,
                 zone_id,
                 behavior,
@@ -261,6 +269,7 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
             )?;
+            s.set_rule_grace(rid, grace, ratio)?;
             created.2 += 1;
         }
         tx.commit()?;

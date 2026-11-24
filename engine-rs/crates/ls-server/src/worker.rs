@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::handlers::events::event_json;
+
+mod episodes;
 use crate::performance::{FrameTiming, PerformanceWindow};
 use crate::state::Shared;
 
@@ -158,7 +160,7 @@ impl EventSink {
         snapshot_jpeg: Option<&[u8]>,
         dispatch: bool,
     ) -> Result<Option<i64>, String> {
-        self.record_located(cand, snapshot_jpeg, dispatch, None, None)
+        self.record_located(cand, snapshot_jpeg, dispatch, None, None, None)
     }
 
     fn record_located(
@@ -168,23 +170,24 @@ impl EventSink {
         dispatch: bool,
         bbox: Option<[f32; 4]>,
         overlay: Option<&str>,
+        episode_id: Option<i64>,
     ) -> Result<Option<i64>, String> {
+        let st = &self.st;
+        let store = ls_store::Store::open(&st.db_path).map_err(|e| e.to_string())?;
+        let key = Self::dedup_key(cand);
         {
             let mut d = self.dedup.lock().map_err(|_| "dedup poison")?;
-            let key = Self::dedup_key(cand);
             if d.seen.contains(&key) {
                 return Ok(None);
             }
             d.seen.insert(key.clone());
-            d.order.push_back(key);
+            d.order.push_back(key.clone());
             if d.order.len() > DEDUP_MAX {
                 if let Some(old) = d.order.pop_front() {
                     d.seen.remove(&old);
                 }
             }
         }
-        let st = &self.st;
-        let store = ls_store::Store::open(&st.db_path).map_err(|e| e.to_string())?;
         let snapshot = snapshot_jpeg.and_then(|jpeg| {
             self.save_snapshot(cand.camera_id, &cand.ts_iso, jpeg)
                 .map_err(|error| {
@@ -207,6 +210,7 @@ impl EventSink {
                 .filter(|_| snapshot.is_some() && crate::spatial::spatial_rule(&cand.behavior)),
             detections_json: overlay.filter(|_| snapshot.is_some()),
             snapshot_sha256: snapshot.as_ref().map(|image| image.sha256.as_str()),
+            episode_id,
         };
         let eid = store
             .add_event_with_evidence(&ev, evidence)
@@ -214,10 +218,16 @@ impl EventSink {
                 if let Some(path) = path {
                     let _ = std::fs::remove_file(path);
                 }
+                if let Ok(mut dedup) = self.dedup.lock() {
+                    dedup.seen.remove(&key);
+                    dedup.order.retain(|reserved| reserved != &key);
+                }
                 error.to_string()
             })?;
         // RA2-S5：AI 复核入队（默认 provider=none 零开销；只写 ai_review 标记）
-        let _ = st.genai.maybe_enqueue(eid, path, cand.level, &st.db_path);
+        if cand.behavior != "alert_resolved" {
+            let _ = st.genai.maybe_enqueue(eid, path, cand.level, &st.db_path);
+        }
         // WS 广播：行口径与 /api/events 完全一致（绝对路径不外泄——event_json
         // 只出 has_snapshot/has_video 布尔，与 Python 桥 pop(snapshot/video) 等价）
         if let Ok(Some(row)) = store.event_by_id(eid) {
@@ -244,6 +254,18 @@ impl EventSink {
         cam_name: &str,
         has_snapshot: bool,
         snapshot_path: Option<&str>,
+    ) {
+        self.deliver(eid, cand, cam_name, has_snapshot, snapshot_path, false);
+    }
+
+    fn deliver(
+        &self,
+        eid: i64,
+        cand: &ls_analyzer::pipeline::Candidate,
+        cam_name: &str,
+        has_snapshot: bool,
+        snapshot_path: Option<&str>,
+        episode_upgrade: bool,
     ) {
         let st = &self.st;
         // RA2-S2：MQTT 总线发布（独立于静默/渠道过滤——Python alerts.dispatch
@@ -293,7 +315,11 @@ impl EventSink {
             .name(format!("ls-dispatch-{eid}"))
             .spawn(move || {
                 if let Ok(s) = ls_store::Store::open(&db_path) {
-                    let submitted = jobs.dispatch_event(&s, &dev);
+                    let submitted = if episode_upgrade {
+                        jobs.dispatch_episode_upgrade(&s, &dev)
+                    } else {
+                        jobs.dispatch_event(&s, &dev)
+                    };
                     if submitted > 0 {
                         println!("[ls-dispatch] event#{eid} 首发派发 {submitted} 渠道");
                     }
@@ -556,6 +582,7 @@ struct CameraPolicy {
     rules: Vec<ls_analyzer::pipeline::RuleSpec>,
     calendar: HashMap<String, String>,
     spatial: crate::spatial::SpatialPolicy,
+    rule_grace: HashMap<i64, ls_analyzer::episode::GraceWindow>,
 }
 
 fn read_camera_policy(s: &ls_store::Store, cid: i64) -> Result<CameraPolicy, String> {
@@ -608,12 +635,27 @@ fn read_camera_policy(s: &ls_store::Store, cid: i64) -> Result<CameraPolicy, Str
         .map(|c| (c.date, c.mode))
         .collect();
     let spatial = crate::spatial::SpatialPolicy::read(s, cid).map_err(|error| error.to_string())?;
+    let rule_grace = s
+        .camera_rule_grace(cid)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(id, seconds, ratio)| {
+            (
+                id,
+                ls_analyzer::episode::GraceWindow {
+                    seconds,
+                    warning_percent: (ratio.clamp(0.01, 0.99) * 100.0).round() as u8,
+                },
+            )
+        })
+        .collect();
     tx.commit().map_err(|error| error.to_string())?;
     Ok(CameraPolicy {
         zones,
         rules,
         calendar,
         spatial,
+        rule_grace,
     })
 }
 
@@ -1154,6 +1196,11 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     // 限流（默认 6 次/分钟/路）；cascade 模式走异步复核队列（见下方触发门）。
     let dcfg = crate::detect::DetectCfg::load(&store, Path::new(&st.data_dir));
     let mode = crate::detect::effective_mode(&cfg.analyzer, &dcfg.mode);
+    let continuous_ppe = mode != "api";
+    pipe.set_continuous_ppe(continuous_ppe);
+    let mut episodes = episodes::EpisodeRuntime::default();
+    let stream_started = std::time::Instant::now();
+    let mut last_episode_check = None;
     let cascade_suppress = mode == "cascade" && dcfg.on_negative == "suppress";
     let mut vlm_cfg = dcfg.to_vlm_cfg();
     match mode.as_str() {
@@ -1435,6 +1482,29 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         person_frames += u64::from(!dets.is_empty());
                     }
                     let rules_start = std::time::Instant::now();
+                    let episode_clock = if video_file {
+                        std::time::Duration::from_secs_f64(
+                            (checked_frames + failed_frames) as f64
+                                / f64::from(cfg.spec.analysis_fps.max(1.0)),
+                        )
+                    } else {
+                        captured.arrived.saturating_duration_since(stream_started)
+                    };
+                    let review_interval = if episodes.recovery_check_due() {
+                        std::time::Duration::from_secs(1)
+                    } else {
+                        ls_analyzer::episode::REVIEW_INTERVAL
+                    };
+                    let recheck = continuous_ppe
+                        && !motion_skip
+                        && !dets.is_empty()
+                        && last_episode_check.is_none_or(|previous| {
+                            episode_clock.saturating_sub(previous) >= review_interval
+                        })
+                        && policy
+                            .rules
+                            .iter()
+                            .any(|rule| episodes::episode_behavior(&rule.behavior));
                     let sample_ppe = live_capture
                         && mode != "api"
                         && !motion_skip
@@ -1446,13 +1516,20 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         // Keep existing tracks until an observed frame resumes analysis.
                         Vec::new()
                     } else {
-                        pipe.process_with_ppe_sample(
+                        pipe.process_with_recheck(
                             &dets,
                             &ts,
                             Some((&frame.data, frame.width, frame.height)),
                             sample_ppe,
+                            recheck,
                         )
                     };
+                    if continuous_ppe
+                        && !motion_skip
+                        && (recheck || !pipe.ppe_readings().is_empty())
+                    {
+                        last_episode_check = Some(episode_clock);
+                    }
                     if live_capture && !motion_skip {
                         stationary_only = stationary.update(&policy.spatial, pipe.last_tracks());
                     }
@@ -1561,14 +1638,40 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             "img_h": frame.height,
                             "tracks": tracks,
                             "zones": zones,
+                            "episode_countdowns": episodes.countdowns(&policy),
                             "objects": if motion_skip { &[] } else { detector.objects() },
                         });
                         let _ = detections.send(payload.to_string());
                     }
                     // UX2 cascade：suppress 策略下本地事件先不派发（复核肯定补投递）
                     let dispatch_now = !cascade_suppress;
-                    let rules_hit = !cands.is_empty(); // 管线候选 = 规则/区域命中
                     let mut ev_round: Vec<(i64, ls_analyzer::pipeline::Candidate)> = Vec::new();
+                    if continuous_ppe && !motion_skip {
+                        let episode_frame = episodes::EpisodeFrame {
+                            camera_id: cid,
+                            camera_name: &cfg.spec.name,
+                            time: episode_clock,
+                            timestamp: &ts,
+                            frame: &frame,
+                            jpeg: ev_snapshot.as_deref(),
+                            dispatch: dispatch_now,
+                        };
+                        match episodes.process(&store, &sink, &pipe, &policy, &episode_frame) {
+                            Ok(events) => {
+                                for (id, candidate, created) in events {
+                                    if created {
+                                        spawn_finalize(&st, &evidence, id);
+                                        alert_events += u64::from(video_file);
+                                    }
+                                    ev_round.push((id, candidate));
+                                }
+                            }
+                            Err(error) => crate::logger::error(&format!(
+                                "[ls-worker] cam-{cid} 事件段落库失败: {error}"
+                            )),
+                        }
+                    }
+                    let rules_hit = !cands.is_empty() || !ev_round.is_empty();
                     if !cands.is_empty() {
                         // 事件帧快照：优先复用本帧抽帧结果，未命中 stride 则现编
                         let snap = match ev_snapshot {
@@ -1595,6 +1698,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 dispatch_now,
                                 bounds,
                                 overlay.as_deref(),
+                                None,
                             ) {
                                 Ok(Some(eid)) => {
                                     if video_file {
@@ -1806,6 +1910,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         }
     }
     evidence.flush();
+    episodes.interrupt(&store, &sink, cid, &crate::util::iso_now());
     if video_file && (checked_frames > 0 || failed_frames > 0 || exit_status == "error") {
         let outcome = match exit_status {
             "completed" => "检查完成",
@@ -2634,6 +2739,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     dispatch_now,
                     target,
                     overlay.as_deref(),
+                    None,
                 ) {
                     let _ = store.set_folder_image_event(iid, eid);
                     ev_round.push((eid, cand));

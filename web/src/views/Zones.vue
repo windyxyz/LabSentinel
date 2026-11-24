@@ -29,6 +29,38 @@ const snapshotUrl = computed(() => camId.value && snapT.value
 const zname = ref('')
 const newRule = ref({ behavior: 'enter', level: 2, cooldown_s: 60, time_start: '00:00', time_end: '23:59', threshold: 0,
   days_of_week: '1,2,3,4,5,6,7', holiday_only: false })  // 任务112：星期/假期条件
+const newGraceSeconds = ref(0)
+const newWarningPercent = ref(70)
+const ruleMessage = ref('')
+const graceBusy = ref(false)
+const supportsGrace = (behavior) => ['enter_no_ppe', 'no_mask'].includes(behavior)
+const warningPercent = (rule) => Math.round((rule.warn_ratio ?? 0.70) * 100)
+
+async function saveRuleGrace(rule, form) {
+  const settings = new FormData(form)
+  graceBusy.value = true
+  ruleMessage.value = ''
+  try {
+    await api.updateRuleGrace(rule.id, {
+      grace_s: Number(settings.get('grace_s')), warn_ratio: Number(settings.get('warn_percent')) / 100,
+    })
+    await load()
+    ruleMessage.value = '宽限已保存'
+  } catch (error) {
+    ruleMessage.value = error.message
+  } finally {
+    graceBusy.value = false
+  }
+}
+
+function ruleSettings() {
+  return {
+    ...newRule.value,
+    ...(supportsGrace(newRule.value.behavior)
+      ? { grace_s: newGraceSeconds.value, warn_ratio: newWarningPercent.value / 100 }
+      : {}),
+  }
+}
 // 任务112：日期例外表（holiday=该日按假期 / workday=按工作日）
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
 const calExceptions = ref([])
@@ -154,7 +186,7 @@ async function loadTpls() {
 async function saveAsTemplate() {
   if (!tplName.value.trim()) { tplMsg.value = '先填模板名'; return }
   try {
-    await api.createRuleTemplate({ name: tplName.value.trim(), rules: [newRule.value] })
+    await api.createRuleTemplate({ name: tplName.value.trim(), rules: [ruleSettings()] })
     tplMsg.value = `模板「${tplName.value.trim()}」已保存`
     tplName.value = ''
     loadTpls()
@@ -462,8 +494,13 @@ function onKey(e) {
 }
 
 async function addRule(zoneId) {
-  await api.addRule({ camera_id: camId.value, zone_id: zoneId, ...newRule.value })
-  load()
+  ruleMessage.value = ''
+  try {
+    await api.addRule({ camera_id: camId.value, zone_id: zoneId, ...ruleSettings() })
+    await load()
+  } catch (error) {
+    ruleMessage.value = error.message
+  }
 }
 </script>
 
@@ -564,6 +601,11 @@ async function addRule(zoneId) {
              style="width:100px" />
       <label class="muted"><input type="checkbox" v-model="newRule.holiday_only" />仅假期生效</label>
     </div>
+    <div v-if="supportsGrace(newRule.behavior)" class="row">
+      <label>宽限（秒） <input v-model.number="newGraceSeconds" type="number" min="0" max="3600" /></label>
+      <label>提前提示（%） <input v-model.number="newWarningPercent" type="number" min="1" max="99" /></label>
+      <span class="muted">设为 0 会立即告警</span>
+    </div>
     <!-- LS-052：可视化周时段排班（100% 兼容 days_of_week/time_start/time_end 契约） -->
     <SchedulePicker
       v-model:days-of-week="newRule.days_of_week"
@@ -575,13 +617,24 @@ async function addRule(zoneId) {
         <td><span :class="'lv' + r.level">L{{ r.level }}</span></td>
         <td class="muted">冷却{{ r.cooldown_s }}s · {{ r.time_start }}-{{ r.time_end }} · 阈值{{ r.threshold }}
           <span v-if="dayLabel(r)"> · {{ dayLabel(r) }}</span><span v-if="r.holiday_only"> · 仅假期</span></td>
-        <td><button class="ghost" @click="api.delRule(r.id).then(load)">删除</button></td>
+        <td>
+          <details v-if="supportsGrace(r.behavior)">
+            <summary>宽限 {{ r.grace_s || 0 }} 秒</summary>
+            <form class="zone-spatial" @submit.prevent="saveRuleGrace(r, $event.currentTarget)">
+              <label>宽限（秒） <input name="grace_s" type="number" min="0" max="3600" :value="r.grace_s ?? 0" required /></label>
+              <label>提前提示（%） <input name="warn_percent" type="number" min="1" max="99" :value="warningPercent(r)" required /></label>
+              <button class="ghost" :disabled="graceBusy">保存</button>
+            </form>
+          </details>
+          <button class="ghost" @click="api.delRule(r.id).then(load)">删除</button>
+        </td>
       </tr>
     </table>
     <div class="row" style="margin-top:8px">
       <button v-for="z in zones" :key="'a' + z.id" class="ghost" @click="addRule(z.id)">给「{{ z.name }}」加此规则</button>
       <button class="ghost" @click="addRule(null)">加为全局规则</button>
     </div>
+    <p v-if="ruleMessage" role="status">{{ ruleMessage }}</p>
 
     <!-- 任务112：日期例外表 -->
     <h3 style="margin:14px 0 10px">日期例外</h3>

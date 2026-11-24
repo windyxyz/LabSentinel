@@ -438,6 +438,23 @@ impl Jobs {
     /// （escalation 的「未处置事件升级提醒」仍走 escalate_once；两者共享渠道快照
     /// 与限流器，事件不重复入队——首发只针对新落地事件。）
     pub fn dispatch_event(&self, store: &Store, ev: &ls_dispatch::DispatchEvent) -> usize {
+        self.dispatch_with_cooldown(store, ev, true)
+    }
+
+    pub fn dispatch_episode_upgrade(
+        &self,
+        store: &Store,
+        ev: &ls_dispatch::DispatchEvent,
+    ) -> usize {
+        self.dispatch_with_cooldown(store, ev, false)
+    }
+
+    fn dispatch_with_cooldown(
+        &self,
+        store: &Store,
+        ev: &ls_dispatch::DispatchEvent,
+        cooldown: bool,
+    ) -> usize {
         let channels: Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> =
             match self.alert_channels.lock().ok().and_then(|g| g.clone()) {
                 Some(injected) if !injected.is_empty() => injected,
@@ -469,7 +486,7 @@ impl Jobs {
                 .get(&key)
                 .map(|t| t.elapsed() < Duration::from_secs(cooldown_s))
                 .unwrap_or(false);
-            if suppressed {
+            if cooldown && suppressed {
                 println!(
                     "[alert] event#{} 冷却窗口内同人同行为——渠道不重复推送",
                     ev.id

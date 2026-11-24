@@ -2,7 +2,8 @@
 
 ## Latest Handoff Snapshot
 
-- **当前节点**。`v0.6.2`，`LS-080` 至 `LS-083` 已验收，代码直连 GitHub 主线。下一阶段 `LS-084` 待启动。
+- **当前节点**。`LS-085`，事件解释与抑制审视。基线版本仍标记 `v0.6.2`，目标推进至 `v0.7.5`。
+- **LS-084 定向验收**。SQLite v25 实施。穿戴规则每 2 秒复检，首次合规后 1 秒复核。受控 10 分钟序列产生 301 次检出，提示与升级共用一个事件 ID，峰值截图刷新，确认合规后生成恢复记录。旧库迁移、规则宽限读写、重放、定向 Clippy、前端 19 项、Vite 构建与 148 条前端 API 契约通过。
 - **验证节奏**。`v0.6.2` 运行必要检查和定向验证。从 `v0.7.0` 起，每个大版本集中跑全量回归并做回归审阅。
 - **LS-083**。DirectML 会话集中在单线程并按使用中的模型共享。实机测试确认两个租用方共享会话，释放其一后另一方完成推理。ZIP 的运行时配置枚举到 2 个 GPU，其中 1 个匹配 Vulkan。事件 WebP、原图叠框、摘要、JPEG 缩略图及告警前转码通过验证。
 - **本地产物**。`Resources/dist/labsentinel-rust-0.6.2-20261124.zip`（119401468 字节，SHA-256 `d6cfde886bb02eedbb8d7bef5c7eb1c372f965f946083a74ffb97c602edc7685`），`Resources/dist/LabSentinel-setup-0.6.2.exe`（93191780 字节，SHA-256 `90061902fb4454b62bbae4901cb7685bf38ee88dcd9b0642aaaf9ba76af0e130`）。
@@ -19,7 +20,7 @@
 - **安装器**。Inno Setup 7 从同一临时暂存目录编译通过，退出码 0，验证产物 154.2 MB。交互安装仍在后续验收范围。
 - **投递与处置**。启动时恢复历史的待投递项，保留重试退避和已发送记录。测试检查记录可查、告警统计排除检查、AI 复核的展示与筛选一致。Rust 三连通过（207 项通过、4 项忽略），前端 101 项和构建通过。
 - **值守验收**。前端实时预览共享五个流媒体名额，超额使用快照。断线后按持久化事件 ID 有序重放并去重。大屏可显示各阶段 P95 耗时，三档灵敏度同时调整人员和 PPE 阈值。Rust 路由定向 17 项、前端定向 26 项通过。
-- **Next First Command**。`git status --short --branch`，按 `LS-084` 检查事件生成和复核之间的工作流。对比结果纳入 `v0.7.0` 回归与回归审阅。
+- **Next First Command**。`rg -n 'add_suppression|event_image_path|add_dataset_sample|detection_overlay' engine-rs/crates`，接入解释详情与可标注的抑制证据。
 
 ## Previous Handoff Snapshot · LS-076
 

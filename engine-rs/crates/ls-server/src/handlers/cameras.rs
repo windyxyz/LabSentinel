@@ -793,7 +793,7 @@ pub(crate) async fn copy_camera_config(
                         rules_skipped += 1;
                         continue;
                     }
-                    s.add_rule_with_schedule(
+                    let rule_id = s.add_rule_with_schedule(
                         *tid,
                         zid,
                         &r.3,
@@ -806,6 +806,7 @@ pub(crate) async fn copy_camera_config(
                         r.10.as_deref(),
                         r.11,
                     )?;
+                    s.set_rule_grace(rule_id, r.12, r.13)?;
                     rules_created += 1;
                 }
             } else {

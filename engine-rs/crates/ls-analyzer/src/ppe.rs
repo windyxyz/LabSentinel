@@ -211,6 +211,7 @@ fn supplement_masks(
     h: u32,
     person_boxes: &[[f32; 4]],
     masks: &mut [PpeStatus],
+    confidence: &mut [f32],
 ) {
     let Ok(faces) = model.faces(bgr, w, h) else {
         return;
@@ -223,12 +224,15 @@ fn supplement_masks(
             associated[owner].push(bounds);
         }
     }
-    for (status, faces) in masks.iter_mut().zip(associated) {
+    for ((status, confidence), faces) in masks.iter_mut().zip(confidence).zip(associated) {
         let (PpeStatus::Unknown, [bounds]) = (*status, faces.as_slice()) else {
             continue;
         };
         if let Ok(scores) = model.classify(bgr, w, *bounds) {
             *status = close_mask_status(scores);
+            if *status == PpeStatus::NoPpe {
+                *confidence = scores[1];
+            }
         }
     }
 }
@@ -334,10 +338,7 @@ impl PpeRunner for YoloPpeRunner {
             specs.push((no_mask, self.violation_conf, 0.0));
             specs.push((mask, self.wearing_conf, 0.0));
         }
-        let unknown = PpeObservation {
-            coat: PpeStatus::Unknown,
-            mask: PpeStatus::Unknown,
-        };
+        let unknown = PpeObservation::default();
         let Ok(mut all_dets) = self.model.detect_classes(bgr, w, h, &specs) else {
             return vec![unknown; person_boxes.len()];
         };
@@ -347,13 +348,13 @@ impl PpeRunner for YoloPpeRunner {
         } else {
             Vec::new()
         };
-        let no_boxes: Vec<[f32; 4]> = no_boxes_raw.iter().map(|d| d.box_).collect();
         let wear_boxes: Vec<[f32; 4]> = all_dets
             .into_iter()
             .flat_map(|v| v.into_iter().map(|d| d.box_))
             .collect();
         let frame_area = ((w as f32) * (h as f32)).max(1.0);
         let mut masks = vec![PpeStatus::Unknown; person_boxes.len()];
+        let mut mask_confidence = vec![0.0f32; person_boxes.len()];
         if let [uncovered, covered] = mask_dets.as_slice() {
             let mut evidence = vec![(false, false); person_boxes.len()];
             for (index, dets) in [uncovered, covered].into_iter().enumerate() {
@@ -365,6 +366,7 @@ impl PpeRunner for YoloPpeRunner {
                     if let (Some(owner), None) = (owners.next(), owners.next()) {
                         if index == 0 {
                             evidence[owner].0 = true;
+                            mask_confidence[owner] = mask_confidence[owner].max(det.score);
                         } else {
                             evidence[owner].1 = true;
                         }
@@ -381,13 +383,23 @@ impl PpeRunner for YoloPpeRunner {
         }
         if masks.contains(&PpeStatus::Unknown) {
             if let Some(model) = self.close_mask.as_mut() {
-                supplement_masks(model, bgr, w, h, person_boxes, &mut masks);
+                supplement_masks(
+                    model,
+                    bgr,
+                    w,
+                    h,
+                    person_boxes,
+                    &mut masks,
+                    &mut mask_confidence,
+                );
             }
         }
         let mut coat_hits = vec![(false, false); person_boxes.len()];
-        for bounds in no_boxes {
-            if let Some(owner) = coat_owner(bounds, person_boxes) {
+        let mut coat_confidence = vec![0.0f32; person_boxes.len()];
+        for detection in no_boxes_raw {
+            if let Some(owner) = coat_owner(detection.box_, person_boxes) {
                 coat_hits[owner].0 = true;
+                coat_confidence[owner] = coat_confidence[owner].max(detection.score);
             }
         }
         for bounds in wear_boxes {
@@ -433,7 +445,11 @@ impl PpeRunner for YoloPpeRunner {
                             let has_no = roi_dets.first().is_some_and(|v| !v.is_empty());
                             let has_wear = roi_dets.iter().skip(1).any(|v| !v.is_empty());
                             return match (has_no, has_wear) {
-                                (true, false) => PpeStatus::NoPpe,
+                                (true, false) => {
+                                    coat_confidence[index] =
+                                        roi_dets[0].iter().map(|d| d.score).fold(0.0, f32::max);
+                                    PpeStatus::NoPpe
+                                }
                                 (false, true) => PpeStatus::Wearing,
                                 _ => PpeStatus::Unknown,
                             };
@@ -469,7 +485,23 @@ impl PpeRunner for YoloPpeRunner {
         coats
             .into_iter()
             .zip(masks)
-            .map(|(coat, mask)| PpeObservation { coat, mask })
+            .zip(coat_confidence.into_iter().zip(mask_confidence))
+            .map(
+                |((coat, mask), (coat_confidence, mask_confidence))| PpeObservation {
+                    coat,
+                    mask,
+                    coat_violation_confidence: if coat == PpeStatus::NoPpe {
+                        coat_confidence
+                    } else {
+                        0.0
+                    },
+                    mask_violation_confidence: if mask == PpeStatus::NoPpe {
+                        mask_confidence
+                    } else {
+                        0.0
+                    },
+                },
+            )
             .collect()
     }
 }

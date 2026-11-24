@@ -83,6 +83,11 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
 `PUT /api/detect/config` 接受 `runtime.adapter_index` 作为 DirectML 使用的 DXGI 显卡编号，`null` 恢复自动选择。
 支持 `VK_EXT_memory_budget` 时读取 Vulkan 的本地显存预算，否则使用可用的 DXGI 数据。显卡映射以 LUID 为准。[Vulkan 显存预算](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_memory_budget.html) · [DXGI 显存查询](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/nf-dxgi1_4-idxgiadapter3-queryvideomemoryinfo)
 
+穿戴规则的 `POST /api/rules` 和 `PUT /api/rules/{rid}` 接受 `grace_s` 与 `warn_ratio`。
+宽限默认 0 秒，提前提示比例默认 0.70。事件结果返回 `episode_id`、起止时间、
+`duration_s`、`hit_count`、`peak_conf`、`alert_tier` 和可用的 `resolved_ts`。
+`category=recovery` 可查询 `alert_resolved` 记录。
+
 `Zone`: `{id, camera_id, name, polygon: [[x,y],...]}`（1280×720 像素坐标）
 
 ## 4. 规则

@@ -212,6 +212,7 @@ pub fn type_text(type_: &str) -> String {
         "enter_no_ppe" => "有人未穿实验服进入监控区".to_string(),
         "enter" => "有人进入监控区".to_string(),
         "exit" => "有人离开监控区".to_string(),
+        "alert_resolved" => "违规已恢复".to_string(),
         "stranger" => "陌生人进入".to_string(),
         "no_gloves" => "未戴手套".to_string(),
         "no_goggles" => "未戴护目镜".to_string(),

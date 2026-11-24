@@ -761,6 +761,29 @@ async fn zones_and_rules_crud() {
     assert_eq!(body_json(r).await.as_array().unwrap().len(), 1);
     let r = req(&app, "DELETE", &format!("/api/rules/{rid}"), None).await;
     assert_eq!(r.status(), StatusCode::OK);
+    let r = req(
+        &app,
+        "POST",
+        "/api/rules",
+        Some(json!({
+            "camera_id":cid, "behavior":"no_mask","grace_s":10, "warn_ratio":0.7,
+        })),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let rid = body_json(r).await["id"].as_i64().unwrap();
+    let r = req(
+        &app,
+        "PUT",
+        &format!("/api/rules/{rid}"),
+        Some(json!({"grace_s":12,"warn_ratio":0.6})),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = req(&app, "GET", "/api/rules", None).await;
+    let rules = body_json(r).await;
+    assert_eq!(rules[0]["grace_s"], 12);
+    assert_eq!(rules[0]["warn_ratio"], 0.6);
 }
 
 #[tokio::test]

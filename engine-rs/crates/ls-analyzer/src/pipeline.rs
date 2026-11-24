@@ -56,17 +56,27 @@ pub struct RuleSpec {
     pub holiday_only: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PpeStatus {
+    #[default]
     Unknown,
     Wearing,
     NoPpe,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PpeObservation {
     pub coat: PpeStatus,
     pub mask: PpeStatus,
+    pub coat_violation_confidence: f32,
+    pub mask_violation_confidence: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PpeReading {
+    pub track_id: i64,
+    pub bbox: [f32; 4],
+    pub observation: PpeObservation,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -154,6 +164,9 @@ pub struct CameraPipeline {
     last_tracks: Vec<LiveTrack>,
     occluded_tracks: Vec<([f32; 4], i64)>,
     last_ppe_sample: PpeSample,
+    continuous_ppe: bool,
+    ppe_readings: Vec<PpeReading>,
+    observed_exits: Vec<(i64, i64)>,
     frame_index: u64,
     /// L1 对齐诊断：true 时每帧记录 ByteTrack 激活轨迹 (track_id, tlbr)
     pub log_tracks: bool,
@@ -184,7 +197,7 @@ pub trait PpeRunner: Send {
             .into_iter()
             .map(|coat| PpeObservation {
                 coat,
-                mask: PpeStatus::Unknown,
+                ..Default::default()
             })
             .collect()
     }
@@ -227,6 +240,9 @@ impl CameraPipeline {
             last_tracks: Vec::new(),
             occluded_tracks: Vec::new(),
             last_ppe_sample: PpeSample::default(),
+            continuous_ppe: false,
+            ppe_readings: Vec::new(),
+            observed_exits: Vec::new(),
             frame_index: 0,
             log_tracks: false,
             track_log: Vec::new(),
@@ -292,6 +308,24 @@ impl CameraPipeline {
         &self.last_ppe_sample
     }
 
+    pub fn set_continuous_ppe(&mut self, enabled: bool) {
+        self.continuous_ppe = enabled;
+    }
+
+    pub fn ppe_readings(&self) -> &[PpeReading] {
+        &self.ppe_readings
+    }
+
+    pub fn observed_exits(&self) -> &[(i64, i64)] {
+        &self.observed_exits
+    }
+
+    pub fn confirmed_in_zone(&self, track: i64, zone: i64) -> bool {
+        self.zone_states
+            .get(&zone)
+            .is_some_and(|state| state.is_inside(track))
+    }
+
     /// 处理一帧检测结果，返回本帧事件候选（未入库）。
     /// 无帧数据 = PPE 恒 Unknown（黄金语料/无模型路径，与 Python ppe_model="" 同口径）。
     pub fn process(&mut self, dets: &[PersonDetection], frame_ts: &str) -> Vec<Candidate> {
@@ -316,7 +350,20 @@ impl CameraPipeline {
         frame: Option<(&[u8], u32, u32)>,
         sample_ppe: bool,
     ) -> Vec<Candidate> {
+        self.process_with_recheck(dets, frame_ts, frame, sample_ppe, false)
+    }
+
+    pub fn process_with_recheck(
+        &mut self,
+        dets: &[PersonDetection],
+        frame_ts: &str,
+        frame: Option<(&[u8], u32, u32)>,
+        sample_ppe: bool,
+        recheck: bool,
+    ) -> Vec<Candidate> {
         self.last_ppe_sample = PpeSample::default();
+        self.ppe_readings.clear();
+        self.observed_exits.clear();
         self.frame_index += 1;
         let now = parse_ts(frame_ts).unwrap_or_else(ls_time::local_now_civil);
         let mut out = Vec::new();
@@ -404,7 +451,8 @@ impl CameraPipeline {
         let mut det_ppe: Vec<PpeStatus> = dets.iter().map(|d| d.ppe).collect();
         let mut without_mask = HashSet::new();
         let mask_interval = self.camera.analysis_fps.round().max(1.0) as u64;
-        let sample_masks = (self.frame_index - 1).is_multiple_of(mask_interval)
+        let sample_masks = !self.continuous_ppe
+            && (self.frame_index - 1).is_multiple_of(mask_interval)
             && self
                 .rules
                 .iter()
@@ -413,12 +461,23 @@ impl CameraPipeline {
             if !active.is_empty()
                 && !dets.is_empty()
                 && (sample_ppe
+                    || recheck
                     || sample_masks
                     || needs_ppe(&self.zones, &self.zone_states, &active))
             {
                 let person_boxes: Vec<[f32; 4]> = active.iter().map(|(b, _)| *b).collect();
                 let observations = runner.observations(bgr, w, h, &person_boxes);
-                for ((bbox, id), observation) in active.iter().zip(observations) {
+                for ((bbox, id), mut observation) in active.iter().zip(observations) {
+                    if occluded.contains(bbox) {
+                        observation = PpeObservation::default();
+                    }
+                    if self.continuous_ppe {
+                        self.ppe_readings.push(PpeReading {
+                            track_id: *id,
+                            bbox: *bbox,
+                            observation,
+                        });
+                    }
                     if let Some(i) = dets.iter().position(|d| d.box_ == *bbox) {
                         det_ppe[i] = observation.coat;
                         if observation.mask == PpeStatus::NoPpe {
@@ -528,7 +587,7 @@ impl CameraPipeline {
                     s.insert(*tid);
                 }
             }
-            if without_mask.contains(tid) {
+            if !self.continuous_ppe && without_mask.contains(tid) {
                 inside.sort_unstable();
                 for zone_id in inside.into_iter().map(Some).chain(std::iter::once(None)) {
                     if self.try_fire(
@@ -550,6 +609,7 @@ impl CameraPipeline {
             let zname = self.zone_name(zid);
             match change {
                 ZoneChange::Exit => {
+                    self.observed_exits.push((tid, zid));
                     let detail = format!("离开安全区「{zname}」");
                     self.try_fire(Some(zid), "exit", tid, &detail, 2, &now, frame_ts, &mut out);
                 }
@@ -568,6 +628,15 @@ impl CameraPipeline {
                         );
                     }
                     PpeStatus::NoPpe => {
+                        if self.continuous_ppe
+                            && self.rules.iter().any(|rule| {
+                                rule.behavior == "enter_no_ppe"
+                                    && rule_zone_ok(rule, "enter_no_ppe", Some(zid))
+                                    && rule_active_at(rule, frame_ts, &self.calendar)
+                            })
+                        {
+                            continue;
+                        }
                         let detail = format!("进入安全区「{zname}」未穿实验服");
                         if !self.try_fire(
                             Some(zid),
@@ -1250,7 +1319,8 @@ mod tests {
                 vec![
                     PpeObservation {
                         coat: PpeStatus::Unknown,
-                        mask: PpeStatus::NoPpe
+                        mask: PpeStatus::NoPpe,
+                        ..Default::default()
                     };
                     boxes.len()
                 ]

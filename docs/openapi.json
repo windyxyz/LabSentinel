@@ -2554,6 +2554,22 @@
       }
     },
     "/api/rules/{rid}": {
+      "put": {
+        "summary": "Update the grace window for a PPE rule",
+        "parameters": [{"name": "rid", "in": "path", "required": true, "schema": {"type": "integer"}}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {
+            "type": "object",
+            "required": ["grace_s"],
+            "properties": {
+              "grace_s": {"type": "integer", "minimum": 0, "maximum": 3600},
+              "warn_ratio": {"type": "number", "minimum": 0.01, "maximum": 0.99, "default": 0.7}
+            }
+          }}}
+        },
+        "responses": {"200": {"description": "Updated"}, "404": {"description": "PPE rule was not found"}, "422": {"description": "Invalid grace settings"}}
+      },
       "delete": {
         "summary": "Delete Rule",
         "operationId": "delete_rule_api_rules__rid__delete",

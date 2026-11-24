@@ -111,7 +111,11 @@ function draw() {
     ctx.lineWidth = 2
     ctx.strokeRect(r.x, r.y, r.w, r.h)
     const confidence = Number.isFinite(t.conf) ? ` · ${Math.round(t.conf * 100)}%` : ''
-    const label = props.debug ? `#${t.id}${confidence}${t.occluded ? ' · 遮挡' : ''}` : `#${t.id}`
+    const countdowns = Array.isArray(latest.episode_countdowns) ? latest.episode_countdowns : []
+    const remaining = countdowns.filter(row => row?.track_id === t.id && Number.isFinite(row.remaining_s))
+      .reduce((lowest, row) => Math.min(lowest, row.remaining_s), Infinity)
+    const grace = Number.isFinite(remaining) ? ` · 宽限 ${remaining} 秒` : ''
+    const label = props.debug ? `#${t.id}${confidence}${t.occluded ? ' · 遮挡' : ''}${grace}` : `#${t.id}${grace}`
     const tw = ctx.measureText(label).width + 8
     ctx.fillStyle = color
     ctx.fillRect(r.x, Math.max(0, r.y - 18), tw, 18)

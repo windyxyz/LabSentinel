@@ -89,10 +89,17 @@ pub(crate) fn event_json(e: &ls_store::Event) -> Value {
         (e.vlm_ts.as_deref(), None)
     };
     json!({"id": e.id, "ts": e.ts, "camera_id": e.camera_id, "type": e.type_,
-           "category": if matches!(e.type_.as_str(), "photo_check" | "video_check") { "check" } else { "alert" },
+           "category": match e.type_.as_str() {
+               "photo_check" | "video_check" => "check",
+               "alert_resolved" => "recovery",
+               _ => "alert",
+           },
            "level": e.level, "track_id": e.track_id, "detail": e.detail,
            "has_snapshot": e.snapshot.is_some(), "has_video": e.video.is_some(),
            "has_overlay": e.detections_json.is_some(), "snapshot_sha256": e.snapshot_sha256,
+           "episode_id": e.episode_id, "first_ts": e.first_ts, "last_ts": e.last_ts,
+           "duration_s": e.duration_s, "hit_count": e.hit_count, "peak_conf": e.peak_conf,
+           "resolved_ts": e.resolved_ts, "alert_tier": e.alert_tier,
            "status": e.status, "handled_by": e.handled_by, "handled_ts": e.handled_ts,
            "ai_verdict": ai_verdict, "ai_review": review,
            "ai_review_ts": review_ts, "ai_review_model": review_model,
@@ -370,22 +377,21 @@ pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i6
 }
 
 fn load_event_thumb(st: &Shared, eid: i64) -> Option<Vec<u8>> {
-    let src = ls_store::Store::open(&st.db_path).ok().and_then(|store| {
-        store
-            .event_by_id(eid)
-            .ok()
-            .flatten()
-            .and_then(|event| event_image_path(st, &store, &event))
-    })?;
+    let store = ls_store::Store::open(&st.db_path).ok()?;
+    let event = store.event_by_id(eid).ok().flatten()?;
+    let src = event_image_path(st, &store, &event)?;
+    let cacheable = event.episode_id.is_none() || event.resolved_ts.is_some();
     let dir = std::path::Path::new(&st.data_dir).join("thumbs");
     let cache = dir.join(format!("ev_{eid}.jpg"));
-    if let Ok(bytes) = std::fs::read(&cache) {
-        return Some(bytes);
+    if cacheable {
+        if let Ok(bytes) = std::fs::read(&cache) {
+            return Some(bytes);
+        }
     }
     let raw = ls_jobs::media::read_snapshot(&src)?;
     let thumbnail = ls_jobs::media::decode_image(&raw)?.thumbnail(320, 180);
     let jpeg = ls_jobs::media::encode_jpeg(&thumbnail, 82)?;
-    if std::fs::create_dir_all(&dir).is_ok() {
+    if cacheable && std::fs::create_dir_all(&dir).is_ok() {
         // 原子写：先写 .tmp 再改名，避免并发读到半截文件
         let tmp = dir.join(format!("ev_{eid}_{}.jpg.tmp", uuid_like()));
         if std::fs::write(&tmp, &jpeg)
@@ -541,13 +547,34 @@ async fn handle_replay(
         tokio::select! {
             message = socket.recv() => if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) { return },
             message = rx.recv() => {
-                if matches!(message, Err(broadcast::error::RecvError::Closed)) { return; }
+                match message {
+                    Err(broadcast::error::RecvError::Closed) => return,
+                    Ok(text) if is_visible_episode_update(&text, after, cameras.as_deref()) => {
+                        if socket.send(Message::Text(text)).await.is_err() { return; }
+                    }
+                    _ => {}
+                }
                 more = true;
             },
             _ = poll.tick() => more = true,
             _ = tokio::task::yield_now(), if more => {},
         }
     }
+}
+
+fn is_visible_episode_update(text: &str, after: i64, cameras: Option<&[i64]>) -> bool {
+    let Ok(event) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    event.get("op").and_then(Value::as_str) == Some("episode_update")
+        && event
+            .get("id")
+            .and_then(Value::as_i64)
+            .is_some_and(|id| id <= after)
+        && event
+            .get("camera_id")
+            .and_then(Value::as_i64)
+            .is_some_and(|camera| cameras.is_none_or(|scope| scope.contains(&camera)))
 }
 
 /// LS-051：`/ws/detections/:cid` 实时检测元数据广播（受 trusted_hosts + 读令牌守卫，

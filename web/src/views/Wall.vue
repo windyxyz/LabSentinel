@@ -43,10 +43,11 @@
     <aside>
       <h3>实时事件</h3>
       <ul>
-        <li v-for="e in visibleEvents" :key="e.id" :class="'L' + e.level">
+        <li v-for="e in visibleEvents" :key="e.id" :class="e.resolved_ts ? 'L0' : 'L' + e.level">
           <span class="ts">{{ (e.ts || '').slice(11, 19) }}</span>
           <span class="ty">{{ TYPE_TEXT[e.type] || e.type }}</span>
           <span class="de">{{ e.detail }}</span>
+          <small v-if="e.resolved_ts" class="muted">已恢复</small>
           <div v-if="device?.can_triage && (!e.status || e.status === 'new')" class="event-actions">
             <button type="button" class="ghost" :disabled="triaging.has(e.id)" @click="triage(e, 'acked')">确认</button>
             <button type="button" class="ghost" :disabled="triaging.has(e.id)" @click="triage(e, 'false_positive')">误报</button>
@@ -182,7 +183,22 @@ function beep() {
 }
 
 function onNewEvent(ev) {
+  if (ev.type === 'alert_resolved' && ev.episode_id) {
+    events.value = events.value.map(event => event.episode_id === ev.episode_id
+      ? { ...event, resolved_ts: ev.ts } : event)
+    if (toast.value?.episode_id === ev.episode_id) toast.value = null
+  }
   events.value = [ev, ...events.value.filter(event => event.id !== ev.id)].slice(0, 50)
+  showAlarm(ev)
+}
+
+function onEpisodeUpdate(ev) {
+  const index = events.value.findIndex(event => event.id === ev.id)
+  if (index >= 0) events.value.splice(index, 1, ev)
+  showAlarm(ev)
+}
+
+function showAlarm(ev) {
   if (selectedGroup.value && !groupCameras.value.some(camera => camera.id === ev.camera_id)) return
   if (Number(ev.level) >= 2) {
     toast.value = ev
@@ -245,7 +261,7 @@ onMounted(async () => {
     events.value = (Array.isArray(list?.items) ? list.items : Array.isArray(list) ? list : []).slice(0, 50)
   } catch { /* ignore */ }
   if (disposed) return
-  stopWs = connectEvents(onNewEvent, () => {})
+  stopWs = connectEvents(onNewEvent, () => {}, onEpisodeUpdate)
   clockTimer = setInterval(() => {
     now.value = new Date().toLocaleString('zh-CN', { hour12: false })
   }, 1000)

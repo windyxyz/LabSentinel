@@ -8,16 +8,18 @@ use ls_core::{AnchorMode, ZoneSpatial};
 use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
+mod episodes;
 mod faces;
 mod operations;
 mod spatial;
+pub use episodes::{EpisodeEvidence, NewEpisode};
 pub use faces::{FacePerson, FaceTemplate};
 pub use operations::{ComplianceCounts, DeliveryWithHistory, EventNote};
 pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 24;
+pub const SCHEMA_VERSION_LATEST: i64 = 25;
 
 #[derive(Debug)]
 pub struct StoredZone {
@@ -47,6 +49,14 @@ pub struct Event {
     pub ai_review_model: Option<String>,
     pub detections_json: Option<String>,
     pub snapshot_sha256: Option<String>,
+    pub episode_id: Option<i64>,
+    pub first_ts: Option<String>,
+    pub last_ts: Option<String>,
+    pub duration_s: f64,
+    pub hit_count: i64,
+    pub peak_conf: Option<f64>,
+    pub resolved_ts: Option<String>,
+    pub alert_tier: String,
     /// UX2 cascade：VLM 复核判定（完整 JSON 文本；None=未复核）
     pub vlm_verdict: Option<String>,
     /// UX2 cascade：复核时间
@@ -74,13 +84,15 @@ pub struct EventEvidence<'a> {
     pub bbox: Option<[f32; 4]>,
     pub detections_json: Option<&'a str>,
     pub snapshot_sha256: Option<&'a str>,
+    pub episode_id: Option<i64>,
 }
 
 const EVENT_COLUMNS: &str = "id,ts,camera_id,type,level,track_id,detail,snapshot,video,\
     COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0),handled_by,handled_ts,\
-    ai_review,ai_review_ts,ai_review_model,detections_json,snapshot_sha256";
+    ai_review,ai_review_ts,ai_review_model,detections_json,snapshot_sha256,\
+    episode_id,first_ts,last_ts,duration_s,hit_count,peak_conf,resolved_ts,alert_tier";
 
-pub const ALERT_EVENTS_SQL: &str = "type NOT IN ('photo_check','video_check')";
+pub const ALERT_EVENTS_SQL: &str = "type NOT IN ('photo_check','video_check','alert_resolved')";
 
 pub const AI_VERDICT_SQL: &str = "COALESCE(
     CASE WHEN json_valid(ai_review) THEN CASE json_extract(ai_review,'$.verdict')
@@ -170,7 +182,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(24, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(25, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -184,7 +196,8 @@ impl Store {
                id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id INTEGER, zone_id INTEGER, \
                behavior TEXT, level INTEGER, cooldown_s INTEGER, \
                time_start TEXT, time_end TEXT, threshold INTEGER, enabled INTEGER, \
-               days_of_week TEXT DEFAULT '1,2,3,4,5,6,7', holiday_only INTEGER DEFAULT 0);
+               days_of_week TEXT DEFAULT '1,2,3,4,5,6,7', holiday_only INTEGER DEFAULT 0, \
+               grace_s INTEGER NOT NULL DEFAULT 0, warn_ratio REAL NOT NULL DEFAULT 0.70);
              CREATE TABLE IF NOT EXISTS calendar_exceptions(\
                date TEXT PRIMARY KEY, mode TEXT NOT NULL, note TEXT);
              CREATE TABLE IF NOT EXISTS rule_templates(\
@@ -196,6 +209,9 @@ impl Store {
                status TEXT DEFAULT 'new', handled_by TEXT, handled_ts TEXT, \
                escalated_ts TEXT, ai_review TEXT, ai_review_ts TEXT, ai_review_model TEXT, \
                detections_json TEXT, snapshot_sha256 TEXT, \
+               episode_id INTEGER, first_ts TEXT, last_ts TEXT, duration_s REAL NOT NULL DEFAULT 0, \
+               hit_count INTEGER NOT NULL DEFAULT 1, peak_conf REAL, resolved_ts TEXT, \
+               alert_tier TEXT NOT NULL DEFAULT 'alert', \
                vlm_verdict TEXT, vlm_ts TEXT, vlm_suppressed INTEGER DEFAULT 0);
              CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
              CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);
@@ -243,6 +259,7 @@ impl Store {
         self.conn.execute_batch(faces::SCHEMA)?;
         self.conn.execute_batch(operations::SCHEMA)?;
         self.conn.execute_batch(spatial::SCHEMA)?;
+        self.conn.execute_batch(episodes::SCHEMA)?;
         Ok(true)
     }
 
@@ -430,6 +447,43 @@ impl Store {
             "INSERT OR IGNORE INTO schema_version VALUES(24, 'rust-ls083-snapshot-evidence')",
             [],
         )?;
+        for (column, definition) in [
+            ("episode_id", "INTEGER"),
+            ("first_ts", "TEXT"),
+            ("last_ts", "TEXT"),
+            ("duration_s", "REAL NOT NULL DEFAULT 0"),
+            ("hit_count", "INTEGER NOT NULL DEFAULT 1"),
+            ("peak_conf", "REAL"),
+            ("resolved_ts", "TEXT"),
+            ("alert_tier", "TEXT NOT NULL DEFAULT 'alert'"),
+        ] {
+            if !event_columns.contains(column) {
+                tx.execute(
+                    &format!("ALTER TABLE events ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
+        }
+        let rule_columns = tx
+            .prepare("PRAGMA table_info(rules)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        for (column, definition) in [
+            ("grace_s", "INTEGER NOT NULL DEFAULT 0"),
+            ("warn_ratio", "REAL NOT NULL DEFAULT 0.70"),
+        ] {
+            if !rule_columns.contains(column) {
+                tx.execute(
+                    &format!("ALTER TABLE rules ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
+        }
+        tx.execute_batch(episodes::SCHEMA)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(25, 'rust-ls084-episodes')",
+            [],
+        )?;
         tx.commit()?;
         self.schema_version()
     }
@@ -465,10 +519,18 @@ impl Store {
             .transpose()?;
         let conn = tx.as_deref().unwrap_or(&self.conn);
         conn.execute(
-            "INSERT INTO events(ts,camera_id,type,level,track_id,detail,snapshot,detections_json,snapshot_sha256)
-             VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO events(ts,camera_id,type,level,track_id,detail,snapshot,detections_json,
+             snapshot_sha256,episode_id,first_ts,last_ts,duration_s,hit_count,peak_conf,alert_tier,status)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,
+             (SELECT first_ts FROM violation_episodes WHERE id=?10),
+             (SELECT last_ts FROM violation_episodes WHERE id=?10),
+             COALESCE((SELECT duration_s FROM violation_episodes WHERE id=?10),0),
+             COALESCE((SELECT hit_count FROM violation_episodes WHERE id=?10),1),
+             (SELECT peak_conf FROM violation_episodes WHERE id=?10),
+             COALESCE((SELECT alert_tier FROM violation_episodes WHERE id=?10),'alert'),
+             CASE WHEN ?3='alert_resolved' THEN 'recorded' ELSE 'new' END)",
             params![ev.ts, ev.camera_id, ev.type_, ev.level, ev.track_id, ev.detail, ev.snapshot,
-                    evidence.detections_json, evidence.snapshot_sha256],
+                    evidence.detections_json, evidence.snapshot_sha256,evidence.episode_id],
         )?;
         let id = conn.last_insert_rowid();
         if let (Some(bbox), Some(tx)) = (evidence.bbox, tx) {
@@ -981,6 +1043,7 @@ impl EventsFilter<'_> {
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         match self.category {
             Some("check") => sql.push_str(" AND type IN ('photo_check','video_check')"),
+            Some("recovery") => sql.push_str(" AND type='alert_resolved'"),
             Some("alert") => {
                 sql.push_str(" AND ");
                 sql.push_str(ALERT_EVENTS_SQL);
@@ -1180,7 +1243,10 @@ impl Store {
         // （weekday/时段过滤依赖它），原缺口会让时段规则周末误触发（静默差异）。
         // RA4.2（退役批）：补选 holiday_only——pipeline.holiday_allowed 消费。
         let mut stmt = self.conn.prepare(
-            "SELECT id,camera_id,zone_id,behavior,level,COALESCE(cooldown_s,0),time_start,time_end,COALESCE(threshold,0),enabled,days_of_week,holiday_only FROM rules ORDER BY camera_id,id")?;
+            "SELECT id,camera_id,zone_id,behavior,level,COALESCE(cooldown_s,0),time_start,time_end,
+             COALESCE(threshold,0),enabled,days_of_week,holiday_only,grace_s,warn_ratio
+             FROM rules ORDER BY camera_id,id",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -1195,6 +1261,8 @@ impl Store {
                 r.get(9)?,
                 r.get(10)?,
                 r.get::<_, i64>(11)? != 0,
+                r.get(12)?,
+                r.get(13)?,
             ))
         })?;
         rows.collect()
@@ -2585,6 +2653,8 @@ pub type RuleFullRow = (
     i64,
     Option<String>,
     bool,
+    u32,
+    f64,
 );
 
 /// 时间线一天：(date, [(hour, total, l3), …24])
@@ -2676,6 +2746,14 @@ fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
         ai_review_model: r.get(17)?,
         detections_json: r.get(18)?,
         snapshot_sha256: r.get(19)?,
+        episode_id: r.get(20)?,
+        first_ts: r.get(21)?,
+        last_ts: r.get(22)?,
+        duration_s: r.get(23)?,
+        hit_count: r.get(24)?,
+        peak_conf: r.get(25)?,
+        resolved_ts: r.get(26)?,
+        alert_tier: r.get(27)?,
     })
 }
 

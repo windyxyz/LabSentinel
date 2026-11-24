@@ -92,6 +92,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/rules"),
     ("POST", "/api/rules"),
     ("DELETE", "/api/rules/:rid"),
+    ("PUT", "/api/rules/:rid"),
     ("GET", "/api/rule-templates"),
     ("POST", "/api/rule-templates"),
     ("PUT", "/api/rule-templates/:tid"),
@@ -286,7 +287,7 @@ pub fn build_router(state: Shared) -> Router {
         )
         .route("/review/suppressions", get(suppressions_list))
         .route("/rules", get(rules_list).post(add_rule))
-        .route("/rules/:rid", delete(delete_rule))
+        .route("/rules/:rid", delete(delete_rule).put(update_rule_grace))
         .route("/rule-templates", get(templates_list).post(add_template))
         .route(
             "/rule-templates/:tid",

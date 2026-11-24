@@ -337,7 +337,9 @@ pub fn run_cleanup_with(
         let rows = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, snapshot, video FROM events WHERE ts < ? ORDER BY id ASC LIMIT ?",
+                    "SELECT id, snapshot, video FROM events WHERE ts < ?
+                     AND NOT EXISTS(SELECT 1 FROM violation_episodes ep WHERE ep.id=events.episode_id AND ep.closed_ts IS NULL)
+                     ORDER BY id ASC LIMIT ?",
                 )
                 .map_err(|e| e.to_string())?;
             let it = stmt
@@ -372,6 +374,10 @@ pub fn run_cleanup_with(
             break;
         }
     }
+
+    store
+        .delete_unreferenced_episodes_older_than(&cutoff)
+        .map_err(|error| error.to_string())?;
 
     // 2) 误报标注池过期文件（按修改时间）
     let pool_cutoff = SystemTime::now()
