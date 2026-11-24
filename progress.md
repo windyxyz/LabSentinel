@@ -3,7 +3,9 @@
 ## Latest Handoff Snapshot
 
 - **人员窗口更正与验收**。同一人在默认 300 秒内最多送一张，按已录入本机匹配跨轨迹和机位，无匹配只按当前连续轨迹。窗口和多人裁剪即时生效，窗口内其他本地事件继续保留。用两张项目图片由助手判读口罩结果，回环模拟 API 实收两次，每次核对裁剪 JPEG 字节。重复轨迹不发送，不同人触发同类规则各自保留，额度用完继续本地。用已确认身份的测试输入验证换轨、换机位、重启、到期与删除身份。当前证据未测现场人脸准确率。`cargo fmt --all -- --check`、定向 Clippy、`cargo test -p ls-server --all-features worker:: -- --nocapture`（22 项）、前端 15 项及构建通过。
-- **当前节点**。`LS-086`，`v0.7.0` 本地双产物构建。后续目标 `v0.7.5`。本机 Vulkan 短测支持 ncnn FP16 作为优先候选，包体与跨厂商长稳门禁仍待补齐。
+- **当前节点**。`LS-087`，推进 `v0.7.5` 实验室专项规则。上一节点 `v0.7.0` 本地双产物通过打包与解包冒烟。`LS-086` 硬件门禁继续待测，决定依据见 [ADR-0012](docs/adr/0012-unified-vulkan-gpu.md#2026-11-24-radeon-880m-实测)。
+- **v0.7.0 双产物**。`Resources/dist/labsentinel-rust-0.7.0-20261124.zip`，119471354 字节，SHA-256 `d983659910f6d2179dcc504853785767e1e86cddf316e6435100939df3d5a8e6`。`Resources/dist/LabSentinel-setup-0.7.0.exe`，93246734 字节，SHA-256 `cf5ce268e92d2ff82050c34cd4962e2feba659352c5ccfd111dcdc4f6b7f3829`。严格打包、Inno Setup 7 编译、解包冒烟中的照片视频留痕、视频预览、告警图片、PPE、抑制审计、推理失败对照及退出均通过。交互安装、升级与卸载待现场复测。
+- **v0.7.0 主线**。`3091a9e` 已直连推送。GitHub `tests` 手动全量任务 `45319400069` 已开始，Web 通过，Windows 与 Ubuntu Rust 执行中。GitHub 标签与 Release 暂停。
 - **v0.7.0 全量回归审阅**。首次运行发现旧库清理在缺失抑制审计与违规片段表时中断、清理预览包含仍活跃的旧告警，以及 WebSocket 与数据库版本断言落后。修复后 Rust fmt、工作区全特性 Clippy、221 项测试（5 项忽略）、前端 103 项与构建通过。路由覆盖 138/138，前端 152 条 API 合同匹配，另登记既有 OpenAPI 条目缺口 49 条待按后续功能批补。实际版本为 `0.7.0`，数据库仍为 `v25`。
 - **LS-088 提前补充协作复核**。同一段白大褂或口罩违规只发首个事件的一张图。升级和刷新证据继续更新原事件。新违规可独立复核，同帧多个新事件共享一张。人数灰区按可恢复轨迹去重，区域几何和留守保留本地判定。会话并发和每日预算受限，自动复核结论需要明确单人证据才可抑制推送。
 - **协作复核验收**。回环模拟视觉 API 验证 10 分钟 301 次本地检出仅送一次单图，恢复后的新事件再送一次，继续新增事件超过每日预算保持本地。检查人员不清楚或结论冲突时保留告警。`cargo fmt --all -- --check`、`cargo clippy -p ls-server -p ls-store --all-targets --all-features -- -D warnings`、`cargo test -p ls-server --all-features worker:: -- --nocapture`（21 项）、`npx vitest run tests/detect.test.js`（10 项）、`npm run build`通过。
