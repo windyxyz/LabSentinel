@@ -897,6 +897,104 @@ async fn spatial_masks_and_false_positive_spots_round_trip() {
 }
 
 #[tokio::test]
+async fn episode_explanation_and_suppression_samples_follow_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("review.db");
+    seed_schema(&db);
+    let root = dir.path().to_str().unwrap();
+    let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+    let cid = store
+        .conn_add_camera("review", "source.mp4", "file")
+        .unwrap();
+    let at = "2026-11-24T10:24:00";
+    let eid = store.add_event_with_evidence(
+        &ls_store::NewEvent {
+            camera_id: cid, type_: "enter_no_ppe", level: 2, track_id: 1, detail: "fixture",
+            snapshot: None, ts: at,
+        },
+        ls_store::EventEvidence {
+            detections_json: Some(r#"{"visual":{"violation_confidence":0.8,"assignment_gap":0.3},"zone_policy":{"name":"台面","spatial":{"anchor_mode":"upper_body"}}}"#),
+            ..Default::default()
+        },
+    ).unwrap();
+    store
+        .set_ai_review(
+            eid,
+            r#"{"verdict":"likely_false","confidence":0.88,"reason":"fixture"}"#,
+            at,
+            "local-vision",
+        )
+        .unwrap();
+    let state =
+        super::helpers::test_state_custom(db.to_str().unwrap(), "adm", true, root, true, "");
+    let app = build_router(state);
+    let admin = [("x-admin-token", "adm")];
+    let explain = body_json(
+        req_hdr(
+            &app,
+            "GET",
+            &format!("/api/events/{eid}/explain"),
+            None,
+            &admin,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(explain["visual"]["assignment_gap"], 0.3);
+    assert_eq!(explain["zone"]["spatial"]["anchor_mode"], "upper_body");
+    assert_eq!(explain["review"]["verdict"], "likely_false");
+    assert_eq!(explain["review_model"], "local-vision");
+    let jpeg = ls_analyzer::evidence::encode_jpeg_bgr(&[120; 64 * 64 * 3], 64, 64).unwrap();
+    let frame = crate::spatial::AuditFrame {
+        data_dir: root,
+        jpeg: Some(&jpeg),
+        pixels: None,
+    };
+    assert!(crate::spatial::audit(
+        &store,
+        cid,
+        "filter_mask",
+        8,
+        "enter_no_ppe",
+        at,
+        Some(&frame)
+    ));
+    assert!(crate::spatial::audit(
+        &store,
+        cid,
+        "filter_mask",
+        8,
+        "enter_no_ppe",
+        at,
+        Some(&frame)
+    ));
+    let rows = store.suppressions(Some(cid), None, 20).unwrap();
+    let audit = &rows[0];
+    assert!(audit.has_snapshot);
+    assert_eq!(audit.hits, 2);
+    let snapshot = format!("/api/review/suppressions/{}/snapshot", audit.id);
+    assert_eq!(
+        req(&app, "GET", &snapshot, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = req_hdr(&app, "GET", &snapshot, None, &admin).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap()
+            .as_ref(),
+        jpeg
+    );
+    let sample = format!("/api/review/suppressions/{}/sample", audit.id);
+    let first = body_json(req_hdr(&app, "POST", &sample, None, &admin).await).await;
+    let second = body_json(req_hdr(&app, "POST", &sample, None, &admin).await).await;
+    assert_eq!(first["sample"]["source_type"], "suppression");
+    assert!(first["sample"]["id"].is_i64());
+    assert_eq!(first["sample"]["id"], second["sample"]["id"]);
+}
+
+#[tokio::test]
 
 async fn pairing_and_device_read() {
     let dir = tempfile::tempdir().unwrap();

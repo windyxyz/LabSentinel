@@ -2475,6 +2475,20 @@
         "responses": {"200": {"description": "Audit records, newest ID first"}}
       }
     },
+    "/api/review/suppressions/{id}/snapshot": {
+      "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "get": {
+        "summary": "Read the captured JPEG for a suppression audit",
+        "responses": {"200": {"description": "Suppression screenshot"}, "404": {"description": "No captured image"}}
+      }
+    },
+    "/api/review/suppressions/{id}/sample": {
+      "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "post": {
+        "summary": "Save captured suppression evidence to the annotation pool",
+        "responses": {"200": {"description": "Existing or created sample"}, "404": {"description": "No captured image"}}
+      }
+    },
     "/api/rules": {
       "get": {
         "summary": "Rules",
@@ -3283,6 +3297,13 @@
             }
           }
         }
+      }
+    },
+    "/api/events/{eid}/explain": {
+      "parameters": [{"name": "eid", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "get": {
+        "summary": "Read recorded local visual, spatial, episode and AI review evidence for an event",
+        "responses": {"200": {"description": "Available evidence, with null values for missing sources"}, "404": {"description": "Event not found"}}
       }
     },
     "/api/events/{eid}/overlay": {

@@ -69,10 +69,15 @@ fn detection_overlay(
     height: u32,
     bbox: Option<[f32; 4]>,
     zone: Option<&ls_analyzer::pipeline::ZoneSpec>,
+    visual: Option<serde_json::Value>,
 ) -> Option<String> {
     (bbox.is_some() || zone.is_some()).then(|| {
         serde_json::json!({
             "width": width, "height": height, "box": bbox, "zone": zone.map(|zone| &zone.points),
+            "zone_policy": zone.map(|zone| serde_json::json!({
+                "id": zone.id, "name": zone.name, "spatial": zone.spatial,
+            })),
+            "visual": visual,
         })
         .to_string()
     })
@@ -1431,6 +1436,11 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             pipe.active_track_count() > 0 && !stationary_only,
                         );
                     let ts = ls_core::time::format_system_time_local_iso(captured.timestamp);
+                    let audit_frame = crate::spatial::AuditFrame {
+                        data_dir: &st.data_dir,
+                        jpeg: ev_snapshot.as_deref(),
+                        pixels: Some((&frame.data, frame.width, frame.height)),
+                    };
                     if motion_skip && (stationary_only || motion_gate.masked_skip()) {
                         motion_skip = crate::spatial::audit(
                             &store,
@@ -1443,6 +1453,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             0,
                             "person_inference",
                             &ts,
+                            Some(&audit_frame),
                         );
                     }
                     handle.motion_total.fetch_add(1, Ordering::Relaxed);
@@ -1541,9 +1552,14 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     };
                     cands.retain(|cand| {
                         tracked_box(cand.track_id).is_none_or(|bbox| {
-                            !policy
-                                .spatial
-                                .suppress(&store, cid, &cand.behavior, bbox, &ts)
+                            !policy.spatial.suppress_with_evidence(
+                                &store,
+                                cid,
+                                &cand.behavior,
+                                bbox,
+                                &ts,
+                                Some(&audit_frame),
+                            )
                         })
                     });
                     if !motion_skip
@@ -1691,6 +1707,15 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 bounds,
                                 cand.zone_id
                                     .and_then(|id| policy.zones.iter().find(|zone| zone.id == id)),
+                                pipe.last_tracks()
+                                    .iter()
+                                    .find(|track| track.id == cand.track_id)
+                                    .map(|track| {
+                                        serde_json::json!({
+                                            "person_confidence": track.confidence,
+                                            "occluded": track.occluded,
+                                        })
+                                    }),
                             );
                             match sink.record_located(
                                 &cand,
@@ -2560,25 +2585,36 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 }
             }
             let cid = cfg.camera_id;
+            let audit_frame = crate::spatial::AuditFrame {
+                data_dir: &st.data_dir,
+                jpeg: None,
+                pixels: Some((&bgr, w, h)),
+            };
             let uncoated: HashSet<_> = dets
                 .iter()
                 .enumerate()
                 .filter_map(|(index, det)| {
                     (det.ppe == ls_analyzer::pipeline::PpeStatus::NoPpe
-                        && !policy.spatial.suppress(
+                        && !policy.spatial.suppress_with_evidence(
                             &store,
                             cid,
                             "enter_no_ppe",
                             det.box_,
                             &processed_ts,
+                            Some(&audit_frame),
                         ))
                     .then_some(index)
                 })
                 .collect();
             unmasked.retain(|&index| {
-                !policy
-                    .spatial
-                    .suppress(&store, cid, "no_mask", dets[index].box_, &processed_ts)
+                !policy.spatial.suppress_with_evidence(
+                    &store,
+                    cid,
+                    "no_mask",
+                    dets[index].box_,
+                    &processed_ts,
+                    Some(&audit_frame),
+                )
             });
             // 照片按与视频相同的区域锚点判定；单帧没有历史在场状态。
             let mut zone_hits: Vec<serde_json::Value> = Vec::new();
@@ -2732,7 +2768,12 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     ts_iso: processed_ts.clone(),
                     evidence_key: format!("folder:{iid}:{}", rule.id),
                 };
-                let overlay = detection_overlay(w, h, target, zone);
+                let visual = target
+                    .and_then(|bounds| dets.iter().find(|det| det.box_ == bounds))
+                    .map(
+                        |det| serde_json::json!({"person_confidence": det.score, "coat": det.ppe}),
+                    );
+                let overlay = detection_overlay(w, h, target, zone, visual);
                 if let Ok(Some(eid)) = sink.record_located(
                     &cand,
                     snapshot_jpeg.as_deref(),

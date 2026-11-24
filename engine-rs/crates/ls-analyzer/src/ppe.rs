@@ -256,6 +256,10 @@ pub(crate) fn overlapping_people(a: [f32; 4], b: [f32; 4]) -> bool {
 }
 
 fn coat_owner(coat: [f32; 4], people: &[[f32; 4]]) -> Option<usize> {
+    coat_assignment(coat, people).map(|(owner, _)| owner)
+}
+
+fn coat_assignment(coat: [f32; 4], people: &[[f32; 4]]) -> Option<(usize, f32)> {
     let coat_area = area(coat);
     if coat_area <= 0.0 || !coat_area.is_finite() {
         return None;
@@ -273,7 +277,8 @@ fn coat_owner(coat: [f32; 4], people: &[[f32; 4]]) -> Option<usize> {
             second = second.max(coverage);
         }
     }
-    (best.1 >= 0.60 && best.1 - second >= 0.15).then_some(best.0)
+    let gap = best.1 - second;
+    (best.1 >= 0.60 && gap >= 0.15).then_some((best.0, gap))
 }
 
 /// 裁切 BGR 子图（带 15% padding），用于远景/灰度监控图人框 ROI 二次精检。
@@ -396,10 +401,14 @@ impl PpeRunner for YoloPpeRunner {
         }
         let mut coat_hits = vec![(false, false); person_boxes.len()];
         let mut coat_confidence = vec![0.0f32; person_boxes.len()];
+        let mut coat_assignment_gap = vec![None; person_boxes.len()];
         for detection in no_boxes_raw {
-            if let Some(owner) = coat_owner(detection.box_, person_boxes) {
+            if let Some((owner, gap)) = coat_assignment(detection.box_, person_boxes) {
                 coat_hits[owner].0 = true;
-                coat_confidence[owner] = coat_confidence[owner].max(detection.score);
+                if detection.score >= coat_confidence[owner] {
+                    coat_confidence[owner] = detection.score;
+                    coat_assignment_gap[owner] = Some(gap);
+                }
             }
         }
         for bounds in wear_boxes {
@@ -486,8 +495,9 @@ impl PpeRunner for YoloPpeRunner {
             .into_iter()
             .zip(masks)
             .zip(coat_confidence.into_iter().zip(mask_confidence))
+            .zip(coat_assignment_gap)
             .map(
-                |((coat, mask), (coat_confidence, mask_confidence))| PpeObservation {
+                |(((coat, mask), (coat_confidence, mask_confidence)), gap)| PpeObservation {
                     coat,
                     mask,
                     coat_violation_confidence: if coat == PpeStatus::NoPpe {
@@ -500,6 +510,7 @@ impl PpeRunner for YoloPpeRunner {
                     } else {
                         0.0
                     },
+                    coat_assignment_gap: if coat == PpeStatus::NoPpe { gap } else { None },
                 },
             )
             .collect()

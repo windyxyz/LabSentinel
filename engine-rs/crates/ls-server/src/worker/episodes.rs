@@ -69,6 +69,11 @@ impl EpisodeRuntime {
                     && rule_active_at(rule, frame.timestamp, &policy.calendar)
             })
             .collect();
+        let audit_frame = crate::spatial::AuditFrame {
+            data_dir: &sink.st.data_dir,
+            jpeg: frame.jpeg,
+            pixels: Some((&frame.frame.data, frame.frame.width, frame.frame.height)),
+        };
         let mut closed = self
             .detector
             .remove_rules(|key| applicable.iter().any(|r| r.id == key.rule_id));
@@ -125,12 +130,13 @@ impl EpisodeRuntime {
                 let observation = match status {
                     PpeStatus::Wearing => Observation::Compliant,
                     PpeStatus::NoPpe
-                        if !policy.spatial.suppress(
+                        if !policy.spatial.suppress_with_evidence(
                             store,
                             frame.camera_id,
                             behavior,
                             reading.bbox,
                             frame.timestamp,
+                            Some(&audit_frame),
                         ) =>
                     {
                         Observation::Violation { confidence }
@@ -242,6 +248,12 @@ impl EpisodeRuntime {
                         Some(reading.bbox),
                         key.zone_id
                             .and_then(|id| policy.zones.iter().find(|zone| zone.id == id)),
+                        Some(serde_json::json!({
+                            "coat": reading.observation.coat, "mask": reading.observation.mask,
+                            "violation_confidence": episode.peak_confidence,
+                            "assignment_gap": if rule.behavior == "enter_no_ppe" { reading.observation.coat_assignment_gap } else { None },
+                            "rule_id": rule.id,
+                        })),
                     ),
                 });
             }
@@ -418,6 +430,11 @@ fn close_persisted(
             persisted.episode_id,
             &persisted.behavior,
             ts,
+            Some(&crate::spatial::AuditFrame {
+                data_dir: &sink.st.data_dir,
+                jpeg: persisted.peak.as_ref().map(|peak| peak.jpeg.as_slice()),
+                pixels: None,
+            }),
         );
     }
     Ok(())

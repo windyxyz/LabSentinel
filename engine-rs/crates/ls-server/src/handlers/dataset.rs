@@ -209,6 +209,87 @@ pub(crate) async fn samples_from_folder(
     }
 }
 
+pub(crate) async fn samples_from_suppression(
+    State(st): State<Shared>,
+    AxPath(id): AxPath<i64>,
+) -> Response {
+    tokio::task::spawn_blocking(move || {
+        let Ok(store) = ls_store::Store::open(&st.db_path) else {
+            return server_err();
+        };
+        match stage_suppression_sample(&st, &store, id) {
+            Ok(id) => created_sample(&store, id),
+            Err((status, error)) => detail_err(status, &error).into_response(),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| server_err())
+}
+
+fn stage_suppression_sample(
+    st: &Shared,
+    store: &ls_store::Store,
+    id: i64,
+) -> Result<i64, (StatusCode, String)> {
+    let db_error = |_| (StatusCode::INTERNAL_SERVER_ERROR, "暂时无法保存样本".into());
+    if let Some(existing) = store.suppression_sample_id(id).map_err(db_error)? {
+        return Ok(existing);
+    }
+    let unavailable = || (StatusCode::NOT_FOUND, "抑制记录没有可用截图".to_owned());
+    let (cid, source) = store
+        .suppression_snapshot(id)
+        .map_err(db_error)?
+        .ok_or_else(unavailable)?;
+    let root = Path::new(&st.data_dir);
+    let source = rooted_file(root, Path::new(&source)).ok_or_else(unavailable)?;
+    let jpeg = ls_jobs::media::read_snapshot(&source)
+        .filter(|bytes| bytes.starts_with(&[0xff, 0xd8]))
+        .ok_or_else(unavailable)?;
+    let image = ls_jobs::media::decode_image(&jpeg).ok_or_else(unavailable)?;
+    let path = format!("dataset_pool/suppression_{id}_{}.jpg", uuid_like());
+    let absolute = root.join(&path);
+    std::fs::create_dir_all(pool_dir(st)).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("创建样本目录失败: {error}"),
+        )
+    })?;
+    if std::fs::write(&absolute, &jpeg).is_err() {
+        let _ = std::fs::remove_file(&absolute);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "写入样本失败".into()));
+    }
+    let result = (|| {
+        let tx = rusqlite::Transaction::new_unchecked(
+            store.conn(),
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(db_error)?;
+        if let Some(existing) = store.suppression_sample_id(id).map_err(db_error)? {
+            return Ok((existing, false));
+        }
+        if store.suppression_snapshot(id).map_err(db_error)?.is_none() {
+            return Err(unavailable());
+        }
+        let sample = store
+            .add_dataset_sample(
+                "suppression",
+                &id.to_string(),
+                Some(cid),
+                &path,
+                i64::from(image.width()),
+                i64::from(image.height()),
+                "[]",
+            )
+            .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok((sample, true))
+    })();
+    if !matches!(&result, Ok((_, true))) {
+        let _ = std::fs::remove_file(absolute);
+    }
+    result.map(|(sample, _)| sample)
+}
+
 /// 实时抓拍入池：取运行中相机最新 JPEG。
 pub(crate) async fn samples_capture(
     State(st): State<Shared>,

@@ -12,7 +12,7 @@ mod episodes;
 mod faces;
 mod operations;
 mod spatial;
-pub use episodes::{EpisodeEvidence, NewEpisode};
+pub use episodes::{EpisodeContext, EpisodeEvidence, NewEpisode};
 pub use faces::{FacePerson, FaceTemplate};
 pub use operations::{ComplianceCounts, DeliveryWithHistory, EventNote};
 pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};

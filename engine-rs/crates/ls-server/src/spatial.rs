@@ -37,6 +37,7 @@ impl SpatialPolicy {
             .map(|mask| mask.id)
     }
 
+    #[cfg(test)]
     pub fn suppress(
         &self,
         store: &Store,
@@ -45,10 +46,22 @@ impl SpatialPolicy {
         bbox: [f32; 4],
         ts: &str,
     ) -> bool {
+        self.suppress_with_evidence(store, cid, behavior, bbox, ts, None)
+    }
+
+    pub fn suppress_with_evidence(
+        &self,
+        store: &Store,
+        cid: i64,
+        behavior: &str,
+        bbox: [f32; 4],
+        ts: &str,
+        frame: Option<&AuditFrame<'_>>,
+    ) -> bool {
         let Some((reason, source)) = self.match_suppression(behavior, bbox) else {
             return false;
         };
-        audit(store, cid, reason, source, behavior, ts)
+        audit(store, cid, reason, source, behavior, ts, frame)
     }
 
     fn match_suppression(&self, behavior: &str, bbox: [f32; 4]) -> Option<(&'static str, i64)> {
@@ -69,6 +82,12 @@ pub(crate) fn spatial_rule(behavior: &str) -> bool {
     matches!(behavior, "enter" | "enter_no_ppe" | "no_mask")
 }
 
+pub(crate) struct AuditFrame<'a> {
+    pub data_dir: &'a str,
+    pub jpeg: Option<&'a [u8]>,
+    pub pixels: Option<(&'a [u8], u32, u32)>,
+}
+
 pub(crate) fn audit(
     store: &Store,
     cid: i64,
@@ -76,9 +95,17 @@ pub(crate) fn audit(
     source: i64,
     behavior: &str,
     ts: &str,
+    frame: Option<&AuditFrame<'_>>,
 ) -> bool {
     match store.add_suppression(cid, reason, source, behavior, ts) {
-        Ok(()) => true,
+        Ok((id, new)) => {
+            if let Some(frame) =
+                frame.filter(|_| new && store.should_save_suppression_snapshot(id).unwrap_or(false))
+            {
+                save_audit_frame(store, id, frame);
+            }
+            true
+        }
         Err(error) => {
             crate::logger::error(&format!("[ls-worker] cam-{cid} 抑制留痕失败: {error}"));
             false
@@ -86,6 +113,35 @@ pub(crate) fn audit(
     }
 }
 
+fn save_audit_frame(store: &Store, id: i64, frame: &AuditFrame<'_>) {
+    let jpeg = frame
+        .jpeg
+        .filter(|bytes| bytes.starts_with(&[0xff, 0xd8]))
+        .map(std::borrow::Cow::Borrowed)
+        .or_else(|| {
+            let (pixels, width, height) = frame.pixels?;
+            ls_analyzer::evidence::encode_jpeg_bgr(pixels, width, height)
+                .ok()
+                .map(std::borrow::Cow::Owned)
+        });
+    let Some(jpeg) = jpeg else { return };
+    let root = std::path::Path::new(frame.data_dir);
+    let relative = format!(
+        "snapshots/suppression_{id}_{}.jpg",
+        crate::util::uuid_like()
+    );
+    let path = root.join(&relative);
+    if std::fs::create_dir_all(root.join("snapshots")).is_err() {
+        return;
+    }
+    if std::fs::write(&path, &jpeg).is_err()
+        || !store
+            .attach_suppression_snapshot(id, &relative)
+            .unwrap_or(false)
+    {
+        let _ = std::fs::remove_file(path);
+    }
+}
 /// Only masked, repeatedly observed objects can relax the active-track motion guard.
 #[derive(Default)]
 pub(crate) struct StationaryTracks(HashMap<i64, ([f32; 4], u8)>);

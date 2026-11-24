@@ -4,6 +4,8 @@ import { api, CHANNEL_NAMES, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
 import AnnotatorModal from '../components/AnnotatorModal.vue'
 import AsyncState from '../components/AsyncState.vue'
 import SnapshotOverlay from '../components/SnapshotOverlay.vue'
+import EventExplanation from '../components/EventExplanation.vue'
+import SuppressionReview from '../components/SuppressionReview.vue'
 
 const rows = ref([])
 const camId = ref('')
@@ -516,6 +518,7 @@ async function rememberSpot(event) {
         </div>
       </div>
     </details>
+    <SuppressionReview :camera-id="camId" />
     <AsyncState :loading="loading" :error="error" :notice="stale ? '刷新失败，仍显示上一次数据' : ''"
                 :empty="loaded && !rows.length"
                 :empty-text="camId || category || level || status || startDate || endDate || q || hourFilter ? '当前筛选条件下没有事件' + (q ? `（关键词：${q}）` : '') : '暂无事件。图片和视频完成检查后会留下记录。规则命中时会另生成告警。'"
@@ -602,6 +605,7 @@ async function rememberSpot(event) {
             <template v-if="drawer.category === 'alert'"> · 轨迹 {{ drawer.track_id }} · <span :class="'lv' + drawer.level">L{{ drawer.level }}</span></template>
             · {{ STATUS_TEXT[drawer.status] || drawer.status }}</p>
           <p>{{ drawer.detail }}</p>
+          <EventExplanation :key="drawer.id" :event-id="drawer.id" />
           <p v-if="drawer.episode_id" class="muted">
             事件段 #{{ drawer.episode_id }} · {{ Number(drawer.duration_s || 0).toFixed(1) }} 秒 · {{ drawer.hit_count }} 次检出
             <template v-if="drawer.resolved_ts"> · 恢复于 {{ drawer.resolved_ts }}</template>

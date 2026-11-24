@@ -129,3 +129,16 @@ pub(crate) async fn suppressions_list(
         )?))
     })
 }
+
+pub(crate) async fn suppression_image(State(st): State<Shared>, Path(id): Path<i64>) -> Response {
+    with_store(&st, |store| {
+        let root = std::path::Path::new(&st.data_dir);
+        let source = store.suppression_snapshot(id)?.and_then(|(_, relative)| {
+            crate::util::rooted_file(root, std::path::Path::new(&relative))
+        });
+        let Some(bytes) = source.and_then(|path| ls_jobs::media::read_snapshot(&path)) else {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "抑制记录没有可用截图").into_response());
+        };
+        Ok(([(axum::http::header::CONTENT_TYPE, "image/jpeg")], bytes).into_response())
+    })
+}

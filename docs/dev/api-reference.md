@@ -75,6 +75,8 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
 | POST | /api/events/{id}/remember-spot | 将已标为误报且有单检测框的事件记为误报点 |
 | DELETE | /api/cameras/{id}/fp-spots/{spot_id} | 移除误报点 |
 | GET | /api/review/suppressions | 抑制记录，支持 `camera_id`、`before_id`、`limit`。同来源、原因和规则的记录按 30 秒聚合 |
+| GET | /api/review/suppressions/{id}/snapshot | 读取抑制时采集的原始 JPEG。记录的 `has_snapshot` 说明是否已采集 |
+| POST | /api/review/suppressions/{id}/sample | 将抑制截图加入标注池，重复提交返回已有样本 |
 
 新生成的事件快照采用 WebP，旧记录仍按实际格式返回。事件行的
 `snapshot_sha256` 对应保存的文件，`has_overlay` 表示可使用
@@ -87,6 +89,8 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
 宽限默认 0 秒，提前提示比例默认 0.70。事件结果返回 `episode_id`、起止时间、
 `duration_s`、`hit_count`、`peak_conf`、`alert_tier` 和可用的 `resolved_ts`。
 `category=recovery` 可查询 `alert_resolved` 记录。
+`GET /api/events/{eid}/explain` 返回落库的本地检测数值、区域参数、事件段与 AI 复核结果。
+抑制截图随审计保留，并按机位、原因和来源限制相近时间的重复采集。
 
 `Zone`: `{id, camera_id, name, polygon: [[x,y],...]}`（1280×720 像素坐标）
 

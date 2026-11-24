@@ -366,6 +366,47 @@ pub(crate) async fn event_overlay(State(st): State<Shared>, AxPath(eid): AxPath<
     })
 }
 
+pub(crate) async fn event_explain(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
+    with_store(&st, |store| {
+        let Some(event) = store.event_by_id(eid)? else {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "事件不存在").into_response());
+        };
+        let recorded = event
+            .detections_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+        let row = event_json(&event);
+        let section = event
+            .episode_id
+            .map(|id| store.episode_context(id))
+            .transpose()?
+            .flatten();
+        Ok(Json(json!({
+            "id": event.id,
+            "camera_id": event.camera_id,
+            "behavior": event.type_,
+            "visual": recorded.as_ref().and_then(|data| data.get("visual")),
+            "zone": recorded.as_ref().and_then(|data| data.get("zone_policy")),
+            "evidence": {
+                "has_snapshot": event.snapshot.is_some(),
+                "has_video": event.video.is_some(),
+                "snapshot_sha256": event.snapshot_sha256,
+            },
+            "episode": event.episode_id.map(|id| json!({
+                "id": id, "first_ts": event.first_ts, "last_ts": event.last_ts,
+                "duration_s": event.duration_s, "hit_count": event.hit_count,
+                "peak_conf": event.peak_conf, "alert_tier": event.alert_tier,
+                "resolved_ts": event.resolved_ts, "context": section,
+            })),
+            "review": row.get("ai_review"),
+            "review_ts": row.get("ai_review_ts"),
+            "review_model": row.get("ai_review_model"),
+            "delivery_suppressed": event.vlm_suppressed != 0,
+        }))
+        .into_response())
+    })
+}
+
 /// LS-050：事件缩略图（宽 320px JPEG）——按需生成并缓存到 `data/thumbs/ev_<id>.jpg`，
 /// 列表页使用较小的截图；缓存缺失时在阻塞线程内解码和缩放。
 pub(crate) async fn event_thumb(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {

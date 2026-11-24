@@ -126,7 +126,8 @@ fn referenced_media_paths(
         .prepare(
             "SELECT snapshot FROM events WHERE snapshot IS NOT NULL \
              UNION SELECT video FROM events WHERE video IS NOT NULL \
-             UNION SELECT snapshot FROM folder_images WHERE snapshot IS NOT NULL",
+             UNION SELECT snapshot FROM folder_images WHERE snapshot IS NOT NULL
+             UNION SELECT path FROM suppression_images",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt

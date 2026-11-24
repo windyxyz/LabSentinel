@@ -1,5 +1,5 @@
 use crate::{EventEvidence, NewEvent, Store};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS violation_episodes(
@@ -39,7 +39,26 @@ pub struct NewEpisode<'a> {
     pub evidence: EpisodeEvidence<'a>,
 }
 
+#[derive(serde::Serialize)]
+pub struct EpisodeContext {
+    pub id: i64,
+    pub rule_id: i64,
+    pub zone_id: Option<i64>,
+    pub behavior: String,
+    pub closed_ts: Option<String>,
+    pub close_reason: Option<String>,
+}
+
 impl Store {
+    pub fn episode_context(&self, id: i64) -> rusqlite::Result<Option<EpisodeContext>> {
+        self.conn().query_row(
+            "SELECT id,rule_id,zone_id,behavior,closed_ts,close_reason FROM violation_episodes WHERE id=?",
+            [id], |row| Ok(EpisodeContext {
+                id: row.get(0)?, rule_id: row.get(1)?, zone_id: row.get(2)?, behavior: row.get(3)?,
+                closed_ts: row.get(4)?, close_reason: row.get(5)?,
+            }),
+        ).optional()
+    }
     pub fn set_rule_grace(
         &self,
         id: i64,

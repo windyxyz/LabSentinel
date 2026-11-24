@@ -186,6 +186,18 @@ export const api = {
   deleteCameraMask: (cid, id) => req('DELETE', `/api/cameras/${cid}/masks/${id}`),
   rememberEventSpot: (id) => req('POST', `/api/events/${id}/remember-spot`),
   eventOverlay: (id) => req('GET', `/api/events/${id}/overlay`),
+  eventExplanation: (id) => req('GET', `/api/events/${id}/explain`),
+  suppressions: (filters) => req('GET', '/api/review/suppressions?' + new URLSearchParams(filters)),
+  saveSuppressionSample: (id) => req('POST', `/api/review/suppressions/${id}/sample`),
+  suppressionSnapshot: async (id) => {
+    const token = requestToken()
+    const response = await fetch(`/api/review/suppressions/${id}/snapshot`, {
+      credentials: 'same-origin',
+      headers: token ? { 'X-Admin-Token': token } : {},
+    })
+    if (!response.ok) throw new Error('截图暂时不可用')
+    return response.blob()
+  },
   deleteFpSpot: (cid, id) => req('DELETE', `/api/cameras/${cid}/fp-spots/${id}`),
   delZone: (id) => req('DELETE', `/api/zones/${id}`),
   copyConfig: (cid, payload) => req('POST', `/api/cameras/${cid}/copy-config`, payload),

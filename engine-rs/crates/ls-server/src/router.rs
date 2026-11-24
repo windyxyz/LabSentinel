@@ -89,6 +89,8 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/events/:eid/remember-spot"),
     ("DELETE", "/api/cameras/:cid/fp-spots/:id"),
     ("GET", "/api/review/suppressions"),
+    ("GET", "/api/review/suppressions/:id/snapshot"),
+    ("POST", "/api/review/suppressions/:id/sample"),
     ("GET", "/api/rules"),
     ("POST", "/api/rules"),
     ("DELETE", "/api/rules/:rid"),
@@ -102,6 +104,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/events/timeline"),
     ("GET", "/api/events/:eid/snapshot"),
     ("GET", "/api/events/:eid/overlay"),
+    ("GET", "/api/events/:eid/explain"),
     ("GET", "/api/events/:eid/video"),
     ("GET", "/api/events/:eid/thumb"), // LS-050 缩略图缓存
     // ---- stats 全套 ----
@@ -262,6 +265,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/events/timeline", get(events_timeline))
         .route("/events/:eid/snapshot", get(event_snapshot))
         .route("/events/:eid/overlay", get(event_overlay))
+        .route("/events/:eid/explain", get(event_explain))
         .route("/events/:eid/video", get(event_video))
         .route("/events/:eid/thumb", get(event_thumb))
         .route("/cameras", get(cameras).post(add_camera))
@@ -286,6 +290,11 @@ pub fn build_router(state: Shared) -> Router {
             delete(remove_false_positive_spot),
         )
         .route("/review/suppressions", get(suppressions_list))
+        .route("/review/suppressions/:id/snapshot", get(suppression_image))
+        .route(
+            "/review/suppressions/:id/sample",
+            post(samples_from_suppression),
+        )
         .route("/rules", get(rules_list).post(add_rule))
         .route("/rules/:rid", delete(delete_rule).put(update_rule_grace))
         .route("/rule-templates", get(templates_list).post(add_template))
