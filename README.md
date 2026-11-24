@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/labsentinel-project.png" alt="LabSentinel 实验室哨兵" width="400" />
+
 # 🧪 LabSentinel · 实验室哨兵
 
 **开源实验室安全行为智能监控系统**：接入现有摄像头（RTSP）、USB/视频文件，或外部软件持续截图的图片文件夹，自动识别进入安全区未穿实验服、统计人数，异常实时多渠道告警。全本地部署，隐私可控。

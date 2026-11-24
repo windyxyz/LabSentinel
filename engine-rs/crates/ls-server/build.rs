@@ -2,6 +2,7 @@
 //! 仅 host=windows 时执行（交叉编译不跑 winresource）。
 
 fn main() {
+    println!("cargo:rerun-if-changed=app-icon.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         if let Err(e) = winresource::WindowsResource::new()
             .set_icon("app-icon.ico")

@@ -43,6 +43,7 @@ DisableProgramGroupPage=yes
 ShowLanguageDialog=yes
 OutputDir={#LsOutputDir}
 OutputBaseFilename=LabSentinel-setup-{#LsAppVersion}
+SetupIconFile=..\..\engine-rs\crates\ls-server\app-icon.ico
 Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=yes
