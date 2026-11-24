@@ -62,6 +62,7 @@ impl GraceWindow {
 pub enum Observation {
     Violation { confidence: f32 },
     Compliant,
+    ConfirmedCompliant,
     Outside,
     Unknown,
 }
@@ -199,6 +200,7 @@ impl EpisodeTracker {
                 })
             }
             Observation::Outside => self.close(key, CloseReason::LeftZone),
+            Observation::ConfirmedCompliant => self.close(key, CloseReason::Recovered),
             Observation::Compliant => {
                 let entry = self.active.get_mut(&key)?;
                 entry.last_confirmed = clock;

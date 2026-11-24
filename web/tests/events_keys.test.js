@@ -46,7 +46,7 @@ describe('Events.vue 键盘快审（LS-052）', () => {
     const w = mount(Events)
     try {
       await flushPromises()
-      await w.get('.events-table tr:nth-child(2)').trigger('click')
+      await w.get('.events-table tbody tr').trigger('click')
       await flushPromises()
       expect(transition).not.toHaveBeenCalled()
       expect(document.querySelector('.drawer-snap')?.getAttribute('src')).toContain('/api/events/1/snapshot')

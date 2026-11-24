@@ -3,6 +3,7 @@ use ls_analyzer::{
     episode::{
         AlertTier, CloseReason, Episode, EpisodeChange, EpisodeKey, EpisodeTracker, Observation,
     },
+    lab_rules::{evaluate_ppe_policy, ComplianceHold},
     pipeline::{rule_active_at, CameraPipeline, Candidate, PpeReading, PpeStatus, RuleSpec},
 };
 use ls_ingest::Frame;
@@ -14,6 +15,7 @@ pub(super) struct EpisodeRuntime {
     detector: EpisodeTracker,
     persisted: HashMap<EpisodeKey, Persisted>,
     closing: HashMap<EpisodeKey, (CloseReason, String)>,
+    matrix_recovery: HashMap<EpisodeKey, ComplianceHold>,
 }
 
 struct Persisted {
@@ -41,7 +43,7 @@ pub(super) struct EpisodeFrame<'a> {
 }
 
 pub(super) fn episode_behavior(behavior: &str) -> bool {
-    matches!(behavior, "enter_no_ppe" | "no_mask")
+    matches!(behavior, "enter_no_ppe" | "no_mask" | "ppe_policy")
 }
 
 impl EpisodeRuntime {
@@ -51,6 +53,10 @@ impl EpisodeRuntime {
 
     pub fn recovery_check_due(&self) -> bool {
         self.detector.needs_recovery_check()
+            || self
+                .matrix_recovery
+                .values()
+                .any(ComplianceHold::in_progress)
     }
 
     pub fn process(
@@ -105,7 +111,7 @@ impl EpisodeRuntime {
             frame.timestamp,
         )?;
         for reading in pipe.ppe_readings() {
-            for behavior in ["enter_no_ppe", "no_mask"] {
+            for behavior in ["enter_no_ppe", "no_mask", "ppe_policy"] {
                 let Some((rule, zone_id)) =
                     applicable_rule(&applicable, pipe, policy, reading, behavior)
                 else {
@@ -116,7 +122,18 @@ impl EpisodeRuntime {
                     track_id: reading.track_id,
                     zone_id,
                 };
-                let (status, confidence) = if behavior == "no_mask" {
+                let is_matrix = behavior == "ppe_policy";
+                let (status, confidence) = if is_matrix {
+                    let Some(matrix) = policy
+                        .lab
+                        .ppe_policies
+                        .iter()
+                        .find(|matrix| matrix.zone_id == key.zone_id)
+                    else {
+                        continue;
+                    };
+                    evaluate_ppe_policy(matrix, reading.observation)
+                } else if behavior == "no_mask" {
                     (
                         reading.observation.mask,
                         reading.observation.mask_violation_confidence,
@@ -127,7 +144,16 @@ impl EpisodeRuntime {
                         reading.observation.coat_violation_confidence,
                     )
                 };
+                let matrix_recovered = is_matrix
+                    && self.persisted.contains_key(&key)
+                    && self
+                        .matrix_recovery
+                        .entry(key)
+                        .or_default()
+                        .observe(frame.time, status);
                 let observation = match status {
+                    PpeStatus::Wearing if matrix_recovered => Observation::ConfirmedCompliant,
+                    PpeStatus::Wearing if is_matrix => Observation::Unknown,
                     PpeStatus::Wearing => Observation::Compliant,
                     PpeStatus::NoPpe
                         if !policy.spatial.suppress_with_evidence(
@@ -250,6 +276,7 @@ impl EpisodeRuntime {
                             .and_then(|id| policy.zones.iter().find(|zone| zone.id == id)),
                         Some(serde_json::json!({
                             "coat": reading.observation.coat, "mask": reading.observation.mask,
+                            "gloves": reading.observation.gloves, "goggles": reading.observation.goggles,
                             "violation_confidence": episode.peak_confidence,
                             "assignment_gap": if rule.behavior == "enter_no_ppe" { reading.observation.coat_assignment_gap } else { None },
                             "rule_id": rule.id,
@@ -360,6 +387,7 @@ impl EpisodeRuntime {
             }
             self.persisted.remove(&key);
             self.closing.remove(&key);
+            self.matrix_recovery.remove(&key);
         }
         Ok(())
     }
@@ -369,6 +397,15 @@ impl EpisodeRuntime {
         if let Err(error) = self.finish_changes(store, sink, changes, camera, ts) {
             crate::logger::warn(&format!(
                 "[ls-worker] cam-{camera} 关闭中断事件段失败: {error}"
+            ));
+        }
+    }
+
+    pub fn lab_policy_changed(&mut self, store: &Store, sink: &EventSink, camera: i64, ts: &str) {
+        let changes = self.detector.remove_rules(|key| key.rule_id > 0);
+        if let Err(error) = self.finish_changes(store, sink, changes, camera, ts) {
+            crate::logger::warn(&format!(
+                "[ls-worker] cam-{camera} 更新区域穿戴策略失败: {error}"
             ));
         }
     }
@@ -463,7 +500,7 @@ fn applicable_rule<'a>(
         .copied()
         .filter(matches)
         .find(|rule| rule.zone_id == 0)?;
-    if behavior == "no_mask" {
+    if matches!(behavior, "no_mask" | "ppe_policy") {
         return Some((rule, None));
     }
     let zone = policy
@@ -601,15 +638,18 @@ mod tests {
             include_bytes!("../../../../../Resources/acceptance/imgs/empty-frame.jpg").as_slice(),
             [628.0, 5.0, 1279.0, 709.0],
         );
-        let cfg = crate::detect::DetectCfg {
-            url,
-            provider: "openai_compat".into(),
-            model: "mock".into(),
-            vlm_prompt: "fixture custom prompt".into(),
-            timeout_s: 10,
-            daily_budget: 2,
-            ..Default::default()
-        };
+        store
+            .settings_set(&[
+                ("detect.mode", "cascade"),
+                ("detect.vlm.url", &url),
+                ("detect.vlm.provider", "openai_compat"),
+                ("detect.vlm.model", "mock"),
+                ("detect.vlm_prompt", "fixture custom prompt"),
+                ("detect.vlm.timeout_s", "10"),
+                ("detect.cascade.daily_budget", "2"),
+            ])
+            .unwrap();
+        let cfg = crate::detect::DetectCfg::for_role(&store, temp.path(), "verifier");
         let review = |events: Vec<(i64, Candidate)>, (jpeg, bounds): (&[u8], [f32; 4])| {
             if !events.is_empty() {
                 let track = events[0].1.track_id;

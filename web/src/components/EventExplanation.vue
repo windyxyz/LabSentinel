@@ -14,6 +14,7 @@ const labels = {
   person_review_window: '同一人员在复核间隔内已有送审记录',
   target_not_isolated: '人物重叠，当前画面无法单独复核',
   local_geometry_rule: '由本地规则判断', budget_exhausted: '今日复核额度已用完',
+  local_candidate: '本地画面提示', local_confirmed: '本地规则已确认', vision_confirmed: '图像复核已确认',
 }
 const percent = (value) => typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 100) + '%' : '—'
 const visual = computed(() => value.value?.visual)
@@ -51,7 +52,14 @@ async function load() {
         <dd v-if="visual.assignment_gap != null">服装归属重叠差值 {{ percent(visual.assignment_gap) }}</dd>
         <dd v-if="visual.coat != null">实验服 {{ label(visual.coat) }}</dd>
         <dd v-if="visual.mask != null">口罩 {{ label(visual.mask) }}</dd>
+        <dd v-if="visual.gloves != null">手套 {{ label(visual.gloves) }}</dd>
+        <dd v-if="visual.goggles != null">护目镜 {{ label(visual.goggles) }}</dd>
         <dd v-if="visual.occluded">抓拍时发生遮挡</dd>
+      </template>
+      <template v-if="value.error_code">
+        <dt>专项规则</dt>
+        <dd>{{ label(value.confidence_stage) }}</dd>
+        <dd v-if="value.suggestion_tts">{{ value.suggestion_tts }}</dd>
       </template>
       <template v-if="zone?.spatial">
         <dt>区域判定</dt>

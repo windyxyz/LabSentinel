@@ -210,6 +210,12 @@ pub fn type_text(type_: &str) -> String {
     match type_ {
         "occupancy_over" => "在场人数超限".to_string(),
         "enter_no_ppe" => "有人未穿实验服进入监控区".to_string(),
+        "ppe_policy" => "防护穿戴不符合当前区域策略".to_string(),
+        "hood_lean" => "疑似探身进入通风橱".to_string(),
+        "sash_limit" => "通风橱拉门高于安全基准".to_string(),
+        "incubator_door_open" => "培养箱门持续开启".to_string(),
+        "spill_or_leak" => "疑似泼洒或泄漏".to_string(),
+        "glove_contamination" => "疑似手套交叉污染".to_string(),
         "enter" => "有人进入监控区".to_string(),
         "exit" => "有人离开监控区".to_string(),
         "alert_resolved" => "违规已恢复".to_string(),

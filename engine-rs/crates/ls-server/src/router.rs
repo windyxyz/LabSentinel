@@ -1,6 +1,7 @@
 // 2026-11-12 batch A split: route registration, ROUTE_INVENTORY, dump_routes.
 // `use crate::*` glob covers root re-exports (state/handlers fns) and root `use` axum/serde types.
 use crate::*;
+use axum::routing::patch;
 
 /// R2-307: machine-readable route inventory for scripts/rust_route_coverage.py.
 /// Format: {"paths": {"<method> <path>": ...}} — one entry per (method, path).
@@ -84,6 +85,8 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("DELETE", "/api/zones/:zid"),
     ("PUT", "/api/zones/:zid"), // LS-052 拖拽顶点保存
     ("GET", "/api/cameras/:cid/spatial"),
+    ("GET", "/api/cameras/:cid/lab-rules"),
+    ("PUT", "/api/cameras/:cid/lab-rules"),
     ("POST", "/api/cameras/:cid/masks"),
     ("DELETE", "/api/cameras/:cid/masks/:id"),
     ("POST", "/api/events/:eid/remember-spot"),
@@ -147,6 +150,17 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/model/status"),
     ("GET", "/api/mqtt/status"),
     ("GET", "/api/genai/status"),
+    ("GET", "/api/assistant/sessions"),
+    ("POST", "/api/assistant/sessions"),
+    ("GET", "/api/assistant/sessions/:id"),
+    ("POST", "/api/assistant/sessions/:id/messages"),
+    ("GET", "/api/assistant/reports"),
+    ("POST", "/api/assistant/reports"),
+    ("PATCH", "/api/assistant/reports/:id"),
+    ("GET", "/api/assistant/reports/:id/export.md"),
+    ("GET", "/api/assistant/roles"),
+    ("PUT", "/api/assistant/roles"),
+    ("POST", "/api/assistant/roles/embeddings/test"),
     ("GET", "/api/plugins"),
     ("GET", "/api/update/check"),
     ("GET", "/api/alerts/status"),
@@ -282,6 +296,10 @@ pub fn build_router(state: Shared) -> Router {
         .route("/zones", get(zones_list).post(add_zone))
         .route("/zones/:zid", delete(delete_zone).put(update_zone))
         .route("/cameras/:cid/spatial", get(spatial_settings))
+        .route(
+            "/cameras/:cid/lab-rules",
+            get(camera_lab_rules).put(save_camera_lab_rules),
+        )
         .route("/cameras/:cid/masks", post(create_camera_mask))
         .route("/cameras/:cid/masks/:id", delete(remove_camera_mask))
         .route("/events/:eid/remember-spot", post(remember_event_spot))
@@ -343,6 +361,20 @@ pub fn build_router(state: Shared) -> Router {
         .route("/model/status", get(model_status))
         .route("/mqtt/status", get(mqtt_status))
         .route("/genai/status", get(genai_status))
+        .route(
+            "/assistant/sessions",
+            get(ai_sessions).post(ai_open_session),
+        )
+        .route("/assistant/sessions/:id", get(ai_session))
+        .route("/assistant/sessions/:id/messages", post(ai_ask))
+        .route(
+            "/assistant/reports",
+            get(ai_reports).post(ai_generate_report),
+        )
+        .route("/assistant/reports/:id", patch(ai_archive_report))
+        .route("/assistant/reports/:id/export.md", get(ai_report_markdown))
+        .route("/assistant/roles", get(ai_roles).put(ai_save_roles))
+        .route("/assistant/roles/embeddings/test", post(ai_test_embeddings))
         .route("/plugins", get(plugins_list))
         .route("/update/check", get(update_check_status))
         .route("/alerts/status", get(alerts_status))

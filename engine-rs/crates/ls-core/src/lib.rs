@@ -9,6 +9,7 @@
 //! - [`bin`]：R2-301 外部二进制（ffmpeg/ffprobe）统一查找（唯一带 IO 的模块）
 
 pub mod bin;
+pub mod lab;
 pub mod state;
 pub mod time;
 pub mod zones;

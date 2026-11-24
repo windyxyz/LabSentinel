@@ -100,6 +100,9 @@ pub(crate) fn event_json(e: &ls_store::Event) -> Value {
            "episode_id": e.episode_id, "first_ts": e.first_ts, "last_ts": e.last_ts,
            "duration_s": e.duration_s, "hit_count": e.hit_count, "peak_conf": e.peak_conf,
            "resolved_ts": e.resolved_ts, "alert_tier": e.alert_tier,
+           "error_code": e.error_code, "severity": e.severity,
+           "confidence_stage": e.confidence_stage, "suggestion_tts": e.suggestion_tts,
+           "vlm_model": e.vlm_model, "vlm_prompt_hash": e.vlm_prompt_hash,
            "status": e.status, "handled_by": e.handled_by, "handled_ts": e.handled_ts,
            "ai_verdict": ai_verdict, "ai_review": review,
            "ai_review_ts": review_ts, "ai_review_model": review_model,
@@ -383,8 +386,13 @@ pub(crate) async fn event_explain(State(st): State<Shared>, AxPath(eid): AxPath<
             .flatten();
         Ok(Json(json!({
             "id": event.id,
+            "event": row,
             "camera_id": event.camera_id,
             "behavior": event.type_,
+            "error_code": event.error_code,
+            "severity": event.severity,
+            "confidence_stage": event.confidence_stage,
+            "suggestion_tts": event.suggestion_tts,
             "visual": recorded.as_ref().and_then(|data| data.get("visual")),
             "zone": recorded.as_ref().and_then(|data| data.get("zone_policy")),
             "evidence": {
@@ -401,6 +409,8 @@ pub(crate) async fn event_explain(State(st): State<Shared>, AxPath(eid): AxPath<
             "review": row.get("ai_review"),
             "review_ts": row.get("ai_review_ts"),
             "review_model": row.get("ai_review_model"),
+            "vlm_model": event.vlm_model,
+            "vlm_prompt_hash": event.vlm_prompt_hash,
             "delivery_suppressed": event.vlm_suppressed != 0,
         }))
         .into_response())

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "LabSentinel",
-    "version": "0.6.0"
+    "version": "0.7.5"
   },
   "paths": {
     "/api/access/status": {
@@ -1160,6 +1160,89 @@
             }
           }
         }
+      }
+    },
+    "/api/assistant/sessions": {
+      "get": {
+        "summary": "查询安全问答会话历史",
+        "operationId": "ai_sessions",
+        "parameters": [{"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}}],
+        "responses": {"200": {"description": "最近会话，最多 50 条"}, "401": {"description": "需要管理员权限"}}
+      },
+      "post": {
+        "summary": "新建指定范围的安全问答会话",
+        "operationId": "ai_open_session",
+        "requestBody": {"required": true, "content": {"application/json": {"example": {"title": "口罩检查", "scope": {"camera_id": 3}}}}},
+        "responses": {"201": {"description": "创建会话，初始 revision 为零"}, "422": {"description": "会话范围无效"}}
+      }
+    },
+    "/api/assistant/sessions/{id}": {
+      "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "get": {
+        "summary": "读取会话、修订号和问答记录",
+        "operationId": "ai_session",
+        "parameters": [{"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}}],
+        "responses": {"200": {"description": "会话与按时间正序排列的一页消息"}, "404": {"description": "会话不存在"}}
+      }
+    },
+    "/api/assistant/sessions/{id}/messages": {
+      "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "post": {
+        "summary": "提交问题并保存答复，首轮可选择附原图",
+        "operationId": "ai_ask",
+        "requestBody": {"required": true, "content": {"application/json": {"example": {"request_id": "d4c00d5e0bb74d0f", "revision": 0, "question": "请复核事件 #15", "include_images": true}}}},
+        "responses": {"200": {"description": "答案、事实、所用模型和实际证据模式，同一请求可安全重放"}, "404": {"description": "会话或范围内的事件不存在"}, "409": {"description": "版本冲突或请求处理中"}, "422": {"description": "问题或范围无效"}}
+      }
+    },
+    "/api/assistant/reports": {
+      "get": {
+        "summary": "查询当前或已归档报告",
+        "operationId": "ai_reports",
+        "parameters": [{"name": "archived", "in": "query", "schema": {"type": "boolean"}}, {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0}}],
+        "responses": {"200": {"description": "带 SQLite 事实快照的报告列表，最多 50 条"}}
+      },
+      "post": {
+        "summary": "生成日、周、月或自定义时段的安全报告",
+        "operationId": "ai_generate_report",
+        "requestBody": {"required": true, "content": {"application/json": {"example": {"request_id": "d4c00d5e0bb74d0f", "period": "custom", "scope": {"start_date": "2026-11-01", "end_date": "2026-11-07", "camera_id": 3}, "include_images": false}}}},
+        "responses": {"200": {"description": "已保存的报告与证据模式。接入不可用时返回本地统计"}, "409": {"description": "请求进行中或编号冲突"}, "422": {"description": "日期或机位无效"}}
+      }
+    },
+    "/api/assistant/reports/{id}": {
+      "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "patch": {
+        "summary": "归档或恢复报告",
+        "operationId": "ai_archive_report",
+        "requestBody": {"required": true, "content": {"application/json": {"example": {"archived": true}}}},
+        "responses": {"200": {"description": "保存成功"}, "404": {"description": "报告不存在"}}
+      }
+    },
+    "/api/assistant/reports/{id}/export.md": {
+      "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "get": {
+        "summary": "导出归档快照为 Markdown",
+        "operationId": "ai_report_markdown",
+        "responses": {"200": {"description": "UTF-8 Markdown 报告"}, "404": {"description": "报告不存在"}}
+      }
+    },
+    "/api/assistant/roles": {
+      "get": {
+        "summary": "读取角色分配和可用接入档案",
+        "operationId": "ai_roles",
+        "responses": {"200": {"description": "角色、档案名和模型名"}}
+      },
+      "put": {
+        "summary": "保存固定角色的档案分配",
+        "operationId": "ai_save_roles",
+        "requestBody": {"required": true, "content": {"application/json": {"example": {"verifier": "profile-local", "chat": "profile-remote", "shift_summary": "off"}}}},
+        "responses": {"200": {"description": "配置已保存"}, "422": {"description": "角色或档案无效"}}
+      }
+    },
+    "/api/assistant/roles/embeddings/test": {
+      "post": {
+        "summary": "用固定测试文本检查向量模型",
+        "operationId": "ai_test_embeddings",
+        "responses": {"200": {"description": "模型名和向量维数"}, "422": {"description": "未配置或授权向量接入"}, "429": {"description": "达到调用预算"}, "502": {"description": "服务未返回有效向量"}}
       }
     },
     "/api/genai/status": {
@@ -2416,6 +2499,22 @@
       "get": {
         "summary": "List motion masks, object filters and remembered false-positive spots",
         "responses": {"200": {"description": "Masks and spots"}, "404": {"description": "Camera not found"}}
+      }
+    },
+    "/api/cameras/{cid}/lab-rules": {
+      "parameters": [{"name": "cid", "in": "path", "required": true, "schema": {"type": "integer"}}],
+      "get": {
+        "summary": "Get camera laboratory safety rules",
+        "responses": {"200": {"description": "Reference lines, PPE alternatives and fixed-view checks"}, "404": {"description": "Camera not found"}}
+      },
+      "put": {
+        "summary": "Replace laboratory safety rules and apply them to the camera worker",
+        "requestBody": {"required": true, "content": {"application/json": {"example": {
+          "reference_lines": [{"name": "通风橱", "kind": "hood_lean", "zone_id": 1, "points": [[0.1, 0.5], [0.7, 0.5]]}],
+          "ppe_policies": [{"zone_id": 1, "alternatives": [["coat", "mask"], ["coat", "goggles", "gloves"]]}],
+          "fixed_checks": [{"kind": "incubator_door_open", "roi": [0.2, 0.25, 0.65, 0.7], "hold_s": 4}]
+        }}}},
+        "responses": {"200": {"description": "Saved and worker policy revision advanced"}, "404": {"description": "Camera not found"}, "422": {"description": "Bad rule or region outside this camera"}}
       }
     },
     "/api/cameras/{cid}/masks": {

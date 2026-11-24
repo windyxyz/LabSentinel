@@ -148,6 +148,7 @@ pub struct YoloPpeRunner {
     violation_class: usize,
     wearing_classes: Vec<usize>,
     mask_classes: Option<(usize, usize)>,
+    accessory_classes: [Option<(usize, usize)>; 2],
     violation_conf: f32,
     wearing_conf: f32,
     clahe_enabled: bool,
@@ -250,6 +251,85 @@ fn intersection(a: [f32; 4], b: [f32; 4]) -> f32 {
     ])
 }
 
+fn glove_owner(people: &[[f32; 4]], [x, y]: [f32; 2]) -> Option<usize> {
+    let mut owners = people.iter().enumerate().filter(|(_, person)| {
+        let height = person[3] - person[1];
+        x >= person[0] && x <= person[2] && y >= person[1] + 0.24 * height && y <= person[3]
+    });
+    match (owners.next(), owners.next()) {
+        (Some((index, _)), None) => Some(index),
+        _ => None,
+    }
+}
+
+fn accessory_evidence(
+    people: &[[f32; 4]],
+    detections: Option<&[Vec<Det>]>,
+    gloves: bool,
+) -> Vec<(PpeStatus, f32)> {
+    let Some([missing, worn]) = detections else {
+        return vec![(PpeStatus::Unknown, 0.0); people.len()];
+    };
+    let owner = |bounds: [f32; 4]| {
+        let x = (bounds[0] + bounds[2]) * 0.5;
+        let y = (bounds[1] + bounds[3]) * 0.5;
+        if gloves {
+            glove_owner(people, [x, y])
+        } else {
+            let mut owners = head_owners(people, x, y);
+            match (owners.next(), owners.next()) {
+                (Some(index), None) => Some(index),
+                _ => None,
+            }
+        }
+    };
+    let mut evidence = vec![(Vec::<[f32; 4]>::new(), Vec::<Det>::new()); people.len()];
+    for detection in worn {
+        if let Some(index) = owner(detection.box_) {
+            evidence[index].0.push(detection.box_);
+        }
+    }
+    for detection in missing {
+        if let Some(index) = owner(detection.box_) {
+            evidence[index].1.push(*detection);
+        }
+    }
+
+    let overlaps = |a, b| intersection(a, b) > 0.25 * area(a).min(area(b));
+    evidence
+        .into_iter()
+        .map(|(worn, missing)| {
+            if missing
+                .iter()
+                .any(|det| worn.iter().any(|bounds| overlaps(det.box_, *bounds)))
+                || (!gloves && !worn.is_empty() && !missing.is_empty())
+            {
+                return (PpeStatus::Unknown, 0.0);
+            }
+            if !missing.is_empty() {
+                return (
+                    PpeStatus::NoPpe,
+                    missing.iter().map(|det| det.score).fold(0.0, f32::max),
+                );
+            }
+            let seen_wearing = if gloves {
+                worn.iter().enumerate().any(|(index, bounds)| {
+                    worn[index + 1..]
+                        .iter()
+                        .any(|other| !overlaps(*bounds, *other))
+                })
+            } else {
+                !worn.is_empty()
+            };
+            if seen_wearing {
+                (PpeStatus::Wearing, 0.0)
+            } else {
+                (PpeStatus::Unknown, 0.0)
+            }
+        })
+        .collect()
+}
+
 pub fn overlapping_people(a: [f32; 4], b: [f32; 4]) -> bool {
     let overlap = intersection(a, b);
     overlap > 0.0 && overlap >= 0.35 * (area(a) + area(b) - overlap)
@@ -343,10 +423,23 @@ impl PpeRunner for YoloPpeRunner {
             specs.push((no_mask, self.violation_conf, 0.0));
             specs.push((mask, self.wearing_conf, 0.0));
         }
+        let mask_end = specs.len();
+        let accessory_indices = self.accessory_classes.map(|pair| {
+            pair.map(|(missing, worn)| {
+                let start = specs.len();
+                specs.push((missing, self.violation_conf, 0.0));
+                specs.push((worn, self.wearing_conf, 0.0));
+                start
+            })
+        });
         let unknown = PpeObservation::default();
         let Ok(mut all_dets) = self.model.detect_classes(bgr, w, h, &specs) else {
             return vec![unknown; person_boxes.len()];
         };
+        let bounded = |start: Option<usize>| start.and_then(|index| all_dets.get(index..index + 2));
+        let gloves = accessory_evidence(person_boxes, bounded(accessory_indices[0]), true);
+        let goggles = accessory_evidence(person_boxes, bounded(accessory_indices[1]), false);
+        all_dets.truncate(mask_end);
         let mask_dets = all_dets.split_off(coat_classes);
         let no_boxes_raw = if !all_dets.is_empty() {
             all_dets.remove(0)
@@ -496,10 +589,16 @@ impl PpeRunner for YoloPpeRunner {
             .zip(masks)
             .zip(coat_confidence.into_iter().zip(mask_confidence))
             .zip(coat_assignment_gap)
+            .zip(gloves.into_iter().zip(goggles))
             .map(
-                |(((coat, mask), (coat_confidence, mask_confidence)), gap)| PpeObservation {
+                |(
+                    (((coat, mask), (coat_confidence, mask_confidence)), gap),
+                    ((gloves, glove_confidence), (goggles, goggle_confidence)),
+                )| PpeObservation {
                     coat,
                     mask,
+                    gloves,
+                    goggles,
                     coat_violation_confidence: if coat == PpeStatus::NoPpe {
                         coat_confidence
                     } else {
@@ -510,6 +609,8 @@ impl PpeRunner for YoloPpeRunner {
                     } else {
                         0.0
                     },
+                    glove_violation_confidence: glove_confidence,
+                    goggle_violation_confidence: goggle_confidence,
                     coat_assignment_gap: if coat == PpeStatus::NoPpe { gap } else { None },
                 },
             )
@@ -594,6 +695,12 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
             Some(Box::new(YoloPpeRunner {
                 model,
                 violation_class,
+                accessory_classes: [
+                    find("no_gloves").zip(find("gloves")),
+                    find("no_goggles")
+                        .or_else(|| find("no_glasses"))
+                        .zip(find("goggles").or_else(|| find("glasses"))),
+                ],
                 wearing_classes,
                 mask_classes: find("no mask").zip(find("mask")),
                 violation_conf: cfg.violation_conf,

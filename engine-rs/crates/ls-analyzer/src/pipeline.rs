@@ -69,8 +69,12 @@ pub enum PpeStatus {
 pub struct PpeObservation {
     pub coat: PpeStatus,
     pub mask: PpeStatus,
+    pub gloves: PpeStatus,
+    pub goggles: PpeStatus,
     pub coat_violation_confidence: f32,
     pub mask_violation_confidence: f32,
+    pub glove_violation_confidence: f32,
+    pub goggle_violation_confidence: f32,
     pub coat_assignment_gap: Option<f32>,
 }
 

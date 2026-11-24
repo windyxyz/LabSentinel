@@ -75,6 +75,8 @@ fn db_get(s: &ls_store::Store, key: &str) -> Option<String> {
 
 pub const MAX_PERSON_REVIEW_WINDOW_S: u64 = 3_600;
 
+pub const VISION_ROLES: [&str; 4] = ["verifier", "shift_summary", "chat", "embeddings"];
+
 pub fn person_review_window(s: &ls_store::Store) -> u64 {
     db_get(s, "detect.cascade.person_window_s")
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -186,12 +188,33 @@ impl DetectCfg {
             .filter(|id| profiles.iter().any(|p| &p.id == id))
             .unwrap_or_else(|| profiles[0].id.clone());
         if let Some(p) = profiles.iter().find(|p| p.id == id) {
-            cfg.provider = p.provider.clone();
-            cfg.url = p.url.clone();
-            cfg.model = p.model.clone();
-            cfg.api_key = p.api_key.clone();
-            cfg.timeout_s = p.timeout_s;
-            cfg.allow_remote = p.allow_remote;
+            cfg.apply_profile(p);
+        }
+        cfg
+    }
+
+    fn apply_profile(&mut self, p: &Profile) {
+        self.provider.clone_from(&p.provider);
+        self.url.clone_from(&p.url);
+        self.model.clone_from(&p.model);
+        self.api_key.clone_from(&p.api_key);
+        self.timeout_s = p.timeout_s;
+        self.allow_remote = p.allow_remote;
+    }
+
+    pub fn for_role(s: &ls_store::Store, data_dir: &Path, role: &str) -> Self {
+        let mut cfg = Self::load(s, data_dir);
+        let routing = vision_routing(s);
+        if let Some(id) = routing.get(role).and_then(Value::as_str) {
+            if let Some(profile) = profiles_load(s, data_dir)
+                .iter()
+                .find(|profile| profile.id == id)
+            {
+                cfg.apply_profile(profile);
+            } else {
+                cfg.url.clear();
+                cfg.api_key.clear();
+            }
         }
         cfg
     }
@@ -204,6 +227,24 @@ impl DetectCfg {
             && (crate::vlm::is_loopback(&self.url)
                 || self.allow_remote
                 || env_bool("LS_VLM_ALLOW_REMOTE").unwrap_or(false))
+    }
+
+    pub(crate) fn still_authorized(
+        &self,
+        store: &ls_store::Store,
+        data_dir: &Path,
+        camera_id: i64,
+        mode: &str,
+    ) -> bool {
+        let current = Self::for_role(store, data_dir, "verifier");
+        current.compliance_ok()
+            && self.provider == current.provider
+            && self.url == current.url
+            && self.model == current.model
+            && self.api_key == current.api_key
+            && store.camera(camera_id).is_ok_and(|camera| {
+                camera.is_some_and(|camera| effective_mode(&camera.analyzer, &current.mode) == mode)
+            })
     }
 
     /// 外部联网判定可用性：`mode!=local` 且合规。`mode==local` 时恒 false
@@ -223,6 +264,37 @@ impl DetectCfg {
             enabled: self.vlm_enabled(),
         }
     }
+}
+
+pub(crate) fn vision_routing(s: &ls_store::Store) -> Value {
+    db_get(s, "detect.vlm.roles")
+        .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
+
+pub(crate) fn reload_verifier(st: &Shared, store: &ls_store::Store, before: &DetectCfg) -> usize {
+    let after = DetectCfg::for_role(store, Path::new(&st.data_dir), "verifier");
+    if before == &after {
+        return 0;
+    }
+    store
+        .cameras()
+        .unwrap_or_default()
+        .iter()
+        .filter(|camera| {
+            matches!(
+                camera.status.as_str(),
+                "running" | "starting" | "reconnecting"
+            )
+        })
+        .filter(|camera| {
+            [before, &after]
+                .iter()
+                .any(|cfg| effective_mode(&camera.analyzer, &cfg.mode) != "local")
+        })
+        .filter(|camera| crate::worker::restart_camera_if_running(st, store, camera.id))
+        .count()
 }
 
 /// 相机级覆盖解析：`default`=跟随全局；`rust`/`python`（历史）=仅本地；
@@ -472,14 +544,20 @@ pub fn usage_try_consume(
     enforce_budget: bool,
 ) -> (bool, u64) {
     let _g = USAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut u = usage_today(s, cfg);
+    let u = usage_today(s, cfg);
     if enforce_budget && u.exhausted() {
         return (true, u.count);
     }
-    u.count += 1;
-    let _ = s.setting_set("detect.usage.date", &u.date);
-    let _ = s.setting_set("detect.usage.count", &u.count.to_string());
-    (false, u.count)
+    let next = u.count.saturating_add(1);
+    if s.settings_set(&[
+        ("detect.usage.date", &u.date),
+        ("detect.usage.count", &next.to_string()),
+    ])
+    .is_err()
+    {
+        return (true, u.count);
+    }
+    (false, next)
 }
 
 // ---- HTTP handlers（新增三条，不改既有契约）----
@@ -678,6 +756,7 @@ pub(crate) async fn detect_config_put(
 
     let out = with_store(&st, |s| {
         let data_dir = Path::new(&st.data_dir);
+        let previous = DetectCfg::for_role(s, data_dir, "verifier");
         let mut writes: Vec<(String, String)> = Vec::new();
         let mut errs: Vec<String> = Vec::new();
         if let Some(thresholds) = sensitivity {
@@ -903,6 +982,12 @@ pub(crate) async fn detect_config_put(
         // 即时生效：EP 变化时全部重启（避免先 restart_following_global 再 restart_all_running 双重重启）
         let restarted = if ep_changed || adapter_changed || sensitivity.is_some() {
             crate::worker::restart_all_running(&st, s)
+        } else if vlm.is_some()
+            || cascade.is_some()
+            || body.get("mode").is_some()
+            || body.get("vlm_prompt").is_some()
+        {
+            reload_verifier(&st, s, &previous)
         } else {
             crate::worker::restart_following_global(&st, s)
         };
@@ -977,6 +1062,7 @@ pub(crate) async fn detect_profile_upsert(
     }
     with_store(&st, |s| {
         let data_dir = Path::new(&st.data_dir);
+        let previous = DetectCfg::for_role(s, data_dir, "verifier");
         let mut list = profiles_load(s, data_dir);
         let id_in = body
             .get("id")
@@ -1073,11 +1159,7 @@ pub(crate) async fn detect_profile_upsert(
             s.setting_set("detect.active_profile", &p.id)?;
         }
         let active_now = active_profile_id(s).unwrap_or_default();
-        let restarted = if active_now == p.id {
-            crate::worker::restart_following_global(&st, s)
-        } else {
-            0
-        };
+        let restarted = reload_verifier(&st, s, &previous);
         Ok(Json(json!({
             "ok": true,
             "profile": profile_json(&p),
@@ -1095,12 +1177,13 @@ pub(crate) async fn detect_profile_activate(
 ) -> Response {
     with_store(&st, |s| {
         let data_dir = Path::new(&st.data_dir);
+        let previous = DetectCfg::for_role(s, data_dir, "verifier");
         let list = profiles_load(s, data_dir);
         let Some(p) = list.iter().find(|p| p.id == id) else {
             return Ok(detail_err(StatusCode::NOT_FOUND, "档案不存在").into_response());
         };
         s.setting_set("detect.active_profile", &p.id)?;
-        let restarted = crate::worker::restart_following_global(&st, s);
+        let restarted = reload_verifier(&st, s, &previous);
         Ok(Json(json!({
             "ok": true, "active": p.id, "restarted": restarted,
             "profile": profile_json(p),
@@ -1116,6 +1199,7 @@ pub(crate) async fn detect_profile_delete(
 ) -> Response {
     with_store(&st, |s| {
         let data_dir = Path::new(&st.data_dir);
+        let previous = DetectCfg::for_role(s, data_dir, "verifier");
         let mut list = profiles_load(s, data_dir);
         let before = list.len();
         list.retain(|p| p.id != id);
@@ -1130,7 +1214,7 @@ pub(crate) async fn detect_profile_delete(
             let next = list.first().map(|p| p.id.clone()).unwrap_or_default();
             s.setting_set("detect.active_profile", &next)?;
         }
-        let restarted = crate::worker::restart_following_global(&st, s);
+        let restarted = reload_verifier(&st, s, &previous);
         Ok(Json(json!({
             "ok": true, "active": active_profile_id(s).unwrap_or_default(),
             "count": list.len(), "restarted": restarted,

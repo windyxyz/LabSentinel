@@ -1,5 +1,6 @@
 // handlers split by domain (2026-11-12 batch A); fns re-exported here for centralized router registration.
 pub(crate) mod alerts;
+pub(crate) mod assistant;
 pub(crate) mod cameras;
 pub(crate) mod config_io;
 pub(crate) mod dataset;
@@ -16,6 +17,7 @@ pub(crate) mod stats;
 pub(crate) mod zones_rules;
 
 pub(crate) use alerts::*;
+pub(crate) use assistant::*;
 pub(crate) use cameras::*;
 pub(crate) use config_io::*;
 pub(crate) use dataset::*;

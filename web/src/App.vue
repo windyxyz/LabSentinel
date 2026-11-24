@@ -6,6 +6,7 @@ import DevicePair from './components/DevicePair.vue'
 import Insights from './views/Insights.vue'
 import Sources from './views/Sources.vue'
 import Events from './views/Events.vue'
+import SafetyAssistant from './views/SafetyAssistant.vue'
 import AlertSettings from './views/AlertSettings.vue'
 import Settings from './views/Settings.vue'
 import Wall from './views/Wall.vue'
@@ -23,6 +24,8 @@ const tabs = [
     icon: '<rect x="2" y="5" width="9" height="7" rx="1.5"/><path d="M11 8.2l3-1.8v5.2l-3-1.8"/><path d="M3 3h6"/>' },
   { key: 'events', label: '事件', comp: Events,
     icon: '<path d="M3 4h10M3 8h10M3 12h7"/>' },
+  { key: 'assistant', label: 'AI 安全助手', comp: SafetyAssistant,
+    icon: '<path d="M3 3h10v7H8l-4 3v-3H3zM5 6h6M5 8h4"/>' },
   { key: 'alerts', label: '告警', comp: AlertSettings,
     icon: '<path d="M8 2.5a3.5 3.5 0 0 1 3.5 3.5v3l1.5 2.5H3l1.5-2.5v-3A3.5 3.5 0 0 1 8 2.5z"/><path d="M6.5 13a1.8 1.8 0 0 0 3 0"/>' },
   { key: 'settings', label: '设置', comp: Settings,
@@ -241,6 +244,7 @@ onBeforeUnmount(() => {
       <Insights v-if="active === 'dash'" />
       <Sources v-else-if="active === 'sources'" :route-query="routeQuery" />
       <Events v-else-if="active === 'events'" :route-query="routeQuery" />
+      <SafetyAssistant v-else-if="active === 'assistant'" :route-query="routeQuery" />
       <AlertSettings v-else-if="active === 'alerts'" />
       <Settings v-else />
     </main>

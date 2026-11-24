@@ -7,6 +7,45 @@ use serde_json::json;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn laboratory_rules_validate_and_apply_atomically() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("lab.db");
+    let path = db.to_str().unwrap();
+    let store = ls_store::Store::open(path).unwrap();
+    store.ensure_schema().unwrap();
+    let camera = store.conn_add_camera("Camera", "test.mp4", "file").unwrap();
+    let state = test_state(path);
+    let app = build_router(state.clone());
+    let endpoint = format!("/api/cameras/{camera}/lab-rules");
+    let initial = body_json(req(&app, "GET", &endpoint, None).await).await;
+    assert_eq!(initial["ppe_policies"], json!([]));
+    let specification = json!({
+        "reference_lines":[{"name":"橱前", "kind":"hood_lean", "points":[[0.15,0.45],[0.75,0.45]]}],
+        "ppe_policies":[{"alternatives":[["coat", "mask"],["coat","gloves","goggles"]]}],
+        "fixed_checks":[{"kind":"spill_or_leak","roi":[0.2,0.35,0.7,0.85],"hold_s":4}]
+    });
+    let saved = req(&app, "PUT", &endpoint, Some(specification.clone())).await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .workers
+            .policy_revision
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    let mut bad = specification.clone();
+    bad["ppe_policies"][0]["zone_id"] = json!(123_456);
+    let rejected = req(&app, "PUT", &endpoint, Some(bad)).await;
+    assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let updated = body_json(req(&app, "GET", &endpoint, None).await).await;
+    assert_eq!(
+        updated["ppe_policies"][0]["alternatives"],
+        specification["ppe_policies"][0]["alternatives"]
+    );
+    assert_eq!(updated["fixed_checks"][0]["kind"], "spill_or_leak");
+}
+
+#[tokio::test]
 async fn analysis_source_settings_persist_without_exposing_stream_credentials() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("analysis.db");

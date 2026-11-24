@@ -1710,7 +1710,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "ls-analyzer"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "jpeg-encoder",
  "ls-core",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "ls-core"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "jiff",
  "serde",
@@ -1738,7 +1738,7 @@ dependencies = [
 
 [[package]]
 name = "ls-dispatch"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "ls-infer"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "half",
  "libloading 0.9.1",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "ls-ingest"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "ls-core",
  "serde",
@@ -1780,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "ls-jobs"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "fs2",
  "image",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "ls-proto"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "ls-server"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "aes",
  "argon2",
@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "ls-store"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "ls-core",
  "rusqlite",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "ls-track"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "serde",
  "serde_json",

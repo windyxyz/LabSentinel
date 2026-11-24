@@ -348,6 +348,87 @@ def check_close_mask(base: str, pkg: Path, sandbox: Path, fixture: Path, timeout
                     raise ValueError(f"{source_type} 未戴口罩告警缺少截图")
 
 
+def check_lab_rules_and_assistant(base: str, pkg: Path, sandbox: Path, timeout: int) -> str:
+    fixtures = ROOT / "Resources" / "acceptance" / "imgs"
+    source = sandbox / "lab-photos"
+    source.mkdir()
+    for name in ("lab-day-cctv.jpg", "lab-night-cctv.jpg"):
+        shutil.copyfile(fixtures / name, source / name)
+    _, body = http_post(f"{base}/api/cameras", {"name": "模拟实验室照片", "type": "folder", "source": str(source)})
+    folder = json.loads(body)["id"]
+    matrix = {"ppe_policies": [{"zone_id": None, "alternatives": [["coat", "mask"]]}]}
+    http_post(f"{base}/api/cameras/{folder}/lab-rules", matrix, method="PUT")
+    http_post(f"{base}/api/cameras/{folder}/start", {})
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _, body = http_get(f"{base}/api/folder-images?camera_id={folder}&limit=5")
+        photos = json.loads(body)["items"]
+        if any(row["error"] for row in photos):
+            raise ValueError("合成监控照片处理失败")
+        if len(photos) == 2 and all(row["width"] for row in photos):
+            break
+        time.sleep(0.2)
+    else:
+        raise ValueError("合成监控照片未完成处理")
+    if not all(row["persons"] > 0 for row in photos):
+        raise ValueError("随包人员模型未在白天或夜视基准图检出目标")
+    http_post(f"{base}/api/cameras/bulk", {"ids": [folder], "action": "stop"})
+
+    video = sandbox / "高位广角参考线.mp4"
+    subprocess.run(
+        [str(pkg / "tools" / "ffmpeg" / "ffmpeg.exe"), "-hide_banner", "-loglevel", "error", "-nostdin",
+         "-loop", "1", "-framerate", "10", "-i", str(fixtures / "lab-day-cctv.jpg"), "-t", "4",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video)],
+        check=True, timeout=20, creationflags=CREATE_NO_WINDOW,
+    )
+    _, body = http_post(f"{base}/api/cameras", {"name": "参考线验收视频", "type": "file", "source": str(video)})
+    camera = json.loads(body)["id"]
+    line = {"name": "测试参考线", "kind": "hood_lean", "zone_id": None, "points": [[0.40, 0.70], [0.18, 0.70]]}
+    http_post(f"{base}/api/cameras/{camera}/lab-rules", {"reference_lines": [line]}, method="PUT")
+    http_post(f"{base}/api/cameras/{camera}/start", {})
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _, body = http_get(f"{base}/api/cameras/{camera}/status")
+        state = json.loads(body)["status"]
+        if state == "completed":
+            break
+        if state in {"error", "model_error"}:
+            raise ValueError(f"参考线验收视频状态为 {state}")
+        time.sleep(0.2)
+    else:
+        raise ValueError("参考线验收视频未完成处理")
+    _, body = http_get(f"{base}/api/events?camera_id={camera}&limit=20")
+    events = json.loads(body)
+    if not any(event["type"] == "video_check" for event in events):
+        raise ValueError("参考线验收视频没有独立检查记载")
+    alarm = next((event for event in events if event["type"] == "hood_lean"), None)
+    if not alarm or alarm["error_code"] != "HOOD_LEAN" or not alarm["has_snapshot"]:
+        raise ValueError("视频未产生带证据的参考线告警")
+
+    _, body = http_post(f"{base}/api/assistant/sessions", {"title": "参考线记载验收", "scope": {"camera_id": camera}})
+    session = json.loads(body)["id"]
+    _, body = http_post(f"{base}/api/assistant/sessions/{session}/messages", {
+        "request_id": "smoke-session-turn", "revision": 0, "question": f"复核事件 #{alarm['id']}",
+    })
+    message = json.loads(body)
+    if message.get("model") or message["evidence_mode"] != "record_only" or message["facts"]["event"]["id"] != alarm["id"]:
+        raise ValueError("未配置 API 时问答没有降级为对应事件记录")
+    _, body = http_post(f"{base}/api/assistant/reports", {
+        "request_id": "smoke-offline-report", "period": "day", "scope": {"camera_id": camera},
+    })
+    report = json.loads(body)
+    if report["facts"]["counts"]["alerts"] < 1 or report.get("model"):
+        raise ValueError("本地日报缺少参考线告警统计")
+    _, report_text = http_get(f"{base}/api/assistant/reports/{report['id']}/export.md")
+    if b"LabSentinel" not in report_text:
+        raise ValueError("Markdown 报告无法导出")
+    photo_results = ", ".join(
+        f"{row['name']} 人员={row['persons']} 实验服穿戴={row['ppe_wearing']} 确认未穿={row['ppe_no']}"
+        for row in photos
+    )
+    return f"{photo_results}，参考线事件、截图、本地问答与报告导出正常"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Rust 单二进制便携包冒烟（RA3/UX3）")
     source = ap.add_mutually_exclusive_group(required=True)
@@ -494,6 +575,17 @@ def main() -> int:
             detection_ok, detection_detail = False, str(error)
         print(f"[{'PASS' if detection_ok else 'FAIL'}] 6 随包照片与视频检测 —— {detection_detail}")
         ok_all &= detection_ok
+
+        # Keep the new acceptance checks as a gate for every later package too.
+        release_core = want_ver.split("+", 1)[0].split("-", 1)[0].split(".")
+        has_lab_rules = all(part.isascii() and part.isdecimal() for part in release_core) and tuple(map(int, release_core)) >= (0, 7, 5)
+        if detection_ok and has_lab_rules:
+            try:
+                detail = check_lab_rules_and_assistant(base, pkg, sandbox, a.timeout)
+                print(f"[PASS] 0.7.5 实验室规则与安全助手 —— {detail}")
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                print(f"[FAIL] 0.7.5 实验室规则与安全助手 —— {error}")
+                ok_all = False
 
         if detection_ok and a.mask_fixture is not None:
             try:

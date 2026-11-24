@@ -193,6 +193,7 @@ pub(crate) async fn guard_middleware(
         "/api/face/library",
         "/api/face/events",
         "/api/review/suppressions",
+        "/api/assistant",
     ];
     const PROTECTED_ADMIN_GETS: &[&str] = &[
         "/api/audit",
@@ -212,7 +213,8 @@ pub(crate) async fn guard_middleware(
         .and_then(|tail| tail.strip_suffix("/notes"))
         .is_some_and(|id| id.parse::<i64>().is_ok());
     let admin_get = ADMIN_GETS.iter().any(matches_path)
-        || (path.starts_with("/api/cameras/") && path.ends_with("/spatial"))
+        || (path.starts_with("/api/cameras/")
+            && (path.ends_with("/spatial") || path.ends_with("/lab-rules")))
         || (event_notes && !device_session)
         || (st.read_protected && PROTECTED_ADMIN_GETS.iter().any(matches_path));
     if !unsafe_m

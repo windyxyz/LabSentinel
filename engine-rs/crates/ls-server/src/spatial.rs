@@ -79,7 +79,10 @@ impl SpatialPolicy {
 }
 
 pub(crate) fn spatial_rule(behavior: &str) -> bool {
-    matches!(behavior, "enter" | "enter_no_ppe" | "no_mask")
+    matches!(
+        behavior,
+        "enter" | "enter_no_ppe" | "no_mask" | "ppe_policy" | "hood_lean"
+    )
 }
 
 pub(crate) struct AuditFrame<'a> {

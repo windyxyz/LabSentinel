@@ -8,8 +8,10 @@ use ls_core::{AnchorMode, ZoneSpatial};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
+pub mod assistant;
 mod episodes;
 mod faces;
+mod lab;
 mod operations;
 mod spatial;
 pub use episodes::{EpisodeContext, EpisodeEvidence, NewEpisode};
@@ -19,7 +21,7 @@ pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 25;
+pub const SCHEMA_VERSION_LATEST: i64 = 26;
 
 #[derive(Debug)]
 pub struct StoredZone {
@@ -57,6 +59,12 @@ pub struct Event {
     pub peak_conf: Option<f64>,
     pub resolved_ts: Option<String>,
     pub alert_tier: String,
+    pub error_code: Option<String>,
+    pub severity: Option<String>,
+    pub confidence_stage: Option<String>,
+    pub suggestion_tts: Option<String>,
+    pub vlm_model: Option<String>,
+    pub vlm_prompt_hash: Option<String>,
     /// UX2 cascade：VLM 复核判定（完整 JSON 文本；None=未复核）
     pub vlm_verdict: Option<String>,
     /// UX2 cascade：复核时间
@@ -90,7 +98,8 @@ pub struct EventEvidence<'a> {
 const EVENT_COLUMNS: &str = "id,ts,camera_id,type,level,track_id,detail,snapshot,video,\
     COALESCE(status,'new'),vlm_verdict,vlm_ts,COALESCE(vlm_suppressed,0),handled_by,handled_ts,\
     ai_review,ai_review_ts,ai_review_model,detections_json,snapshot_sha256,\
-    episode_id,first_ts,last_ts,duration_s,hit_count,peak_conf,resolved_ts,alert_tier";
+    episode_id,first_ts,last_ts,duration_s,hit_count,peak_conf,resolved_ts,alert_tier,\
+    error_code,severity,confidence_stage,suggestion_tts,vlm_model,vlm_prompt_hash";
 
 pub const ALERT_EVENTS_SQL: &str = "type NOT IN ('photo_check','video_check','alert_resolved')";
 
@@ -182,7 +191,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(25, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(26, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -212,6 +221,8 @@ impl Store {
                episode_id INTEGER, first_ts TEXT, last_ts TEXT, duration_s REAL NOT NULL DEFAULT 0, \
                hit_count INTEGER NOT NULL DEFAULT 1, peak_conf REAL, resolved_ts TEXT, \
                alert_tier TEXT NOT NULL DEFAULT 'alert', \
+               error_code TEXT, severity TEXT, confidence_stage TEXT, suggestion_tts TEXT, \
+               vlm_model TEXT, vlm_prompt_hash TEXT, \
                vlm_verdict TEXT, vlm_ts TEXT, vlm_suppressed INTEGER DEFAULT 0);
              CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
              CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);
@@ -260,6 +271,8 @@ impl Store {
         self.conn.execute_batch(operations::SCHEMA)?;
         self.conn.execute_batch(spatial::SCHEMA)?;
         self.conn.execute_batch(episodes::SCHEMA)?;
+        self.conn.execute_batch(lab::SCHEMA)?;
+        self.conn.execute_batch(assistant::SCHEMA)?;
         Ok(true)
     }
 
@@ -456,6 +469,12 @@ impl Store {
             ("peak_conf", "REAL"),
             ("resolved_ts", "TEXT"),
             ("alert_tier", "TEXT NOT NULL DEFAULT 'alert'"),
+            ("error_code", "TEXT"),
+            ("severity", "TEXT"),
+            ("confidence_stage", "TEXT"),
+            ("suggestion_tts", "TEXT"),
+            ("vlm_model", "TEXT"),
+            ("vlm_prompt_hash", "TEXT"),
         ] {
             if !event_columns.contains(column) {
                 tx.execute(
@@ -482,6 +501,12 @@ impl Store {
         tx.execute_batch(episodes::SCHEMA)?;
         tx.execute(
             "INSERT OR IGNORE INTO schema_version VALUES(25, 'rust-ls084-episodes')",
+            [],
+        )?;
+        tx.execute_batch(lab::SCHEMA)?;
+        tx.execute_batch(assistant::SCHEMA)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(26, 'rust-ls087-ls088-lab-rules-and-ai')",
             [],
         )?;
         tx.commit()?;
@@ -518,9 +543,16 @@ impl Store {
             .map(|_| self.conn.unchecked_transaction())
             .transpose()?;
         let conn = tx.as_deref().unwrap_or(&self.conn);
+        let description = ls_core::lab::alarm_description(ev.type_);
+        let severity = description.as_ref().map(|_| match ev.level {
+            3.. => "critical",
+            2 => "warning",
+            _ => "notice",
+        });
         conn.execute(
             "INSERT INTO events(ts,camera_id,type,level,track_id,detail,snapshot,detections_json,
-             snapshot_sha256,episode_id,first_ts,last_ts,duration_s,hit_count,peak_conf,alert_tier,status)
+             snapshot_sha256,episode_id,first_ts,last_ts,duration_s,hit_count,peak_conf,alert_tier,status,
+             error_code,severity,confidence_stage,suggestion_tts)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,
              (SELECT first_ts FROM violation_episodes WHERE id=?10),
              (SELECT last_ts FROM violation_episodes WHERE id=?10),
@@ -528,9 +560,11 @@ impl Store {
              COALESCE((SELECT hit_count FROM violation_episodes WHERE id=?10),1),
              (SELECT peak_conf FROM violation_episodes WHERE id=?10),
              COALESCE((SELECT alert_tier FROM violation_episodes WHERE id=?10),'alert'),
-             CASE WHEN ?3='alert_resolved' THEN 'recorded' ELSE 'new' END)",
+             CASE WHEN ?3='alert_resolved' THEN 'recorded' ELSE 'new' END,?11,?12,?13,?14)",
             params![ev.ts, ev.camera_id, ev.type_, ev.level, ev.track_id, ev.detail, ev.snapshot,
-                    evidence.detections_json, evidence.snapshot_sha256,evidence.episode_id],
+                    evidence.detections_json, evidence.snapshot_sha256,evidence.episode_id,
+                    description.as_ref().map(|value| value.code), severity,
+                    description.as_ref().map(|value| value.stage), description.map(|value| value.suggestion)],
         )?;
         let id = conn.last_insert_rowid();
         if let (Some(bbox), Some(tx)) = (evidence.bbox, tx) {
@@ -651,7 +685,9 @@ impl Store {
     ) -> rusqlite::Result<Option<(i64, String)>> {
         self.conn
             .query_row(
-                "UPDATE events SET vlm_verdict=?,vlm_ts=?,vlm_suppressed=?
+                "UPDATE events SET vlm_verdict=?1,vlm_ts=?2,vlm_suppressed=?3,
+                   vlm_model=CASE WHEN json_valid(?1) THEN COALESCE(json_extract(?1,'$.model'),vlm_model) ELSE vlm_model END,
+                   vlm_prompt_hash=CASE WHEN json_valid(?1) THEN COALESCE(json_extract(?1,'$.prompt_hash'),vlm_prompt_hash) ELSE vlm_prompt_hash END
                  WHERE id=? AND vlm_verdict IS NULL RETURNING level,detail",
                 params![verdict, ts, suppressed, eid],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -822,6 +858,19 @@ impl Store {
         self.conn.execute(
             "UPDATE events SET ai_review=?, ai_review_ts=?, ai_review_model=? WHERE id=?",
             params![review_json, ts, model, eid],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_event_vision_source(
+        &self,
+        eid: i64,
+        model: &str,
+        prompt_hash: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE events SET vlm_model=?,vlm_prompt_hash=? WHERE id=?",
+            params![model, prompt_hash, eid],
         )?;
         Ok(())
     }
@@ -2772,6 +2821,12 @@ fn map_event(r: &Row<'_>) -> rusqlite::Result<Event> {
         peak_conf: r.get(25)?,
         resolved_ts: r.get(26)?,
         alert_tier: r.get(27)?,
+        error_code: r.get(28)?,
+        severity: r.get(29)?,
+        confidence_stage: r.get(30)?,
+        suggestion_tts: r.get(31)?,
+        vlm_model: r.get(32)?,
+        vlm_prompt_hash: r.get(33)?,
     })
 }
 

@@ -306,11 +306,26 @@ function applyRoute() {
   status.value = Object.hasOwn(STATUS_TEXT, nextStatus) ? nextStatus : ''
   applyPreset(query.get('today') === '1' ? 'today' : '', false)
 }
-watch(() => props.routeQuery, () => { applyRoute(); resetAndLoad() })
+async function openLinkedEvent() {
+  const id = Number(new URLSearchParams(props.routeQuery).get('event'))
+  if (!Number.isSafeInteger(id) || id <= 0) return
+  const query = props.routeQuery
+  try {
+    const data = await api.eventExplanation(id)
+    if (query === props.routeQuery && data?.event?.id === id) {
+      drawer.value = data.event
+      nextTick(() => drawerEl.value?.focus({ preventScroll: true }))
+    }
+  } catch (error) {
+    if (query === props.routeQuery) actionNotice.value = error.message
+  }
+}
+watch(() => props.routeQuery, () => { applyRoute(); resetAndLoad(); openLinkedEvent() })
 onMounted(() => {
   applyRoute()
   window.addEventListener('keydown', onKey)
   load(); loadTimeline()
+  openLinkedEvent()
   api.cameras().then(list => { cams.value = Array.isArray(list) ? list : [] }).catch(() => { /* 筛选下拉留空即可 */ })
 })
 onUnmounted(() => window.removeEventListener('keydown', onKey))
@@ -524,10 +539,11 @@ async function rememberSpot(event) {
                 :empty-text="camId || category || level || status || startDate || endDate || q || hourFilter ? '当前筛选条件下没有事件' + (q ? `（关键词：${q}）` : '') : '暂无事件。图片和视频完成检查后会留下记录。规则命中时会另生成告警。'"
                 @retry="load">
       <table class="events-table">
-      <tr><th class="col-time"><input type="checkbox" aria-label="全选当前页"
+      <thead><tr><th class="col-time"><input type="checkbox" aria-label="全选当前页"
              :checked="newRowsCount > 0 && selected.length === newRowsCount"
              @change="toggleAll($event.target.checked)" /></th>
-          <th>时间</th><th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr>
+          <th>时间</th><th>摄像头</th><th>类型</th><th>级别</th><th>详情</th><th>状态</th><th>截图</th><th>视频</th><th>处置</th></tr></thead>
+      <tbody>
       <tr v-for="e in rows" :key="e.id"
           style="cursor:pointer"
           @click="openDetail($event, e)">
@@ -572,6 +588,7 @@ async function rememberSpot(event) {
           <span v-else class="muted" style="font-size:12px">{{ e.handled_ts?.slice(5, 16) }}</span>
         </td>
       </tr>
+      </tbody>
     </table>
     <div v-if="selected.length" class="row pager" style="align-items:center">
       <b>已选 {{ selected.length }} 条</b>
@@ -606,6 +623,7 @@ async function rememberSpot(event) {
             · {{ STATUS_TEXT[drawer.status] || drawer.status }}</p>
           <p>{{ drawer.detail }}</p>
           <EventExplanation :key="drawer.id" :event-id="drawer.id" />
+          <a :href="`#/assistant?event=${drawer.id}&camera=${drawer.camera_id}`">向 AI 助手追问</a>
           <p v-if="drawer.episode_id" class="muted">
             事件段 #{{ drawer.episode_id }} · {{ Number(drawer.duration_s || 0).toFixed(1) }} 秒 · {{ drawer.hit_count }} 次检出
             <template v-if="drawer.resolved_ts"> · 恢复于 {{ drawer.resolved_ts }}</template>

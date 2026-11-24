@@ -9,6 +9,38 @@ use axum::response::{IntoResponse, Json, Response};
 use ls_core::{AnchorMode, ZoneSpatial};
 use serde_json::{json, Value};
 
+pub(crate) async fn camera_lab_rules(
+    State(st): State<Shared>,
+    AxPath(cid): AxPath<i64>,
+) -> Response {
+    with_store(&st, |store| {
+        if store.camera(cid)?.is_none() {
+            return Ok(detail_err(StatusCode::NOT_FOUND, "监控源不存在").into_response());
+        }
+        Ok(Json(store.lab_rules(cid)?).into_response())
+    })
+}
+
+pub(crate) async fn save_camera_lab_rules(
+    State(st): State<Shared>,
+    AxPath(cid): AxPath<i64>,
+    Json(body): Json<ls_core::lab::LabRules>,
+) -> Response {
+    with_store(&st, |store| match store.replace_lab_rules(cid, &body) {
+        Ok(()) => {
+            let revision = st.workers.notify_policy_changed();
+            Ok(Json(json!({"ok": true, "policy_revision": revision})).into_response())
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Ok(detail_err(StatusCode::NOT_FOUND, "监控源不存在").into_response())
+        }
+        Err(rusqlite::Error::InvalidParameterName(message)) => {
+            Ok(detail_err(StatusCode::UNPROCESSABLE_ENTITY, &message).into_response())
+        }
+        Err(error) => Err(error),
+    })
+}
+
 pub(crate) fn zone_json(zone: &ls_store::StoredZone) -> Value {
     let mut result = json!(zone.spatial);
     result["id"] = json!(zone.id);

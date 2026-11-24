@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue'
 import { api, mediaUrl } from '../api'
 import SchedulePicker from '../components/SchedulePicker.vue'
+import LabRulesPanel from '../components/LabRulesPanel.vue'
 
 const NATIVE_W = 1280, NATIVE_H = 720
 const DISP_W = 640, DISP_H = 360
@@ -549,6 +550,8 @@ async function addRule(zoneId) {
       <button class="ghost" @click="removeSpatial(spot.id, 'spot')">移除</button>
     </div>
   </div>
+
+  <LabRulesPanel v-if="camId" :camera-id="camId" :zones="zones" :snapshot="snapshotUrl" />
 
   <div class="panel">
     <h3 style="margin-bottom:10px">已配置安全区</h3>

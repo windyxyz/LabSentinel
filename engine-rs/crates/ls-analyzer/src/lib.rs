@@ -7,6 +7,7 @@
 pub mod detector;
 pub mod episode;
 pub mod evidence;
+pub mod lab_rules;
 pub mod motion;
 pub mod pipeline;
 pub mod ppe;

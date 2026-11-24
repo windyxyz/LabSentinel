@@ -1,18 +1,8 @@
-//! RA2-S5（ADR-0011）：事件 AI 复核（VLM 误报预分类）。契约对齐 Python
-//! `server/app/genai.py`：
-//! - 默认关（provider=none 零开销）；只写 events.ai_review* 标记，绝不改 status/
-//!   不抑制告警；失败静默计数；截图只发回环（非回环需 LS_GENAI_ALLOW_REMOTE）；
-//! - 单线程有界队列（max=100，满丢 + dropped 计数）；
-//! - provider：ollama / openai_compat，严格 JSON verdict 白名单；
-//! - 状态端点九字段（provider/model/queue_depth/enqueued/dropped/reviewed/failed/
-//!   inflight/max_inflight）。
+//! Legacy opt-in event review queue. All model requests use the shared VLM transport.
 
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::time::Duration;
-
-use base64::Engine;
-use serde_json::{json, Value};
 
 const QUEUE_MAX: usize = 100;
 
@@ -64,32 +54,16 @@ fn env_num<T: std::str::FromStr>(k: &str, d: T) -> T {
         .unwrap_or(d)
 }
 
-fn is_loopback(url: &str) -> bool {
-    // 与 Python urlparse().hostname 同口径的宽松判定
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url);
-    let host = rest
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("");
-    matches!(
-        host.to_ascii_lowercase().as_str(),
-        "127.0.0.1" | "localhost" | "::1"
-    )
-}
-
 impl GenAI {
     /// 从 env 组装；provider=none 时 tx=None（零队列/零线程）。
     pub fn from_env() -> Self {
         let provider = std::env::var("LS_GENAI_PROVIDER").unwrap_or_else(|_| "none".into());
         let url = std::env::var("LS_GENAI_URL").unwrap_or_default();
         let allow_remote = env_bool("LS_GENAI_ALLOW_REMOTE", false);
-        if provider == "none" || url.is_empty() || (!is_loopback(&url) && !allow_remote) {
+        if !matches!(provider.as_str(), "openai_compat" | "ollama")
+            || url.is_empty()
+            || (!crate::vlm::is_loopback(&url) && !allow_remote)
+        {
             // 未配置/非回环未授权 → 保持关闭（与 Python 合规红线一致）
             return GenAI {
                 provider: "none".into(),
@@ -103,12 +77,13 @@ impl GenAI {
         let model = std::env::var("LS_GENAI_MODEL").unwrap_or_else(|_| "llava".into());
         let api_key = std::env::var("LS_GENAI_API_KEY").unwrap_or_default();
         let timeout_s = env_num("LS_GENAI_TIMEOUT_S", 10u64).max(1);
-        let cfg = ProviderCfg {
+        let cfg = crate::vlm::VlmCfg {
             provider: provider.clone(),
             model: model.clone(),
             url: url.clone(),
             api_key: api_key.clone(),
             timeout_s,
+            enabled: true,
         };
         let stats = std::sync::Arc::new(Stats::default());
         let rx_stats = std::sync::Arc::clone(&stats);
@@ -121,18 +96,8 @@ impl GenAI {
                 for job in rx {
                     rx_stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
                     rx_stats.inflight.fetch_add(1, Ordering::Relaxed);
-                    let result = snapshot_b64(&job.snapshot)
-                        .and_then(|b64| {
-                            call_provider(
-                                &cfg.provider,
-                                &cfg.url,
-                                &cfg.model,
-                                &cfg.api_key,
-                                cfg.timeout_s,
-                                &b64,
-                            )
-                            .ok()
-                        })
+                    let result = ls_jobs::media::snapshot_jpeg(std::path::Path::new(&job.snapshot))
+                        .and_then(|jpeg| crate::vlm::visual_response(&cfg, PROMPT, &[jpeg]).ok())
                         .and_then(|text| parse_review(&text).ok());
                     match result {
                         Some(review) => {
@@ -177,6 +142,7 @@ impl GenAI {
         if level < self.min_level {
             return false;
         }
+        self.stats.queue_depth.fetch_add(1, Ordering::Relaxed);
         match tx.try_send(GenAIJob {
             eid,
             snapshot: snap.to_string(),
@@ -184,10 +150,10 @@ impl GenAI {
         }) {
             Ok(()) => {
                 self.stats.enqueued.fetch_add(1, Ordering::Relaxed);
-                self.stats.queue_depth.fetch_add(1, Ordering::Relaxed);
                 true
             }
             Err(_) => {
+                self.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
                 self.stats.dropped.fetch_add(1, Ordering::Relaxed);
                 false
             }
@@ -206,80 +172,6 @@ impl GenAI {
             "inflight": self.stats.inflight.load(Ordering::Relaxed),
             "max_inflight": 1,
         })
-    }
-}
-
-// 简化版：消费者线程通过 `ReviewSink` 回调把结果回写（避免 GenAI 直接持有 db）。
-// 实际接入见 AppState 构造处的 `spawn_worker`（本模块提供 parse/call 纯函数 + 状态）。
-
-struct ProviderCfg {
-    provider: String,
-    model: String,
-    url: String,
-    api_key: String,
-    timeout_s: u64,
-}
-
-/// 调 provider 返回原始文本（ureq；HTTP 错误/超时 → Err）。
-pub fn call_provider(
-    provider: &str,
-    url: &str,
-    model: &str,
-    api_key: &str,
-    timeout_s: u64,
-    b64: &str,
-) -> Result<String, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(timeout_s.max(1))))
-        .build()
-        .into();
-    let (endpoint, body) = if provider == "ollama" {
-        (
-            format!("{}/api/generate", url.trim_end_matches('/')),
-            json!({
-                "model": model, "prompt": PROMPT, "images": [b64],
-                "stream": false, "format": "json", "options": {"temperature": 0},
-            }),
-        )
-    } else if provider == "openai_compat" {
-        (
-            format!("{}/v1/chat/completions", url.trim_end_matches('/')),
-            json!({
-                "model": model, "temperature": 0, "max_tokens": 300,
-                "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": PROMPT},
-                    {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{b64}")}},
-                ]}],
-            }),
-        )
-    } else {
-        return Err(format!("未知 provider: {provider}"));
-    };
-    let mut req = agent
-        .post(&endpoint)
-        .header("Content-Type", "application/json");
-    if !api_key.is_empty() && provider == "openai_compat" {
-        req = req.header("Authorization", format!("Bearer {api_key}"));
-    }
-    let mut resp = req
-        .send(body.to_string())
-        .map_err(|e| format!("VLM 请求失败: {e}"))?;
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("VLM 响应读取失败: {e}"))?;
-    let data: Value = serde_json::from_str(&text).map_err(|_| "VLM 响应非 JSON".to_string())?;
-    if provider == "ollama" {
-        Ok(data
-            .get("response")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string())
-    } else {
-        Ok(data["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string())
     }
 }
 
@@ -311,10 +203,4 @@ pub fn parse_review(text: &str) -> Result<Value, String> {
         .unwrap_or(0.0)
         .clamp(0.0, 1.0);
     Ok(json!({"verdict": verdict, "reason": reason, "confidence": conf}))
-}
-
-/// JPEG 截图 → base64（长边压缩留给后续；当前直接编码，契约等价）。
-pub fn snapshot_b64(path: &str) -> Option<String> {
-    let raw = ls_jobs::media::snapshot_jpeg(std::path::Path::new(path))?;
-    Some(base64::engine::general_purpose::STANDARD.encode(&raw))
 }
