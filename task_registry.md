@@ -48,15 +48,15 @@
 | LS-086 | v0.7.0 · 统一 Vulkan CV 引擎选型 Spike（`ncnn-vulkan` vs `ort-webgpu` vs `wgpu/Burn`）& 真机对比基准 | P0 | BLOCKED | 2026-11-24 | 本地验收完成。余 NVIDIA、Intel、四小时 CV+VLM 同卡门禁和增量包体优化。按 ADR-0012 用实验工具复测。 |
 | LS-087 | v0.7.5 · 实验室专项规则（1D 通风橱 `ref_lines` / OR-of-ANDs PPE 策略矩阵 / 协议无关固定机位规则） | P1 | DONE | 2026-11-24 | 本地双产物与集中回归通过。固定机位用两张合成图回环核对，视频参考线告警有原始证据。 |
 | LS-088 | v0.7.5 · 防幻觉 VLM 2.0 统一引擎 + 性价比带识图 AI 辅助报告、多轮历史问答与持久化记录（DeepSeek/Qwen-VL-Flash 等） | P0 | DONE | 2026-11-24 | 本地双产物与远端全量回归通过。使用合成图的回环精测通过，后续现场准确率和计费测量见 GA 门槛。 |
-| LS-089 | v0.8.0 · 零 NC 数据集 COCO-Pose 姿态跌倒/昏迷检测 + 可选红外热成像温度遥测钩子 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-089`（Schema `v27`） |
+| LS-089 | v0.8.0 · COCO-Pose 姿态跌倒/昏迷检测 + 可选红外热成像温度遥测钩子 | P1 | READY | 2026-11-24 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-089`（Schema `v27`，可结合 URFD/Le2i 调优评测） |
 | LS-090 | v0.8.0 · 摄像头防篡改检测（`tamper.rs`）+ 可选 FFmpeg 音频尖峰旁路 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-090` |
-| LS-091 | v0.8.0 · 全链路模型/阈值/提示词 SHA-256 溯源（`open-nvr` 模式）+ 机位×时段热点热力图 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-091`（Schema `v27`） |
-| LS-092 | v0.8.0 · 托管离线 Vulkan `llama-server.exe`（反 NF4 硬拦截 + 显存配额防 TDR）+ `tools/` `ms-swift` 微调剧本 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-092` |
-| LS-093 | v0.8.5 · 统一 Vulkan CV 生产引擎灰度落地 + 下一代检测器（YOLO26n/s + Apache-2.0 可选线） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-093` |
+| LS-091 | v0.8.0 · 模型、规则与提示词溯源 + PPE 逐人诊断 + 机位时段热力图 | P1 | READY | 2026-11-24 | `rg -n -e apply_coat_confirmation -e coat_confidence engine-rs/crates/ls-analyzer/src/ppe.rs`，按路线图 §3.4 准备固定验收样本 |
+| LS-092 | v0.8.0 · 可选 `llama-server.exe` Vulkan 托管 + GGUF 与视觉投影校验 | P0 | READY | 2026-11-24 | 见 `docs/plan/v1.0.0-roadmap.md` §3.3，先准备同图比较离线模型 |
+| LS-093 | v0.8.5 · Vulkan CV 灰度 + 人员和 PPE 权重独立对照 | P0 | READY | 2026-11-24 | `python -X utf8 -B Resources/dist/model-evaluation/check_folder.py` 复跑本地候选。原文件清单见 `docs/plan/model-source-review-2026-11-24.md` |
 | LS-094 | v0.8.5 · 声明式「实验室安全技能包（Skill Packs）」4 套内置场景模板 | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-094`（Schema `v28`） |
-| LS-095 | v0.9.0 · Vulkan 晋升统一默认 GPU + 数据飞轮 2.0（绿灯数据集 + NC 许可防火墙 + 7 大训练配方 + 人话评测） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-095`（Schema `v29`） |
+| LS-095 | v0.9.0 · Vulkan 默认晋升 + 数据集版本、许可与导出清理 | P0 | READY | 2026-11-24 | 见 `docs/plan/v1.0.0-roadmap.md` §3.4 与 `LS-095`（Schema `v29`） |
 | LS-096 | v0.9.0 · 零外部服务中英文语义事件检索（嵌入式 `sqlite-vec` + `Jina-CLIP v2`/`SigLIP 2`） | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-096`（Schema `v30`） |
-| LS-097 | v0.9.0 · 零转码视频底座（可选 `retina` RTSP + 关键帧环 + 按需 fMP4）+ 分层保留 + 事务性 Alert Outbox | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-097`（Schema `v31`） |
+| LS-097 | v0.9.0 · 零转码录像、事件回放与告警投递恢复 | P0 | READY | 2026-11-24 | `rg -n -e FrameReader -e file_exit_ok engine-rs/crates/ls-ingest/src/capture.rs`，按路线图 §2.2、§6.3 分别准备大华/乐橙回放及投递恢复样本（Schema `v31`） |
 | LS-098 | v0.9.5 · 细粒度可配权限本地 MCP Server（默认只读 + 逐工具高权限勾选 + 独立令牌 + 审计 + HMAC 凭证） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-098`（Schema `v32`） |
 | LS-099 | v0.9.5 · 原生 `windows-service` 服务化 + 一键纯视觉审计证据包 ZIP + 可选物理声光报警 Actor | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-099` |
 | LS-100 | v1.0.0 · 72h 统一 Vulkan（CV+VLM）并发长稳压测 + 全维度精度与 MCP 安全认证 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-100` |

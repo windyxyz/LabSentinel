@@ -2,6 +2,12 @@
 
 ## Latest Handoff Snapshot
 
+- **范围变更（2026-11-24）· 放开非商业/学术数据集随包限制**。用户确认本项目仅作非商业自用与学习研究，允许 `SH17`（CC BY-NC-SA）、`FASDD`、`URFD/Le2i` 等非商业/学术数据集参与训练、评测与随包权重发布；取消 `LS-095` 中的 NC 硬拦截（`exit 2`），改为自动登记来源与原许可证并写入 `NOTICE`。已同步更新 [docs/plan/v1.0.0-roadmap.md](docs/plan/v1.0.0-roadmap.md)、[task_plan.md](task_plan.md)、[task_registry.md](task_registry.md)。下一实施任务仍从 `LS-089` 接续。
+- **同类项目工程做法规划审阅**。`LS-097` 保持 `READY`。对照 `v0.7.5` 源码和同类项目原始资料，更新[路线图版本图与 §2.2](docs/plan/v1.0.0-roadmap.md#22-同类项目的工程做法与验收)。补入机位健康、历史证据、场景模板、录像回放、告警回执和权限验收。复用实时最新帧、已有预览池与断线补发。此轮为文档更新，下一实施任务仍从 `LS-089` 接续。
+- **文档验证**。`git diff --check` 通过，核对了 10 个版本图节点、22 项原有任务与 7 行新增验收的版本归属。
+- **模型来源与路线图预研**。`LS-093` 保持 `READY`。补入从 `v0.8.0` 诊断现有 PPE、`v0.8.5` 候选权重和后端分别灰度，到 `v1.0.0` 分类验证的顺序。[来源与实测](docs/plan/model-source-review-2026-11-24.md)记录权重、许可、哈希与适用范围。产品实现仍从 `LS-089` 接续。
+- **定向推理验证**。`python -X utf8 -B Resources/dist/model-evaluation/compare_local.py` 退出 0，输出 18 图 CPU 对照。`python -X utf8 -B Resources/dist/model-evaluation/check_folder.py` 退出 0。使用 `v0.7.5` 暂存包与独立回环实例，随包配置 3 人均未知，绕过末级复核后确认两件白大褂，YOLO26n 替换人员模型后两张图仍检出 3 人。`vulkan_spike.exe cpu <yolo26n.onnx> 5 <3 张 BGR>` 加载随包 ORT，单会话和四会话返回检测框，退出 0。外部 API 调用 0，测试图片来自项目合成及公开样本。
+- **规划核验**。`git diff --check` 通过，确认路线图仍为 22 项，候选报告中的本地引用与两份推理结果均已对照。
 - **当前节点**。`v0.7.5` 本地测试版已验收。`LS-087`、`LS-088` 完成，下一阶段从 `LS-089` 的任务记录继续。`LS-086` 跨厂商硬件门禁依旧待设备，选型依据见 [ADR-0012](docs/adr/0012-unified-vulkan-gpu.md#2026-11-24-radeon-880m-实测)。
 - **人员窗口更正与验收**。同一人在默认 300 秒内最多送一张，按已录入本机匹配跨轨迹和机位，无匹配只按当前连续轨迹。窗口和多人裁剪即时生效，窗口内其他本地事件继续保留。用两张项目图片由助手判读口罩结果，回环模拟 API 实收两次，每次核对裁剪 JPEG 字节。重复轨迹不发送，不同人触发同类规则各自保留，额度用完继续本地。用已确认身份的测试输入验证换轨、换机位、重启、到期与删除身份。当前证据未测现场人脸准确率。`cargo fmt --all -- --check`、定向 Clippy、`cargo test -p ls-server --all-features worker:: -- --nocapture`（22 项）、前端 15 项及构建通过。
 - **补充合成监控验收**。新增白天高位广角和灰度夜视两张合成图。`cargo test -p ls-server --all-features --offline laboratory_fixed_review` 通过。白天指定区域无法确认设备门，模拟接口返回不确定，无事件。夜视可见敞开门扇和搁架，写入确认阶段和原始截图。稳定视图未重复发送，准确收到两次单图裁剪，全程使用回环模拟接口。
