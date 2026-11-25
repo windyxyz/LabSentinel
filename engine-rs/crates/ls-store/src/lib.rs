@@ -14,6 +14,7 @@ mod faces;
 mod lab;
 mod operations;
 mod spatial;
+pub mod vec;
 pub use episodes::{EpisodeContext, EpisodeEvidence, NewEpisode};
 pub use faces::{FacePerson, FaceTemplate};
 pub use operations::{ComplianceCounts, DeliveryWithHistory, EventNote};
@@ -21,7 +22,7 @@ pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 29;
+pub const SCHEMA_VERSION_LATEST: i64 = 30;
 const PROVENANCE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS provenance_snapshots(hash TEXT PRIMARY KEY, settings TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS event_provenance(event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
         hash TEXT NOT NULL REFERENCES provenance_snapshots(hash));
@@ -166,6 +167,7 @@ pub struct ReportSummary {
 impl Store {
     /// 打开已有库（Python 建库路径）；空文件则由 Python 负责首次建库。
     pub fn open(path: &str) -> rusqlite::Result<Self> {
+        vec::register()?;
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // LS-041（存储安全）：必须真正开启 WAL 模式才能与 synchronous=NORMAL 配对
@@ -202,7 +204,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(29, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(30, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -288,6 +290,7 @@ impl Store {
         self.conn.execute_batch(assistant::SCHEMA)?;
         self.conn.execute_batch(PROVENANCE_SCHEMA)?;
         self.conn.execute_batch(SCENE_PACK_SCHEMA)?;
+        self.conn.execute_batch(vec::SCHEMA)?;
         Ok(true)
     }
 
@@ -552,6 +555,11 @@ impl Store {
         }
         tx.execute(
             "INSERT OR IGNORE INTO schema_version VALUES(29, 'rust-ls095-dataset-metadata')",
+            [],
+        )?;
+        tx.execute_batch(vec::SCHEMA)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(30, 'rust-ls096-semantic-index')",
             [],
         )?;
         tx.commit()?;
@@ -3261,6 +3269,29 @@ mod tests {
         let sample = s.dataset_sample_by_id(id).unwrap().unwrap();
         assert_eq!(sample.lighting, "low_light");
         assert!(sample.is_hard_negative);
+    }
+
+    #[test]
+    fn semantic_index_is_available_on_every_store_connection() {
+        for _ in 0..2 {
+            let s = Store::open(":memory:").unwrap();
+            let version: String = s
+                .conn()
+                .query_row("SELECT vec_version()", [], |row| row.get(0))
+                .unwrap();
+            assert!(version.starts_with('v'));
+            s.ensure_schema().unwrap();
+            assert_eq!(s.migrate().unwrap(), SCHEMA_VERSION_LATEST);
+            let table: i64 = s
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name='vec_event_embeddings'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table, 1);
+        }
     }
 
     #[test]

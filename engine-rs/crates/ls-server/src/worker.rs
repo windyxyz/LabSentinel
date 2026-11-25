@@ -472,6 +472,10 @@ pub struct Workers {
 static NEXT_REVIEW_SOURCE: AtomicU64 = AtomicU64::new(1);
 
 impl Workers {
+    pub(crate) fn is_idle(&self) -> bool {
+        self.map.lock().is_ok_and(|map| map.is_empty())
+    }
+
     pub(crate) fn image_health(&self, camera: i64) -> Option<&'static str> {
         let handle = self.get(camera)?;
         Some(tamper::ImageHealth::label(

@@ -69,8 +69,16 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/maintenance/status"),
     ("GET", "/api/maintenance/preview"),
     ("POST", "/api/maintenance/cleanup"),
+    ("GET", "/api/storage"),
+    ("POST", "/api/storage/preview"),
+    ("POST", "/api/storage/cleanup"),
+    ("POST", "/api/storage/compact"),
+    ("PUT", "/api/storage/policy"),
     ("GET", "/api/escalation/status"),
     ("GET", "/api/events/count"),
+    ("GET", "/api/events/explore"),
+    ("GET", "/api/events/explore/settings"),
+    ("PUT", "/api/events/explore/settings"),
     ("GET", "/api/ws/events"),
     ("GET", "/api/ws/detections/:cid"), // LS-051（root /ws/detections/:cid）
     // ---- R2-309 批次 1：cameras 扩展 ----
@@ -348,8 +356,18 @@ pub fn build_router(state: Shared) -> Router {
         .route("/maintenance/status", get(maintenance_status))
         .route("/maintenance/preview", get(maintenance_preview))
         .route("/maintenance/cleanup", post(maintenance_cleanup))
+        .route("/storage", get(storage::usage))
+        .route("/storage/preview", post(storage::preview))
+        .route("/storage/cleanup", post(storage::cleanup))
+        .route("/storage/compact", post(storage::compact))
+        .route("/storage/policy", put(storage::set_policy))
         .route("/escalation/status", get(escalation_status))
         .route("/events/count", get(events_count))
+        .route("/events/explore", get(semantic::explore))
+        .route(
+            "/events/explore/settings",
+            get(semantic::status).put(semantic::configure),
+        )
         .route("/pairing", post(create_pairing))
         .route("/pairing/claim", post(claim_pairing))
         .route("/pairing/revoke", post(revoke_pairing))

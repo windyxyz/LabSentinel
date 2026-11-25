@@ -9,6 +9,8 @@ import AccessSettings from './AccessSettings.vue'
 import DetectPanel from './DetectPanel.vue'
 import Devices from './Devices.vue'
 import Face from './Face.vue'
+import StorageSettings from './StorageSettings.vue'
+import SemanticSettings from '../components/SemanticSettings.vue'
 import AnnotatorModal from '../components/AnnotatorModal.vue'
 
 const search = ref('')
@@ -21,6 +23,7 @@ const sections = [
   { id: 'devices', label: '设备与配对', kw: '设备 配对 令牌 移动端 手机 撤销 三级', icon: '<rect x="4.5" y="2" width="7" height="12" rx="1.5"/><path d="M7 12.2h2"/>' },
   { id: 'face', label: '人脸识别', kw: '人脸 名册 注册 同意 合规 陌生人 删除', icon: '<circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 13.8c.9-2.7 3-4 5.5-4s4.6 1.3 5.5 4"/>' },
   { id: 'data', label: '数据管理', kw: '导入 导出 备份 配置 json 迁移', icon: '<path d="M3 5.5C3 4.1 5.2 3 8 3s5 1.1 5 2.5S10.8 8 8 8 3 6.9 3 5.5z"/><path d="M3 5.5v5C3 11.9 5.2 13 8 13s5-1.1 5-2.5v-5"/>' },
+  { id: 'storage', label: '存储管理', kw: '磁盘 清理 缓存 日志 事件 原图 标注池 自动保留', icon: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M2.5 9h11M5 11h1"/>' },
   { id: 'plugins', label: '插件', kw: '插件 外挂 zip 上传 启用 日志 扩展', icon: '<path d="M6 2.5h4v2.2a1.6 1.6 0 1 0 2.2 2.2H14v4h-1.8a1.6 1.6 0 1 1 0 2.2H14v1.4H2v-1.4h1.8a1.6 1.6 0 1 0-2.2-2.2H2v-4h2.2A1.6 1.6 0 1 0 6 4.7z"/>' },
   { id: 'network', label: '网络与运维', kw: '局域网 端口 令牌 开机自启 日报 周报 定时 报告 重启', icon: '<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c2 1.8 2 9.2 0 11M8 2.5c-2 1.8-2 9.2 0 11"/>' },
   { id: 'service', label: '服务控制', kw: '停止 服务 重启 退出 关机 日志 尾部', icon: '<path d="M8 2.5v5.5"/><path d="M4.6 4.8a4.8 4.8 0 1 0 6.8 0"/>' },
@@ -544,6 +547,7 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', syncSection))
     <div class="settings-body">
       <section v-show="show('detect')" class="panel detect-panel-host">
         <DetectPanel />
+        <SemanticSettings v-if="show('detect')" />
       </section>
       <section v-if="show('access')" class="panel">
         <AccessSettings />
@@ -628,6 +632,9 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', syncSection))
       </section>
       <section v-if="show('face')" class="panel">
         <Face />
+      </section>
+      <section v-if="show('storage')" class="panel">
+        <StorageSettings />
       </section>
       <section v-show="show('data')" class="panel">
     <h3 style="margin:14px 0 10px">配置导入导出</h3>

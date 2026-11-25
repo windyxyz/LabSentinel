@@ -12,6 +12,8 @@ Copyright (C) 2026 LabSentinel contributors
 axum / tower-http   0.7 / 0.6       MIT                 Web API 与静态托管    crates.io/crates/axum
 tokio               1.x             MIT                 异步运行时            crates.io/crates/tokio
 rusqlite (SQLite)   0.41 (bundled)  MIT / Public Domain 嵌入式数据库          crates.io/crates/rusqlite
+sqlite-vec          0.1.7           MIT / Apache-2.0     本机事件向量检索      https://github.com/asg017/sqlite-vec
+tokenizers          0.22.2          Apache-2.0           可选视觉搜图分词     https://github.com/huggingface/tokenizers
 ort + DirectML      2.x / 1.24.4    MIT                 ONNX/GPU 推理运行时   crates.io/crates/ort · onnxruntime-directml
 tract-onnx          0.21            MIT / Apache-2.0    纯 Rust ONNX 推理回落 crates.io/crates/tract-onnx
 ureq / rustls       3.x / 0.23      MIT / Apache-2.0    HTTP 客户端与 TLS     crates.io/crates/ureq

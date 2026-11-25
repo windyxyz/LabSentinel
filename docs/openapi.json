@@ -3192,6 +3192,25 @@
         }
       }
     },
+    "/api/events/explore": {
+      "get": {
+        "summary": "Search authorized event snapshots with the offline encoder",
+        "parameters": [
+          {"name":"q","in":"query","schema":{"type":"string","maxLength":256}},
+          {"name":"similar_to","in":"query","schema":{"type":"integer"}},
+          {"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100}}
+        ],
+        "responses": {"200":{"description":"Ranked authorized events"},"409":{"description":"Disabled or not indexed"}}
+      }
+    },
+    "/api/events/explore/settings": {
+      "get": {"summary":"Read offline search status","responses":{"200":{"description":"Offline search status"}}},
+      "put": {
+        "summary":"Set offline search state",
+        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}}}}}},
+        "responses":{"200":{"description":"Saved"},"409":{"description":"Model files missing"}}
+      }
+    },
     "/api/events/count": {
       "get": {
         "summary": "Events Count",
@@ -4063,6 +4082,33 @@
             }
           }
         }
+      }
+    },
+    "/api/storage": {
+      "get": {"summary":"Read managed storage usage","responses":{"200":{"description":"Space, categories and retention rules"}}}
+    },
+    "/api/storage/preview": {
+      "post": {
+        "summary":"Preview one cleanup batch",
+        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["category","days"],"properties":{"category":{"type":"string","enum":["logs","cache","events","normal_checks","dataset","backups"]},"days":{"type":"integer","minimum":1,"maximum":3650}}}}}},
+        "responses":{"200":{"description":"Preview fingerprint and estimated space"}}
+      }
+    },
+    "/api/storage/cleanup": {
+      "post": {
+        "summary":"Apply a previewed cleanup batch",
+        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["selection","preview"],"properties":{"selection":{"type":"object","required":["category","days"]},"preview":{"type":"string","pattern":"^[0-9a-f]{64}$"}}}}}},
+        "responses":{"200":{"description":"Actual deleted records, files and bytes"},"409":{"description":"Preview changed or cleanup busy"}}
+      }
+    },
+    "/api/storage/compact": {
+      "post": {"summary":"Reclaim free SQLite pages during idle operation","responses":{"200":{"description":"Reclaimed bytes"},"409":{"description":"Detection running, storage busy or space insufficient"}}}
+    },
+    "/api/storage/policy": {
+      "put": {
+        "summary":"Replace the automatic cleanup rules",
+        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"array","maxItems":6,"items":{"type":"object","required":["category","days"]}}}}},
+        "responses":{"200":{"description":"Saved"},"409":{"description":"Cleanup busy"}}
       }
     },
     "/api/maintenance/status": {

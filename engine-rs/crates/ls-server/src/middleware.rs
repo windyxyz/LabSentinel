@@ -180,6 +180,7 @@ pub(crate) async fn guard_middleware(
     }
     const ADMIN_GETS: &[&str] = &[
         "/api/diagnostics/bundle.zip",
+        "/api/storage",
         "/api/dataset",
         "/api/system/network",
         "/api/system/autostart",

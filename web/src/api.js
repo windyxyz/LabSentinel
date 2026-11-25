@@ -284,6 +284,14 @@ export const api = {
   bulkStatus: (payload) => req('POST', '/api/events/bulk-status', payload),
   cameraWebrtc: (id, signal) => req('GET', `/api/cameras/${id}/webrtc`, undefined, signal),
   maintenanceStatus: () => req('GET', '/api/maintenance/status'),
+  semanticStatus: () => req('GET', '/api/events/explore/settings'),
+  semanticConfigure: enabled => req('PUT', '/api/events/explore/settings', { enabled }),
+  semanticSearch: params => req('GET', '/api/events/explore?' + new URLSearchParams(params)),
+  storageUsage: () => req('GET', '/api/storage'),
+  storagePreview: selection => req('POST', '/api/storage/preview', selection),
+  storageCleanup: request => req('POST', '/api/storage/cleanup', request),
+  storageCompact: () => req('POST', '/api/storage/compact', {}),
+  storagePolicy: rules => req('PUT', '/api/storage/policy', rules),
   maintenancePreview: () => req('GET', '/api/maintenance/preview'),
   shutdownServer: () => req('POST', '/api/system/shutdown'),  // 任务120：网页端停止服务
   // 任务79：配置导入导出（导出走 fetch+blob，令牌经请求头传递；<a> 裸链接带不了）

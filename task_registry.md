@@ -55,10 +55,11 @@
 | LS-093 | v0.8.5 · Vulkan CV 灰度 + 人员和 PPE 权重独立对照 | P0 | BLOCKED | 2026-11-24 | YOLO26n 随包切换、实际检查和回退通过。按 `LS-086` 复测 NVIDIA、Intel 及 CV/VLM 同卡四小时门槛后再灰度。 |
 | LS-094 | v0.8.5 · 四套机位场景模板与预览事务套用 | P1 | DONE | 2026-11-24 | 事务预览、冲突、重复套用与过期预览验证通过。SQLite `v28` 保存版本与目标。最终双产物与解包冒烟见 `progress.md`。 |
 | LS-095 | v0.9.0 · Vulkan 默认晋升 + 数据集版本、许可与导出清理 | P0 | BLOCKED | 2026-11-25 | SQLite v29、ZIP 组别及版本清单、分离低光验证、许可台账已通过定向验证。用 `LS-086/093` 的跨显卡实测接续默认切换与现场精度，不阻塞 `LS-096/097` 开发。 |
-| LS-096 | v0.9.0 · 零外部服务中英文语义事件检索（嵌入式 `sqlite-vec` + `Jina-CLIP v2`/`SigLIP 2`） | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-096`（Schema `v30`） |
-| LS-097 | v0.9.0 · 零转码录像、事件回放与告警投递恢复 | P0 | READY | 2026-11-24 | `rg -n -e FrameReader -e file_exit_ok engine-rs/crates/ls-ingest/src/capture.rs`，按路线图 §2.2、§6.3 分别准备大华/乐橙回放及投递恢复样本（Schema `v31`） |
+| LS-096 | v0.9.0 · SigLIP 2 本机中英文事件截图检索 | P1 | DONE | 2026-11-25 | SQLite v30、真实 CPU 编码、相似查询和机位授权实时收窄已验收。现场准确率与性能留到集中验证。 |
+| LS-097 | v0.9.0 · 分析取流、可靠告警投递与恢复 | P0 | IN_PROGRESS | 2026-11-25 | 从 `EventSink::record_located` 和 `Jobs::dispatch_with_cooldown` 接续，验收事件与投递意图、渠道回执、重启边界及大华/乐橙授权源。 |
 | LS-098 | v0.9.5 · 细粒度可配权限本地 MCP Server（默认只读 + 逐工具高权限勾选 + 独立令牌 + 审计 + HMAC 凭证） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-098`（Schema `v32`） |
 | LS-099 | v0.9.5 · 原生 `windows-service` 服务化 + 一键纯视觉审计证据包 ZIP + 可选物理声光报警 Actor | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-099` |
 | LS-100 | v0.9.6 · 72h 统一 Vulkan（CV+VLM）并发长稳压测 + 全维度精度与 MCP 安全认证 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-100` |
 | LS-101 | v0.9.6 · 升级/回滚/卸载 + 签名、GitHub 主页重写与双产物 | P0 | READY | 2026-11-24 | 按最终实装与验收状态重写 `README.md`，见路线图 §6.4 |
+| LS-102 | v0.9.0 · 设置内存储管理与分类清理 | P0 | DONE | 2026-11-25 | 设置页、清理范围过期拦截、删除回执、原件保护、保留策略、数据库整理均进入当前批次验收。 |
 | LS-900 | 代码签名证书（T-403）与 GitHub uploads 网络通道（S302）处理 | P3 | BLOCKED | 2026-11-22 | 人工事项：待证书到位或用户调整本机网络/hosts |

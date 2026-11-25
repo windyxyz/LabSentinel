@@ -164,6 +164,8 @@ pub(crate) fn permit_device(
             "/api/cameras"
                 | "/api/events"
                 | "/api/events/count"
+                | "/api/events/explore"
+                | "/api/events/explore/settings"
                 | "/api/stats/daily"
                 | "/api/stats/compliance"
                 | "/ws/events"

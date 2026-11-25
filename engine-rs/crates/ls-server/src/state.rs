@@ -39,6 +39,8 @@ pub struct AppState {
     pub(crate) faces: crate::local_face::FaceRuntime,
     pub(crate) thermal: crate::handlers::telemetry::ThermalRuntime,
     pub(crate) local_vlm: crate::local_vlm::LocalVlm,
+    pub(crate) semantic: crate::semantic::SemanticRuntime,
+    pub(crate) storage: crate::storage::StorageRuntime,
 }
 
 #[derive(Default)]

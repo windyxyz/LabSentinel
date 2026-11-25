@@ -184,7 +184,7 @@ impl OrtSession {
                     if let Some(lease) = state.models.get(&key).and_then(Weak::upgrade) {
                         return Ok(lease);
                     }
-                    let session = build(&key.path, Some(key.adapter))?;
+                    let session = build(&key.path, Some(key.adapter), None)?;
                     state.last_id += 1;
                     let lease = Arc::new(GpuLease(state.last_id));
                     state.sessions.insert(lease.0, session);
@@ -199,7 +199,11 @@ impl OrtSession {
                 }
             }
         }
-        build(path, None).map(Box::new).map(Self::Cpu)
+        build(path, None, None).map(Box::new).map(Self::Cpu)
+    }
+
+    pub(crate) fn load_background_cpu(path: &Path) -> Result<Self, String> {
+        build(path, None, Some(1)).map(Box::new).map(Self::Cpu)
     }
 
     pub(crate) fn is_gpu(&self) -> bool {
@@ -247,7 +251,7 @@ pub fn dml_lock() -> &'static Mutex<()> {
     &LOCK
 }
 
-fn build(path: &Path, dml: Option<Option<i32>>) -> Result<Session, String> {
+fn build(path: &Path, dml: Option<Option<i32>>, threads: Option<usize>) -> Result<Session, String> {
     static ENVIRONMENT: OnceLock<Result<ort::environment::Environment, String>> = OnceLock::new();
     let environment = ENVIRONMENT
         .get_or_init(|| {
@@ -260,6 +264,13 @@ fn build(path: &Path, dml: Option<Option<i32>>) -> Result<Session, String> {
         .map_err(Clone::clone)?;
     let bytes = std::fs::read(path).map_err(|error| format!("读取模型失败: {error}"))?;
     let mut builder = Session::builder(environment).map_err(|error| error.to_string())?;
+    if let Some(threads) = threads {
+        builder = builder
+            .with_intra_threads(threads)
+            .map_err(|error| error.to_string())?
+            .with_parallel_execution(false)
+            .map_err(|error| error.to_string())?;
+    }
     if let Some(adapter) = dml {
         let mut provider = ort::ep::DirectML::default();
         if let Some(adapter) = adapter {

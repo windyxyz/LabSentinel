@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 ls-core = { path = "../ls-core" }
 rusqlite = { version = "0.41", features = ["bundled"] }
+sqlite-vec = "=0.1.7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -9,6 +9,8 @@ pub mod post;
 pub mod preprocess;
 
 #[cfg(feature = "ort")]
+pub mod embed;
+#[cfg(feature = "ort")]
 pub mod face;
 
 #[cfg(feature = "ort")]

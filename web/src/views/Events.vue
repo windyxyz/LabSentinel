@@ -6,6 +6,7 @@ import AsyncState from '../components/AsyncState.vue'
 import SnapshotOverlay from '../components/SnapshotOverlay.vue'
 import EventExplanation from '../components/EventExplanation.vue'
 import SuppressionReview from '../components/SuppressionReview.vue'
+import ExploreGrid from '../components/ExploreGrid.vue'
 
 const rows = ref([])
 const camId = ref('')
@@ -16,6 +17,11 @@ const cams = ref([])
 const props = defineProps({ routeQuery: { type: String, default: '' } })
 const zoom = ref(null)
 const videoZoom = ref(null)
+const exploreEnabled = ref(false)
+const explore = ref(null)
+onMounted(() => api.semanticStatus().then(status => {
+  exploreEnabled.value = status?.enabled === true && status?.available === true
+}).catch(() => {}))
 // 任务19：分页 + 时间范围
 const PAGE_SIZE = 50
 const offset = ref(0)
@@ -412,9 +418,16 @@ async function quickMark(status) {
 function openDetail(e, ev) {
   // 点击行打开抽屉；按钮/图片/视频区域点击不触发
   if (e.target.closest('button, img, video, a')) return
+  openEvent(ev)
+}
+function openEvent(ev) {
   lastFocus = document.activeElement
   drawer.value = ev
   nextTick(() => drawerEl.value?.focus({ preventScroll: true }))
+}
+async function findSimilar(ev) {
+  closeDrawer()
+  await explore.value?.similar(ev.id)
 }
 function closeDrawer() {
   drawer.value = null
@@ -457,6 +470,7 @@ async function rememberSpot(event) {
 <template>
   <div class="panel">
     <p v-if="actionNotice" class="muted" role="status">{{ actionNotice }}</p>
+    <ExploreGrid v-if="exploreEnabled" ref="explore" @open-event="openEvent" />
     <div class="row">
       <b>事件查询</b>
       <select v-model="camId" @change="zoneFilter = null; resetAndLoad()">
@@ -645,6 +659,7 @@ async function rememberSpot(event) {
                :eid="drawer.id" :src="mediaUrl(`/api/events/${drawer.id}/snapshot`)" :available="drawer.has_overlay === true"
                @error="previewUnavailable = true" @zoom="url => zoom = url" />
           <p v-else-if="previewUnavailable" class="muted">事件图片已不可用。</p>
+          <button v-if="exploreEnabled && drawer.has_snapshot" class="ghost" @click="findSimilar(drawer)">找相似画面</button>
           <video v-if="drawer.has_video" :src="mediaUrl(`/api/events/${drawer.id}/video`)" controls
                  style="width:100%; border-radius:var(--overlay-radius); background:#000" />
           <div v-if="drawer.status === 'new'" class="row">

@@ -59,6 +59,8 @@ pub(crate) fn test_state_custom(
         faces: Default::default(),
         thermal: Default::default(),
         local_vlm: Default::default(),
+        semantic: Default::default(),
+        storage: Default::default(),
     })
 }
 

@@ -43,8 +43,10 @@ mod middleware;
 mod performance;
 mod plugins;
 mod router;
+mod semantic;
 mod spatial;
 mod state;
+mod storage;
 mod util;
 mod vlm;
 mod worker;
@@ -380,6 +382,8 @@ async fn main() {
         faces: Default::default(),
         thermal: Default::default(),
         local_vlm: Default::default(),
+        semantic: Default::default(),
+        storage: Default::default(),
     });
     // R2-305：网页端配置的渠道（app_settings alert.*，Fernet 解密）注入 ls-jobs
     // escalation 发送——"网页端保存企微 webhook → rust 路径生效"的真实验收点。
@@ -442,6 +446,8 @@ async fn main() {
     let app = build_router(st.clone());
     st.jobs.start();
     crate::local_face::start_retention(Arc::clone(&st));
+    crate::semantic::start(Arc::clone(&st));
+    crate::storage::start(Arc::clone(&st));
     // LS-051：按 app_settings 决定是否托管 go2rtc（缺失二进制优雅降级，不阻塞启动）
     let go2rtc_enabled = ls_store::Store::open(&st.db_path)
         .ok()
@@ -556,6 +562,8 @@ async fn selftest_http() -> bool {
         faces: Default::default(),
         thermal: Default::default(),
         local_vlm: Default::default(),
+        semantic: Default::default(),
+        storage: Default::default(),
     });
     // 不 start() 后台作业：自检只验 API/DB 链路（顺带消除空 DB 的 backup 噪音）
     let app = build_router(st.clone());
