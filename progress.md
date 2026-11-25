@@ -2,6 +2,10 @@
 
 ## Latest Handoff Snapshot
 
+- **范围变更（2026-11-25）**。路线图原 1.0.0 节点改为 0.9.6，产品基线是 `aee9cb6` 的 0.8.5。当前任务 `LS-095`，先落实可独立验收的数据集版本和导出清理。后续依次推进 `LS-096/097`、`LS-098/099` 与 `LS-100/101`。GitHub Release 暂停。
+- **`LS-095` 数据集子项**。SQLite v29 保留旧标注并新增光照、困难负样本和误报点来源。按训练集和光照导出的 ZIP 有版本摘要、样本路径、图片与标签 SHA-256、排除与缺失 ID。低光验证目录不会混入训练合并。开发支具输出参与合并的来源及原许可，训练预检可读，正式训练保存相同台账。本批未运行训练。
+- **定向验证**。`cargo test -p ls-server -p ls-store --all-features dataset` 中导出与样本测试通过；`cargo test -p ls-store --all-features` 8 项通过，含 v28 旧样本迁移与重复迁移。`python -X utf8 -B -m unittest discover -s tools/tests` 16 项，`npm run build` 和 171 条接口契约通过。Vulkan 默认晋升与现场精度验收仍需补实测。
+
 - **品牌与版本**。GitHub `main @ d5d4e0f` 的有字图已按远端 blob 摘要核对。无字图进入网页、PWA、托盘、主程序与安装器。`LS-101` 已登记 1.0.0 发布前按项目实况重写 README。
 - **`v0.8.0` 本地验收**。`fmt`、全特性 Clippy、Rust 236 项通过（5 忽略），前端 104 项、构建及解包冒烟通过。独立实例验证溯源、热点、温度超限和低比特 GGUF 拒绝。Ghost Downloader 获取并校验了 `llama.cpp b11193` Vulkan、SmolVLM-256M Q8_0 和 F16 投影。独立实例启动进程、写入加密档案并完成一张图的真实回环复核。
 - **`v0.8.5` 本地验收**。修正后再次执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 和 `cargo test --workspace --all-features`，237 项通过（6 忽略）。`npx vitest run` 104 项通过，`npm run build` 通过。最终产物的 `scripts/contract_audit.py` 匹配 171 条前端 API，`scripts/rust_route_coverage.py --fail-under 100` 覆盖 159/159。包内 ORT 核验了姿态 ONNX 的 CPU 和 GPU 偏好。独立包核验四套场景、过期预览返回 409、YOLO26n 切换、实际照片检查和恢复默认。两个 Windows 可执行文件和 ZIP 网页图标均与新图标一致。Vite 的表格、配置和 jsdom Canvas 仍有既有警告。

@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import dataset_hub  # noqa: E402
 import merge_datasets as md  # noqa: E402
-from train_ppe import preflight_dataset  # noqa: E402
+from train_ppe import preflight_dataset, training_dataset_sources  # noqa: E402
 
 from PIL import Image
 
@@ -53,6 +53,51 @@ class DatasetHubTests(unittest.TestCase):
 
 
 class MergeDatasetTests(unittest.TestCase):
+    def test_weak_validation_images_are_not_reused_for_training(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for split in ("train", "val_weak"):
+                path = root / "images" / split
+                path.mkdir(parents=True)
+                (path / "image.jpg").write_bytes(JPEG)
+            self.assertEqual([sample.image.parent.name for sample in md.load_yolo_dir(root)], ["train"])
+
+    def test_training_sources_follow_the_data_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = root / "data.yaml"
+            data.write_text("train: images/train\n", encoding="utf-8")
+            (root / "dataset-sources.json").write_text(
+                json.dumps({"format_version": 1, "sources": [
+                    {"name": "example", "source": "https://example.test/data",
+                     "license": "CC BY-NC-SA 4.0", "sample_count": 2},
+                ]}), encoding="utf-8",
+            )
+            manifest = training_dataset_sources(data, root)
+            self.assertEqual(manifest["sources"][0]["license"], "CC BY-NC-SA 4.0")
+            self.assertEqual(len(manifest["data_yaml_sha256"]), 64)
+
+    def test_merge_records_source_of_retained_samples(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name in ("first", "duplicate"):
+                self._make_dataset(root / name, ["lab coat", "person"])
+                (root / name / "dataset-source.json").write_text(
+                    json.dumps({"source": f"https://example.test/{name}", "license": "CC BY-NC-SA 4.0"}),
+                    encoding="utf-8",
+                )
+            out = root / "merged"
+            self.assertEqual(md.main([
+                "--src", f"first={root / 'first'}",
+                "--src", f"duplicate={root / 'duplicate'}",
+                "--out", str(out),
+            ]), 0)
+            manifest = json.loads((out / "dataset-sources.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["sources"], [{
+                "name": "first", "source": "https://example.test/first",
+                "license": "CC BY-NC-SA 4.0", "sample_count": 1,
+            }])
+
     def test_normalize_class_aliases(self):
         self.assertEqual(md.normalize_class("Lab Coat"), "lab_coat")
         self.assertEqual(md.normalize_class("no-lab-coat"), "no_lab_coat")

@@ -21,7 +21,7 @@ pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 28;
+pub const SCHEMA_VERSION_LATEST: i64 = 29;
 const PROVENANCE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS provenance_snapshots(hash TEXT PRIMARY KEY, settings TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS event_provenance(event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
         hash TEXT NOT NULL REFERENCES provenance_snapshots(hash));
@@ -202,7 +202,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(28, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(29, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -271,7 +271,9 @@ impl Store {
                source_id TEXT NOT NULL, camera_id INTEGER, image_path TEXT NOT NULL, \
                width INTEGER NOT NULL, height INTEGER NOT NULL, \
                status TEXT NOT NULL DEFAULT 'pending', boxes_json TEXT NOT NULL DEFAULT '[]', \
-               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+               created_at TEXT NOT NULL, updated_at TEXT NOT NULL, \
+               lighting TEXT NOT NULL DEFAULT 'unknown', is_hard_negative INTEGER NOT NULL DEFAULT 0, \
+               source_fp_spot_id INTEGER);
              CREATE TABLE IF NOT EXISTS share_links(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
                token_hash TEXT NOT NULL UNIQUE, ttl_hours INTEGER NOT NULL, \
@@ -530,6 +532,26 @@ impl Store {
         tx.execute_batch(SCENE_PACK_SCHEMA)?;
         tx.execute(
             "INSERT OR IGNORE INTO schema_version VALUES(28, 'rust-ls094-scene-packs')",
+            [],
+        )?;
+        let dataset_columns = tx
+            .prepare("PRAGMA table_info(dataset_samples)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        for (column, definition) in [
+            ("lighting", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("is_hard_negative", "INTEGER NOT NULL DEFAULT 0"),
+            ("source_fp_spot_id", "INTEGER"),
+        ] {
+            if !dataset_columns.contains(column) {
+                tx.execute(
+                    &format!("ALTER TABLE dataset_samples ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(29, 'rust-ls095-dataset-metadata')",
             [],
         )?;
         tx.commit()?;
@@ -1098,6 +1120,33 @@ pub struct DatasetSample {
     pub boxes_json: String,
     pub created_at: String,
     pub updated_at: String,
+    pub lighting: String,
+    pub is_hard_negative: bool,
+    pub source_fp_spot_id: Option<i64>,
+}
+
+impl DatasetSample {
+    const COLUMNS: &'static str = "id,source_type,source_id,camera_id,image_path,width,height,\
+        COALESCE(status,'pending'),boxes_json,created_at,updated_at,lighting,is_hard_negative,source_fp_spot_id";
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            source_type: row.get(1)?,
+            source_id: row.get(2)?,
+            camera_id: row.get(3)?,
+            image_path: row.get(4)?,
+            width: row.get(5)?,
+            height: row.get(6)?,
+            status: row.get(7)?,
+            boxes_json: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            lighting: row.get(11)?,
+            is_hard_negative: row.get(12)?,
+            source_fp_spot_id: row.get(13)?,
+        })
+    }
 }
 
 /// LS-054：只读值守分享链接。
@@ -1877,9 +1926,10 @@ impl Store {
         status: Option<&str>,
         limit: i64,
     ) -> rusqlite::Result<Vec<DatasetSample>> {
-        let mut sql = String::from(
-            "SELECT id,source_type,source_id,camera_id,image_path,width,height,COALESCE(status,'pending'),boxes_json,created_at,updated_at \
-             FROM dataset_samples WHERE 1=1");
+        let mut sql = format!(
+            "SELECT {} FROM dataset_samples WHERE 1=1",
+            DatasetSample::COLUMNS
+        );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(s) = status {
             sql.push_str(" AND COALESCE(status,'pending')=?");
@@ -1889,45 +1939,21 @@ impl Store {
         args.push(Box::new(limit));
         let vals: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(vals.as_slice(), |r| {
-            Ok(DatasetSample {
-                id: r.get(0)?,
-                source_type: r.get(1)?,
-                source_id: r.get(2)?,
-                camera_id: r.get(3)?,
-                image_path: r.get(4)?,
-                width: r.get(5)?,
-                height: r.get(6)?,
-                status: r.get(7)?,
-                boxes_json: r.get(8)?,
-                created_at: r.get(9)?,
-                updated_at: r.get(10)?,
-            })
-        })?;
+        let rows = stmt.query_map(vals.as_slice(), DatasetSample::from_row)?;
         rows.collect()
     }
 
     pub fn dataset_sample_by_id(&self, id: i64) -> rusqlite::Result<Option<DatasetSample>> {
-        rusqlite::OptionalExtension::optional(self.conn.query_row(
-            "SELECT id,source_type,source_id,camera_id,image_path,width,height,status,boxes_json,created_at,updated_at \
-             FROM dataset_samples WHERE id=?",
-            [id],
-            |r| {
-                Ok(DatasetSample {
-                    id: r.get(0)?,
-                    source_type: r.get(1)?,
-                    source_id: r.get(2)?,
-                    camera_id: r.get(3)?,
-                    image_path: r.get(4)?,
-                    width: r.get(5)?,
-                    height: r.get(6)?,
-                    status: r.get(7)?,
-                    boxes_json: r.get(8)?,
-                    created_at: r.get(9)?,
-                    updated_at: r.get(10)?,
-                })
-            },
-        ))
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM dataset_samples WHERE id=?",
+                    DatasetSample::COLUMNS
+                ),
+                [id],
+                DatasetSample::from_row,
+            )
+            .optional()
     }
 
     pub fn update_dataset_sample(
@@ -1936,9 +1962,21 @@ impl Store {
         boxes_json: &str,
         status: &str,
     ) -> rusqlite::Result<usize> {
+        self.update_dataset_annotations(id, boxes_json, status, None, None)
+    }
+
+    pub fn update_dataset_annotations(
+        &self,
+        id: i64,
+        boxes_json: &str,
+        status: &str,
+        lighting: Option<&str>,
+        hard_negative: Option<bool>,
+    ) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "UPDATE dataset_samples SET boxes_json=?, status=?, updated_at=? WHERE id=?",
-            params![boxes_json, status, chrono_now(), id],
+            "UPDATE dataset_samples SET boxes_json=?, status=?, updated_at=?, \
+             lighting=COALESCE(?,lighting), is_hard_negative=COALESCE(?,is_hard_negative) WHERE id=?",
+            params![boxes_json, status, chrono_now(), lighting, hard_negative, id],
         )
     }
 
@@ -3193,6 +3231,36 @@ mod tests {
         assert_eq!(s.update_dataset_sample(id, "[]", "verified").unwrap(), 1);
         assert_eq!(s.delete_dataset_sample(id).unwrap(), 1);
         assert!(s.dataset_samples(None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dataset_metadata_preserves_v28_samples_and_remigrates() {
+        let s = Store::open(":memory:").unwrap();
+        s.ensure_schema().unwrap();
+        s.conn()
+            .execute_batch(
+                "ALTER TABLE dataset_samples DROP COLUMN lighting;
+                 ALTER TABLE dataset_samples DROP COLUMN is_hard_negative;
+                 ALTER TABLE dataset_samples DROP COLUMN source_fp_spot_id;
+                 DELETE FROM schema_version WHERE version>28;
+                 INSERT OR IGNORE INTO schema_version VALUES(28, 'test-v28');",
+            )
+            .unwrap();
+        let id = s
+            .add_dataset_sample("event", "7", None, "dataset_pool/old.jpg", 4, 4, "[]")
+            .unwrap();
+        assert_eq!(s.migrate().unwrap(), SCHEMA_VERSION_LATEST);
+        let sample = s.dataset_sample_by_id(id).unwrap().unwrap();
+        assert_eq!(sample.source_id, "7");
+        assert_eq!(sample.lighting, "unknown");
+        assert!(!sample.is_hard_negative);
+        assert_eq!(sample.source_fp_spot_id, None);
+        s.update_dataset_annotations(id, "[]", "verified", Some("low_light"), Some(true))
+            .unwrap();
+        assert_eq!(s.migrate().unwrap(), SCHEMA_VERSION_LATEST);
+        let sample = s.dataset_sample_by_id(id).unwrap().unwrap();
+        assert_eq!(sample.lighting, "low_light");
+        assert!(sample.is_hard_negative);
     }
 
     #[test]

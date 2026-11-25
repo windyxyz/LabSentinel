@@ -22,6 +22,12 @@
           <span class="muted">拖拽画框或调整角点 · 滚轮缩放 · Alt + 拖拽平移 · 数字键切类</span>
           <button class="ghost" :disabled="selected < 0" @click="deleteSelected">删除选中框</button>
           <span class="muted">已标注 {{ boxes.length }} 个</span>
+          <select v-model="lighting" aria-label="样本光照">
+            <option value="unknown">光照未标记</option>
+            <option value="normal">常规光照</option>
+            <option value="low_light">低光 · 独立验证</option>
+          </select>
+          <label><input v-model="hardNegative" type="checkbox" />困难负样本</label>
         </div>
         <div class="row" style="align-items:center;gap:8px;margin-top:8px">
           <button :disabled="busy" @click="save('verified')">保存并标记已核验</button>
@@ -52,6 +58,8 @@ const image = ref('')
 const zoom = ref(1)
 const canvasEl = ref(null)
 const boxes = ref([])
+const lighting = ref('unknown')
+const hardNegative = ref(false)
 const cls = ref('person')
 const selected = ref(-1)
 const busy = ref(false)
@@ -62,6 +70,8 @@ let imageRequest = 0
 
 watch(() => props.sample, (s) => {
   boxes.value = Array.isArray(s?.boxes) ? JSON.parse(JSON.stringify(s.boxes)) : []
+  lighting.value = s?.lighting || 'unknown'
+  hardNegative.value = s?.is_hard_negative === true
   selected.value = -1
   msg.value = ''
   zoom.value = 1
@@ -267,7 +277,9 @@ async function save(status, next = false) {
   busy.value = true
   msg.value = ''
   try {
-    await api.datasetUpdate(props.sample.id, { boxes: boxes.value, status })
+    await api.datasetUpdate(props.sample.id, {
+      boxes: boxes.value, status, lighting: lighting.value, is_hard_negative: hardNegative.value,
+    })
     msg.value = '已保存'
     emit('saved', { id: props.sample.id, status, next })
   } catch (e) { msg.value = String(e.message || e) }

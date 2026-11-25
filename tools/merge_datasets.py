@@ -23,6 +23,8 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dataset_hub import find_entry, load_registry
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # 标准词表（与 Rust yolo_label_line / tools/export_onnx.py 对齐）
@@ -137,6 +139,8 @@ def load_yolo_dir(root: Path, mapping: dict[str, str] | None = None) -> list[Sam
             if img.suffix.lower() not in (".jpg", ".jpeg", ".png", ".bmp"):
                 continue
             rel = img.relative_to(images_dir)
+            if rel.parts[0] == "val_weak":
+                continue
             lab = labels_dir / rel.with_suffix(".txt")
             pairs.append((img, lab if lab.is_file() else None))
     else:
@@ -285,6 +289,21 @@ def class_names(root: Path) -> list[str]:
     return list(names)
 
 
+def source_record(root: Path, name: str, registry: dict) -> dict:
+    sidecar = root / "dataset-source.json"
+    if sidecar.is_file():
+        metadata = json.loads(sidecar.read_text(encoding="utf-8-sig"))
+        if not isinstance(metadata, dict) or not all(
+            isinstance(metadata.get(key), str) and metadata[key].strip()
+            for key in ("source", "license")
+        ):
+            raise ValueError(f"{sidecar}: source 和 license 必须是非空文字")
+    else:
+        entry = find_entry({"datasets": registry["datasets"]}, name) or {}
+        metadata = {"source": entry.get("source") or entry.get("url"), "license": entry.get("license")}
+    return {"name": name, "source": metadata["source"], "license": metadata["license"], "sample_count": 0}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="多源 YOLO 数据集清洗与合并")
     ap.add_argument("--src", action="append", default=[], help="name=path（可多次）")
@@ -299,16 +318,22 @@ def main(argv: list[str] | None = None) -> int:
     if (out / "data.yaml").exists() or (out / "classes.txt").exists():
         ap.error("--out 已包含训练集，请指定新的输出目录")
     all_public: list[Sample] = []
+    registry = load_registry()
+    sources: list[dict] = []
+    sample_sources: dict[int, dict] = {}
     for spec in args.src:
         if "=" not in spec:
             print(f"[跳过] --src 需 name=path: {spec}", file=sys.stderr)
             continue
-        _, path = spec.split("=", 1)
+        name, path = spec.split("=", 1)
         root = Path(path)
+        source = source_record(root, name, registry)
         names = class_names(root)
         samples = remap_class_ids(load_yolo_dir(root), names, mapping)
         print(f"[load] {root}: {len(samples)} 张")
         all_public.extend(samples)
+        sources.append(source)
+        sample_sources.update((id(sample), source) for sample in samples)
     import tempfile
     user_samples: list[Sample] = []
     tmp_ctx = tempfile.TemporaryDirectory(prefix="ls_user_zip_") if args.user_zip else None
@@ -321,17 +346,27 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError:
                 names = CANONICAL
             user_samples = remap_class_ids(load_yolo_dir(tmp), names, mapping)
+            source = {"name": "user-zip", "source": None, "license": None, "sample_count": 0}
+            sources.append(source)
+            sample_sources.update((id(sample), source) for sample in user_samples)
             print(f"[load] user-zip: {len(user_samples)} 张")
         try:
             u, p = (int(x) for x in args.mix_ratio.split(":"))
         except ValueError:
             u, p = 1, 3
-        merged = dedupe(mix(user_samples, dedupe(all_public), (u, p)))
+        merged = [sample for sample in dedupe(mix(user_samples, dedupe(all_public), (u, p)))
+                  if sample.image.is_file()]
         if not merged:
             print("[失败] 没有可用样本", file=sys.stderr)
             return 2
         try:
             stats = write_dataset(merged, out)
+            for sample in merged:
+                sample_sources[id(sample)]["sample_count"] += 1
+            manifest = {"format_version": 1, "sources": [source for source in sources if source["sample_count"]]}
+            (out / "dataset-sources.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+            )
         except (OSError, ValueError) as exc:
             print(f"[失败] {exc}", file=sys.stderr)
             return 2

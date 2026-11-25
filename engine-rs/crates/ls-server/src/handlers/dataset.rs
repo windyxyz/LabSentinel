@@ -4,7 +4,7 @@
 //! 存储：`dataset_samples`（v16）。图片统一拷入 `data/dataset_pool/`，
 //! 标注框格式 `[{class, x1,y1,x2,y2}]`（像素坐标，导出时归一化）。
 //! 导出：仅 `verified` 样本；按 8:2 划分 train/val，输出 images/ + labels/ +
-//! data.yaml + classes.txt + README.txt。
+//! data.yaml + classes.txt + manifest.json + README.txt。
 
 use crate::state::Shared;
 use crate::util::*;
@@ -113,6 +113,8 @@ fn sample_json(s: &ls_store::DatasetSample) -> Value {
         "camera_id": s.camera_id, "image_path": s.image_path,
         "width": s.width, "height": s.height, "status": s.status,
         "boxes": boxes, "training_sets": sets, "created_at": s.created_at, "updated_at": s.updated_at,
+        "lighting": s.lighting, "is_hard_negative": s.is_hard_negative,
+        "source_fp_spot_id": s.source_fp_spot_id,
     })
 }
 
@@ -281,6 +283,12 @@ fn stage_suppression_sample(
                 "[]",
             )
             .map_err(db_error)?;
+        tx.execute(
+            "UPDATE dataset_samples SET source_fp_spot_id=(SELECT source_id FROM suppression_audit
+             WHERE id=? AND reason='remembered_spot') WHERE id=?",
+            rusqlite::params![id, sample],
+        )
+        .map_err(db_error)?;
         tx.commit().map_err(db_error)?;
         Ok((sample, true))
     })();
@@ -373,6 +381,7 @@ pub(crate) async fn samples_list(
         Err(_) => return server_err(),
     };
     let class = q.get("class").filter(|class| !class.is_empty());
+    let lighting = q.get("lighting").filter(|value| !value.is_empty());
     let training_set = q
         .get("set")
         .filter(|name| !name.is_empty() && name.as_str() != "all");
@@ -380,17 +389,19 @@ pub(crate) async fn samples_list(
         .iter()
         .map(sample_json)
         .filter(|sample| {
-            training_set.is_none_or(|name| {
-                sample["training_sets"]
-                    .as_array()
-                    .is_some_and(|sets| sets.iter().any(|s| s.as_str() == Some(name)))
-            }) && class.is_none_or(|class| {
-                sample["boxes"].as_array().is_some_and(|boxes| {
-                    boxes
-                        .iter()
-                        .any(|b| b["class"].as_str() == Some(class.as_str()))
+            lighting.is_none_or(|value| sample["lighting"].as_str() == Some(value))
+                && training_set.is_none_or(|name| {
+                    sample["training_sets"]
+                        .as_array()
+                        .is_some_and(|sets| sets.iter().any(|s| s.as_str() == Some(name)))
                 })
-            })
+                && class.is_none_or(|class| {
+                    sample["boxes"].as_array().is_some_and(|boxes| {
+                        boxes
+                            .iter()
+                            .any(|b| b["class"].as_str() == Some(class.as_str()))
+                    })
+                })
         })
         .collect();
     let counts = store.dataset_class_counts().unwrap_or_default();
@@ -422,8 +433,22 @@ pub(crate) async fn sample_update(
     if !boxes.is_array() {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "boxes 必须是数组").into_response();
     }
+    let lighting = body.get("lighting").and_then(Value::as_str);
+    let hard_negative = body.get("is_hard_negative").and_then(Value::as_bool);
+    if (body.get("lighting").is_some()
+        && !matches!(lighting, Some("unknown" | "normal" | "low_light")))
+        || (body.get("is_hard_negative").is_some() && hard_negative.is_none())
+    {
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "样本光照或困难负样本标记无效",
+        )
+        .into_response();
+    }
     with_store(&st, |s| {
-        if s.update_dataset_sample(id, &boxes.to_string(), status)? > 0 {
+        if s.update_dataset_annotations(id, &boxes.to_string(), status, lighting, hard_negative)?
+            > 0
+        {
             Ok(Json(json!({"ok": true})).into_response())
         } else {
             Ok(detail_err(StatusCode::NOT_FOUND, "sample not found").into_response())
@@ -510,6 +535,7 @@ pub fn yolo_label_line(b: &Value, img_w: i64, img_h: i64, class_index: usize) ->
 pub(crate) struct DatasetExport {
     set: Option<String>,
     exclude: Option<String>,
+    lighting: Option<String>,
 }
 
 /// 在阻塞线程准备 ZIP，再以有界缓冲输出到浏览器。
@@ -518,13 +544,13 @@ pub(crate) async fn dataset_export(
     Query(query): Query<DatasetExport>,
 ) -> Response {
     use axum::http::header;
-    let (classes, scoped) = match query.set.as_deref() {
-        None | Some("" | "all") => (TRAINING_CLASSES, false),
+    let (training_set, classes) = match query.set.as_deref() {
+        None | Some("" | "all") => ("all", TRAINING_CLASSES),
         Some(id) => {
-            let Some((_, classes)) = TRAINING_SETS.iter().find(|(name, _)| *name == id) else {
+            let Some(&(name, classes)) = TRAINING_SETS.iter().find(|(name, _)| *name == id) else {
                 return detail_err(StatusCode::BAD_REQUEST, "未知训练集").into_response();
             };
-            (*classes, true)
+            (name, classes)
         }
     };
     let exclude = query.exclude.as_deref().unwrap_or("");
@@ -536,8 +562,20 @@ pub(crate) async fn dataset_export(
     let Ok(excluded) = excluded else {
         return detail_err(StatusCode::BAD_REQUEST, "排除样本 ID 无效").into_response();
     };
+    if !matches!(
+        query.lighting.as_deref(),
+        None | Some("unknown" | "normal" | "low_light")
+    ) {
+        return detail_err(StatusCode::BAD_REQUEST, "未知光照筛选").into_response();
+    }
     let DatasetArchive { file, size } = match tokio::task::spawn_blocking(move || {
-        build_dataset_zip(&st, classes, scoped, &excluded)
+        build_dataset_zip(
+            &st,
+            training_set,
+            classes,
+            query.lighting.as_deref(),
+            &excluded,
+        )
     })
     .await
     {
@@ -580,8 +618,9 @@ struct DatasetArchive {
 
 fn build_dataset_zip(
     st: &Shared,
+    training_set: &str,
     classes: &[&str],
-    scoped: bool,
+    lighting: Option<&str>,
     excluded: &std::collections::HashSet<i64>,
 ) -> Result<Option<DatasetArchive>, Box<dyn std::error::Error + Send + Sync>> {
     let store = ls_store::Store::open(&st.db_path)?;
@@ -589,6 +628,7 @@ fn build_dataset_zip(
     let selected = samples
         .into_iter()
         .filter(|sample| !excluded.contains(&sample.id))
+        .filter(|sample| lighting.is_none_or(|name| sample.lighting == name))
         .map(|sample| {
             let boxes = serde_json::from_str::<Vec<Value>>(&sample.boxes_json).unwrap_or_default();
             let labels = boxes
@@ -601,17 +641,22 @@ fn build_dataset_zip(
                 .collect::<Vec<_>>();
             (sample, labels)
         })
-        .filter(|(_, labels)| !scoped || !labels.is_empty())
+        .filter(|(_, labels)| training_set == "all" || !labels.is_empty())
         .collect::<Vec<_>>();
-    let verified = selected.len();
+    let mut unavailable = Vec::new();
     let samples: Vec<_> = selected
         .into_iter()
         .filter_map(|(sample, labels)| {
-            let path = sample_path(st, &sample.image_path)?;
-            let file = File::open(&path).ok()?;
-            image::ImageReader::with_format(BufReader::new(file), image::ImageFormat::Jpeg)
-                .into_dimensions()
-                .ok()?;
+            let Some(path) = sample_path(st, &sample.image_path).filter(|path| {
+                File::open(path).is_ok_and(|file| {
+                    image::ImageReader::with_format(BufReader::new(file), image::ImageFormat::Jpeg)
+                        .into_dimensions()
+                        .is_ok()
+                })
+            }) else {
+                unavailable.push(sample.id);
+                return None;
+            };
             Some((sample, path, labels))
         })
         .collect();
@@ -621,20 +666,58 @@ fn build_dataset_zip(
     let mut zip = zip::ZipWriter::new(BufWriter::new(tempfile::tempfile()?));
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let count = samples.len();
-    let val_n = if count == 1 { 0 } else { count.div_ceil(5) };
-    let train_n = count - val_n;
-    for (i, (s, path, lines)) in samples.iter().enumerate() {
-        let split = if val_n > 0 && i % 5 == 0 {
+    let weak_n = samples
+        .iter()
+        .filter(|(sample, _, _)| sample.lighting == "low_light")
+        .count();
+    let ordinary_n = count - weak_n;
+    let val_n = if ordinary_n < 2 {
+        0
+    } else {
+        ordinary_n.div_ceil(5)
+    };
+    let train_n = ordinary_n - val_n;
+    let mut entries = Vec::with_capacity(count);
+    let mut ordinary_index = 0;
+    for (s, path, lines) in &samples {
+        let split = if s.lighting == "low_light" {
+            "val_weak"
+        } else if val_n > 0 && ordinary_index % 5 == 0 {
             "val"
         } else {
             "train"
         };
+        if split != "val_weak" {
+            ordinary_index += 1;
+        }
         let stem = format!("sample_{}", s.id);
-        zip.start_file(format!("images/{split}/{stem}.jpg"), options)?;
-        std::io::copy(&mut File::open(path)?, &mut zip)?;
-        zip.start_file(format!("labels/{split}/{stem}.txt"), options)?;
-        zip.write_all(lines.join("\n").as_bytes())?;
+        let image_path = format!("images/{split}/{stem}.jpg");
+        let label_path = format!("labels/{split}/{stem}.txt");
+        let image = std::fs::read(path)?;
+        let labels = lines.join("\n");
+        zip.start_file(&image_path, options)?;
+        zip.write_all(&image)?;
+        zip.start_file(&label_path, options)?;
+        zip.write_all(labels.as_bytes())?;
+        entries.push(json!({
+            "id": s.id, "source_type": s.source_type, "source_id": s.source_id,
+            "camera_id": s.camera_id, "split": split,
+            "lighting": s.lighting, "is_hard_negative": s.is_hard_negative,
+            "source_fp_spot_id": s.source_fp_spot_id,
+            "image": image_path, "labels": label_path,
+            "image_sha256": sha256_hex(&image), "labels_sha256": sha256_hex(labels.as_bytes()),
+        }));
     }
+    let mut excluded_ids = excluded.iter().copied().collect::<Vec<_>>();
+    excluded_ids.sort_unstable();
+    let mut manifest = json!({
+        "format_version": 1, "training_set": training_set, "classes": classes, "lighting_filter": lighting,
+        "samples": entries, "excluded_sample_ids": excluded_ids, "unavailable_sample_ids": unavailable,
+    });
+    let version = sha256_hex(&serde_json::to_vec(&manifest)?);
+    manifest["version"] = json!(version);
+    zip.start_file("manifest.json", options)?;
+    serde_json::to_writer_pretty(&mut zip, &manifest)?;
     let instructions = if val_n > 0 {
         zip.start_file("data.yaml", options)?;
         write!(
@@ -649,15 +732,15 @@ fn build_dataset_zip(
         )?;
         "解压后执行 python tools/train_ppe.py --data <解压目录>/data.yaml --preflight。"
     } else {
-        "当前只有一张图片。请添加并核验更多图片，或用 --user-zip 合并到已有数据集后预检。"
+        "常规训练和验证样本不足。低光样本单独置于 val_weak，可供独立评测。"
     };
     zip.start_file("classes.txt", options)?;
     zip.write_all(classes.join("\n").as_bytes())?;
     zip.start_file("README.txt", options)?;
     write!(
         zip,
-        "LabSentinel YOLO 样本\n已导出 {count} 张（train {train_n} / val {val_n}）\n缺失或不可读 {} 张\n\n{instructions}\n",
-        verified - count,
+        "LabSentinel YOLO 样本\n已导出 {count} 张（train {train_n} / val {val_n} / val_weak {weak_n}）\n缺失或不可读 {} 张\n样本、排除项和文件摘要见 manifest.json。\n\n{instructions}\n",
+        unavailable.len(),
     )?;
     let mut file = zip.finish()?.into_inner()?;
     let size = file.metadata()?.len();
@@ -737,7 +820,44 @@ mod tests {
             .unwrap();
         assert_eq!(labels.lines().count(), 1);
         assert!(labels.starts_with("1 "));
+        let manifest: Value =
+            serde_json::from_reader(zip.by_name("manifest.json").unwrap()).unwrap();
+        assert_eq!(manifest["format_version"], 1);
+        assert_eq!(manifest["training_set"], "mask");
+        assert_eq!(manifest["excluded_sample_ids"], json!([2]));
+        let exported = manifest["samples"].as_array().unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0]["id"], 1);
+        assert_eq!(exported[0]["image"], "images/train/sample_1.jpg");
+        assert_eq!(exported[0]["image_sha256"], sha256_hex(&jpeg));
+        assert_eq!(exported[0]["labels_sha256"], sha256_hex(labels.as_bytes()));
+        assert_eq!(exported[0]["source_type"], "event");
+        assert_eq!(exported[0]["source_id"], "combined");
+        let mut payload = manifest.clone();
+        let version = payload.as_object_mut().unwrap().remove("version").unwrap();
+        assert_eq!(version, sha256_hex(&serde_json::to_vec(&payload).unwrap()));
         assert!(pool.join("skip.jpg").is_file());
+        let response = req(
+            &app, "PUT", "/api/dataset/samples/2",
+            Some(json!({"status":"verified","boxes":[],"lighting":"low_light","is_hard_negative":true})),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = req(
+            &app,
+            "GET",
+            "/api/dataset/export.zip?lighting=low_light",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let mut weak = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert!(weak.by_name("images/val_weak/sample_2.jpg").is_ok());
+        assert!(weak.by_name("data.yaml").is_err());
+        let manifest: Value =
+            serde_json::from_reader(weak.by_name("manifest.json").unwrap()).unwrap();
+        assert_eq!(manifest["samples"][0]["lighting"], "low_light");
+        assert_eq!(manifest["samples"][0]["is_hard_negative"], true);
         let response = req(&app, "DELETE", "/api/dataset/samples/2", None).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(!pool.join("skip.jpg").exists());

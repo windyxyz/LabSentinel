@@ -330,6 +330,7 @@ const pool = ref(null)
 const poolStatus = ref('')
 const poolClass = ref('')
 const poolSet = ref('')
+const poolLighting = ref('')
 const poolExcluded = ref([])
 const poolBusy = ref(false)
 const poolPage = ref(0)
@@ -344,7 +345,9 @@ const shareToken = ref('')
 const annotator = ref(null)
 async function loadPool() {
   try {
-    const result = await api.datasetSamples({ status: poolStatus.value, class: poolClass.value, set: poolSet.value, limit: 2000 })
+    const result = await api.datasetSamples({
+      status: poolStatus.value, class: poolClass.value, set: poolSet.value, lighting: poolLighting.value, limit: 2000,
+    })
     pool.value = { total: Number(result?.total) || 0, samples: Array.isArray(result?.samples) ? result.samples : [] }
     poolPage.value = Math.min(poolPage.value, Math.max(0, Math.ceil(pool.value.samples.length / poolPageSize) - 1))
     poolClasses.value = Array.isArray(result?.class_counts) ? result.class_counts : []
@@ -355,9 +358,10 @@ async function exportDataset() {
   poolMessage.value = ''
   try {
     const params = { set: poolSet.value || 'all' }
+    if (poolLighting.value) params.lighting = poolLighting.value
     if (poolExcluded.value.length) params.exclude = poolExcluded.value.join(',')
     await downloadBinary(api.datasetExportUrl(params), `labsentinel-yolo-${params.set}.zip`)
-    poolMessage.value = '训练集 ZIP 已生成。'
+    poolMessage.value = '训练集 ZIP 已生成，导出清单含样本版本和排除项。'
   }
   catch (err) { poolMessage.value = err.message }
   finally { poolBusy.value = false }
@@ -659,6 +663,12 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', syncSection))
         <option value="">全部训练集</option>
         <option v-for="(name, id) in trainingSets" :key="id" :value="id">{{ name }}</option>
       </select>
+      <select v-model="poolLighting" aria-label="样本光照筛选" @change="poolPage = 0; loadPool()">
+        <option value="">全部光照</option>
+        <option value="low_light">低光验证</option>
+        <option value="normal">常规光照</option>
+        <option value="unknown">光照未标记</option>
+      </select>
       <button class="ghost" :disabled="poolBusy" @click="loadPool">刷新</button>
       <button class="ghost" :disabled="poolBusy" @click="exportDataset">导出已核验样本 ZIP</button>
       <template v-if="poolExcluded.length">
@@ -684,7 +694,10 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', syncSection))
         <td><input v-model="poolExcluded" :value="s.id" type="checkbox" :disabled="poolBusy"
                    :aria-label="`本次不导出样本 ${s.id}`" /></td>
         <td>#{{ s.id }}</td>
-        <td>{{ s.source_type }} {{ s.source_id }}</td>
+        <td>{{ s.source_type }} {{ s.source_id }}<br v-if="s.lighting === 'low_light' || s.is_hard_negative" />
+          <small v-if="s.lighting === 'low_light'">低光验证</small>
+          <small v-if="s.is_hard_negative"> 困难负样本</small>
+        </td>
         <td><span :class="s.status === 'verified' ? 'st-ok' : 'st-idle'">{{ s.status }}</span></td>
         <td>{{ Array.isArray(s.training_sets) ? s.training_sets.map(id => trainingSets[id]).filter(Boolean).join('、') || '—' : '—' }}</td>
         <td>{{ Array.isArray(s.boxes) ? s.boxes.length : 0 }}</td>

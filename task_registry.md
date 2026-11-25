@@ -38,7 +38,7 @@
 | LS-073 | 视觉模型与数据调研、标注训练集分组导出 | P1 | DONE | 2026-11-23 | 本地复测包已更新。现场授权数据供日后独立验收，本机不训练 |
 | LS-074 | 现成检测权重对照与 0.6.0 本地随包验证 | P1 | DONE | 2026-11-23 | `python -X utf8 scripts/smoke_rust.py --zip Resources/dist/labsentinel-rust-0.6.0-20261123.zip`，等待用户现场试用，GitHub 发布暂停 |
 | LS-075 | 候选模型对照、合并与淘汰 | P1 | DONE | 2026-11-23 | 本地双产物已更新，`python -X utf8 scripts/smoke_rust.py --zip Resources/dist/labsentinel-rust-0.6.0-20261123.zip`；现场测试后再处理 GitHub 发布 |
-| LS-076 | v0.6.0 基线缺陷审查与 1.0.0 路线图补充 | P0 | DONE | 2026-11-23 | 查 `docs/plan/v1.0.0-roadmap.md` §1.3 的 9 项发现与验收。待用户恢复后锁定 `LS-080`。 |
+| LS-076 | v0.6.0 基线缺陷审查与 0.9.6 路线图补充 | P0 | DONE | 2026-11-23 | 查 `docs/plan/v1.0.0-roadmap.md` §1.3 的 9 项发现与验收。待用户恢复后锁定 `LS-080`。 |
 | LS-080 | v0.6.1 · `InferBackend` 抽象 + 现成权重对照整合（YOLOE 正负对照/`PP-LCNet`）+ 256×256 上身 PPE 精判/唯一归属/遮挡断轨/COCO 互证 | P0 | DONE | 2026-11-24 | 文件检测与后端改动通过。候选对照完成，256 试验结果保留在 findings，随包沿用达到验收要求的权重组合。 |
 | LS-081 | v0.6.1 · 并发流硬上限（≤5）+ WS `?since=` 断线重放 + 分阶段耗时 HUD + 敏感度三档预设 | P0 | DONE | 2026-11-24 | 值守功能和基线缺陷通过定向验证，见 `progress.md`。 |
 | LS-082 | v0.6.2 · 空间智能防误报（4 锚点/死区/12 帧离场宽限/Motion+Filter 双遮罩/静止降频/一键记住误报点/抑制审计） | P0 | DONE | 2026-11-24 | 旧库迁移、遮罩心跳、规则与误报点 API 及前端定向验证通过。 |
@@ -54,11 +54,11 @@
 | LS-092 | v0.8.0 · 可选 `llama-server.exe` 托管 + GGUF 与视觉投影校验 | P0 | DONE | 2026-11-24 | 运行时和模型按需准备。SmolVLM 单图回环真实调用通过，预设精度、显存预算和长期运行待专项验证。 |
 | LS-093 | v0.8.5 · Vulkan CV 灰度 + 人员和 PPE 权重独立对照 | P0 | BLOCKED | 2026-11-24 | YOLO26n 随包切换、实际检查和回退通过。按 `LS-086` 复测 NVIDIA、Intel 及 CV/VLM 同卡四小时门槛后再灰度。 |
 | LS-094 | v0.8.5 · 四套机位场景模板与预览事务套用 | P1 | DONE | 2026-11-24 | 事务预览、冲突、重复套用与过期预览验证通过。SQLite `v28` 保存版本与目标。最终双产物与解包冒烟见 `progress.md`。 |
-| LS-095 | v0.9.0 · Vulkan 默认晋升 + 数据集版本、许可与导出清理 | P0 | READY | 2026-11-24 | 见 `docs/plan/v1.0.0-roadmap.md` §3.4 与 `LS-095`（Schema `v29`） |
+| LS-095 | v0.9.0 · Vulkan 默认晋升 + 数据集版本、许可与导出清理 | P0 | BLOCKED | 2026-11-25 | SQLite v29、ZIP 组别及版本清单、分离低光验证、许可台账已通过定向验证。用 `LS-086/093` 的跨显卡实测接续默认切换与现场精度，不阻塞 `LS-096/097` 开发。 |
 | LS-096 | v0.9.0 · 零外部服务中英文语义事件检索（嵌入式 `sqlite-vec` + `Jina-CLIP v2`/`SigLIP 2`） | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-096`（Schema `v30`） |
 | LS-097 | v0.9.0 · 零转码录像、事件回放与告警投递恢复 | P0 | READY | 2026-11-24 | `rg -n -e FrameReader -e file_exit_ok engine-rs/crates/ls-ingest/src/capture.rs`，按路线图 §2.2、§6.3 分别准备大华/乐橙回放及投递恢复样本（Schema `v31`） |
 | LS-098 | v0.9.5 · 细粒度可配权限本地 MCP Server（默认只读 + 逐工具高权限勾选 + 独立令牌 + 审计 + HMAC 凭证） | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-098`（Schema `v32`） |
 | LS-099 | v0.9.5 · 原生 `windows-service` 服务化 + 一键纯视觉审计证据包 ZIP + 可选物理声光报警 Actor | P1 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-099` |
-| LS-100 | v1.0.0 · 72h 统一 Vulkan（CV+VLM）并发长稳压测 + 全维度精度与 MCP 安全认证 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-100` |
-| LS-101 | v1.0.0 · 升级/回滚/卸载 + 签名、GitHub 主页重写与双产物 | P0 | READY | 2026-11-24 | 按最终实装与验收状态重写 `README.md`，见路线图 §6.4 |
+| LS-100 | v0.9.6 · 72h 统一 Vulkan（CV+VLM）并发长稳压测 + 全维度精度与 MCP 安全认证 | P0 | READY | 2026-11-23 | 见 `docs/plan/v1.0.0-roadmap.md` `LS-100` |
+| LS-101 | v0.9.6 · 升级/回滚/卸载 + 签名、GitHub 主页重写与双产物 | P0 | READY | 2026-11-24 | 按最终实装与验收状态重写 `README.md`，见路线图 §6.4 |
 | LS-900 | 代码签名证书（T-403）与 GitHub uploads 网络通道（S302）处理 | P3 | BLOCKED | 2026-11-22 | 人工事项：待证书到位或用户调整本机网络/hosts |

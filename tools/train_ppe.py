@@ -11,6 +11,7 @@
 数据集先用 tools/download_datasets.py 下载。训练完成后再跑 tools/export_onnx.py 导出 ONNX。
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -44,6 +45,27 @@ def dataset_root(yaml_path: Path, configured: str | None) -> Path:
     except (OSError, ValueError, AttributeError):
         pass
     return (yaml_path.parent / path).resolve()
+
+
+def training_dataset_sources(yaml_path: Path, root: Path) -> dict:
+    from merge_datasets import source_record
+    from dataset_hub import load_registry
+
+    manifest = root / "dataset-sources.json"
+    if manifest.is_file():
+        recorded = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(recorded, dict) or not isinstance(recorded.get("sources"), list):
+            raise ValueError("dataset-sources.json 缺少来源列表")
+        sources = recorded["sources"]
+    else:
+        source = source_record(root, root.name, load_registry())
+        source.pop("sample_count")
+        sources = [source]
+    return {
+        "format_version": 1,
+        "data_yaml_sha256": hashlib.sha256(yaml_path.read_bytes()).hexdigest(),
+        "sources": sources,
+    }
 
 
 def preflight_dataset(yaml_path: Path) -> tuple[dict, dict[str, int]]:
@@ -171,9 +193,11 @@ def main():
 
     try:
         dataset, counts = preflight_dataset(data_path)
+        sources = training_dataset_sources(data_path, Path(dataset["path"]))
     except (OSError, ValueError, ImportError) as exc:
         sys.exit(f"[error] 训练预检失败：{exc}")
     print(f"[ok] 训练集 {counts['train']} 张，验证集 {counts['val']} 张")
+    print(f"[info] 数据来源: {json.dumps(sources, ensure_ascii=False)}")
     if args.preflight:
         return
     if args.arch == "yolo11n" and not model_path.exists():
@@ -236,6 +260,9 @@ def main():
     copy_dst = BEST_COPY_DST.parent / f"{args.arch}_ppe.pt"
     copy_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(best, copy_dst)
+    source_record = json.dumps(sources, ensure_ascii=False, indent=2) + "\n"
+    (best.parent.parent / "dataset-sources.json").write_text(source_record, encoding="utf-8")
+    copy_dst.with_suffix(".sources.json").write_text(source_record, encoding="utf-8")
     print(f"[done] 训练完成，结果目录: {best.parents[2]}")
     print(f"[done] best.pt 已复制: {best} -> {copy_dst}")
     print(f"[next] 运行 tools/export_onnx.py 导出 ONNX（--weights {copy_dst}）")

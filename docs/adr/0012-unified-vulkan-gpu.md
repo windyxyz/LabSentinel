@@ -29,7 +29,7 @@
    - `v0.8.0`（`LS-092`）：离线 `llama-server.exe` 率先原生启用 Vulkan（固定短切片防 WDDM 2s TDR，强制反 NF4 量化拦截）。
    - `v0.8.5`（`LS-093`）：落地胜出 Vulkan CV 生产引擎并开放 `auto_vulkan` 灰度。
    - `v0.9.0`（`LS-095`）：经多机长稳验证后将 `runtime.backend` 默认切换为 `auto_vulkan`；**永久保留 `Vulkan → DirectML (ls-dml-worker + dml_lock) → CPU` 自动降级回退链**，保证老旧无 Vulkan 驱动机器开箱可用且永不触发事故 A1。
-5. **GA 长稳认证（`v1.0.0` · `LS-100`）**：
+5. **GA 长稳认证（`v0.9.6` · `LS-100`）**：
    - 72 小时 4/9 路 Vulkan CV + Vulkan VLM 并发长稳零 TDR/零 Kernel-Power 41，外加 12 小时 DirectML 回退回归认证。
 
 ## 后果与影响
