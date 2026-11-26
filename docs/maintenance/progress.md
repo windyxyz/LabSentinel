@@ -2,7 +2,7 @@
 
 ## Latest Handoff Snapshot
 
-- **`LS-101` v0.9.6 GitHub 发布**。用户确认发布，仓库签名运行器尚未配置。首轮远端运行已取消，因默认包缺少 Vulkan。改用同源锁定 Vulkan 资产构建安装器和便携包，待 GitHub Windows 验收及发布资产核验。
+- **`LS-101` v0.9.6 GitHub 发布**。2026-11-27，标签 `v0.9.6` 指向 `f9a8fee`，[未签名预览版](https://github.com/windyxyz/LabSentinel/releases/tag/v0.9.6) 已发布。安装器和便携 ZIP 同源构建，包含锁定 Vulkan 资产及随包模型。[发布运行](https://github.com/windyxyz/LabSentinel/actions/runs/45851558542) 通过双平台 Rust 与前端回归、审计、Windows 安装覆盖回滚卸载、原生服务、双包检测、Vulkan 回退和播放验收。使用 `gh api` 与 `gh release download` 核对标签、发布状态和双包 SHA-256。线上包与本地候选哈希不同，两份线上哈希与发布清单一致。正式签名接续 `LS-900`。
 - **`LS-104` Rust CI #83**。将录制测试的可变绑定限定在 Windows。为 `paste` 的停更公告 `RUSTSEC-2024-0436` 登记单项例外。Windows GNU 通过 `cargo fmt --all -- --check`、`cargo clippy --offline --locked -p ls-ingest --all-targets --all-features -- -D warnings` 和 `cargo test --offline --locked -p ls-ingest recording::tests`，8 项通过，1 项性能基准默认忽略。`cargo deny --locked --all-features check` 四项通过。已通过 `gh run watch --exit-status` 确认修复提交 `a90698d` 的 [Rust CI #84](https://github.com/windyxyz/LabSentinel/actions/runs/45848606557) 双平台 Clippy、格式、路由覆盖和两项依赖审计通过。同一提交的 [tests #156](https://github.com/windyxyz/LabSentinel/actions/runs/45848607090) 通过。
 - **本地缓存与目录维护 `LS-103`**。Rust 与 Vue 源码位置保持原有结构，模型目录改为 `models/`，接力文档进入 `docs/maintenance/`，早期 Android 和模型实验移入各自的归档。43 个本地验收批次按用途改名并归入 `Resources/验收归档/`。当前可试用的双包与 SHA-256 在 `Resources/本地发行包/0.9.6/`。
 - **清理验证**。Cargo 官方清理从 C 盘移除 63.4 GiB 编译生成物，D 盘程序构建缓存和 Python 软件包缓存分别清理 490.1 MiB 与 981.6 MiB。历史验收与旧环境采用 NTFS 压缩。用户授权后使用 Windows PowerShell 5.1 执行 `scripts/清理重复验收缓存.ps1 -Apply`，删除 1,039 个重复文件，原始大小 18.20 GiB，实际增加 11.25 GiB 可用空间。D 盘可用空间为 218.49 GiB。脚本改用 .NET SHA-256，隔离预览与 `-WhatIf` 通过，清理后再次核对双包哈希。此前一并复验 8 个随包模型文件、Rust fmt、离线 Cargo 元数据、Python 语法、186 条接口和新旧目录入口。
