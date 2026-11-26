@@ -1,5 +1,6 @@
 # RA4.2 / ADR-0011：发布流水线——Rust 单二进制正式产物（过渡期结束后的唯一发布形态）。
 # verify → test → build-rust（隔离 Windows 安装验收）→ sign-windows → publish（草稿）。
+# v0.9.6 可手动发布带校验清单的未签名预览版。
 # setup.exe 为必发布资产：Inno Setup 7.1.1（官方安装器 + SHA256 钉死）编译
 # deploy/windows/installer.iss，源为 Rust staging 树。
 # 历史版本的 Python 便携包仍可从旧 tag 的 Release 获取；本流水线不再构建 Python 形态。
@@ -8,6 +9,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish_preview_096:
+        description: 发布 v0.9.6 未签名预览版
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,12 +24,18 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: clean tree / tag == VERSION / CHANGELOG has this release
+        env:
+          PUBLISH_PREVIEW_096: ${{ inputs.publish_preview_096 }}
         run: |
           test -z "$(git status --porcelain)" || { echo "::error::工作区不干净"; git status --short; exit 1; }
           V=$(cat VERSION | tr -d ' \n')
           T="${GITHUB_REF_NAME#v}"
           if [ "$GITHUB_EVENT_NAME" = push ]; then
             test "$V" = "$T" || { echo "::error::tag $GITHUB_REF_NAME != VERSION $V"; exit 1; }
+          fi
+          if [ "$PUBLISH_PREVIEW_096" = true ]; then
+            test "$GITHUB_REF" = refs/heads/main && test "$V" = 0.9.6 || {
+              echo "::error::v0.9.6 预览发布要求 main 分支且 VERSION 为 0.9.6"; exit 1; }
           fi
           grep -qE "^## \[${V}\]|^## ${V}" CHANGELOG.md || {
             echo "::error::CHANGELOG 缺 ## [$V] 本版条目（发布前把 Unreleased 改名）"; exit 1; }
@@ -333,3 +345,28 @@ jobs:
             dist/labsentinel-rust-*.zip
             dist/LabSentinel-setup-*.exe
             dist/SHA256SUMS-rust.txt
+
+  publish-preview-096:
+    needs: [build-rust]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_preview_096
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806  # v4
+        with:
+          name: labsentinel-windows-acceptance
+          path: dist
+      - name: 验证双产物并发布未签名预览版
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: dist
+        run: |
+          sha256sum --check --strict SHA256SUMS-rust.txt
+          gh release create v0.9.6 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title 'LabSentinel v0.9.6 预览版' \
+            --notes-file ../docs/releases/release-notes-v0.9.6.md \
+            labsentinel-rust-0.9.6-*.zip LabSentinel-setup-0.9.6.exe SHA256SUMS-rust.txt
