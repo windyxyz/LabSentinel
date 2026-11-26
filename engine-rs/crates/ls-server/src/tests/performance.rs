@@ -172,7 +172,17 @@ fn windows_rtsp_benchmark() {
     let duration = Duration::from_secs(number_setting("LS_BENCH_SECONDS", 30));
     assert!(!duration.is_zero());
     let ep = std::env::var("LS_BENCH_EP").unwrap_or_else(|_| "cpu".into());
-    assert!(["cpu", "dml"].contains(&ep.as_str()));
+    assert!(["cpu", "dml", "auto_vulkan"].contains(&ep.as_str()));
+    assert!(
+        ep != "auto_vulkan" || cfg!(all(windows, feature = "vulkan-cv")),
+        "use --features vulkan-cv"
+    );
+    if ep == "auto_vulkan" {
+        assert!(
+            assets.join("vulkan/ncnn.dll.xz").is_file(),
+            "use the staged Vulkan package"
+        );
+    }
     let work = tempfile::tempdir().unwrap();
     fixture(&assets, work.path());
     let db = work.path().join("benchmark.db");
@@ -180,7 +190,7 @@ fn windows_rtsp_benchmark() {
     let store = ls_store::Store::open(db_path).unwrap();
     store.ensure_schema().unwrap();
     for (key, value) in [
-        ("runtime.ep", ep.as_str()),
+        ("runtime.backend", ep.as_str()),
         ("detect.mode", "local"),
         ("ppe.enabled", "1"),
         ("perf.motion_gate_enabled", "0"),
@@ -221,15 +231,41 @@ fn windows_rtsp_benchmark() {
         start_worker(&st, cfg).unwrap();
         handles.push((id, st.workers.get(id).unwrap()));
     }
+    let warm_ppe = std::env::var("LS_BENCH_WARM_PPE").as_deref() == Ok("1");
     let warmed = wait_until(Duration::from_secs(50), || {
-        handles
-            .iter()
-            .all(|(_, handle)| handle.performance.lock().unwrap().frames() >= 5)
+        handles.iter().all(|(_, handle)| {
+            let performance = handle.performance.lock().unwrap();
+            performance.frames() >= 5
+                && (!warm_ppe || performance.summary()["latency"]["person_ppe_ms"].is_object())
+        })
     });
-    for (_, handle) in &handles {
-        *handle.performance.lock().unwrap() = Default::default();
+    if warm_ppe {
+        assert!(warmed, "not every camera ran PPE during warmup");
     }
+    let warmup: Vec<_> = handles
+        .iter()
+        .map(|(id, handle)| {
+            let mut window = handle.performance.lock().unwrap();
+            let mut summary = window.summary();
+            summary["camera_id"] = json!(id);
+            let input = window.input_kind;
+            *window = Default::default();
+            window.input_kind = input;
+            summary
+        })
+        .collect();
     let before = store.count_events().unwrap();
+    let first_day = ls_core::time::local_today_iso();
+    let compliance_frames = |id, last_day: &str| {
+        store
+            .compliance_counts(&first_day, last_day, None, Some(&[id]))
+            .unwrap()
+            .frames
+    };
+    let before_compliance: Vec<_> = handles
+        .iter()
+        .map(|(id, _)| compliance_frames(*id, &first_day))
+        .collect();
     let warm_pid_path = std::env::var_os("LS_BENCH_PID_FILE").map(PathBuf::from);
     if let Some(path) = warm_pid_path {
         std::fs::write(path, std::process::id().to_string()).unwrap();
@@ -237,13 +273,16 @@ fn windows_rtsp_benchmark() {
     let started = Instant::now();
     std::thread::sleep(duration);
     let measured_seconds = started.elapsed().as_secs_f64();
+    let last_day = ls_core::time::local_today_iso();
     let per_camera: Vec<_> = handles
         .iter()
-        .map(|(id, handle)| {
+        .zip(before_compliance)
+        .map(|((id, handle), before)| {
             let mut summary = handle.performance.lock().unwrap().summary();
             summary["camera_id"] = json!(id);
             summary["fps"] =
                 json!(summary["frames"].as_u64().unwrap_or_default() as f64 / measured_seconds);
+            summary["compliance_sample_frames"] = json!(compliance_frames(*id, &last_day) - before);
             summary
         })
         .collect();
@@ -268,11 +307,13 @@ fn windows_rtsp_benchmark() {
     } else {
         None
     };
+    let devices = st.workers.inference_devices();
     let report = json!({
         "scenario": "1080p H264 RTSP, empty/person/low light/distant/motion clips",
         "test_pid": std::process::id(), "requested_ep": ep, "last_loaded_ep": ls_infer::yolo::ep_used(),
         "seconds": measured_seconds, "all_cameras_warmed": warmed, "source_fps": 12, "target_analysis_fps": 5,
-        "events": events, "recovery_ms": recovery_ms, "cameras": per_camera,
+        "events": events, "recovery_ms": recovery_ms, "warmup_cameras": warmup,
+        "cameras": per_camera, "model_devices": devices,
     });
     println!("{report}");
     if let Some(path) = std::env::var_os("LS_BENCH_REPORT") {
@@ -280,11 +321,43 @@ fn windows_rtsp_benchmark() {
     }
     drop(running);
     drop(source);
+    if ep == "auto_vulkan" {
+        assert_eq!(
+            devices.len(),
+            cameras as usize,
+            "missing active analysis sources"
+        );
+        assert!(
+            devices
+                .iter()
+                .all(|row| row["person"] == "Vulkan(GPU)" && row["ppe"] == "Vulkan(GPU)"),
+            "Vulkan unexpectedly fell back: {devices:?}"
+        );
+        assert!(
+            per_camera.iter().all(|camera| {
+                camera["vulkan_calls"].as_u64().unwrap_or_default()
+                    > camera["inferred"].as_u64().unwrap_or_default()
+                    && camera["latency"]["person_ppe_ms"]["p95"].is_number()
+            }),
+            "missing measured person + PPE Vulkan work on a camera"
+        );
+        if duration >= Duration::from_secs(15) {
+            assert!(
+                per_camera
+                    .iter()
+                    .all(|camera| camera["compliance_sample_frames"]
+                        .as_i64()
+                        .unwrap_or_default()
+                        > 0),
+                "a Vulkan camera did not persist periodic compliance samples"
+            );
+        }
+    }
     assert!(
         per_camera
             .iter()
             .any(|camera| camera["inferred"].as_u64().unwrap_or_default() > 0),
-        "no ORT inference observed"
+        "no person inference observed"
     );
 }
 

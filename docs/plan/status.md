@@ -7,7 +7,7 @@
 
 ## v0.5.0（LS-050～LS-057）
 
-本地实现覆盖性能预筛、PPE/VLM 与规则、实时值守、交互、告警运维、样本标注、ONNX 模型评测和训练工具。发布门禁与双产物的实测结果记录于 [交接快照](../../progress.md)。
+本地实现覆盖性能预筛、PPE/VLM 与规则、实时值守、交互、告警运维、样本标注、ONNX 模型评测和训练工具。发布门禁与双产物的实测结果记录于 [交接快照](../maintenance/progress.md)。
 
 ## 第八轮：v0.4.0 后全仓深度审计与系统性加固（2026-11-22，LS-040 ~ LS-045）
 
@@ -87,7 +87,7 @@
 | 文档 | ✅ 安装与卸载补 setup.exe 安装/升级/卸载全节；部署指南形态表、README 快速开始、CHANGELOG 补记「随 Python 退役误删安装器」与恢复；release-notes-v0.2.0 标注为初版（2026-11-12）历史 |
 
 **遗留**：代码签名（T-403）仍为人工事项（未签名安装器可能触发 SmartScreen）。
-历史文档（40-roadmap/70-release-plan/验证记录/20-research/m0-spike）按用户决策保留不动。
+历史文档（40-roadmap/70-release-plan/验证记录/20-research/models）按用户决策保留不动。
 
 ## 二轮审查基线与本轮目标
 
@@ -496,6 +496,6 @@ Certum 代码签名证书、minisign 密钥对（R2-107 用测试密钥对验证
 
 ## 已知遗留风险
 
-1. `assets.lock.json` 的 `yolo11n.onnx` 使用 Ultralytics 官方导出（sha256 `634279b4…`），与本地自行导出的 `m0-spike/yolo11n.onnx`（sha256 `4758511e…`）不是同一文件。CI 便携包用官方版；**黄金语料/契约测试仍以本地版为基准**。ADR-0009 需写明该差异与恢复计划（把本地导出上传到项目自建 assets release 后改 URL）。
+1. `assets.lock.json` 的 `yolo11n.onnx` 使用 Ultralytics 官方导出（sha256 `634279b4…`），与本地自行导出的 `models/yolo11n.onnx`（sha256 `4758511e…`）不是同一文件。CI 便携包用官方版；**黄金语料/契约测试仍以本地版为基准**。ADR-0009 需写明该差异与恢复计划（把本地导出上传到项目自建 assets release 后改 URL）。
 2. `assets.lock.json` 中 `yolo11n_ppe.onnx` / `.classes.txt` 的 `Windy-LabSentinel/assets` release URL 实测 404（Q-08 按需下载当前不可用）——二轮审查未覆盖，需维护者补传资产或换 URL。
 3. 二轮审查报告的 `engine-rs/crates/ls-server/src/main.rs:546`、`ls-analyzer/src/main.rs:992` 两处 medium「疑似跨文件污点」为既有结构性告警，Mimosa 每次提交都会提示；R5 触碰这两处时一并复核。

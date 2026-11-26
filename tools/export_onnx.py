@@ -1,6 +1,6 @@
 """把训练好的 best.pt 导出为 ONNX（opset 13，imgsz 640），供 LabSentinel 推理。
 
-默认: m0-spike/yolo11n_ppe.pt -> m0-spike/yolo11n_ppe.onnx（server/.env 的 LS_PPE_MODEL 指向它）。
+默认: models/yolo11n_ppe.pt -> models/yolo11n_ppe.onnx（server/.env 的 LS_PPE_MODEL 指向它）。
 导出后打印 10 类别顺序——PPE 引擎（PpeEngine）按类别名匹配，依赖 data.yaml 的 names 顺序。
 
 用法（m0-venv）:
@@ -23,8 +23,8 @@ from pathlib import Path
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_WEIGHTS = ROOT / "m0-spike" / "yolo11n_ppe.pt"
-DEFAULT_OUT = ROOT / "m0-spike" / "yolo11n_ppe.onnx"
+DEFAULT_WEIGHTS = ROOT / "models" / "yolo11n_ppe.pt"
+DEFAULT_OUT = ROOT / "models" / "yolo11n_ppe.onnx"
 DEFAULT_DATA = ROOT / "Resources" / "datasets" / "lab-ppe" / "data.yaml"
 
 

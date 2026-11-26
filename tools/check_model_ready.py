@@ -5,7 +5,7 @@
 
 用法（m0-venv）:
     python tools/check_model_ready.py                       # 默认项目根 + v1 模型
-    python tools/check_model_ready.py --model m0-spike/yolo11n_ppe.onnx --root .
+    python tools/check_model_ready.py --model models/yolo11n_ppe.onnx --root .
     python tools/check_model_ready.py --help
 
 输出 PASS/FAIL/WARN 表；退出码 0=可接入（PASS/WARN），1=存在 FAIL。
@@ -148,7 +148,7 @@ def check_model_ready(root: Path, model: Path):
 def main():
     ap = argparse.ArgumentParser(description="模型就绪自检（只读；接入前一键核对，45 手册 §3 门禁）")
     ap.add_argument("--root", default=str(ROOT), help="项目根目录（默认脚本上级）")
-    ap.add_argument("--model", default="m0-spike/yolo11n_ppe.onnx",
+    ap.add_argument("--model", default="models/yolo11n_ppe.onnx",
                     help="待检 ONNX（相对 --root 或绝对路径）")
     args = ap.parse_args()
     root = Path(args.root).resolve()

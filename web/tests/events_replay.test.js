@@ -34,3 +34,25 @@ it('resumes at the last event after a disconnect without replaying it to the pag
     stop()
   }
 })
+
+it('opens from the history cursor and reports an expired history without disrupting replay', () => {
+  let socket
+  vi.stubGlobal('WebSocket', class {
+    constructor(url) { this.url = url; socket = this }
+    close() {}
+  })
+  const onEvent = vi.fn()
+  const onHistoryReset = vi.fn()
+  const stop = connectEvents(onEvent, null, null, { since: 42, onHistoryReset })
+  const send = value => socket.onmessage({ data: JSON.stringify(value) })
+  try {
+    expect(new URL(socket.url).searchParams.get('since')).toBe('42')
+    send({ stream_cursor: 42, stream_history_reset: true })
+    send({ id: 45 })
+    send({ id: 45 })
+    expect(onHistoryReset).toHaveBeenCalledTimes(1)
+    expect(onEvent.mock.calls.map(([event]) => event.id)).toEqual([45])
+  } finally {
+    stop()
+  }
+})

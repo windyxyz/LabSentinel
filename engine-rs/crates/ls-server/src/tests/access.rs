@@ -437,6 +437,18 @@ async fn browser_pairing_scopes_http_and_closes_a_socket_when_authorization_chan
     let events = body_json(local(&app, "GET", "/api/events", &paired, None).await).await;
     assert_eq!(events.as_array().unwrap().len(), 1);
     assert_eq!(events[0]["id"], first_event);
+    let audit = local(&app, "GET", "/api/export/audit-pack.zip", &paired, None).await;
+    assert_eq!(audit.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(audit.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let rows: serde_json::Value =
+        serde_json::from_reader(zip.by_name("events.json").unwrap()).unwrap();
+    let rows = rows["events"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], first_event);
     let daily = body_json(local(&app, "GET", "/api/stats/daily?days=1", &paired, None).await).await;
     assert_eq!(daily["days"][0]["l2"], 1);
     for denied in [

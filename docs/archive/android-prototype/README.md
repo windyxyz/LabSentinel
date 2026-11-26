@@ -1,5 +1,7 @@
 # LabSentinel 安卓客户端（Flutter 骨架）
 
+> 已归档的 Flutter 原型。当前产品代码见 [Rust 后端](../../../engine-rs/) 和 [Vue 前端](../../../web/)。
+
 > 任务 08 交付物。本目录是一个**待补全的 Flutter 工程**：`lib/` 业务源码与 `pubspec.yaml` 已就绪；
 > 平台原生文件（`android/`、`ios/` 等子目录）需在本机装好 Flutter SDK 后用 `flutter create .` 补全。
 > 交付机器上没有 Flutter / Android SDK，构建被阻塞（探查结论见 历史任务包（已归档删除） 执行报告）。
@@ -11,7 +13,7 @@
 | Flutter SDK | stable 通道，≥ 3.22（Dart ≥ 3.4，满足 pubspec 的 sdk 约束） |
 | Android SDK | Platform-Tools + 对应 compileSdk（`flutter doctor` 全绿为准） |
 | JDK | 17+（交付机器已有 Temurin JDK 21 / 25，可直接用） |
-| 服务端 | 局域网内运行：`cd server && ..\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000`（`.venv` 由 `python scripts\deploy.py install` 创建；详见 [部署指南](../docs/guide/部署指南.md)） |
+| 服务端 | 局域网内运行：`cd server && ..\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000`（`.venv` 由 `python scripts\deploy.py install` 创建；详见 [部署指南](../../guide/部署指南.md)） |
 
 ## 二、初始化与构建
 
@@ -81,3 +83,4 @@ android/
 5. **依赖版本**：`flutter_local_notifications ^17.2.3` 需 minSdk ≥ 21（Flutter 默认模板满足）
    与 compileSdk 34（近期 Flutter 模板默认满足）；若 pub 解析到更高主版本，按其 changelog 调整。
 6. release 签名 / 统计页 / 事件筛选 UI（level/camera 过滤客户端已支持，UI 未做）为后续任务。
+

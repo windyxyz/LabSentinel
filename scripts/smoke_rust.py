@@ -46,6 +46,63 @@ def http_post(url: str, obj: dict, timeout: float = 3.0, *, method: str = "POST"
         return r.status, r.read()
 
 
+def check_vulkan_runtime(base: str, sandbox: Path, timeout: int, mode: str) -> str:
+    config = f"{base}/api/detect/config"
+    runtime = json.loads(http_get(config)[1])["runtime"]
+    if not runtime["vulkan_available"]:
+        raise ValueError("灰度验收包未提供 Vulkan 运行时")
+    gpu_id = "auto" if mode == "active" else "vulkan:2147483647"
+    physical = mode in ("luid", "uuid")
+    if physical:
+        matched = next((adapter for adapter in runtime["adapters"]
+                        if isinstance(adapter.get("gpu_id"), str)
+                        and (mode != "uuid" or adapter["gpu_id"].startswith("uuid:"))
+                        and adapter.get("vulkan_index") is not None
+                        and adapter.get("dxgi_index") is not None), None)
+        if matched is None:
+            raise ValueError("找不到同时支持 Vulkan 和 DirectML 的物理显卡")
+        gpu_id = matched["gpu_id"]
+    http_post(config, {"runtime": {"backend": "auto_vulkan", "gpu_id": gpu_id}}, method="PUT")
+    if physical:
+        selected = json.loads(http_get(config)[1])["runtime"]
+        if selected["gpu_id"] != gpu_id or selected["effective_adapter_index"] != matched["dxgi_index"]:
+            raise ValueError(f"物理显卡设置或 DirectML 映射不一致: {gpu_id}")
+    photo = ROOT / "Resources" / "acceptance" / "imgs" / "person-frame.jpg"
+    source = sandbox / "vulkan-input"
+    source.mkdir()
+    shutil.copyfile(photo, source / "vulkan.jpg")
+    _, body = http_post(f"{base}/api/cameras", {
+        "name": "Vulkan 灰度验收", "type": "folder", "source": str(source), "autostart": True,
+    })
+    camera = json.loads(body)["id"]
+
+    def wait_for_check(allowed_devices: set[str], photos: int) -> dict:
+        deadline = time.monotonic() + timeout
+        devices = {}
+        while time.monotonic() < deadline:
+            runtime = json.loads(http_get(config)[1])["runtime"]
+            devices = next((row for row in runtime["camera_devices"] if row["camera_id"] == camera), {})
+            if devices.get("person") in allowed_devices and devices.get("ppe") in allowed_devices:
+                _, response = http_get(f"{base}/api/folder-images?camera_id={camera}&limit={photos}")
+                items = json.loads(response)["items"]
+                if len(items) == photos and all(item["width"] and item["persons"] >= 1 and not item["error"] for item in items):
+                    return devices
+            time.sleep(0.5)
+        raise ValueError(f"未证实人员和 PPE 使用 {sorted(allowed_devices)} 并完成照片识别，实际 {devices}")
+
+    try:
+        allowed = {"Vulkan(GPU)"} if mode == "active" or physical else {"DirectML(GPU)", "CPU"}
+        first = wait_for_check(allowed, photos=1)
+        _, result = http_post(config, {"runtime": {"backend": "cpu", "gpu_id": "auto"}}, method="PUT")
+        if json.loads(result)["restarted"] != 1:
+            raise ValueError("切换 CPU 后没有软重启运行中的图片分析源")
+        shutil.copyfile(photo, source / "cpu.jpg")
+        second = wait_for_check({"CPU"}, photos=2)
+        return f"人员 {first['person']} → {second['person']}，PPE {first['ppe']} → {second['ppe']}，两次照片检查均有识别结果"
+    finally:
+        http_post(f"{base}/api/cameras/{camera}/stop", {})
+
+
 def check_file_detection(base: str, pkg: Path, sandbox: Path, timeout: int) -> tuple[bool, str]:
     sample = ROOT / "Resources" / "acceptance" / "imgs" / "person-frame.jpg"
     source = sandbox / "photo-input"
@@ -436,6 +493,8 @@ def main() -> int:
     source.add_argument("--install-dir", type=Path)
     ap.add_argument("--timeout", type=int, default=90)
     ap.add_argument("--mask-fixture", type=Path, help="可选，已知未戴口罩的单人近景照片，用于独立验证口罩补判")
+    ap.add_argument("--vulkan-validation", choices=("active", "luid", "uuid", "fallback"),
+                    help="验证灰度包 Vulkan 自动选卡、物理显卡选择或无效设备回退。uuid 要求设备 UUID")
     ap.add_argument("--keep", action="store_true")
     a = ap.parse_args()
     if a.zip is not None and not a.zip.is_file():
@@ -532,11 +591,14 @@ def main() -> int:
             _, body_runtime = http_get(f"{base}/api/detect/config", timeout=8)
             runtime = json.loads(body_runtime).get("runtime", {})
             adapters = runtime.get("adapters")
-            runtime_ok = runtime.get("ep") in {"cpu", "dml"} and isinstance(adapters, list)
+            expected_vulkan = (pkg / "vulkan" / "ncnn.dll.xz").is_file()
+            runtime_ok = (runtime.get("ep") in {"cpu", "dml"} and isinstance(adapters, list)
+                          and runtime.get("vulkan_available", False) is expected_vulkan)
             vulkan_count = sum(adapter.get("vulkan_index") is not None for adapter in adapters or [])
             ok4 = st == 200 and j.get("backend") == "rust" and ver_ok and ppe_ok and runtime_ok
             detail = (f"backend={j.get('backend')} version={got_ver} (want={want_ver}) "
-                      f"ppe_enabled={j_ppe.get('enabled')} GPU={len(adapters or [])} Vulkan={vulkan_count}")
+                      f"ppe_enabled={j_ppe.get('enabled')} GPU={len(adapters or [])} Vulkan={vulkan_count} "
+                      f"灰度能力={runtime.get('vulkan_available', False)}")
         except (OSError, ValueError) as e:
             detail = repr(e)
         print(f"[{'PASS' if ok4 else 'FAIL'}] 4 /api/system + PPE —— {detail}")
@@ -560,13 +622,22 @@ def main() -> int:
         print(f"[{'PASS' if ok5 else 'FAIL'}] 5 前端 —— {detail5}")
         ok_all &= ok5
 
+        if ok3 and a.vulkan_validation:
+            try:
+                detail = check_vulkan_runtime(base, sandbox, a.timeout, a.vulkan_validation)
+                print(f"[PASS] Vulkan 灰度 {a.vulkan_validation} —— {detail}")
+            except (OSError, ValueError, KeyError) as error:
+                print(f"[FAIL] Vulkan 灰度 {a.vulkan_validation} —— {error}")
+                ok_all = False
+
         try:
             if ok3:
                 db_path = sandbox / "data" / "labsentinel.db"
                 with closing(sqlite3.connect(db_path)) as db, db:
-                    db.execute(
-                        "INSERT INTO app_settings(key,value,updated_ts) VALUES('runtime.ep','cpu',datetime('now')) "
-                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+                    db.executemany(
+                        "INSERT INTO app_settings(key,value,updated_ts) VALUES(?,'cpu',datetime('now')) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [("runtime.ep",), ("runtime.backend",)],
                     )
                 detection_ok, detection_detail = check_file_detection(base, pkg, sandbox, a.timeout)
             else:

@@ -12,6 +12,7 @@
 //! 推理层替换后本模块无需改动。
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use ls_core::state::ZoneState;
 use ls_core::time::{self as ls_time, DateTime};
@@ -136,6 +137,10 @@ pub trait Detector: Send {
     fn objects(&self) -> &[SceneObject] {
         &[]
     }
+
+    fn inference_device(&self) -> Option<ls_infer::yolo::InferenceDevice> {
+        None
+    }
 }
 
 /// 无推理后端：保留管线/事件通道，不产事件（T-325 前）。
@@ -179,6 +184,8 @@ pub struct CameraPipeline {
     last_tracks: Vec<LiveTrack>,
     occluded_tracks: Vec<([f32; 4], i64)>,
     last_ppe_sample: PpeSample,
+    ppe_elapsed: Option<Duration>,
+    ppe_timings: PpeTimings,
     continuous_ppe: bool,
     ppe_readings: Vec<PpeReading>,
     observed_exits: Vec<(i64, i64)>,
@@ -193,8 +200,24 @@ pub struct CameraPipeline {
     ppe: Option<Box<dyn PpeRunner>>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct PpeTimings {
+    pub full_frame: Option<Duration>,
+    pub crops: Option<Duration>,
+    pub coat_confirmation: Option<Duration>,
+    pub close_mask: Option<Duration>,
+}
+
 /// PPE 检测器接口（每帧最多一次整图推理；实现由 ls-analyzer 用 YoloModel 提供）。
 pub trait PpeRunner: Send {
+    fn inference_device(&self) -> Option<ls_infer::yolo::InferenceDevice> {
+        None
+    }
+
+    fn last_timings(&self) -> PpeTimings {
+        PpeTimings::default()
+    }
+
     /// 对整帧跑一次 PPE 证据检测，按人框归属返回每人状态（与 Python
     /// `vision.ppe_status_from_boxes` 同语义：违规证据优先、穿戴证据次之、
     /// 皆无 → Unknown——绝不把"证据不足"当"未穿"）。
@@ -255,6 +278,8 @@ impl CameraPipeline {
             last_tracks: Vec::new(),
             occluded_tracks: Vec::new(),
             last_ppe_sample: PpeSample::default(),
+            ppe_elapsed: None,
+            ppe_timings: PpeTimings::default(),
             continuous_ppe: false,
             ppe_readings: Vec::new(),
             observed_exits: Vec::new(),
@@ -327,6 +352,14 @@ impl CameraPipeline {
         &self.last_ppe_sample
     }
 
+    pub fn ppe_elapsed(&self) -> Option<Duration> {
+        self.ppe_elapsed
+    }
+
+    pub fn ppe_timings(&self) -> PpeTimings {
+        self.ppe_timings
+    }
+
     pub fn set_continuous_ppe(&mut self, enabled: bool) {
         self.continuous_ppe = enabled;
     }
@@ -381,6 +414,8 @@ impl CameraPipeline {
         recheck: bool,
     ) -> Vec<Candidate> {
         self.last_ppe_sample = PpeSample::default();
+        self.ppe_elapsed = None;
+        self.ppe_timings = PpeTimings::default();
         self.ppe_readings.clear();
         self.observed_exits.clear();
         self.frame_index += 1;
@@ -484,8 +519,11 @@ impl CameraPipeline {
                     || sample_masks
                     || needs_ppe(&self.zones, &self.zone_states, &active))
             {
+                let started = Instant::now();
                 let person_boxes: Vec<[f32; 4]> = active.iter().map(|(b, _)| *b).collect();
                 let observations = runner.observations(bgr, w, h, &person_boxes);
+                self.ppe_elapsed = Some(started.elapsed());
+                self.ppe_timings = runner.last_timings();
                 for ((bbox, id), mut observation) in active.iter().zip(observations) {
                     if occluded.contains(bbox) {
                         observation = PpeObservation::default();
@@ -1433,12 +1471,14 @@ mod tests {
             1,
             "进场帧必须跑一次 PPE"
         );
+        assert!(p.ppe_elapsed().is_some());
         let second = p.process_with_frame(
             &d,
             "2026-01-01T10:00:01",
             Some(([0u8; 12].as_slice(), 2, 2)),
         );
         assert!(second.is_empty());
+        assert!(p.ppe_elapsed().is_none());
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,

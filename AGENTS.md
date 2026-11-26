@@ -17,27 +17,27 @@
 ### 2.1 会话启动（`relay-start`）
 1. 按顺序读取（默认“摘要优先、按需深读”）：
    - `AGENTS.md`（全文）
-   - `task_registry.md`（当前活跃 `Task-ID` 行）
-   - `progress.md`（顶部 `Latest Handoff Snapshot`）
-   - `task_plan.md`（当前 Phase 相关段落）
-   - `findings.md`（约束、风险与避坑项）
-   - `修改记录_会话备忘.md`（最近 1~3 条 `Session Record`）
+   - `docs/maintenance/task_registry.md`（当前活跃 `Task-ID` 行）
+   - `docs/maintenance/progress.md`（顶部 `Latest Handoff Snapshot`）
+   - `docs/maintenance/task_plan.md`（当前 Phase 相关段落）
+   - `docs/maintenance/findings.md`（约束、风险与避坑项）
+   - `docs/maintenance/修改记录_会话备忘.md`（最近 1~3 条 `Session Record`）
 2. 锁定**单一 `Task-ID`**，声明 `Task-Name`。
 3. 输出 `Session Context`（Developer/Branch、Task-ID/Task-Name、Active Goal、Current Phase、Next First Command、Open TODO Top3）。
 4. 执行启动检查（`Get-Location`、`Get-ChildItem -Force`、`git status --short`、`python -V`），确认后再执行 `Next First Command`。
 
 ### 2.2 范围变更（`relay-scope-change`）
-需求、约束或优先级变更时，先同步更新 `task_plan.md`、`findings.md`、`progress.md`（及 `task_registry.md`），再动代码。
+需求、约束或优先级变更时，先同步更新 `docs/maintenance/` 里的 `task_plan.md`、`findings.md`、`progress.md` 和 `task_registry.md`，再动代码。
 
 ### 2.3 验证红线（`relay-verify`）
 - **未执行并记录真实命令与结果前，严禁宣称“已完成/已修复”。**
 - 开发批次按改动运行必要的编译检查和定向测试。从 `v0.7.0` 起，每个大版本集中执行全量回归和回归审阅，并覆盖本次大版本累积的小批次。当前 `v0.6.2` 按定向验证收口。
 - 大版本 Rust 门禁为 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 和 `cargo test --workspace --all-features`。修改 `Cargo.toml` 时连同 `Cargo.lock` 提交。
 - 大版本前端门禁为 `npx vitest run` 与 `npm run build`。接口解包始终校验返回形状（`Array.isArray` 等防御，严禁未校验直接 `.field.length`）。
-- 实测结果须回写 `progress.md`。
+- 实测结果须回写 `docs/maintenance/progress.md`。
 
 ### 2.4 会话收尾（`relay-handoff-stop`）
-切换工具/模型或结束会话前必须落盘：
+切换工具/模型或结束会话前，在 `docs/maintenance/` 落盘：
 1. 更新 `progress.md` 顶部 `Latest Handoff Snapshot`；
 2. 在 `修改记录_会话备忘.md` 追加一条 `Session Record`；
 3. 回写 `task_registry.md` 中对应 `Task-ID` 的 `Status`、`Last Update`、`Next First Command`。

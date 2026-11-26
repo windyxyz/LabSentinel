@@ -294,6 +294,7 @@ impl Store {
             "INSERT INTO face_event_matches(event_id,person_id,similarity) VALUES(?,?,?)",
             params![id, person, similarity],
         )?;
+        crate::outbox::enqueue(&tx, id, crate::AlertDispatchKind::Initial)?;
         tx.commit()?;
         Ok(Some(id))
     }

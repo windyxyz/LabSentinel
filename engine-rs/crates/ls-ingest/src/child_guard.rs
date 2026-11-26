@@ -6,7 +6,7 @@
 //! - 所有 Windows 子进程加 `CREATE_NO_WINDOW`（0x0800_0000）——杜绝控制台黑框闪现；
 //! - Drop 时先 kill 再 wait 兜底。
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 /// 受守护的子进程。Drop 终止并回收子进程，然后关闭 Job 句柄。
 pub struct ChildGuard {
@@ -17,8 +17,12 @@ pub struct ChildGuard {
 
 impl ChildGuard {
     /// 启动一个受守护的子进程：stdout/stderr 丢弃（后台服务），CREATE_NO_WINDOW + Job Object。
-    pub fn spawn(mut cmd: Command) -> Result<Self, String> {
-        cmd.stdout(Stdio::null())
+    pub fn spawn(cmd: Command) -> Result<Self, String> {
+        Self::spawn_with_stdout(cmd, Stdio::null())
+    }
+
+    pub fn spawn_with_stdout(mut cmd: Command, stdout: Stdio) -> Result<Self, String> {
+        cmd.stdout(stdout)
             .stderr(Stdio::null())
             .stdin(Stdio::null());
         #[cfg(windows)]
@@ -51,6 +55,13 @@ impl ChildGuard {
             Some(c) => matches!(c.try_wait(), Ok(None)),
             None => false,
         }
+    }
+
+    pub fn exit_status(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("child was stopped"))?
+            .try_wait()
     }
 
     /// 终止并回收。

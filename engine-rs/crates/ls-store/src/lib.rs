@@ -12,17 +12,23 @@ pub mod assistant;
 mod episodes;
 mod faces;
 mod lab;
+mod mcp;
 mod operations;
+mod outbox;
+mod recording;
 mod spatial;
 pub mod vec;
 pub use episodes::{EpisodeContext, EpisodeEvidence, NewEpisode};
 pub use faces::{FacePerson, FaceTemplate};
+pub use mcp::{McpToken, NewMcpToken};
 pub use operations::{ComplianceCounts, DeliveryWithHistory, EventNote};
+pub use outbox::{AlertDeliveryOutcome, AlertDispatchKind};
+pub use recording::EventRecording;
 pub use spatial::{CameraMask, FalsePositiveSpot, MaskKind, SuppressionRecord};
 
 /// schema 权威编号（v16 = LS-054 dataset_samples + share_links，2026-11-22）；
 /// 文档/诊断常量，实际迁移执行见 ensure_schema/migrate。
-pub const SCHEMA_VERSION_LATEST: i64 = 30;
+pub const SCHEMA_VERSION_LATEST: i64 = 32;
 const PROVENANCE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS provenance_snapshots(hash TEXT PRIMARY KEY, settings TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS event_provenance(event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
         hash TEXT NOT NULL REFERENCES provenance_snapshots(hash));
@@ -112,7 +118,8 @@ const EVENT_COLUMNS: &str = "id,ts,camera_id,type,level,track_id,detail,snapshot
     episode_id,first_ts,last_ts,duration_s,hit_count,peak_conf,resolved_ts,alert_tier,\
     error_code,severity,confidence_stage,suggestion_tts,vlm_model,vlm_prompt_hash";
 
-pub const ALERT_EVENTS_SQL: &str = "type NOT IN ('photo_check','video_check','alert_resolved')";
+pub const ALERT_EVENTS_SQL: &str =
+    "type NOT IN ('photo_check','video_check','motion_recording','alert_resolved')";
 pub const EVENT_ZONE_SQL: &str = "CASE WHEN json_valid(detections_json) THEN json_extract(detections_json,'$.zone_policy.id') END";
 
 pub const AI_VERDICT_SQL: &str = "COALESCE(
@@ -204,7 +211,7 @@ impl Store {
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT);
-             INSERT OR IGNORE INTO schema_version VALUES(30, 'rust-bootstrap');
+             INSERT OR IGNORE INTO schema_version VALUES(32, 'rust-bootstrap');
              CREATE TABLE IF NOT EXISTS cameras(\
                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, source TEXT, type TEXT, \
                status TEXT DEFAULT 'stopped', group_name TEXT DEFAULT '', \
@@ -291,6 +298,9 @@ impl Store {
         self.conn.execute_batch(PROVENANCE_SCHEMA)?;
         self.conn.execute_batch(SCENE_PACK_SCHEMA)?;
         self.conn.execute_batch(vec::SCHEMA)?;
+        outbox::migrate(&self.conn)?;
+        self.conn.execute_batch(recording::SCHEMA)?;
+        self.conn.execute_batch(mcp::SCHEMA)?;
         Ok(true)
     }
 
@@ -562,6 +572,17 @@ impl Store {
             "INSERT OR IGNORE INTO schema_version VALUES(30, 'rust-ls096-semantic-index')",
             [],
         )?;
+        outbox::migrate(&tx)?;
+        tx.execute_batch(recording::SCHEMA)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(31, 'rust-ls097-alert-outbox')",
+            [],
+        )?;
+        tx.execute_batch(mcp::SCHEMA)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_version VALUES(32, 'rust-ls098-mcp-tokens')",
+            [],
+        )?;
         tx.commit()?;
         self.schema_version()
     }
@@ -600,7 +621,17 @@ impl Store {
         evidence: EventEvidence,
         provenance: Option<(&str, &str)>,
     ) -> rusqlite::Result<i64> {
-        let tx = (evidence.bbox.is_some() || provenance.is_some())
+        self.add_event_with_outbox(ev, evidence, provenance, None)
+    }
+
+    pub fn add_event_with_outbox(
+        &self,
+        ev: &NewEvent,
+        evidence: EventEvidence,
+        provenance: Option<(&str, &str)>,
+        dispatch: Option<AlertDispatchKind>,
+    ) -> rusqlite::Result<i64> {
+        let tx = (evidence.bbox.is_some() || provenance.is_some() || dispatch.is_some())
             .then(|| self.conn.unchecked_transaction())
             .transpose()?;
         let conn = tx.as_deref().unwrap_or(&self.conn);
@@ -643,6 +674,9 @@ impl Store {
                 "INSERT INTO event_provenance(event_id,hash) VALUES(?,?)",
                 params![id, hash],
             )?;
+        }
+        if let Some(kind) = dispatch {
+            outbox::enqueue(conn, id, kind)?;
         }
         if let Some(tx) = tx {
             tx.commit()?;
@@ -762,8 +796,10 @@ impl Store {
         verdict: &str,
         ts: &str,
         suppressed: bool,
+        dispatch_after_review: bool,
     ) -> rusqlite::Result<Option<(i64, String)>> {
-        self.conn
+        let tx = self.conn.unchecked_transaction()?;
+        let updated = tx
             .query_row(
                 "UPDATE events SET vlm_verdict=?1,vlm_ts=?2,vlm_suppressed=?3,
                    vlm_model=CASE WHEN json_valid(?1) THEN COALESCE(json_extract(?1,'$.model'),vlm_model) ELSE vlm_model END,
@@ -772,7 +808,12 @@ impl Store {
                 params![verdict, ts, suppressed, eid],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()
+            .optional()?;
+        if updated.is_some() && dispatch_after_review {
+            outbox::resolve_review(&tx, eid, suppressed)?;
+        }
+        tx.commit()?;
+        Ok(updated)
     }
 
     /// UX2 cascade：VLM 明确否定且 on_negative=suppress → 标记抑制（不投递）。
@@ -884,6 +925,23 @@ impl Store {
             "UPDATE cameras SET analysis_source=?,analysis_shared=? WHERE id=? AND type='rtsp'",
             params![source, shared, id],
         )
+    }
+
+    pub fn camera_uses_retina(&self, id: i64) -> rusqlite::Result<bool> {
+        Ok(self
+            .setting_get(&format!("capture.backend.{id}"))?
+            .as_deref()
+            == Some("retina"))
+    }
+
+    pub fn set_camera_retina(&self, id: i64, enabled: bool) -> rusqlite::Result<()> {
+        let key = format!("capture.backend.{id}");
+        if enabled {
+            self.setting_set(&key, "retina")?;
+        } else {
+            self.settings_delete(&[key])?;
+        }
+        Ok(())
     }
 
     /// RA2-S6：人脸同意记录（合规留痕，只存 subject/ts，不落人脸图片）。
@@ -1096,10 +1154,11 @@ pub struct AuditRow {
     pub action: String,
     pub target: Option<String>,
     pub status_code: Option<i64>,
+    pub detail: Option<String>,
 }
 
 /// 待重试投递：(delivery_id, event_id, channel, attempts)
-pub type RetryableDelivery = (i64, i64, String, i64);
+pub type RetryableDelivery = (i64, i64, String, i64, bool);
 /// 单条投递：(event_id, status, attempts, last_error)
 pub type DeliveryRow = (i64, String, i64, Option<String>);
 
@@ -1112,6 +1171,9 @@ pub struct Delivery {
     pub attempts: i64,
     pub last_error: Option<String>,
     pub updated_ts: Option<String>,
+    pub receipt_code: Option<i64>,
+    pub latency_ms: Option<i64>,
+    pub delivered_ts: Option<String>,
 }
 
 /// LS-054：数据飞轮样本（人工标注工作台）。
@@ -1217,7 +1279,9 @@ impl EventsFilter<'_> {
         let mut sql = String::from(" WHERE 1=1");
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         match self.category {
-            Some("check") => sql.push_str(" AND type IN ('photo_check','video_check')"),
+            Some("check") => {
+                sql.push_str(" AND type IN ('photo_check','video_check','motion_recording')")
+            }
             Some("recovery") => sql.push_str(" AND type='alert_resolved'"),
             Some("alert") => {
                 sql.push_str(" AND ");
@@ -1309,6 +1373,7 @@ impl Store {
             .execute("DELETE FROM camera_masks WHERE camera_id=?", [id])?;
         self.conn
             .execute("DELETE FROM fp_spots WHERE camera_id=?", [id])?;
+        self.set_camera_retina(id, false)?;
         self.conn
             .execute("DELETE FROM cameras WHERE id=?", params![id])
     }
@@ -1548,6 +1613,28 @@ impl Store {
             .query_row(&sql, rusqlite::params_from_iter(args), |row| row.get(0))
     }
 
+    pub fn event_replay_state(
+        &self,
+        since: Option<i64>,
+        cameras: Option<&[i64]>,
+    ) -> rusqlite::Result<(i64, bool)> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let latest = self.latest_event_id(cameras)?;
+        let history_reset = if let Some(id) = since.filter(|id| *id > 0) {
+            let mut sql = "SELECT EXISTS(SELECT 1 FROM events WHERE id=?".to_string();
+            let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(id)];
+            append_camera_scope(&mut sql, &mut args, cameras);
+            sql.push(')');
+            let visible: bool =
+                transaction.query_row(&sql, rusqlite::params_from_iter(args), |row| row.get(0))?;
+            !visible
+        } else {
+            false
+        };
+        transaction.commit()?;
+        Ok((latest, history_reset))
+    }
+
     pub fn events_after_id(
         &self,
         id: i64,
@@ -1745,7 +1832,7 @@ impl Store {
             |r| r.get(0),
         )?;
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT id,ts,request_id,actor,action,target,status_code FROM audit_log WHERE 1=1{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"))?;
+            "SELECT id,ts,request_id,actor,action,target,status_code,detail FROM audit_log WHERE 1=1{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"))?;
         // rusqlite 参数不能复用同一绑定缓冲，重新构造一次
         let mut args2: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(a) = action {
@@ -1766,6 +1853,7 @@ impl Store {
                 action: r.get(4)?,
                 target: r.get(5)?,
                 status_code: r.get(6)?,
+                detail: r.get(7)?,
             })
         })?;
         Ok((rows.collect::<Result<Vec<_>, _>>()?, total))
@@ -1783,7 +1871,9 @@ impl Store {
         limit: i64,
     ) -> rusqlite::Result<Vec<Delivery>> {
         let mut sql = String::from(
-            "SELECT id,event_id,channel,COALESCE(status,'pending'),attempts,last_error,updated_ts FROM alert_deliveries WHERE 1=1");
+            "SELECT id,event_id,channel,COALESCE(status,'pending'),attempts,last_error,updated_ts,
+                receipt_code,latency_ms,delivered_ts FROM alert_deliveries WHERE 1=1",
+        );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(id) = event_id {
             sql.push_str(" AND event_id=?");
@@ -1806,6 +1896,9 @@ impl Store {
                 attempts: r.get(4)?,
                 last_error: r.get(5)?,
                 updated_ts: r.get(6)?,
+                receipt_code: r.get(7)?,
+                latency_ms: r.get(8)?,
+                delivered_ts: r.get(9)?,
             })
         })?;
         rows.collect()
@@ -1813,18 +1906,29 @@ impl Store {
 
     /// 回收上次进程退出时留下的首发记录，沿用原始时间与重试退避。
     pub fn recover_interrupted_deliveries(&self) -> rusqlite::Result<usize> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let legacy = tx.execute(
             "UPDATE alert_deliveries SET status='retry', attempts=COALESCE(attempts,0),
              updated_ts=COALESCE(NULLIF(updated_ts,''),?),
              last_error=COALESCE(NULLIF(last_error,''),'上次进程退出时尚未记录发送结果')
-             WHERE COALESCE(status,'pending')='pending'",
+             WHERE idempotency_key IS NULL AND COALESCE(status,'pending')='pending'",
             [chrono_now()],
-        )
+        )?;
+        let uncertain = tx.execute(
+            "UPDATE alert_deliveries SET status='unconfirmed', attempts=attempts+1,
+                last_error='进程在渠道请求完成前退出，接收状态待核实', updated_ts=?
+             WHERE idempotency_key IS NOT NULL AND status='sending'",
+            [chrono_now()],
+        )?;
+        let reviewing = outbox::recover_reviews(&tx)?;
+        tx.commit()?;
+        Ok(legacy + uncertain + reviewing)
     }
 
     pub fn retry_delivery(&self, id: i64) -> rusqlite::Result<bool> {
         let n = self.conn.execute(
-            "UPDATE alert_deliveries SET status='retry', attempts=0, last_error=NULL, updated_ts=? WHERE id=? AND status IN ('failed','retry','dead_letter')",
+            "UPDATE alert_deliveries SET status='retry', attempts=0, last_error=NULL, updated_ts=?1,
+             next_attempt_ts=?1 WHERE id=?2 AND status IN ('failed','retry','dead_letter','unconfirmed')",
             params!["1970-01-01T00:00:00", id],
         )?;
         Ok(n > 0)
@@ -1839,11 +1943,13 @@ impl Store {
         limit: i64,
     ) -> rusqlite::Result<Vec<RetryableDelivery>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id,event_id,channel,attempts FROM alert_deliveries \
-             WHERE COALESCE(status,'pending') IN ('retry','failed') \
-               AND (?6 IS NULL OR id=?6)
-               AND updated_ts <= CASE attempts WHEN 0 THEN ?1 WHEN 1 THEN ?2
-                   WHEN 2 THEN ?3 WHEN 3 THEN ?4 ELSE ?5 END
+            "SELECT id,event_id,channel,attempts,idempotency_key IS NOT NULL FROM alert_deliveries \
+             WHERE (?6 IS NULL OR id=?6) AND (
+                (idempotency_key IS NULL AND status IN ('retry','failed')
+                 AND updated_ts <= CASE attempts WHEN 0 THEN ?1 WHEN 1 THEN ?2
+                        WHEN 2 THEN ?3 WHEN 3 THEN ?4 ELSE ?5 END)
+                OR (idempotency_key IS NOT NULL AND status IN ('pending','retry') AND next_attempt_ts <= ?8)
+             )
                ORDER BY updated_ts ASC, id ASC LIMIT ?7",
         )?;
         let rows = stmt.query_map(
@@ -1854,9 +1960,10 @@ impl Store {
                 cutoffs[3],
                 cutoffs[4],
                 delivery_id,
-                limit
+                limit,
+                chrono_now(),
             ],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
         rows.collect()
     }
@@ -2570,6 +2677,10 @@ impl Store {
         self.conn.execute("DELETE FROM zones", [])?;
         self.conn.execute("DELETE FROM camera_masks", [])?;
         self.conn.execute("DELETE FROM fp_spots", [])?;
+        self.conn.execute(
+            "DELETE FROM app_settings WHERE key GLOB 'capture.backend.*'",
+            [],
+        )?;
         self.conn.execute("DELETE FROM cameras", [])?;
         Ok(())
     }
@@ -3292,6 +3403,18 @@ mod tests {
                 .unwrap();
             assert_eq!(table, 1);
         }
+    }
+
+    #[test]
+    fn outbox_schema_is_available_after_old_database_upgrade() {
+        let s = Store::open(":memory:").unwrap();
+        s.ensure_schema().unwrap();
+        s.migrate().unwrap();
+        let mut row = s
+            .conn()
+            .prepare("SELECT event_id, kind, status FROM alert_outbox")
+            .unwrap();
+        assert!(row.query([]).unwrap().next().unwrap().is_none());
     }
 
     #[test]

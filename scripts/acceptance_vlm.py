@@ -114,7 +114,7 @@ def main() -> int:
             # decode_image 需 ffmpeg（find 候选不含仓库根 tools/ffmpeg 子目录）
             "LS_FFMPEG": str(ROOT / "tools" / "ffmpeg" / "ffmpeg.exe"),
             # UX2 cascade 本地先行：真 YOLO 模型扫人（触发门依赖本地检测）
-            "LS_MODEL_PATH": str(ROOT / "m0-spike" / "yolo11n.onnx"),
+            "LS_MODEL_PATH": str(ROOT / "models" / "yolo11n.onnx"),
         })
         proc = subprocess.Popen(
             [str(EXE), "--launch"], cwd=str(ROOT), env=env,

@@ -55,8 +55,8 @@
 - **NPU（XDNA2）实测——最终跑通（2026-10-25）**：硬件在位（NPU Compute Accelerator Device + 驱动 OK）。**最终成绩：XINT8 量化（检测头保留 FP32）后 NPU 实测 40.0 FPS（p50 24.8ms），人员检测正常（均 2.36 人/帧，conf 0.80 与 FP32 同档）**，日志确认 aiecompiler 真实编译并在 AIE 阵列执行。
   - 三档对比（yolo11n @640）：**GPU DirectML 64 FPS > NPU XINT8 40 FPS > CPU FP32 32–39 FPS**。NPU 跑赢 CPU、输给核显，但对小模型而言 NPU 的价值是**把 CPU 和 GPU 同时解放出来**（多路并发时：分析走 NPU、解码/WebRTC 走 GPU、Web 走 CPU）。
   - 量化配方（关键工程结论）：**必须排除检测头**（`/model.23` 子图 84 个节点）——全图量化的两版（通用 QDQ、Quark XINT8）类别输出全部归零；排除后精度恢复。Quark XINT8（pypi.amd.com 的 onnxruntime-vitisai + download.amd.com 的 amd_quark 0.12 zip）。
-  - **本机绕道方案（未装 MSVC 时可用）**：Quark 导入时要 JIT 编译 C++ 扩展，本机无 Visual Studio——把 `quark/onnx/operators/custom_ops/build_custom_ops.py` 末尾的 `_initialize_kernels()` 调用剥掉后手工注入模块即可量化（m0-spike 里有完整代码）。正式环境建议装 VS Build Tools 走官方路径。
-  - venv：`D:\LabSentinel\npu-venv`（py3.12），快照 `m0-spike/npu-venv-freeze.txt`。
+  - **本机绕道方案（未装 MSVC 时可用）**：Quark 导入时要 JIT 编译 C++ 扩展，本机无 Visual Studio——把 `quark/onnx/operators/custom_ops/build_custom_ops.py` 末尾的 `_initialize_kernels()` 调用剥掉后手工注入模块即可量化（models 里有完整代码）。正式环境建议装 VS Build Tools 走官方路径。
+  - venv：`D:\LabSentinel\npu-venv`（py3.12），快照 `tools/legacy/model-experiments/npu-venv-freeze.txt`。
   - **M1 推理架构定论**：三档后端统一走 **ONNX Runtime**（providers 自动降级：DirectML → VitisAI → CPU），训练用 Ultralytics、部署用 ORT——与 ADR-0001 一致并细化。量化版模型注意：不同后端置信度分布略有差异，生产需按后端校准阈值。
   - **环境坑（NPU venv）**：`onnxruntime`（CPU 版）与 `onnxruntime-vitisai` 同装互杀；`numpy` 必须钉 1.26.4（AMD wheel 按 numpy 1.x 编译）；pandas 需 2.2.3（兼容 numpy1）；pytorch.org 官方源本网络不可用（用 PyPI 装 CPU torch）；Quark 0.13 的 download.amd.com 直链已失效（0.12 可用，需断点续传）。
 - **坑 1**：GitHub 下载模型权重 SSL 失败（国内网络），需 curl 手动下载或镜像；安装脚本要内置镜像回退逻辑。
@@ -78,8 +78,8 @@
 - ✅ Vue3 Web 四页面（仪表盘/摄像头/安全区画布绘制/事件查询），vite 构建通过；`npm run dev` :5173 → :8000。
 - ✅ Docker Compose（Linux 容器走 CPU 版 onnxruntime）+ README。
 - ✅ **实验服（PPE）管线已就位待模型**：`PpeEngine`（自定义类别）+ 进入安全区时人框↔实验服框重叠判定（wearing/no/unknown 三态）+ `LS_PPE_MODEL`/`LS_PPE_CLASS_NAMES`/`LS_PPE_CONF` 配置。当前无模型走 "unknown" 占位路径（enter_no_ppe 事件注明"检测未启用"）。
-- ✅ **Roboflow 打通（2026-10-25 晚）**：key 走本地代理 7890；LAB PPE 数据集已下载 `datasets/lab-ppe/`（588 训练/40 验证图，CC BY 4.0，10 类含 Lab Coat/No Lab Coat/Person）；yolo11n 微调进行中（runs/detect/runs/ppe_v1，epoch27 mAP50=0.68）；训练完导出 ONNX 到 m0-spike 并由 .env 的 LS_PPE_MODEL 自动加载。
-- 🎉 **实验服检测上线（2026-10-25 深夜）**：微调 50 epoch 完成——**Lab Coat AP50=0.977 / No Lab Coat=0.808 / Person=0.995**（test split）；`m0-spike/yolo11n_ppe.onnx(+.pt)` 上线。判定采用**证据分级**：No Lab Coat 显式检测(conf≥0.30)→违规告警；Lab Coat 低阈值(0.20)→合规证据；两者皆无→"不确定"（绝不把证据不足当违规，防误报）。mixkit 域外视频置信度保守属预期，真实验收待实验室摄像头画面。
+- ✅ **Roboflow 打通（2026-10-25 晚）**：key 走本地代理 7890；LAB PPE 数据集已下载 `datasets/lab-ppe/`（588 训练/40 验证图，CC BY 4.0，10 类含 Lab Coat/No Lab Coat/Person）；yolo11n 微调进行中（runs/detect/runs/ppe_v1，epoch27 mAP50=0.68）；训练完导出 ONNX 到 models 并由 .env 的 LS_PPE_MODEL 自动加载。
+- 🎉 **实验服检测上线（2026-10-25 深夜）**：微调 50 epoch 完成——**Lab Coat AP50=0.977 / No Lab Coat=0.808 / Person=0.995**（test split）；`models/yolo11n_ppe.onnx(+.pt)` 上线。判定采用**证据分级**：No Lab Coat 显式检测(conf≥0.30)→违规告警；Lab Coat 低阈值(0.20)→合规证据；两者皆无→"不确定"（绝不把证据不足当违规，防误报）。mixkit 域外视频置信度保守属预期，真实验收待实验室摄像头画面。
 - 🎉 **v2 重训完成（2026-10-27）**：merged 数据集 11420 图全量训练 40 轮（batch16 全核，约 19h），最佳 **mAP50=0.723 / mAP50-95=0.477**（epoch28）。完成链路已执行：v1 三件套备份 → ONNX 导出（15 通道=4+11 ✓）→ 11 类词表 → test 集评估对比（**历史模型评估记录**：Person P 32→51%、Lab Coat 22→49%、No Lab Coat 11→77%、HairNet 82%——四项核心类全部大幅超越 v1）→ check_model_ready PASS。**v2 已就绪待接入**（.env 改 LS_PPE_MODEL 无需改——路径同名，重启即用新模型；词表已同步 11 类）。过程事故：m0-venv onnxruntime 再次被 ultralytics 生态污染（pybind11 1.31-cpu 与 py 文件 1.24.4-directml 混装致 run() 全崩），已按标准流程修复并双 provider 验证——**导出/评估类操作前必须先核对 onnxruntime 完整性**。
 - 🚀 **数据扩充 v2（2026-10-26，重训待跑）**：真实视频评测显示白大褂/便服区分不足 → 收编 5 个公开数据集合并训练（`datasets/merged/`：**11420 图 / 26068 框**，统一 11 类词表含 HairNet）：
   - 新收编：**ENSI PPE**（8040 图，Labcoat/Person/Gloves/HairNet，CC BY 4.0）、**lcd3**（1988 图，person_with/without_labcoat 分割标注→外接框）、whitecoat（624）、aremean（180）

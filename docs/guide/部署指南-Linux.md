@@ -28,7 +28,7 @@ sudo install -d -o labsentinel -g labsentinel /opt/labsentinel /var/lib/labsenti
 sudo install -m 755 engine-rs/target/release/labsentinel-server /opt/labsentinel/
 sudo cp -r web/dist /opt/labsentinel/web
 sudo install -d /opt/labsentinel/models
-sudo cp m0-spike/yolo11n.onnx /opt/labsentinel/models/   # PPE 模型存在则一并复制
+sudo cp models/yolo11n.onnx /opt/labsentinel/models/   # PPE 模型存在则一并复制
 
 sudo mkdir -p /etc/labsentinel && sudo tee /etc/labsentinel/config.env >/dev/null <<'EOF'
 LS_ADMIN_TOKEN=<占位：用 python3 -c "import secrets;print(secrets.token_urlsafe(24))" 生成>

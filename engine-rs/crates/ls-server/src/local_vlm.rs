@@ -9,7 +9,7 @@ use std::{
 };
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -33,12 +33,29 @@ const BINARY: &str = if cfg!(windows) {
     "llama-server"
 };
 
+mod gpu;
+
+pub(crate) fn owns_profile(url: &str, model: &str) -> bool {
+    model == ALIAS && url == profile_url()
+}
+
+fn profile_url() -> String {
+    format!("http://127.0.0.1:{PORT}/v1")
+}
+
 #[derive(Default)]
 pub(crate) struct LocalVlm(Mutex<Option<Running>>);
 
 struct Running {
     child: ChildGuard,
-    backend: &'static str,
+    status: LaunchStatus,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct LaunchStatus {
+    status: &'static str,
+    gpu: Option<gpu::Plan>,
+    fallback_reason: Option<String>,
 }
 
 impl LocalVlm {
@@ -123,7 +140,13 @@ fn skip_value(reader: &mut impl Read, kind: u32, count: u64) -> io::Result<()> {
     Ok(())
 }
 
-fn gguf_type(reader: &mut impl Read) -> io::Result<Option<u32>> {
+#[derive(Default)]
+struct GgufMetadata {
+    file_type: Option<u32>,
+    block_count: Option<u32>,
+}
+
+fn gguf_metadata(reader: &mut impl Read, need_blocks: bool) -> io::Result<GgufMetadata> {
     if int::<4>(reader)? != *b"GGUF" || !(2..=3).contains(&u32_le(reader)?) || u64_le(reader)? == 0
     {
         return Err(invalid());
@@ -132,6 +155,8 @@ fn gguf_type(reader: &mut impl Read) -> io::Result<Option<u32>> {
     if entries > 16_384 {
         return Err(invalid());
     }
+    let mut metadata = GgufMetadata::default();
+    let mut block_key = Vec::new();
     for _ in 0..entries {
         let len = u64_le(reader)?;
         if len > 4096 {
@@ -140,12 +165,30 @@ fn gguf_type(reader: &mut impl Read) -> io::Result<Option<u32>> {
         let mut key = vec![0; len as usize];
         reader.read_exact(&mut key)?;
         let kind = u32_le(reader)?;
-        if key == b"general.file_type" {
-            return if kind == 4 {
-                Ok(Some(u32_le(reader)?))
+        if key == b"general.file_type" || (!block_key.is_empty() && key == block_key) {
+            if kind != 4 {
+                return Err(invalid());
+            }
+            let value = u32_le(reader)?;
+            if key == b"general.file_type" {
+                metadata.file_type = Some(value);
             } else {
-                Err(invalid())
-            };
+                metadata.block_count = (value > 0).then_some(value);
+            }
+            if metadata.file_type.is_some() && (!need_blocks || metadata.block_count.is_some()) {
+                break;
+            }
+            continue;
+        }
+        if need_blocks && key == b"general.architecture" && kind == 8 {
+            let len = u64_le(reader)?;
+            if len > 128 {
+                return Err(invalid());
+            }
+            block_key.resize(len as usize, 0);
+            reader.read_exact(&mut block_key)?;
+            block_key.extend_from_slice(b".block_count");
+            continue;
         }
         let (kind, count) = if kind == 9 {
             (u32_le(reader)?, u64_le(reader)?)
@@ -154,16 +197,22 @@ fn gguf_type(reader: &mut impl Read) -> io::Result<Option<u32>> {
         };
         skip_value(reader, kind, count)?;
     }
-    Ok(None)
+    Ok(metadata)
 }
 
-fn check_gguf(path: &Path, projector: bool) -> Result<(), String> {
-    let mut file =
-        BufReader::new(File::open(path).map_err(|_| "无法读取 GGUF 文件")?).take(64 * 1024 * 1024);
-    let file_type = gguf_type(&mut file).map_err(|_| "GGUF 文件头无效或版本不支持")?;
-    match file_type {
-        Some(0 | 1 | 7 | 18 | 32) => Ok(()),
-        None if projector => Ok(()),
+fn check_gguf(
+    path: &Path,
+    projector: bool,
+    need_blocks: bool,
+) -> Result<(u64, Option<u32>), String> {
+    let file = File::open(path).map_err(|_| "无法读取 GGUF 文件")?;
+    let size = file.metadata().map_err(|_| "无法读取 GGUF 大小")?.len();
+    let mut reader = BufReader::new(file).take(64 * 1024 * 1024);
+    let metadata =
+        gguf_metadata(&mut reader, need_blocks).map_err(|_| "GGUF 文件头无效或版本不支持")?;
+    match metadata.file_type {
+        Some(0 | 1 | 7 | 18 | 32) => Ok((size, metadata.block_count)),
+        None if projector => Ok((size, None)),
         _ => Err(
             "请选择 F16、BF16、Q6_K 或 Q8_0 等受支持的权重。当前量化类型无法用于离线视觉复核。"
                 .into(),
@@ -178,6 +227,9 @@ pub(crate) struct LocalConfig {
     projector: String,
     #[serde(default)]
     gpu_layers: u32,
+    vulkan_device: Option<String>,
+    vram_budget_mb: Option<u64>,
+    cv_vram_reserve_mb: Option<u64>,
 }
 
 fn launch(
@@ -185,7 +237,7 @@ fn launch(
     model: &Path,
     projector: &Path,
     key: &str,
-    layers: u32,
+    gpu: Option<&gpu::Plan>,
 ) -> Result<ChildGuard, String> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).map_err(|_| "回环服务端口已被占用")?;
     let mut cmd = Command::new(bin);
@@ -207,14 +259,18 @@ fn launch(
             ALIAS,
             "--api-key",
             key,
+            "--device",
+            gpu.map_or("none", |plan| plan.device.id.as_str()),
             "--n-gpu-layers",
-            &layers.to_string(),
+            &gpu.map_or(0, |plan| plan.layers).to_string(),
             "--model",
         ])
         .arg(model)
         .arg("--mmproj")
         .arg(projector);
-    if layers == 0 {
+    if let Some(plan) = gpu {
+        cmd.args(["--fit", "off", "--mmproj-device", &plan.device.id]);
+    } else {
         cmd.arg("--no-mmproj-offload");
     }
     let mut child = ChildGuard::spawn(cmd)?;
@@ -242,18 +298,46 @@ fn launch(
     )
 }
 
-pub(crate) async fn local_vlm_status(State(st): State<Shared>) -> Response {
+#[derive(Deserialize)]
+pub(crate) struct StatusQuery {
+    #[serde(default)]
+    probe: bool,
+}
+
+pub(crate) async fn local_vlm_status(
+    State(st): State<Shared>,
+    Query(query): Query<StatusQuery>,
+) -> Response {
     let status = match st.local_vlm.0.try_lock() {
-        Ok(mut state) => state.as_mut().map_or("stopped", |running| {
-            if running.child.is_running() {
-                running.backend
-            } else {
-                "stopped"
-            }
-        }),
-        Err(_) => "starting",
+        Ok(mut state) => state
+            .as_mut()
+            .and_then(|running| running.child.is_running().then(|| running.status.clone()))
+            .map_or_else(|| json!({"status":"stopped"}), |status| json!(status)),
+        Err(_) => json!({"status":"starting"}),
     };
-    Json(json!({"status": status, "runtime_available": binary().is_some(), "directory": "models/local-vlm", "profile_id": PROFILE_ID})).into_response()
+    let store = match ls_store::Store::open(&st.db_path) {
+        Ok(store) => store,
+        Err(_) => return detail_err(StatusCode::INTERNAL_SERVER_ERROR, "无法读取本机视觉设置"),
+    };
+    let mut status = status;
+    status["gpu_settings"] = json!({
+        "vulkan_device": gpu::preferred_device(&store),
+        "vram_budget_mb": gpu::budget(&store),
+        "cv_vram_reserve_mb": gpu::cv_reserve(&store),
+    });
+    drop(store);
+    let bin = binary();
+    status["runtime_available"] = json!(bin.is_some());
+    status["directory"] = json!("models/local-vlm");
+    status["profile_id"] = json!(PROFILE_ID);
+    if let Some(bin) = bin.filter(|_| query.probe) {
+        match tokio::task::spawn_blocking(move || gpu::devices(&bin, false)).await {
+            Ok(Ok(devices)) => status["vulkan_devices"] = json!(devices),
+            Ok(Err(error)) => status["device_error"] = json!(error),
+            Err(_) => status["device_error"] = json!("无法枚举本机 Vulkan 显卡"),
+        }
+    }
+    Json(status).into_response()
 }
 
 pub(crate) async fn local_vlm_start(
@@ -261,23 +345,36 @@ pub(crate) async fn local_vlm_start(
     Json(config): Json<LocalConfig>,
 ) -> Response {
     match tokio::task::spawn_blocking(move || start(&st, config)).await {
-        Ok(Ok(backend)) => {
-            Json(json!({"status": backend, "profile_id": PROFILE_ID})).into_response()
+        Ok(Ok(status)) => {
+            let mut body = json!(status);
+            body["profile_id"] = json!(PROFILE_ID);
+            Json(body).into_response()
         }
         Ok(Err(error)) => detail_err(StatusCode::UNPROCESSABLE_ENTITY, &error),
         Err(_) => detail_err(StatusCode::INTERNAL_SERVER_ERROR, "离线视觉服务启动失败"),
     }
 }
 
-fn start(st: &Shared, config: LocalConfig) -> Result<&'static str, String> {
+fn start(st: &Shared, config: LocalConfig) -> Result<LaunchStatus, String> {
     let root = Path::new(&st.data_dir).join("models").join("local-vlm");
     let model = candidate(&config.model, &root)?;
     let projector = candidate(&config.projector, &root)?;
     if model == projector || config.gpu_layers > 128 {
         return Err("权重与投影需要分别选择，GPU 层数须在 0 至 128 之间".into());
     }
-    check_gguf(&model, false)?;
-    check_gguf(&projector, true)?;
+    if config
+        .vulkan_device
+        .as_deref()
+        .is_some_and(|v| !gpu::valid_device(v))
+        || [config.vram_budget_mb, config.cv_vram_reserve_mb]
+            .into_iter()
+            .flatten()
+            .any(|value| value > gpu::MAX_MEMORY_MB)
+    {
+        return Err("请选择自动或有效的 Vulkan 设备，并填写有效的显存预算".into());
+    }
+    let (weights_bytes, block_count) = check_gguf(&model, false, config.gpu_layers > 0)?;
+    let (projector_bytes, _) = check_gguf(&projector, true, false)?;
     let bin = binary().ok_or("请先在软件 tools/llama 目录放入官方 llama.cpp Vulkan 运行时")?;
     let mut active = st
         .local_vlm
@@ -291,21 +388,62 @@ fn start(st: &Shared, config: LocalConfig) -> Result<&'static str, String> {
     let mut random = [0; 24];
     getrandom::getrandom(&mut random).map_err(|_| "生成回环服务令牌失败")?;
     let key = crate::util::sha256_hex(&random);
-    let (child, backend) = match launch(&bin, &model, &projector, &key, config.gpu_layers) {
-        Ok(child) => (
-            child,
-            if config.gpu_layers == 0 {
-                "cpu"
-            } else {
-                "gpu_requested"
-            },
-        ),
-        Err(_) if config.gpu_layers > 0 => {
-            (launch(&bin, &model, &projector, &key, 0)?, "cpu_fallback")
-        }
-        Err(error) => return Err(error),
-    };
     let store = ls_store::Store::open(&st.db_path).map_err(|_| "无法保存本地接入档案")?;
+    let device = config
+        .vulkan_device
+        .unwrap_or_else(|| gpu::preferred_device(&store));
+    let budget = config.vram_budget_mb.unwrap_or_else(|| gpu::budget(&store));
+    let reserve = config
+        .cv_vram_reserve_mb
+        .unwrap_or_else(|| gpu::cv_reserve(&store));
+    let mut status = LaunchStatus {
+        status: "cpu",
+        gpu: None,
+        fallback_reason: None,
+    };
+    let child = if config.gpu_layers == 0 {
+        launch(&bin, &model, &projector, &key, None)?
+    } else {
+        status.status = "cpu_fallback";
+        match gpu::devices(&bin, true).and_then(|devices| {
+            gpu::choose(
+                &store,
+                &devices,
+                &device,
+                budget,
+                reserve,
+                config.gpu_layers,
+                gpu::ModelSize {
+                    weights_bytes,
+                    projector_bytes,
+                    block_count,
+                },
+            )
+            .ok_or_else(|| "未找到所选的 Vulkan 显卡".into())
+        }) {
+            Ok(plan) => status.gpu = Some(plan),
+            Err(reason) => status.fallback_reason = Some(reason),
+        }
+        let gpu_child = status.gpu.as_ref().and_then(|plan| {
+            if plan.layers == 0 {
+                status.fallback_reason = Some("预留检测显存后，剩余预算不足以加载视觉模型".into());
+                return None;
+            }
+            match launch(&bin, &model, &projector, &key, Some(plan)) {
+                Ok(child) => Some(child),
+                Err(error) => {
+                    status.fallback_reason = Some(error);
+                    None
+                }
+            }
+        });
+        if let Some(child) = gpu_child {
+            status.status = "gpu_requested";
+            child
+        } else {
+            launch(&bin, &model, &projector, &key, None)?
+        }
+    };
     let data = Path::new(&st.data_dir);
     let before = crate::detect::DetectCfg::for_role(&store, data, "verifier");
     let tx = store
@@ -318,17 +456,29 @@ fn start(st: &Shared, config: LocalConfig) -> Result<&'static str, String> {
         id: PROFILE_ID.into(),
         name: "离线视觉（本机）".into(),
         provider: "openai_compat".into(),
-        url: format!("http://127.0.0.1:{PORT}/v1"),
+        url: profile_url(),
         model: ALIAS.into(),
         api_key: key,
         timeout_s: 30,
         allow_remote: false,
     });
     profiles_store(&store, data, &profiles)?;
+    for (key, value) in [
+        ("llama.vulkan_device", device),
+        ("llama.vram_budget_mb", budget.to_string()),
+        ("runtime.cv_vram_reserve_mb", reserve.to_string()),
+    ] {
+        store
+            .setting_set(key, &value)
+            .map_err(|err| err.to_string())?;
+    }
     tx.commit().map_err(|err| err.to_string())?;
-    *active = Some(Running { child, backend });
+    *active = Some(Running {
+        child,
+        status: status.clone(),
+    });
     crate::detect::reload_verifier(st, &store, &before);
-    Ok(backend)
+    Ok(status)
 }
 
 pub(crate) async fn local_vlm_stop(State(st): State<Shared>) -> Response {

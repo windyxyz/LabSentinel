@@ -43,7 +43,7 @@
 
 ## 本地复核记录
 
-忽略目录 `Resources/dist/model-evaluation/` 内有 `comparison.json`、`folder-comparison.json` 和对应的一次性验证脚本。`compare_local.py` 使用 `Resources/runs/vulkan-spike/pydeps` 内现有的 CPU 运行依赖，`check_folder.py` 使用 `Resources/dist/rust/labsentinel-server`。YOLO26n ONNX 的输入为 FP32 `[1,3,640,640]`，输出为 `[1,300,6]`，模型元数据声明 `end2end=True`。Rust `vulkan_spike.exe cpu` 另对该权重跑过单会话与四会话推理，成功加载并输出检测框。
+忽略目录 `Resources/验收归档/识别 - 模型试用对照/` 内有 `comparison.json`、`folder-comparison.json` 和对应的一次性验证脚本。`compare_local.py` 使用 `Resources/runs/Vulkan 推理后端对照/pydeps` 内现有的 CPU 运行依赖，`check_folder.py` 使用 `Resources/dist/rust/labsentinel-server`。YOLO26n ONNX 的输入为 FP32 `[1,3,640,640]`，输出为 `[1,300,6]`，模型元数据声明 `end2end=True`。Rust `vulkan_spike.exe cpu` 另对该权重跑过单会话与四会话推理，成功加载并输出检测框。
 
 | 下载文件 | 字节数 | SHA-256 |
 |---|---:|---|

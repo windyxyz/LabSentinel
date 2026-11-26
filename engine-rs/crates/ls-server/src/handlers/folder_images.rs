@@ -109,35 +109,58 @@ pub(crate) async fn folder_images_summary(
 /// POST /folders/{cid}/scan（RA1.3 摘 503）：wake-or-start（Python folder_scan 契约）。
 /// 运行中的 folder worker → 置 wake（下轮立即扫描）；未运行 → 启动 folder worker。
 pub(crate) async fn folder_scan(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
-    use std::sync::atomic::Ordering;
-    with_store(&st, |s| {
-        let Some(cam) = s.camera(cid)? else {
-            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
-        };
-        if cam.type_ != "folder" {
-            return Ok(
-                detail_err(StatusCode::BAD_REQUEST, "该摄像头不是图片文件夹源").into_response(),
-            );
-        }
-        if let Some(h) = st.workers.get(cid) {
-            h.wake.store(true, Ordering::SeqCst);
-            return Ok(
-                Json(json!({"ok": true, "started": false, "msg": "已触发立即扫描"}))
-                    .into_response(),
-            );
-        }
-        match crate::worker::WorkerConfig::from_db(s, cid) {
-            Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response()),
-            Ok(None) => Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response()),
-            Ok(Some(cfg)) => match crate::worker::start_worker(&st, cfg) {
-                Ok(()) => Ok(Json(
-                    json!({"ok": true, "started": true, "msg": "图片文件夹接入已启动"}),
-                )
-                .into_response()),
-                Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response()),
-            },
-        }
+    with_store(&st, |store| {
+        Ok(match request_folder_scan(&st, store, cid) {
+            Ok(started) => {
+                let message = if started {
+                    "图片文件夹接入已启动"
+                } else {
+                    "已触发立即扫描"
+                };
+                Json(json!({"ok": true, "started": started, "msg": message})).into_response()
+            }
+            Err(FolderScanError::Missing) => detail_err(StatusCode::NOT_FOUND, "camera not found"),
+            Err(FolderScanError::WrongType) => {
+                detail_err(StatusCode::BAD_REQUEST, "该摄像头不是图片文件夹源")
+            }
+            Err(FolderScanError::Failed(error)) => {
+                detail_err(StatusCode::INTERNAL_SERVER_ERROR, &error)
+            }
+        })
     })
+}
+
+pub(crate) enum FolderScanError {
+    Missing,
+    WrongType,
+    Failed(String),
+}
+
+pub(crate) fn request_folder_scan(
+    st: &Shared,
+    store: &ls_store::Store,
+    cid: i64,
+) -> Result<bool, FolderScanError> {
+    let camera = store
+        .camera(cid)
+        .map_err(|_| FolderScanError::Failed("暂时无法查询摄像头".into()))?
+        .ok_or(FolderScanError::Missing)?;
+    if camera.type_ != "folder" {
+        return Err(FolderScanError::WrongType);
+    }
+    let started = if st.workers.get(cid).is_some() {
+        false
+    } else {
+        super::cameras::start_camera_worker(st, store, cid)
+            .map_err(FolderScanError::Failed)?
+            .ok_or(FolderScanError::Missing)?
+    };
+    if !started {
+        if let Some(worker) = st.workers.get(cid) {
+            worker.wake.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    Ok(started)
 }
 
 pub(crate) fn folder_row_json(r: &ls_store::FolderImageRow, path_full: bool) -> Value {

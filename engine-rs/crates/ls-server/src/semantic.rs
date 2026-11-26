@@ -100,16 +100,57 @@ pub(crate) async fn configure(State(st): State<Shared>, Json(config): Json<Confi
 
 #[derive(Deserialize)]
 pub(crate) struct ExploreQuery {
-    q: Option<String>,
-    similar_to: Option<i64>,
-    limit: Option<i64>,
+    pub(crate) q: Option<String>,
+    pub(crate) similar_to: Option<i64>,
+    pub(crate) limit: Option<i64>,
 }
 
-pub(crate) async fn explore(
-    State(st): State<Shared>,
-    Extension(browser): Extension<BrowserAccess>,
-    Query(query): Query<ExploreQuery>,
-) -> Response {
+pub(crate) enum SearchError {
+    InvalidQuery,
+    Disabled,
+    MissingEvent,
+    Unindexed,
+    Busy,
+    ModelUnavailable,
+    Encoding,
+    Database,
+}
+
+impl From<rusqlite::Error> for SearchError {
+    fn from(_: rusqlite::Error) -> Self {
+        Self::Database
+    }
+}
+
+impl SearchError {
+    fn response(self) -> Response {
+        let (status, message) = match self {
+            Self::InvalidQuery => (
+                StatusCode::BAD_REQUEST,
+                "请输入 1 至 256 个字符或选择一个事件",
+            ),
+            Self::Disabled => (StatusCode::CONFLICT, "离线搜图尚未启用"),
+            Self::MissingEvent => (StatusCode::NOT_FOUND, "未找到该事件"),
+            Self::Unindexed => (StatusCode::CONFLICT, "该事件截图暂未编入索引"),
+            Self::Busy => (StatusCode::TOO_MANY_REQUESTS, "离线搜图繁忙，请稍后重试"),
+            Self::ModelUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "无法加载离线分词或文字模型",
+            ),
+            Self::Encoding => (StatusCode::UNPROCESSABLE_ENTITY, "文字编码失败"),
+            Self::Database => return server_err(),
+        };
+        detail_err(status, message)
+    }
+}
+
+pub(crate) fn search_events(
+    st: &Shared,
+    store: &Store,
+    query: &ExploreQuery,
+    cameras: Option<&[i64]>,
+    types: Option<&[&str]>,
+) -> Result<Vec<(ls_store::Event, f32)>, SearchError> {
     if !matches!(
         (&query.q, query.similar_to),
         (Some(_), None) | (None, Some(_))
@@ -118,76 +159,77 @@ pub(crate) async fn explore(
         .as_ref()
         .is_some_and(|text| text.trim().is_empty() || text.chars().count() > 256)
     {
-        return detail_err(
-            StatusCode::BAD_REQUEST,
-            "请输入 1 至 256 个字符或选择一个事件",
-        );
+        return Err(SearchError::InvalidQuery);
     }
-    tokio::task::spawn_blocking(move || {
-        with_store(&st, |store| {
-            let Some(root) = model_root(&st).filter(|_| enabled(store)) else {
-                return Ok(detail_err(StatusCode::CONFLICT, "离线搜图尚未启用"));
-            };
-            let scope = browser.device.as_ref().and_then(|d| d.cameras.as_deref());
-            let embedding = if let Some(id) = query.similar_to {
-                let Some(event) = store
-                    .event_by_id(id)?
-                    .filter(|e| scope.is_none_or(|ids| ids.contains(&e.camera_id)))
-                else {
-                    return Ok(detail_err(StatusCode::NOT_FOUND, "未找到该事件"));
-                };
-                let Some(vector) = store.event_embedding(&event, ENCODER)? else {
-                    return Ok(detail_err(StatusCode::CONFLICT, "该事件截图暂未编入索引"));
-                };
-                vector
-            } else {
-                let Ok(mut slot) = st.semantic.text.try_lock() else {
-                    return Ok(detail_err(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "离线搜图繁忙，请稍后重试",
-                    ));
-                };
-                if slot.is_none() {
-                    match verify_asset(&root, TOKENIZER_FILE)
-                        .and_then(|()| verify_asset(&root, TEXT_FILE))
-                        .and_then(|()| TextEncoder::load(&root))
-                    {
-                        Ok(model) => *slot = Some(model),
-                        Err(error) => {
-                            crate::logger::error(&format!("[semantic] {error}"));
-                            return Ok(detail_err(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "无法加载离线分词或文字模型",
-                            ));
-                        }
-                    }
-                }
-                let query_text = query.q.as_deref().unwrap_or_default();
-                match slot.as_mut().unwrap().encode(query_text) {
-                    Ok(vector) => vector,
-                    Err(_) => {
-                        return Ok(detail_err(StatusCode::UNPROCESSABLE_ENTITY, "文字编码失败"))
-                    }
-                }
-            };
-            let ranked = store.rank_event_embeddings(
-                ENCODER,
-                &embedding,
-                scope,
-                query.similar_to,
-                query.limit.unwrap_or(30),
-            )?;
-            let mut results = Vec::with_capacity(ranked.len());
-            for (id, distance) in ranked {
-                if let Some(event) = store
-                    .event_by_id(id)?
-                    .filter(|e| scope.is_none_or(|ids| ids.contains(&e.camera_id)))
-                {
-                    results
-                        .push(json!({"event": event_json(&event), "similarity": 1.0 - distance}));
+    let root = model_root(st)
+        .filter(|_| enabled(store))
+        .ok_or(SearchError::Disabled)?;
+    let visible = |event: &ls_store::Event| {
+        cameras.is_none_or(|ids| ids.contains(&event.camera_id))
+            && types.is_none_or(|types| types.contains(&event.type_.as_str()))
+    };
+    let embedding = if let Some(id) = query.similar_to {
+        let event = store
+            .event_by_id(id)?
+            .filter(visible)
+            .ok_or(SearchError::MissingEvent)?;
+        store
+            .event_embedding(&event, ENCODER)?
+            .ok_or(SearchError::Unindexed)?
+    } else {
+        let mut slot = st.semantic.text.try_lock().map_err(|_| SearchError::Busy)?;
+        if slot.is_none() {
+            match verify_asset(&root, TOKENIZER_FILE)
+                .and_then(|()| verify_asset(&root, TEXT_FILE))
+                .and_then(|()| TextEncoder::load(&root))
+            {
+                Ok(model) => *slot = Some(model),
+                Err(error) => {
+                    crate::logger::error(&format!("[semantic] {error}"));
+                    return Err(SearchError::ModelUnavailable);
                 }
             }
-            Ok(Json(json!({"results": results})).into_response())
+        }
+        let text = query.q.as_deref().unwrap_or_default();
+        slot.as_mut()
+            .unwrap()
+            .encode(text)
+            .map_err(|_| SearchError::Encoding)?
+    };
+    let ranked = store.rank_event_embeddings_scoped(
+        ENCODER,
+        &embedding,
+        cameras,
+        query.similar_to,
+        query.limit.unwrap_or(30),
+        types,
+    )?;
+    let mut results = Vec::with_capacity(ranked.len());
+    for (id, distance) in ranked {
+        if let Some(event) = store.event_by_id(id)?.filter(visible) {
+            results.push((event, 1.0 - distance));
+        }
+    }
+    Ok(results)
+}
+
+pub(crate) async fn explore(
+    State(st): State<Shared>,
+    Extension(browser): Extension<BrowserAccess>,
+    Query(query): Query<ExploreQuery>,
+) -> Response {
+    tokio::task::spawn_blocking(move || {
+        let cameras = browser.device.as_ref().and_then(|d| d.cameras.as_deref());
+        with_store(&st, |store| {
+            Ok(match search_events(&st, store, &query, cameras, None) {
+                Ok(rows) => {
+                    let results: Vec<_> = rows.iter().map(|(event, similarity)| {
+                        json!({"event": event_json(event), "similarity": similarity})
+                    }).collect();
+                    Json(json!({"results": results})).into_response()
+                }
+                Err(error) => error.response(),
+            })
         })
     })
     .await

@@ -64,14 +64,13 @@ pub(crate) async fn system(State(st): State<Shared>) -> Json<Value> {
     // UX（2026-11-21）：推理设备——providers 如实反映设置偏好（dml=DX12 统一
     // 层：N/A/Intel 卡与核显；实际生效设备以 worker 日志为准，DML 失败回落 CPU）
     let (providers, gpu_pref, gpu_active) = {
-        let ep = ls_store::Store::open(&st.db_path)
-            .ok()
-            .map(|s| crate::detect::runtime_ep_pref(&s))
-            .unwrap_or_else(|| "dml".into());
-        let arr = if ep == "dml" {
-            json!(["DmlExecutionProvider", "CPUExecutionProvider"])
-        } else {
-            json!(["CPUExecutionProvider"])
+        let ep = crate::detect::runtime_ep_pref(&s);
+        let arr = match crate::detect::runtime_backend(&s).as_str() {
+            "auto_vulkan" | "vulkan" => {
+                json!(["Vulkan", "DmlExecutionProvider", "CPUExecutionProvider"])
+            }
+            "dml" => json!(["DmlExecutionProvider", "CPUExecutionProvider"]),
+            _ => json!(["CPUExecutionProvider"]),
         };
         // 实际生效（模型加载后实时覆盖更新；None=尚无相机启动过）
         let active = ls_infer::yolo::ep_used();
@@ -254,11 +253,16 @@ pub(crate) async fn network_get(State(st): State<Shared>) -> Response {
     let token_set = crate::envfile::get_key(&content, "LS_ADMIN_TOKEN")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(!st.admin_token.is_empty());
+    #[cfg(windows)]
+    let managed_by_scm = crate::service::active();
+    #[cfg(not(windows))]
+    let managed_by_scm = false;
     Json(json!({
         "lan": !crate::is_loopback_host(&host),
         "host": host, "port": port,
         "trusted_hosts": trusted,
-        "read_protected": crate::envfile::get_key(&content, "LS_AUTH_READ_PROTECTED").map_or(st.read_protected, |v| v == "1" || v.eq_ignore_ascii_case("true")),
+        "read_protected": managed_by_scm || crate::envfile::get_key(&content, "LS_AUTH_READ_PROTECTED").map_or(st.read_protected, |v| v == "1" || v.eq_ignore_ascii_case("true")),
+        "read_protected_required": managed_by_scm,
         "admin_token_set": token_set,
         "env_path": path.to_string_lossy(),
     }))
@@ -296,6 +300,14 @@ pub(crate) async fn network_put(State(st): State<Shared>, Json(body): Json<Value
         .trim()
         .to_string();
     let read_protected = body.get("read_protected").and_then(Value::as_bool);
+    #[cfg(windows)]
+    if crate::service::active() && read_protected == Some(false) {
+        return detail_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Windows 服务始终开启读取保护",
+        )
+        .into_response();
+    }
     if (lan == Some(true) || read_protected == Some(true))
         && token.is_none()
         && existing_token.is_empty()
@@ -382,6 +394,14 @@ pub(crate) async fn system_restart(State(st): State<Shared>) -> Response {
         )
         .into_response();
     }
+    #[cfg(windows)]
+    if crate::service::active() {
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            crate::service::request(crate::service::Command::Restart);
+        });
+        return Json(json!({"ok": true, "spawned": true})).into_response();
+    }
     if RESTARTING.swap(true, Ordering::AcqRel) {
         return detail_err(StatusCode::CONFLICT, "服务正在重启").into_response();
     }
@@ -434,6 +454,10 @@ fn reg_run(args: &[&str]) -> Result<String, String> {
 pub(crate) async fn autostart_get() -> Response {
     #[cfg(windows)]
     {
+        if crate::service::active() {
+            return Json(json!({"supported": true, "enabled": true, "managed_by_scm": true}))
+                .into_response();
+        }
         let enabled = reg_run(&["query", AUTOSTART_KEY, "/v", AUTOSTART_NAME]).is_ok();
         Json(json!({"supported": true, "enabled": enabled})).into_response()
     }
@@ -444,6 +468,10 @@ pub(crate) async fn autostart_get() -> Response {
 }
 
 pub(crate) async fn autostart_put(Json(body): Json<Value>) -> Response {
+    #[cfg(windows)]
+    if crate::service::active() {
+        return detail_err(StatusCode::CONFLICT, "自启由 Windows 服务管理器设置").into_response();
+    }
     let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) else {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "enabled 必须是布尔值")
             .into_response();
@@ -523,7 +551,6 @@ fn run_ppe_benchmark(st: &Shared, body: &Value) -> Response {
         std::path::PathBuf::from(&st.data_dir).join("models"),
         crate::deploy::default_install_root().join("models"),
         std::path::PathBuf::from("models"),
-        std::path::PathBuf::from("m0-spike"),
     ];
     let in_allowed = allowed_roots.iter().any(|root| {
         root.canonicalize()
@@ -808,6 +835,7 @@ pub(crate) async fn diagnostics_bundle(State(st): State<Shared>) -> Response {
                 | "report.daily_enabled"
                 | "report.weekly_enabled"
                 | "perf.motion_gate_enabled"
+                | "perf.motion_event_recording"
                 | "ppe.enabled" => Some(matches!(v.as_str(), "1" | "true" | "on")),
                 _ => None,
             };
@@ -1705,7 +1733,7 @@ pub(crate) async fn ppe_upload(
         if bundled_cls.is_file() {
             let _ = std::fs::copy(&bundled_cls, &classes_dest);
         } else {
-            let repo_cls = std::path::Path::new("m0-spike/yolo11n_ppe.classes.txt");
+            let repo_cls = std::path::Path::new("models/yolo11n_ppe.classes.txt");
             if repo_cls.is_file() {
                 let _ = std::fs::copy(repo_cls, &classes_dest);
             }

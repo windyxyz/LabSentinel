@@ -186,7 +186,11 @@ fn plan(pack: Pack, changes: &[Change]) -> (Value, String) {
 }
 
 pub(crate) async fn scene_packs() -> Response {
-    Json(json!({"packs": PACKS, "version": REVISION})).into_response()
+    Json(scene_packs_json()).into_response()
+}
+
+pub(crate) fn scene_packs_json() -> Value {
+    json!({"packs": PACKS, "version": REVISION})
 }
 
 pub(crate) async fn scene_preview(

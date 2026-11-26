@@ -167,6 +167,9 @@ impl Store {
         } else {
             None
         };
+        if let Some(eid) = event_id {
+            crate::outbox::enqueue(&tx, eid, crate::AlertDispatchKind::Initial)?;
+        }
         tx.commit()?;
         Ok(event_id)
     }
@@ -176,13 +179,21 @@ impl Store {
         eid: i64,
         level: i64,
         detail: &str,
+        dispatch_now: bool,
     ) -> rusqlite::Result<bool> {
-        self.conn().query_row(
+        let tx = self.conn().unchecked_transaction()?;
+        let reviewed: bool = tx.query_row(
             "UPDATE events SET level=MAX(level,?),detail=?,alert_tier='alert' WHERE id=? AND episode_id IS NOT NULL
              RETURNING vlm_verdict IS NOT NULL AND vlm_suppressed=0",
             params![level,detail,eid],
             |row| row.get(0),
-        )
+        )?;
+        let dispatch = dispatch_now || reviewed;
+        if dispatch {
+            crate::outbox::enqueue(&tx, eid, crate::AlertDispatchKind::Upgrade)?;
+        }
+        tx.commit()?;
+        Ok(dispatch)
     }
 
     pub fn refresh_episode_snapshot(

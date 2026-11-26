@@ -103,7 +103,7 @@ async function req(method, path, body, signal) {
     }
     throw Object.assign(new Error(msg), { status: r.status, code })
   }
-  return r.json()
+  return r.status === 204 ? null : r.json()
 }
 
 export const api = {
@@ -114,6 +114,11 @@ export const api = {
   accessLogout: () => req('POST', '/api/access/logout', {}),
   revokeOtherSessions: () => req('POST', '/api/access/revoke-others', {}),
   recoverAccess: (data) => req('POST', '/api/access/recover', data),
+  mcpConfig: () => req('GET', '/api/mcp/config'),
+  saveMcpConfig: (data) => req('PUT', '/api/mcp/config', data),
+  mcpTokens: () => req('GET', '/api/mcp/tokens'),
+  createMcpToken: (data) => req('POST', '/api/mcp/tokens', data),
+  revokeMcpToken: (id) => req('DELETE', `/api/mcp/tokens/${encodeURIComponent(id)}`),
   system: () => req('GET', '/api/system'),
   cameras: () => req('GET', '/api/cameras'),
   cameraStatus: (id) => req('GET', `/api/cameras/${id}/status`),
@@ -136,7 +141,7 @@ export const api = {
   modelsLocal: () => req('GET', '/api/models/local'),
   // UX2（2026-11-20）：检测模式全局策略（local/api/cascade）
   detectConfig: () => req('GET', '/api/detect/config'),
-  localVlm: () => req('GET', '/api/detect/local-vlm'),
+  localVlm: (probe = false) => req('GET', '/api/detect/local-vlm' + (probe ? '?probe=true' : '')),
   startLocalVlm: (payload) => req('POST', '/api/detect/local-vlm/start', payload),
   stopLocalVlm: () => req('POST', '/api/detect/local-vlm/stop', {}),
   saveDetectConfig: (d) => req('PUT', '/api/detect/config', d),
@@ -237,6 +242,8 @@ export const api = {
   addEventNote: (id, text) => req('POST', `/api/events/${id}/notes`, { text }),
   alertsStatus: () => req('GET', '/api/alerts/status'),
   alertConfig: () => req('GET', '/api/alerts/config'),
+  alertActuator: () => req('GET', '/api/alerts/actuator'),
+  saveAlertActuator: (data) => req('PUT', '/api/alerts/actuator', data),
   saveAlertConfig: (data) => req('PUT', '/api/alerts/config', data),
   resetAlertConfig: (channel) => req('POST', '/api/alerts/config/reset' + (channel ? `?channel=${encodeURIComponent(channel)}` : '')),
   pushPolicy: () => req('GET', '/api/alerts/push-policy'),
@@ -340,6 +347,7 @@ export const api = {
 }
 
 export const TYPE_TEXT = {
+  motion_recording: '运动触发录像',
   alert_resolved: '违规已恢复',
   ppe_policy: '区域穿戴不合规',
   hood_lean: '通风橱探身',
@@ -379,9 +387,9 @@ export const STATUS_TEXT = {
   ignored: '忽略',
 }
 
-export function connectEvents(onEvent, onState, onUpdate) {
+export function connectEvents(onEvent, onState, onUpdate, { since = null, onHistoryReset } = {}) {
   let ws, timer, closed = false
-  let cursor = null
+  let cursor = Number.isSafeInteger(since) && since >= 0 ? since : null
   function open() {
     if (closed) return
     // T-106/T-201：令牌走 Sec-WebSocket-Protocol 子协议（不进 URL/日志），
@@ -399,7 +407,8 @@ export function connectEvents(onEvent, onState, onUpdate) {
         const event = JSON.parse(m.data)
         if (Number.isSafeInteger(event?.stream_cursor)) {
           cursor = event.stream_cursor
-        } else if (event?.op === 'episode_update' && Number.isSafeInteger(event.id)) {
+          if (event.stream_history_reset === true) onHistoryReset?.()
+        } else if ((event?.op === 'episode_update' || event?.op === 'recording_update') && Number.isSafeInteger(event.id)) {
           onUpdate?.(event)
         } else if (Number.isSafeInteger(event?.id) && (cursor === null || event.id > cursor)) {
           cursor = event.id

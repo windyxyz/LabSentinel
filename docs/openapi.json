@@ -623,6 +623,11 @@
             }
           }
         }
+      },
+      "put": {
+        "summary": "保存告警模板",
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{"type":"object","properties":{"title":{"type":"string"},"text":{"type":"string"}}}}}},
+        "responses": {"200":{"description":"已保存模板"}}
       }
     },
     "/api/alert-template/preview": {
@@ -1534,6 +1539,9 @@
         }
       }
     },
+    "/api/cameras/{cid}/stop": {
+      "post": {"summary":"Stop one camera worker","parameters":[{"name":"cid","in":"path","required":true,"schema":{"type":"integer"}}],"responses":{"200":{"description":"Current worker status"},"404":{"description":"Camera does not exist"}}}
+    },
     "/api/cameras/{cid}/start": {
       "post": {
         "summary": "Start Camera",
@@ -1611,7 +1619,7 @@
     "/api/cameras/{cid}/webrtc": {
       "get": {
         "summary": "Camera Webrtc",
-        "description": "T-102：返回经 FastAPI 鉴权代理的相对 WS 路径（浏览器不再直连 go2rtc :1984）。\n\n前端按 location 组装 ws/wss（http→ws、https→wss），令牌走 Sec-WebSocket-Protocol\n子协议（T-106），媒体面仍在 go2rtc :8555（webrtc.candidates 可配跨网段地址）。",
+        "description": "返回用于建立 WebRTC 的同源信令路径。",
         "operationId": "camera_webrtc_api_cameras__cid__webrtc_get",
         "parameters": [
           {
@@ -1834,7 +1842,8 @@
                 "required": ["mode"],
                 "properties": {
                   "mode": { "enum": ["main", "relay", "substream"] },
-                  "source": { "type": "string", "writeOnly": true }
+                  "source": { "type": "string", "writeOnly": true },
+                  "capture_backend": { "enum": ["ffmpeg", "retina"], "description": "RTSP 取流方式，省略时保留已保存的选择" }
                 }
               }
             }
@@ -1843,7 +1852,7 @@
         "responses": {
           "200": { "description": "分析码流设置已保存" },
           "404": { "description": "摄像头不存在" },
-          "422": { "description": "模式、摄像头类型或子码流地址无效" }
+          "422": { "description": "模式、摄像头类型、取流方式或子码流地址无效" }
         }
       }
     },
@@ -2513,11 +2522,22 @@
     "/api/stats/hotspots": {
       "get": {"summary": "Alert counts by authorized camera, recorded zone, and local hour", "responses": {"200": {"description": "Date and matching nonempty time cells"}}}
     },
+    "/api/detect/config": {
+      "get": {
+        "summary": "Read detection settings and each active analysis source's loaded person and PPE devices",
+        "responses": {"200": {"description": "Detection settings. Runtime includes backend, gpu_id, vulkan_available, camera_devices and legacy ep."}}
+      },
+      "put": {
+        "summary": "Save detection settings and restart affected analysis sources",
+        "requestBody": {"required": true, "content": {"application/json": {"example": {"runtime": {"backend": "auto_vulkan", "gpu_id": "auto"}}}}},
+        "responses": {"200": {"description": "Settings saved and affected source restart count"}, "422": {"description": "Unsupported configuration or unavailable Vulkan preview package"}}
+      }
+    },
     "/api/detect/local-vlm": {
-      "get": {"summary": "Check the managed loopback visual runtime", "responses": {"200": {"description": "Runtime status"}}}
+      "get": {"summary": "Check the managed loopback visual runtime and GPU preferences", "parameters": [{"name": "probe", "in": "query", "schema": {"type": "boolean", "default": false}, "description": "List the Vulkan devices from the installed llama.cpp runtime"}], "responses": {"200": {"description": "Runtime status, GPU startup estimate, fallback reason and optional device list"}}}
     },
     "/api/detect/local-vlm/start": {
-      "post": {"summary": "Start the optional managed llama.cpp process", "requestBody": {"required": true, "content": {"application/json": {"example": {"model": "vision-Q6_K.gguf", "projector": "mmproj-F16.gguf", "gpu_layers": 10}}}}, "responses": {"200": {"description": "Loopback server ready and profile saved"}, "422": {"description": "Invalid, missing, or unsupported runtime or model"}}}
+      "post": {"summary": "Start the optional managed llama.cpp process", "requestBody": {"required": true, "content": {"application/json": {"example": {"model": "vision-Q6_K.gguf", "projector": "mmproj-F16.gguf", "gpu_layers": 10, "vulkan_device": "auto", "vram_budget_mb": 0, "cv_vram_reserve_mb": 1024}}}}, "responses": {"200": {"description": "Loopback server ready and profile saved, including CPU fallback when GPU startup is unavailable"}, "422": {"description": "Invalid, missing, or unsupported runtime, GPU configuration, or model"}}}
     },
     "/api/detect/local-vlm/stop": {
       "post": {"summary": "Stop the managed loopback visual runtime", "responses": {"200": {"description": "Runtime stopped"}}}
@@ -2693,6 +2713,9 @@
           }
         }
       }
+    },
+    "/api/rules/{rid}/enabled": {
+      "patch": {"summary":"Enable or disable one rule","parameters":[{"name":"rid","in":"path","required":true,"schema":{"type":"integer"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["enabled"],"properties":{"enabled":{"type":"boolean"}}}}}},"responses":{"200":{"description":"Rule state"},"404":{"description":"Rule does not exist"}}}
     },
     "/api/rules/{rid}": {
       "put": {
@@ -3799,6 +3822,16 @@
         }
       }
     },
+    "/api/alerts/actuator": {
+      "get": {
+        "summary": "Read sound and light actuator configuration and device status",
+        "responses": {"200": {"description": "Configuration and desired/applied alert level. status.reconfiguring means the change is awaiting device handover."}}
+      },
+      "put": {
+        "summary": "Configure one HTTP or Modbus RTU actuator, or disable output with a null target",
+        "responses": {"200": {"description": "Saved"}, "422": {"description": "Invalid configuration"}}
+      }
+    },
     "/api/alerts/config": {
       "get": {
         "summary": "Alerts Config Get",
@@ -4084,13 +4117,37 @@
         }
       }
     },
+    "/mcp": {
+      "post": {
+        "summary": "LabSentinel MCP Streamable HTTP JSON-RPC",
+        "description": "Dedicated MCP Bearer credential. Call initialize, tools/list or tools/call. Optional SSE is disabled.",
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{"type":"object","required":["jsonrpc","method"]}}}},
+        "responses":{"200":{"description":"JSON-RPC response"},"202":{"description":"Notification accepted"},"401":{"description":"Missing or invalid MCP credential"},"403":{"description":"Host, peer or Origin forbidden"},"404":{"description":"MCP disabled"}}
+      },
+      "get": {"summary":"MCP stream probe","responses":{"405":{"description":"Only JSON-RPC over POST is available"}}},
+      "delete": {"summary":"MCP session termination probe","responses":{"405":{"description":"The transport is stateless"}}}
+    },
+    "/api/mcp/config": {
+      "get": {"summary":"Read MCP policy and tool definitions","responses":{"200":{"description":"MCP settings"}}},
+      "put": {"summary":"Update MCP policy","responses":{"200":{"description":"MCP settings"},"409":{"description":"High-risk change requires confirmation"}}}
+    },
+    "/api/mcp/tokens": {
+      "get": {"summary":"List MCP credential metadata","responses":{"200":{"description":"List without credentials or hashes"}}},
+      "post": {"summary":"Issue a dedicated scoped MCP token","responses":{"201":{"description":"Token shown once"}}}
+    },
+    "/api/mcp/tokens/{id}": {
+      "delete": {"summary":"Revoke an MCP token","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],"responses":{"204":{"description":"Revoked"},"404":{"description":"Token already revoked or missing"}}}
+    },
+    "/api/mcp/receipts/verify": {
+      "post": {"summary":"Verify a locally signed MCP receipt","responses":{"200":{"description":"Receipt validation result"}}}
+    },
     "/api/storage": {
       "get": {"summary":"Read managed storage usage","responses":{"200":{"description":"Space, categories and retention rules"}}}
     },
     "/api/storage/preview": {
       "post": {
         "summary":"Preview one cleanup batch",
-        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["category","days"],"properties":{"category":{"type":"string","enum":["logs","cache","events","normal_checks","dataset","backups"]},"days":{"type":"integer","minimum":1,"maximum":3650}}}}}},
+        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["category","days"],"properties":{"category":{"type":"string","enum":["logs","cache","vulkan_cache","events","normal_checks","dataset","backups"]},"days":{"type":"integer","minimum":1,"maximum":3650}}}}}},
         "responses":{"200":{"description":"Preview fingerprint and estimated space"}}
       }
     },
@@ -4107,7 +4164,7 @@
     "/api/storage/policy": {
       "put": {
         "summary":"Replace the automatic cleanup rules",
-        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"array","maxItems":6,"items":{"type":"object","required":["category","days"]}}}}},
+        "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"array","maxItems":7,"items":{"type":"object","required":["category","days"]}}}}},
         "responses":{"200":{"description":"Saved"},"409":{"description":"Cleanup busy"}}
       }
     },
@@ -4127,6 +4184,9 @@
           }
         }
       }
+    },
+    "/api/export/audit-pack.zip": {
+      "get": {"summary":"Export filtered event evidence and its SHA-256 manifest","responses":{"200":{"description":"Offline ZIP with HTML, CSV, JSON, media, and recorded rule and model settings when available","content":{"application/zip":{"schema":{"type":"string","format":"binary"}}}},"413":{"description":"Narrow the current filter"},"429":{"description":"Concurrent exports are busy"}}}
     },
     "/api/export/events.csv": {
       "get": {
@@ -4925,6 +4985,146 @@
           }
         }
       }
+    },
+    "/api/alerts/push-policy": {
+      "get": {"summary":"读取告警推送策略","responses":{"200":{"description":"推送策略"}}},
+      "put": {"summary":"更新告警推送策略","responses":{"200":{"description":"已保存推送策略"}}}
+    },
+    "/api/dataset/export.zip": {
+      "get": {"summary":"按筛选条件导出 YOLO 训练集","responses":{"200":{"description":"含图片、标签、来源台账与排除记录的 ZIP","content":{"application/zip":{"schema":{"type":"string","format":"binary"}}}}}}
+    },
+    "/api/dataset/samples": {
+      "get": {"summary":"列出标注池样本","responses":{"200":{"description":"标注样本列表"}}}
+    },
+    "/api/dataset/samples/capture/{cid}": {
+      "parameters": [{"name":"cid","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "post": {"summary":"将机位当前画面加入标注池","responses":{"200":{"description":"入库样本"}}}
+    },
+    "/api/dataset/samples/from-event/{eid}": {
+      "parameters": [{"name":"eid","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "post": {"summary":"将事件截图加入标注池","responses":{"200":{"description":"入库样本"}}}
+    },
+    "/api/dataset/samples/from-folder/{iid}": {
+      "parameters": [{"name":"iid","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "post": {"summary":"将文件夹检查图片加入标注池","responses":{"200":{"description":"入库样本"}}}
+    },
+    "/api/dataset/samples/{id}": {
+      "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "put": {"summary":"更新样本标注和训练集元数据","responses":{"200":{"description":"已更新样本"}}},
+      "delete": {"summary":"移除标注池样本","responses":{"200":{"description":"删除结果"}}}
+    },
+    "/api/dataset/samples/{id}/image": {
+      "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "get": {"summary":"下载标注池样本图片","responses":{"200":{"description":"样本图片内容"}}}
+    },
+    "/api/detect/models": {
+      "post": {"summary":"列出已配置视觉服务可用的模型","responses":{"200":{"description":"模型列表"}}}
+    },
+    "/api/detect/profiles": {
+      "get": {"summary":"读取视觉服务档案列表","responses":{"200":{"description":"档案和当前选择"}}},
+      "post": {"summary":"创建或更新视觉服务档案","responses":{"200":{"description":"已保存档案"}}}
+    },
+    "/api/detect/profiles/{id}": {
+      "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "delete": {"summary":"删除视觉服务档案","responses":{"200":{"description":"删除结果"}}}
+    },
+    "/api/detect/profiles/{id}/activate": {
+      "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "post": {"summary":"启用指定视觉服务档案","responses":{"200":{"description":"启用结果"}}}
+    },
+    "/api/detect/test": {
+      "post": {"summary":"测试视觉服务配置","responses":{"200":{"description":"连接与响应结果"}}}
+    },
+    "/api/detect/usage": {
+      "get": {"summary":"读取视觉服务请求用量","responses":{"200":{"description":"用量统计"}}}
+    },
+    "/api/diagnostics/bundle.zip": {
+      "get": {"summary":"导出脱敏诊断包","responses":{"200":{"description":"诊断 ZIP","content":{"application/zip":{"schema":{"type":"string","format":"binary"}}}}}}
+    },
+    "/api/events/{id}/notes": {
+      "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "get": {"summary":"读取事件交接备注","responses":{"200":{"description":"备注列表"}}},
+      "post": {"summary":"添加事件交接备注","responses":{"201":{"description":"已创建备注"}},"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["text"],"properties":{"text":{"type":"string","minLength":1,"maxLength":500}}}}}}}
+    },
+    "/api/events/{eid}/thumb": {
+      "parameters": [{"name":"eid","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "get": {"summary":"读取事件截图缩略图","responses":{"200":{"description":"缩略图内容"}}}
+    },
+    "/api/fs/list": {
+      "get": {"summary":"浏览可选择的本地目录","responses":{"200":{"description":"目录与文件列表"}}}
+    },
+    "/api/go2rtc/config": {
+      "put": {"summary":"更新本机流媒体中继设置","responses":{"200":{"description":"中继配置结果"}}}
+    },
+    "/api/go2rtc/status": {
+      "get": {"summary":"读取本机流媒体中继状态","responses":{"200":{"description":"中继状态"}}}
+    },
+    "/api/models/active": {
+      "put": {"summary":"切换本机当前检测模型","responses":{"200":{"description":"模型切换结果"}}}
+    },
+    "/api/models/local": {
+      "get": {"summary":"列出本机可用的模型","responses":{"200":{"description":"模型列表"}}}
+    },
+    "/api/models/ppe/benchmark": {
+      "post": {"summary":"比较当前与候选 PPE 模型","responses":{"200":{"description":"同一画面的模型对照结果"}}}
+    },
+    "/api/models/ppe/config": {
+      "put": {"summary":"更新 PPE 模型与推理设置","responses":{"200":{"description":"模型配置结果"}}}
+    },
+    "/api/models/ppe/reset": {
+      "post": {"summary":"恢复随包 PPE 模型设置","responses":{"200":{"description":"重置结果"}}}
+    },
+    "/api/models/ppe/upload": {
+      "post": {"summary":"上传本地 PPE 模型","responses":{"200":{"description":"模型上传结果"}}}
+    },
+    "/api/plugins/upload": {
+      "post": {"summary":"上传插件 ZIP","responses":{"200":{"description":"插件安装结果"}}}
+    },
+    "/api/reports/schedule": {
+      "get": {"summary":"读取定时安全报告设置","responses":{"200":{"description":"报告计划"}}},
+      "put": {"summary":"更新定时安全报告设置","responses":{"200":{"description":"已保存报告计划"}}}
+    },
+    "/api/reports/send-now": {
+      "post": {"summary":"发送当期安全报告","responses":{"200":{"description":"投递结果"}}}
+    },
+    "/api/setup/status": {
+      "get": {"summary":"读取首次配置引导状态","responses":{"200":{"description":"配置引导状态"}}}
+    },
+    "/api/share-links": {
+      "get": {"summary":"列出只读分享链接","responses":{"200":{"description":"链接清单"}}},
+      "post": {"summary":"创建有时限的只读分享链接","responses":{"200":{"description":"链接及有效期"}}}
+    },
+    "/api/share-links/verify": {
+      "get": {"summary":"核验只读分享链接","responses":{"200":{"description":"有效性结果"}}}
+    },
+    "/api/share-links/{id}": {
+      "parameters": [{"name":"id","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "delete": {"summary":"撤销只读分享链接","responses":{"200":{"description":"撤销结果"}}}
+    },
+    "/api/stats/compliance": {
+      "get": {"summary":"读取防护用品合规统计","responses":{"200":{"description":"合规统计"}}}
+    },
+    "/api/system/autostart": {
+      "get": {"summary":"读取登录时自动启动设置","responses":{"200":{"description":"自启状态"}}},
+      "put": {"summary":"变更登录时自动启动设置","responses":{"200":{"description":"设置结果"}}}
+    },
+    "/api/system/network": {
+      "get": {"summary":"读取服务网络配置","responses":{"200":{"description":"监听和访问配置"}}},
+      "put": {"summary":"保存服务网络配置","responses":{"200":{"description":"保存及重启提示"}}}
+    },
+    "/api/system/restart": {
+      "post": {"summary":"请求重启本机服务","responses":{"200":{"description":"已受理重启"}}}
+    },
+    "/ws/detections/{cid}": {
+      "parameters": [{"name":"cid","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "get": {"summary":"订阅机位实时检测框","responses":{"101":{"description":"升级为 WebSocket"}}}
+    },
+    "/ws/events": {
+      "get": {"summary":"订阅事件通知并按游标补发","responses":{"101":{"description":"升级为 WebSocket"}}}
+    },
+    "/ws/webrtc/{cid}": {
+      "parameters": [{"name":"cid","in":"path","required":true,"schema":{"type":"integer","format":"int64"}}],
+      "get": {"summary":"建立机位 WebRTC 信令连接","responses":{"101":{"description":"升级为 WebSocket"}}}
     }
   },
   "components": {

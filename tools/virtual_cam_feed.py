@@ -2,7 +2,7 @@
 
 前置：Windows 已注册 OBS Virtual Camera（ffmpeg -list_devices 能看到）；pip install pyvirtualcam。
 用法（m0-venv）:
-    python tools/virtual_cam_feed.py --video m0-spike/data/lab-walk-24076.mp4
+    python tools/virtual_cam_feed.py --video models/data/lab-walk-24076.mp4
     python tools/virtual_cam_feed.py --width 1280 --height 720 --fps 30
 然后服务端添加 type=usb、source=1（OBS Virtual Camera 的 OpenCV 设备号）的摄像头。
 
@@ -18,7 +18,7 @@ except ImportError:
     print("缺少 pyvirtualcam：pip install pyvirtualcam -i https://pypi.tuna.tsinghua.edu.cn/simple")
     raise SystemExit(2)
 
-DEFAULT_VIDEO = r"D:\User\Desktop\TOOLS\监控识别\m0-spike\data\lab-walk-24076.mp4"
+DEFAULT_VIDEO = r"D:\User\Desktop\TOOLS\监控识别\models\data\lab-walk-24076.mp4"
 
 
 def main() -> int:

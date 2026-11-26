@@ -96,6 +96,16 @@ fn exclude_open_episodes(has_episodes: bool) -> &'static str {
     }
 }
 
+fn exclude_pending_alerts(conn: &rusqlite::Connection) -> &'static str {
+    if table_exists(conn, "alert_outbox") {
+        "AND NOT EXISTS(SELECT 1 FROM alert_outbox o WHERE o.event_id=events.id AND o.status IN ('pending','awaiting_review'))
+         AND NOT EXISTS(SELECT 1 FROM alert_deliveries d WHERE d.event_id=events.id
+            AND d.idempotency_key IS NOT NULL AND d.status IN ('pending','retry','sending','unconfirmed'))"
+    } else {
+        ""
+    }
+}
+
 /// 将 DB 中存储的媒体路径解析为绝对路径：相对路径按 `data_dir` 拼接，避免安装版 CWD 漂移误判孤儿。
 fn resolve_under_data_dir(path: &str, data_dir: &Path) -> PathBuf {
     let p = Path::new(path);
@@ -240,9 +250,10 @@ pub fn preview_cleanup_with(
     let mut ev_bytes = 0u64;
     let mut last_id = 0i64;
     let exclude_open = exclude_open_episodes(table_exists(conn, "violation_episodes"));
+    let exclude_pending = exclude_pending_alerts(conn);
     let sql = format!(
         "SELECT id, snapshot, video FROM events WHERE ts < ? AND id > ?
-                       {exclude_open} ORDER BY id ASC LIMIT ?"
+                       {exclude_open} {exclude_pending} ORDER BY id ASC LIMIT ?"
     );
     loop {
         let rows = {
@@ -349,7 +360,8 @@ pub fn run_cleanup_with(
     // 1) 过期事件：先删文件再删行
     let has_episodes = table_exists(conn, "violation_episodes");
     let exclude_open = exclude_open_episodes(has_episodes);
-    let sql = format!("SELECT id, snapshot, video FROM events WHERE ts < ? {exclude_open} ORDER BY id ASC LIMIT ?");
+    let exclude_pending = exclude_pending_alerts(conn);
+    let sql = format!("SELECT id, snapshot, video FROM events WHERE ts < ? {exclude_open} {exclude_pending} ORDER BY id ASC LIMIT ?");
     loop {
         let rows = {
             let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -419,9 +431,14 @@ pub fn run_cleanup_with(
             .unwrap_or(0);
     }
     if table_exists(conn, "alert_deliveries") {
+        let protect_pending = if table_exists(conn, "alert_outbox") {
+            "AND (idempotency_key IS NULL OR status NOT IN ('pending','retry','sending','unconfirmed'))"
+        } else {
+            ""
+        };
         stats.deleted_deliveries = conn
             .execute(
-                "DELETE FROM alert_deliveries WHERE updated_ts < ?",
+                &format!("DELETE FROM alert_deliveries WHERE updated_ts < ? {protect_pending}"),
                 [&cutoff],
             )
             .unwrap_or(0);
@@ -505,10 +522,10 @@ pub fn run_cleanup_with(
     while free_gb(&cfg.data_dir) < cfg.disk_min_free_gb && rounds < 200 {
         let vid_rows = {
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, video FROM events WHERE status!='new' AND video IS NOT NULL \
-                     ORDER BY id ASC LIMIT ?",
-                )
+                .prepare(&format!(
+                    "SELECT id, video FROM events WHERE status!='new' AND video IS NOT NULL
+                     {exclude_pending} ORDER BY id ASC LIMIT ?"
+                ))
                 .map_err(|e| e.to_string())?;
             let it = stmt
                 .query_map([BATCH as i64], |r| {
@@ -522,10 +539,10 @@ pub fn run_cleanup_with(
         let mut row_rows: Vec<EmergencyRow> = Vec::new();
         if vid_rows.is_empty() {
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, snapshot FROM events WHERE status!='new' AND snapshot IS NOT NULL \
-                     ORDER BY id ASC LIMIT ?",
-                )
+                .prepare(&format!(
+                    "SELECT id, snapshot FROM events WHERE status!='new' AND snapshot IS NOT NULL
+                     {exclude_pending} ORDER BY id ASC LIMIT ?"
+                ))
                 .map_err(|e| e.to_string())?;
             let it = stmt
                 .query_map([BATCH as i64], |r| {
@@ -538,10 +555,10 @@ pub fn run_cleanup_with(
         }
         if vid_rows.is_empty() && snap_rows.is_empty() {
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, COALESCE(status,'new'), level, snapshot, video FROM events \
-                     ORDER BY level ASC, id ASC LIMIT ?",
-                )
+                .prepare(&format!(
+                    "SELECT id, COALESCE(status,'new'), level, snapshot, video FROM events
+                     WHERE 1=1 {exclude_pending} ORDER BY level ASC, id ASC LIMIT ?"
+                ))
                 .map_err(|e| e.to_string())?;
             let it = stmt
                 .query_map([BATCH as i64], |r| {

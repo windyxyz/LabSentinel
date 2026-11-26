@@ -33,6 +33,17 @@ pub(crate) async fn cameras(
                         } else {
                             "main"
                         });
+                        if c.type_ == "rtsp" {
+                            value["capture_preference"] = json!(if s.camera_uses_retina(c.id).unwrap_or(false) {
+                                "retina"
+                            } else {
+                                "ffmpeg"
+                            });
+                            value["capture_backend"] = json!(st.workers.get(c.id).and_then(|worker| {
+                                let backend = worker.performance.lock().ok()?.capture_backend;
+                                (!backend.is_empty()).then_some(backend)
+                            }));
+                        }
                     }
                     value
                 })
@@ -107,11 +118,26 @@ pub(crate) async fn set_analysis_source(
                 .into_response())
             }
         };
+        let use_retina = match body.get("capture_backend") {
+            None => store.camera_uses_retina(cid)?,
+            Some(v) if v == "retina" => true,
+            Some(v) if v == "ffmpeg" => false,
+            _ => {
+                return Ok(
+                    detail_err(StatusCode::UNPROCESSABLE_ENTITY, "请选择 FFmpeg 或 Retina")
+                        .into_response(),
+                )
+            }
+        };
+        let tx = store.conn().unchecked_transaction()?;
         if store.set_camera_analysis_source(cid, source, shared)? == 0 {
             return Ok(detail_err(StatusCode::NOT_FOUND, "摄像头不存在").into_response());
         }
+        store.set_camera_retina(cid, use_retina)?;
+        tx.commit()?;
         let restarted = crate::worker::restart_camera_if_running(&st, store, cid);
-        Ok(Json(json!({"id": cid, "analysis_mode": mode, "restarted": restarted})).into_response())
+        let backend = if use_retina { "retina" } else { "ffmpeg" };
+        Ok(Json(json!({"id": cid, "analysis_mode": mode, "capture_preference": backend, "restarted": restarted})).into_response())
     })
 }
 
@@ -154,7 +180,7 @@ pub(crate) async fn camera_status(State(st): State<Shared>, AxPath(id): AxPath<i
     }
 }
 
-pub(super) fn capture_health(st: &Shared, cid: i64) -> (Option<f64>, Option<String>, u64) {
+pub(crate) fn capture_health(st: &Shared, cid: i64) -> (Option<f64>, Option<String>, u64) {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     let Some(worker) = st.workers.get(cid) else {
         return (None, None, 0);
@@ -345,12 +371,8 @@ pub(crate) async fn add_camera(State(st): State<Shared>, Json(body): Json<Value>
                         st.go2rtc.refresh();
                     }
                     let mut status = "stopped";
-                    if autostart {
-                        if let Ok(Some(cfg)) = crate::worker::WorkerConfig::from_db(&s, id) {
-                            if crate::worker::start_worker(&st, cfg).is_ok() {
-                                status = "starting";
-                            }
-                        }
+                    if autostart && matches!(start_camera_worker(&st, &s, id), Ok(Some(true))) {
+                        status = "starting";
                     }
                     Json(json!({"id": id, "name": name, "source": if body.get("dahua").is_some() { "" } else { &source },
                             "type": type_, "group_name": group_name, "status": status}))
@@ -432,22 +454,55 @@ pub(crate) async fn set_camera_analyzer(
 }
 
 pub(crate) async fn start_camera(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
-    with_store(&st, |s| {
-        if s.camera(cid)?.is_none() {
-            return Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response());
-        }
-        // RA1.2（ADR-0011）：进程内 worker 真实现（帧循环在专用线程；启动失败
-        // 退避重连，超限写 error）。响应契约 = Python `{"ok": true}`。
-        match crate::worker::WorkerConfig::from_db(s, cid) {
-            Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response()),
-            Ok(None) => Ok(detail_err(StatusCode::NOT_FOUND, "camera not found").into_response()),
-            Ok(Some(cfg)) => match crate::worker::start_worker(&st, cfg) {
-                Ok(()) => Ok(Json(json!({"ok": true})).into_response()),
-                Err(e) if e == "已在运行" => Ok(Json(json!({"ok": true})).into_response()),
-                Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e).into_response()),
-            },
-        }
+    with_store(&st, |store| match start_camera_worker(&st, store, cid) {
+        Ok(Some(_)) => Ok(Json(json!({"ok": true})).into_response()),
+        Ok(None) => Ok(detail_err(StatusCode::NOT_FOUND, "camera not found")),
+        Err(e) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &e)),
     })
+}
+
+pub(crate) fn start_camera_worker(
+    st: &Shared,
+    store: &ls_store::Store,
+    cid: i64,
+) -> Result<Option<bool>, String> {
+    #[cfg(windows)]
+    let _intent = crate::service::camera_intent_guard();
+    let Some(config) = crate::worker::WorkerConfig::from_db(store, cid)? else {
+        return Ok(None);
+    };
+    #[cfg(windows)]
+    crate::service::remember_camera(store, cid, &config.spec.type_, true)
+        .map_err(|err| format!("保存机位启动状态失败: {err}"))?;
+    match crate::worker::start_worker(st, config) {
+        Ok(()) => Ok(Some(true)),
+        Err(error) if error == "已在运行" => Ok(Some(false)),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) async fn stop_camera(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
+    with_store(&st, |store| match stop_camera_worker(&st, store, cid)? {
+        Some(was_running) => {
+            Ok(Json(json!({"ok": true, "was_running": was_running})).into_response())
+        }
+        None => Ok(detail_err(StatusCode::NOT_FOUND, "camera not found")),
+    })
+}
+
+pub(crate) fn stop_camera_worker(
+    st: &Shared,
+    store: &ls_store::Store,
+    cid: i64,
+) -> rusqlite::Result<Option<bool>> {
+    #[cfg(windows)]
+    let _intent = crate::service::camera_intent_guard();
+    let Some(_camera) = store.camera(cid)? else {
+        return Ok(None);
+    };
+    #[cfg(windows)]
+    crate::service::remember_camera(store, cid, &_camera.type_, false)?;
+    Ok(Some(crate::worker::stop_worker(st, cid)))
 }
 
 pub(crate) async fn camera_webrtc(
@@ -650,14 +705,16 @@ pub(crate) async fn cameras_bulk(State(st): State<Shared>, Json(body): Json<Valu
             }
             // RA1.2：start/stop 走进程内 worker（Python bulk 契约：ok/missing/failed）
             let res = if action == "start" {
-                match crate::worker::WorkerConfig::from_db(s, *cid) {
+                match start_camera_worker(&st, s, *cid) {
                     Err(e) => Err(e),
                     Ok(None) => Err("camera disappeared".into()),
-                    Ok(Some(cfg)) => crate::worker::start_worker(&st, cfg).map(|_| ()),
+                    Ok(Some(false)) => Err("已在运行".into()),
+                    Ok(Some(true)) => Ok(()),
                 }
             } else {
-                crate::worker::stop_worker(&st, *cid);
-                Ok(())
+                stop_camera_worker(&st, s, *cid)
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
             };
             match res {
                 Ok(()) => ok.push(*cid),
@@ -918,8 +975,14 @@ pub(crate) async fn camera_snapshot(
 /// Python 契约：manager.stop_camera → 级联清理（区域/规则）→ `{"ok": true}`；
 /// 文件夹派生图/缩略图清理属 Python 文件系统语义，Rust 侧仅 DB 级联（ls-store 同口径）。
 pub(crate) async fn delete_camera(State(st): State<Shared>, AxPath(cid): AxPath<i64>) -> Response {
-    crate::worker::stop_worker(&st, cid);
     with_store(&st, |s| {
+        #[cfg(windows)]
+        let _intent = crate::service::camera_intent_guard();
+        #[cfg(windows)]
+        if let Some(camera) = s.camera(cid)? {
+            crate::service::remember_camera(s, cid, &camera.type_, false)?;
+        }
+        crate::worker::stop_worker(&st, cid);
         s.delete_camera(cid)?;
         st.go2rtc.refresh();
         Ok(Json(json!({"ok": true})).into_response())

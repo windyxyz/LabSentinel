@@ -4,12 +4,13 @@
 //! 单次整图推理解码实验服和口罩证据，各自判定，保留无法确认的状态。
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ls_infer::face::FaceMaskModel;
 use ls_infer::post::Det;
-use ls_infer::yolo::{OutputFormat, YoloModel};
+use ls_infer::yolo::{InferenceDevice, OutputFormat, VulkanCv, YoloModel};
 
-use crate::pipeline::{PpeObservation, PpeRunner, PpeStatus};
+use crate::pipeline::{PpeObservation, PpeRunner, PpeStatus, PpeTimings};
 
 pub const COAT_CONFIRMATION_FILE: &str = "labcoat-confirm.onnx";
 const COAT_CONFIRMATION_CONF: f32 = 0.55;
@@ -154,6 +155,7 @@ pub struct YoloPpeRunner {
     clahe_enabled: bool,
     close_mask: Option<FaceMaskModel>,
     coat_confirmation: Option<CoatConfirmation>,
+    timings: PpeTimings,
 }
 
 struct CoatConfirmation {
@@ -362,8 +364,25 @@ fn coat_assignment(coat: [f32; 4], people: &[[f32; 4]]) -> Option<(usize, f32)> 
     (best.1 >= 0.60 && gap >= 0.15).then_some((best.0, gap))
 }
 
+struct PpeCrop {
+    bgr: Vec<u8>,
+    width: u32,
+    height: u32,
+    origin: [f32; 2],
+}
+
+fn crop_coat_gap(
+    [x1, y1, x2, y2]: [f32; 4],
+    [x, y]: [f32; 2],
+    people: &[[f32; 4]],
+    expected_owner: usize,
+) -> Option<f32> {
+    let (owner, gap) = coat_assignment([x1 + x, y1 + y, x2 + x, y2 + y], people)?;
+    (owner == expected_owner).then_some(gap)
+}
+
 /// 裁切 BGR 子图（带 15% padding），用于远景/灰度监控图人框 ROI 二次精检。
-fn crop_bgr_roi(bgr: &[u8], w: u32, h: u32, pb: [f32; 4]) -> Option<(Vec<u8>, u32, u32)> {
+fn crop_bgr_roi(bgr: &[u8], w: u32, h: u32, pb: [f32; 4]) -> Option<PpeCrop> {
     let bw = (pb[2] - pb[0]).max(0.0);
     let bh = (pb[3] - pb[1]).max(0.0);
     if bw < 32.0 || bh < 32.0 {
@@ -386,10 +405,23 @@ fn crop_bgr_roi(bgr: &[u8], w: u32, h: u32, pb: [f32; 4]) -> Option<(Vec<u8>, u3
         let end = start + (rw as usize) * 3;
         out.extend_from_slice(&bgr[start..end]);
     }
-    Some((out, rw, rh))
+    Some(PpeCrop {
+        bgr: out,
+        width: rw,
+        height: rh,
+        origin: [x1 as f32, y1 as f32],
+    })
 }
 
 impl PpeRunner for YoloPpeRunner {
+    fn inference_device(&self) -> Option<InferenceDevice> {
+        Some(self.model.device())
+    }
+
+    fn last_timings(&self) -> PpeTimings {
+        self.timings
+    }
+
     fn statuses(
         &mut self,
         bgr: &[u8],
@@ -410,6 +442,7 @@ impl PpeRunner for YoloPpeRunner {
         h: u32,
         person_boxes: &[[f32; 4]],
     ) -> Vec<PpeObservation> {
+        self.timings = PpeTimings::default();
         if person_boxes.is_empty() {
             return Vec::new();
         }
@@ -433,7 +466,10 @@ impl PpeRunner for YoloPpeRunner {
                 start
             })
         });
-        let Ok(mut all_dets) = self.model.detect_classes(bgr, w, h, &specs) else {
+        let started = Instant::now();
+        let full_frame = self.model.detect_classes(bgr, w, h, &specs);
+        self.timings.full_frame = Some(started.elapsed());
+        let Ok(mut all_dets) = full_frame else {
             return vec![
                 PpeObservation {
                     coat_diagnostic: crate::pipeline::CoatDiagnostic {
@@ -490,6 +526,7 @@ impl PpeRunner for YoloPpeRunner {
         }
         if masks.contains(&PpeStatus::Unknown) {
             if let Some(model) = self.close_mask.as_mut() {
+                let started = Instant::now();
                 supplement_masks(
                     model,
                     bgr,
@@ -499,6 +536,7 @@ impl PpeRunner for YoloPpeRunner {
                     &mut masks,
                     &mut mask_confidence,
                 );
+                self.timings.close_mask = Some(started.elapsed());
             }
         }
         let mut coat_hits = vec![(false, false); person_boxes.len()];
@@ -543,7 +581,14 @@ impl PpeRunner for YoloPpeRunner {
                     reasons[index] = "overlapping_people";
                 }
                 if !occluded && box_area / frame_area < 0.35 {
-                    if let Some((roi, rw, rh)) = crop_bgr_roi(bgr, w, h, *pb) {
+                    let started = Instant::now();
+                    if let Some(PpeCrop {
+                        bgr: roi,
+                        width: rw,
+                        height: rh,
+                        origin,
+                    }) = crop_bgr_roi(bgr, w, h, *pb)
+                    {
                         inputs[index] = "person_crop";
                         // LS-055：灰度/低照度 ROI 先做 CLAHE 增强（仅灰度图触发，避免彩色失真）
                         let roi = if self.clahe_enabled
@@ -558,24 +603,39 @@ impl PpeRunner for YoloPpeRunner {
                         } else {
                             roi
                         };
-                        if let Ok(roi_dets) =
+                        let result =
                             self.model
-                                .detect_classes(&roi, rw, rh, &specs[..coat_classes])
-                        {
-                            let has_no = roi_dets.first().is_some_and(|v| !v.is_empty());
-                            let has_wear = roi_dets.iter().skip(1).any(|v| !v.is_empty());
-                            return match (has_no, has_wear) {
-                                (true, false) => {
-                                    coat_confidence[index] =
-                                        roi_dets[0].iter().map(|d| d.score).fold(0.0, f32::max);
+                                .detect_classes(&roi, rw, rh, &specs[..coat_classes]);
+                        *self.timings.crops.get_or_insert_default() += started.elapsed();
+                        if let Ok(roi_dets) = result {
+                            let group_gap = |detection: &Det| {
+                                crop_coat_gap(detection.box_, origin, person_boxes, index)
+                            };
+                            let missing = roi_dets
+                                .iter()
+                                .take(1)
+                                .flatten()
+                                .filter_map(|detection| {
+                                    group_gap(detection).map(|gap| (detection.score, gap))
+                                })
+                                .max_by(|(a, _), (b, _)| a.total_cmp(b));
+                            let wearing = roi_dets
+                                .iter()
+                                .skip(1)
+                                .flatten()
+                                .any(|detection| group_gap(detection).is_some());
+                            return match (missing, wearing) {
+                                (Some((score, gap)), false) => {
+                                    coat_confidence[index] = score;
+                                    coat_assignment_gap[index] = Some(gap);
                                     PpeStatus::NoPpe
                                 }
-                                (false, true) => PpeStatus::Wearing,
-                                (true, true) => {
+                                (None, true) => PpeStatus::Wearing,
+                                (Some(_), true) => {
                                     reasons[index] = "conflicting_labels";
                                     PpeStatus::Unknown
                                 }
-                                _ => PpeStatus::Unknown,
+                                (None, false) => PpeStatus::Unknown,
                             };
                         }
                         reasons[index] = "model_error";
@@ -589,18 +649,19 @@ impl PpeRunner for YoloPpeRunner {
         if let Some(confirmation) = self.coat_confirmation.as_mut() {
             if coats.contains(&PpeStatus::Wearing) {
                 let detections = confirmation.model.as_mut().and_then(|model| {
-                    model
-                        .detect_classes(
-                            bgr,
-                            w,
-                            h,
-                            &[
-                                (0, COAT_CONFIRMATION_CONF, 0.0),
-                                (1, COAT_CONFIRMATION_CONF, 0.0),
-                                (2, COAT_CONFIRMATION_CONF, 0.0),
-                            ],
-                        )
-                        .ok()
+                    let started = Instant::now();
+                    let result = model.detect_classes(
+                        bgr,
+                        w,
+                        h,
+                        &[
+                            (0, COAT_CONFIRMATION_CONF, 0.0),
+                            (1, COAT_CONFIRMATION_CONF, 0.0),
+                            (2, COAT_CONFIRMATION_CONF, 0.0),
+                        ],
+                    );
+                    self.timings.coat_confirmation = Some(started.elapsed());
+                    result.ok()
                 });
                 let scores = apply_coat_confirmation(
                     &mut coats,
@@ -673,6 +734,13 @@ impl PpeRunner for YoloPpeRunner {
 
 /// 构造 PPE 检测器：模型/类名/类别索引任一不满足 → None（仅人员检测）。
 pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
+    make_ppe_runner_cv(cfg, None)
+}
+
+pub fn make_ppe_runner_cv(
+    cfg: &PpeConfig,
+    vulkan: Option<&VulkanCv>,
+) -> Option<Box<dyn PpeRunner>> {
     let names = load_class_names(&cfg.model_path);
     if names.is_empty() {
         println!(
@@ -701,26 +769,29 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
         );
         return None;
     }
-    match YoloModel::load(
+    match YoloModel::load_cv(
         &cfg.model_path,
         cfg.imgsz,
         cfg.violation_conf,
         cfg.iou,
         0.0,
-        None,
         cfg.use_gpu,
+        vulkan.filter(|_| {
+            cfg.output_format
+                .is_none_or(|format| format == OutputFormat::Yolo)
+        }),
     ) {
         Ok(mut model) => {
             model.use_output_format(cfg.output_format);
             let coat_confirmation = cfg.coat_confirmation.as_ref().map(|path| {
-                let model = YoloModel::load(
+                let model = YoloModel::load_cv(
                     path,
                     640,
                     COAT_CONFIRMATION_CONF,
                     0.5,
                     0.0,
-                    None,
                     cfg.use_gpu,
+                    vulkan,
                 )
                 .map(|mut model| {
                     model.use_output_format(Some(OutputFormat::Yolo));
@@ -761,6 +832,7 @@ pub fn make_ppe_runner(cfg: &PpeConfig) -> Option<Box<dyn PpeRunner>> {
                 clahe_enabled: cfg.clahe_enabled,
                 close_mask,
                 coat_confirmation,
+                timings: PpeTimings::default(),
             }))
         }
         Err(e) => {
@@ -805,6 +877,22 @@ pub fn violation_classes(classes: &[String]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn person_crop_ignores_coat_boxes_from_padding_and_neighbor() {
+        let people = [[100.0, 80.0, 180.0, 240.0], [166.0, 80.0, 240.0, 240.0]];
+        let pixels = vec![0; 320 * 300 * 3];
+        let crop = crop_bgr_roi(&pixels, 320, 300, people[0]).unwrap();
+        assert_eq!(crop.origin, [88.0, 56.0]);
+        let own_coat = [32.0, 54.0, 66.0, 130.0];
+        let neighbor_coat = [90.0, 54.0, 103.0, 130.0];
+        let shared_coat = [79.0, 54.0, 90.0, 130.0];
+        let above_person = [32.0, 2.0, 66.0, 20.0];
+        assert_eq!(crop_coat_gap(own_coat, crop.origin, &people, 0), Some(1.0));
+        assert_eq!(crop_coat_gap(neighbor_coat, crop.origin, &people, 0), None);
+        assert_eq!(crop_coat_gap(shared_coat, crop.origin, &people, 0), None);
+        assert_eq!(crop_coat_gap(above_person, crop.origin, &people, 0), None);
+    }
 
     #[test]
     fn ambiguous_coat_boxes_do_not_confirm_wearing_or_suppress_an_independent_violation() {

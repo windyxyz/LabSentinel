@@ -1,5 +1,5 @@
 # RA4.2 / ADR-0011：发布流水线——Rust 单二进制正式产物（过渡期结束后的唯一发布形态）。
-# verify → test（tests.yml：Rust + Web）→ build-rust（Windows：zip + Inno setup.exe）→ publish（Release）。
+# verify → test → build-rust（隔离 Windows 安装验收）→ sign-windows → publish（草稿）。
 # setup.exe 为必发布资产：Inno Setup 7.1.1（官方安装器 + SHA256 钉死）编译
 # deploy/windows/installer.iss，源为 Rust staging 树。
 # 历史版本的 Python 便携包仍可从旧 tag 的 Release 获取；本流水线不再构建 Python 形态。
@@ -7,6 +7,7 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,12 +22,16 @@ jobs:
           test -z "$(git status --porcelain)" || { echo "::error::工作区不干净"; git status --short; exit 1; }
           V=$(cat VERSION | tr -d ' \n')
           T="${GITHUB_REF_NAME#v}"
-          test "$V" = "$T" || { echo "::error::tag $GITHUB_REF_NAME != VERSION $V"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            test "$V" = "$T" || { echo "::error::tag $GITHUB_REF_NAME != VERSION $V"; exit 1; }
+          fi
           grep -qE "^## \[${V}\]|^## ${V}" CHANGELOG.md || {
             echo "::error::CHANGELOG 缺 ## [$V] 本版条目（发布前把 Unreleased 改名）"; exit 1; }
 
   test:
     uses: ./.github/workflows/tests.yml
+    with:
+      regression: true
 
   rust-ci:
     uses: ./.github/workflows/rust.yml
@@ -79,33 +84,50 @@ jobs:
       - name: 安装 Chromium 播放验收依赖
         working-directory: web
         run: npx playwright install chromium --only-shell
-      - name: setup.exe 安装→升级→回滚→探活→卸载
+      - name: setup.exe 全新安装、覆盖、回滚、探活与卸载
         shell: pwsh
         run: |
           $setup = Get-ChildItem Resources/dist/LabSentinel-setup-*.exe |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           $dir = Join-Path $env:RUNNER_TEMP ("ls-setup-smoke-" + [Guid]::NewGuid())
-          $old = Join-Path $env:RUNNER_TEMP "LabSentinel-setup-0.5.0.exe"
-          Invoke-WebRequest -Uri "https://github.com/windyxyz/LabSentinel/releases/download/v0.5.0/LabSentinel-setup-0.5.0.exe" -OutFile $old
-          if ((Get-FileHash $old).Hash -ne '3e7472c44798a216641478a5c238a70aa149bd4fbd297d6de15beef72f4ff83b') { throw "旧版安装器校验失败" }
           $installArgs = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$dir`""
-          $oldInstall = Start-Process -FilePath $old -Wait -PassThru -ArgumentList $installArgs
-          if ($oldInstall.ExitCode -ne 0) { throw "旧版安装失败：rc=$($oldInstall.ExitCode)" }
-          $p = Start-Process -FilePath $setup.FullName -Wait -PassThru -ArgumentList `
-            $installArgs
-          if ($p.ExitCode -ne 0) { throw "静默安装失败：rc=$($p.ExitCode)" }
+          $p = Start-Process -FilePath $setup.FullName -WindowStyle Hidden -Wait -PassThru -ArgumentList $installArgs
+          if ($p.ExitCode -ne 0) { throw "全新安装失败：rc=$($p.ExitCode)" }
           $want = (Get-Content VERSION -Raw).Trim()
-          if ((Get-Content (Join-Path $dir VERSION) -Raw).Trim() -ne $want) { throw "升级版本不正确" }
+          $versionFile = Join-Path $dir 'VERSION'
+          if ((Get-Content $versionFile -Raw).Trim() -ne $want) { throw "安装版本不正确" }
           $userData = Join-Path $dir 'data\preserve.txt'
           New-Item -ItemType Directory -Path (Split-Path $userData) -Force | Out-Null
           'test-user-state' | Set-Content -LiteralPath $userData
           $legacyData = Join-Path $dir 'server\data\preserve.txt'
-          $rv = Start-Process -FilePath (Join-Path $dir 'labsentinel-server.exe') -ArgumentList '--rollback' -WorkingDirectory $dir -Wait -PassThru
-          if ($rv.ExitCode -ne 0 -or (Get-Content (Join-Path $dir VERSION) -Raw).Trim() -ne '0.5.0' -or !(Test-Path $userData)) {
-            throw "首次覆盖升级后回滚失败：rc=$($rv.ExitCode)"
+
+          # Rollback skips archives that have the same version as the active install.
+          $fixtureVersion = '0.0.0'
+          $index = Join-Path $dir 'web\index.html'
+          $freshHash = (Get-FileHash -LiteralPath $index).Hash
+          Add-Content -LiteralPath $index '<!-- rollback fixture -->' -Encoding utf8
+          $fixtureHash = (Get-FileHash -LiteralPath $index).Hash
+          Set-Content -LiteralPath $versionFile -Value $fixtureVersion -Encoding ascii
+          $p = Start-Process -FilePath $setup.FullName -WindowStyle Hidden -Wait -PassThru -ArgumentList $installArgs
+          if ($p.ExitCode -ne 0 -or (Get-Content $versionFile -Raw).Trim() -ne $want -or
+              (Get-FileHash -LiteralPath $index).Hash -ne $freshHash) {
+            throw "覆盖安装未恢复候选文件：rc=$($p.ExitCode)"
           }
-          $p = Start-Process -FilePath $setup.FullName -Wait -PassThru -ArgumentList $installArgs
-          if ($p.ExitCode -ne 0) { throw "重新升级失败：rc=$($p.ExitCode)" }
+          $archivedIndex = Join-Path $dir "versions\$fixtureVersion\web\index.html"
+          if ((Get-FileHash -LiteralPath $archivedIndex).Hash -ne $fixtureHash) {
+            throw "覆盖安装未保留测试归档"
+          }
+          $rv = Start-Process -FilePath (Join-Path $dir 'labsentinel-server.exe') -ArgumentList '--rollback' -WorkingDirectory $dir -WindowStyle Hidden -Wait -PassThru
+          if ($rv.ExitCode -ne 0 -or (Get-Content $versionFile -Raw).Trim() -ne $fixtureVersion -or
+              (Get-FileHash -LiteralPath $index).Hash -ne $fixtureHash -or
+              (Get-Content -LiteralPath $userData -Raw).Trim() -ne 'test-user-state') {
+            throw "归档回滚失败：rc=$($rv.ExitCode)"
+          }
+          $p = Start-Process -FilePath $setup.FullName -WindowStyle Hidden -Wait -PassThru -ArgumentList $installArgs
+          if ($p.ExitCode -ne 0 -or (Get-Content $versionFile -Raw).Trim() -ne $want -or
+              (Get-FileHash -LiteralPath $index).Hash -ne $freshHash) {
+            throw "重新安装未恢复候选文件：rc=$($p.ExitCode)"
+          }
           foreach ($f in @("labsentinel-server.exe", "VERSION", "web\index.html", "models\yolo11n.onnx", "models\yolo11n_ppe.onnx", "models\yolo11n_ppe.classes.txt", "onnxruntime.dll", "tools\ffmpeg\ffmpeg.exe", "tools\go2rtc.exe", "tools\go2rtc-LICENSE.txt")) {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "安装缺文件：$f" }
           }
@@ -145,7 +167,78 @@ jobs:
           if ($u.ExitCode -ne 0) { throw "删除数据卸载失败：rc=$($u.ExitCode)" }
           Start-Sleep -Seconds 10
           if (Test-Path $dir) { throw "删除数据卸载后安装目录残留" }
-          "setup.exe 冒烟通过：安装/探活/升级/回滚/卸载及数据选择"
+          "setup.exe 冒烟通过：全新安装、覆盖、回滚、探活与卸载"
+      - name: 原生 Windows 服务安装、网页重启、覆盖安装与卸载
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem Resources/dist/LabSentinel-setup-*.exe | Select-Object -First 1
+          $serviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\LabSentinel'
+          if (Test-Path $serviceKey) { throw 'SCM 冒烟需要无现有 LabSentinel 服务的隔离运行器' }
+          function Invoke-Checked([string]$File, [string]$Arguments) {
+            $run = Start-Process -FilePath $File -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+            if ($run.ExitCode -ne 0) { throw "$(Split-Path $File -Leaf) 退出码 $($run.ExitCode)" }
+          }
+          function Wait-Ready([int]$Port) {
+            $deadline = (Get-Date).AddSeconds(45)
+            while ((Get-Date) -lt $deadline) {
+              try {
+                $health = Invoke-RestMethod "http://127.0.0.1:$Port/api/health/ready" -TimeoutSec 2
+                if ($health.ok -eq $true -or $health.status -eq 'ready') { return }
+              } catch { }
+              Start-Sleep -Milliseconds 500
+            }
+            throw "原生服务在端口 $Port 未就绪"
+          }
+          $quiet = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
+          $install = "$quiet /ALLUSERS /TASKS=createshortcut,createdesktop,nativewindowsservice"
+          $localData = Join-Path $env:LOCALAPPDATA 'LabSentinel'
+          if (Test-Path $localData) { throw 'SCM 冒烟需要干净的测试账户数据目录' }
+          Invoke-Checked $setup.FullName $install
+          $roots = @(${env:ProgramFiles(x86)}, $env:ProgramFiles) | Select-Object -Unique
+          $root = $roots | Where-Object { Test-Path (Join-Path $_ 'LabSentinel\labsentinel-server.exe') } |
+            Select-Object -First 1 | ForEach-Object { Join-Path $_ 'LabSentinel' }
+          if (!$root -or !(Test-Path $serviceKey) -or (Get-Service LabSentinel).Status -ne 'Running') {
+            throw 'SCM 注册或运行状态异常'
+          }
+          Wait-Ready 8000
+          $protected = Invoke-WebRequest 'http://127.0.0.1:8000/api/events' -SkipHttpErrorCheck
+          if ($protected.StatusCode -ne 401) { throw '未认证请求可读取服务模式事件' }
+          $group = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'LabSentinel'
+          $desktopLink = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'LabSentinel.lnk'
+          if (!(Test-Path (Join-Path $group 'LabSentinel.lnk')) -or !(Test-Path $desktopLink)) {
+            throw '服务安装未创建公共快捷方式'
+          }
+          $data = Join-Path $root 'service-data'
+          $tokenLine = Get-Content (Join-Path $data 'network.env') | Where-Object { $_ -like 'LS_ADMIN_TOKEN=*' }
+          $headers = @{ 'x-admin-token' = ($tokenLine -split '=', 2)[1] }
+          $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $probe.Start()
+          $port = $probe.LocalEndpoint.Port
+          $probe.Stop()
+          $network = "http://127.0.0.1:8000/api/system/network"
+          Invoke-RestMethod $network -Method Put -Headers $headers -ContentType 'application/json' `
+            -Body (@{ port = $port } | ConvertTo-Json) | Out-Null
+          Invoke-RestMethod 'http://127.0.0.1:8000/api/system/restart' -Method Post -Headers $headers | Out-Null
+          Wait-Ready $port
+          New-Item -ItemType Directory -Path $localData | Out-Null
+          'personal-state' | Set-Content -LiteralPath (Join-Path $localData 'preserve.txt')
+          'native-service-state' | Set-Content -LiteralPath (Join-Path $data 'preserve.txt')
+          Invoke-Checked $setup.FullName "$quiet /ALLUSERS"
+          Wait-Ready $port
+          if (!(Test-Path (Join-Path $root 'versions'))) { throw '原生服务覆盖安装缺版本归档' }
+          $uninstaller = Join-Path $root 'unins000.exe'
+          Invoke-Checked $uninstaller $quiet
+          if (Test-Path $serviceKey) { throw '默认卸载后 SCM 注册残留' }
+          if (!(Test-Path (Join-Path $data 'preserve.txt')) -or !(Test-Path (Join-Path $localData 'preserve.txt'))) {
+            throw '默认卸载删除了服务数据或个人数据'
+          }
+          Invoke-Checked $setup.FullName $install
+          Wait-Ready $port
+          Invoke-Checked $uninstaller "$quiet /REMOVEDATA=1"
+          Start-Sleep -Seconds 10
+          foreach ($path in @($serviceKey, $root, $localData, $group, $desktopLink)) {
+            if (Test-Path $path) { throw "全清卸载后仍有残留：$path" }
+          }
       - name: 便携包冒烟（启动、前端、照片与视频检测）
         shell: pwsh
         run: |
@@ -176,7 +269,45 @@ jobs:
           Get-Content $sums
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: labsentinel-rust
+          name: labsentinel-windows-acceptance
+          path: |
+            Resources/dist/labsentinel-rust-*.zip
+            Resources/dist/LabSentinel-setup-*.exe
+            Resources/dist/SHA256SUMS-rust.txt
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: github.event_name == 'push'
+        with:
+          name: labsentinel-windows-staging
+          path: Resources/dist/rust/labsentinel-server
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-windows:
+    needs: [build-rust]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: [self-hosted, Windows, X64, labsentinel-signing]
+    environment: release-signing
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806  # v4
+        with:
+          name: labsentinel-windows-staging
+          path: Resources/dist/rust/labsentinel-server
+      - name: Sign the executable and installer, then compute release checksums
+        shell: pwsh
+        env:
+          LS_SIGNING_THUMBPRINT: ${{ vars.LS_SIGNING_THUMBPRINT }}
+          PYTHONIOENCODING: utf-8
+        run: ./scripts/sign_windows_release.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: labsentinel-windows-signed
           path: |
             Resources/dist/labsentinel-rust-*.zip
             Resources/dist/LabSentinel-setup-*.exe
@@ -185,18 +316,19 @@ jobs:
           retention-days: 14
 
   publish:
-    needs: [build-rust]
+    needs: [sign-windows]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806  # v4
         with:
-          name: labsentinel-rust
+          name: labsentinel-windows-signed
           path: dist
       - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v2
         with:
-          draft: true  # 签名作业接入前保持草稿，人工校验后发布
+          draft: true  # 验收后人工发布
           files: |
             dist/labsentinel-rust-*.zip
             dist/LabSentinel-setup-*.exe

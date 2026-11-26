@@ -3,9 +3,10 @@
 // 2026-11-12 batch A split. Unused items in this superset `use` are cleaned by cargo fix.
 use crate::state::Shared;
 use crate::util::*;
+use axum::body::Body;
 use axum::extract::{
     ws::{WebSocket, WebSocketUpgrade},
-    Path as AxPath, Query, State,
+    Path as AxPath, Query, Request, State,
 };
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -13,6 +14,9 @@ use axum::Extension;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
+
+mod audit_pack;
+pub(crate) use audit_pack::export as export_audit_pack;
 
 pub(crate) async fn events(
     State(st): State<Shared>,
@@ -92,7 +96,7 @@ pub(crate) fn event_json(e: &ls_store::Event) -> Value {
     };
     json!({"id": e.id, "ts": e.ts, "camera_id": e.camera_id, "type": e.type_,
            "category": match e.type_.as_str() {
-               "photo_check" | "video_check" => "check",
+               "photo_check" | "video_check" | "motion_recording" => "check",
                "alert_resolved" => "recovery",
                _ => "alert",
            },
@@ -146,22 +150,26 @@ pub(crate) struct NoteInput {
     text: String,
 }
 
+pub(crate) fn event_note_text(text: &str) -> Option<&str> {
+    let text = text.trim();
+    (!text.is_empty()
+        && text.chars().count() <= 500
+        && !text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')))
+    .then_some(text)
+}
+
 pub(crate) async fn add_event_note(
     State(st): State<Shared>,
     Extension(crate::middleware::RequestActor(actor)): Extension<crate::middleware::RequestActor>,
     AxPath(id): AxPath<i64>,
     Json(input): Json<NoteInput>,
 ) -> Response {
-    let note = input.text.trim();
-    if note.is_empty()
-        || note.chars().count() > 500
-        || note
-            .chars()
-            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
-    {
+    let Some(note) = event_note_text(&input.text) else {
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "交接备注需填写 1–500 字")
             .into_response();
-    }
+    };
     with_store(&st, |store| {
         match store.add_event_note(id, &actor, note)? {
             Some(note) => Ok((StatusCode::CREATED, Json(note)).into_response()),
@@ -181,25 +189,63 @@ pub(crate) async fn set_status(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_owned();
-    if !["new", "acked", "false_positive", "ignored"].contains(&status.as_str()) {
+    if !valid_event_status(&status) {
         // T-505 契约对齐：Python 侧 EventStatusBody Literal → 422，两实现同契约
         return detail_err(StatusCode::UNPROCESSABLE_ENTITY, "非法状态").into_response();
     }
-    tokio::task::spawn_blocking(move || with_store(&st, |s| {
-        let now = iso_now();
-        let handled = status != "new";
-        if s.set_event_status(id, &status, handled.then_some(actor.as_str()), handled.then_some(now.as_str()))? == 0 {
-            return Ok(detail_err(StatusCode::NOT_FOUND, "事件不存在").into_response());
+    tokio::task::spawn_blocking(move || {
+        with_store(&st, |store| {
+            Ok(
+                match record_event_status(&st, store, id, &status, &actor, None)? {
+                    Some(result) => Json(result).into_response(),
+                    None => detail_err(StatusCode::NOT_FOUND, "事件不存在"),
+                },
+            )
+        })
+    })
+    .await
+    .unwrap_or_else(|_| server_err())
+}
+
+pub(crate) fn valid_event_status(status: &str) -> bool {
+    matches!(status, "new" | "acked" | "false_positive" | "ignored")
+}
+
+pub(crate) fn record_event_status(
+    st: &Shared,
+    store: &ls_store::Store,
+    eid: i64,
+    status: &str,
+    actor: &str,
+    reason: Option<&str>,
+) -> rusqlite::Result<Option<Value>> {
+    let now = iso_now();
+    let handled = status != "new";
+    let tx = store.conn().unchecked_transaction()?;
+    if store.set_event_status(
+        eid,
+        status,
+        handled.then_some(actor),
+        handled.then_some(now.as_str()),
+    )? == 0
+    {
+        return Ok(None);
+    }
+    if let Some(reason) = reason {
+        store
+            .add_event_note(eid, actor, reason)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    }
+    tx.commit()?;
+    let mut result = json!({"ok": true, "handled_by": handled.then_some(actor),
+        "handled_ts": handled.then_some(now)});
+    if status == "false_positive" {
+        match super::dataset::stage_event_sample(st, store, eid, false) {
+            Ok(sample) => result["sample_id"] = json!(sample),
+            Err((_, error)) => result["sample_error"] = json!(error),
         }
-        let mut result = json!({"ok": true, "handled_by": handled.then_some(actor), "handled_ts": handled.then_some(now)});
-        if status == "false_positive" {
-            match super::dataset::stage_event_sample(&st, s, id, false) {
-                Ok(sample) => result["sample_id"] = json!(sample),
-                Err((_, error)) => result["sample_error"] = json!(error),
-            }
-        }
-        Ok(Json(result).into_response())
-    })).await.unwrap_or_else(|_| server_err())
+    }
+    Ok(Some(result))
 }
 
 pub(crate) async fn bulk_event_status(
@@ -284,37 +330,7 @@ pub(crate) async fn events_timeline(
     })
 }
 
-pub(crate) fn serve_event_media(
-    st: &Shared,
-    eid: i64,
-    col: fn(&ls_store::Event) -> &Option<String>,
-    content_type: &str,
-) -> Response {
-    match ls_store::Store::open(&st.db_path) {
-        Ok(s) => match s.event_by_id(eid) {
-            Ok(Some(ev)) => {
-                let rel = col(&ev).clone().unwrap_or_default();
-                let Some(p) = rooted_file(
-                    std::path::Path::new(&st.data_dir),
-                    std::path::Path::new(&rel),
-                ) else {
-                    return detail_err(StatusCode::NOT_FOUND, "media file not found")
-                        .into_response();
-                };
-                match std::fs::read(&p) {
-                    Ok(bytes) => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
-                    Err(_) => {
-                        detail_err(StatusCode::NOT_FOUND, "media file not found").into_response()
-                    }
-                }
-            }
-            _ => detail_err(StatusCode::NOT_FOUND, "event not found").into_response(),
-        },
-        Err(_) => server_err(),
-    }
-}
-
-pub(super) fn event_image_path(
+pub(crate) fn event_image_path(
     st: &Shared,
     store: &ls_store::Store,
     event: &ls_store::Event,
@@ -357,8 +373,34 @@ pub(crate) async fn event_snapshot(State(st): State<Shared>, AxPath(eid): AxPath
     })
 }
 
-pub(crate) async fn event_video(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
-    serve_event_media(&st, eid, |e| &e.video, "video/mp4")
+pub(crate) async fn event_video(
+    State(st): State<Shared>,
+    AxPath(eid): AxPath<i64>,
+    request: Request,
+) -> Response {
+    let path = {
+        use std::path::Path;
+        let Ok(store) = ls_store::Store::open(&st.db_path) else {
+            return server_err();
+        };
+        match store.event_by_id(eid) {
+            Ok(event) => event.and_then(|event| {
+                rooted_file(Path::new(&st.data_dir), Path::new(event.video.as_deref()?))
+            }),
+            Err(_) => return server_err(),
+        }
+    };
+    let Some(path) = path else {
+        return detail_err(StatusCode::NOT_FOUND, "该事件的录像不可用").into_response();
+    };
+    let mut file = tower_http::services::ServeFile::new(path);
+    match file.try_call(request).await {
+        Ok(response) => response.map(Body::new),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            detail_err(StatusCode::NOT_FOUND, "该事件的录像不可用").into_response()
+        }
+        Err(_) => server_err(),
+    }
 }
 
 pub(crate) async fn event_overlay(State(st): State<Shared>, AxPath(eid): AxPath<i64>) -> Response {
@@ -407,6 +449,7 @@ pub(crate) async fn event_explain(State(st): State<Shared>, AxPath(eid): AxPath<
                 "has_snapshot": event.snapshot.is_some(),
                 "has_video": event.video.is_some(),
                 "snapshot_sha256": event.snapshot_sha256,
+                "recording": store.event_recording(eid)?,
             },
             "episode": event.episode_id.map(|id| json!({
                 "id": id, "first_ts": event.first_ts, "last_ts": event.last_ts,
@@ -564,14 +607,18 @@ async fn handle_replay(
     const PAGE: i64 = 64;
     let db = db_path.clone();
     let scope = cameras.clone();
-    let latest = tokio::task::spawn_blocking(move || {
-        ls_store::Store::open(&db)?.latest_event_id(scope.as_deref())
+    let replay = tokio::task::spawn_blocking(move || {
+        ls_store::Store::open(&db)?.event_replay_state(since, scope.as_deref())
     })
     .await;
-    let Ok(Ok(latest)) = latest else { return };
+    let Ok(Ok((latest, history_reset))) = replay else {
+        return;
+    };
     let mut after = since.map_or(latest, |cursor| cursor.min(latest));
     if socket
-        .send(Message::Text(json!({ "stream_cursor": after }).to_string()))
+        .send(Message::Text(
+            json!({"stream_cursor": after, "stream_history_reset": history_reset}).to_string(),
+        ))
         .await
         .is_err()
     {
@@ -608,7 +655,7 @@ async fn handle_replay(
             message = rx.recv() => {
                 match message {
                     Err(broadcast::error::RecvError::Closed) => return,
-                    Ok(text) if is_visible_episode_update(&text, after, cameras.as_deref()) => {
+                    Ok(text) if is_visible_event_update(&text, after, cameras.as_deref()) => {
                         if socket.send(Message::Text(text)).await.is_err() { return; }
                     }
                     _ => {}
@@ -621,15 +668,17 @@ async fn handle_replay(
     }
 }
 
-fn is_visible_episode_update(text: &str, after: i64, cameras: Option<&[i64]>) -> bool {
+fn is_visible_event_update(text: &str, after: i64, cameras: Option<&[i64]>) -> bool {
     let Ok(event) = serde_json::from_str::<Value>(text) else {
         return false;
     };
-    event.get("op").and_then(Value::as_str) == Some("episode_update")
-        && event
-            .get("id")
-            .and_then(Value::as_i64)
-            .is_some_and(|id| id <= after)
+    matches!(
+        event.get("op").and_then(Value::as_str),
+        Some("episode_update" | "recording_update")
+    ) && event
+        .get("id")
+        .and_then(Value::as_i64)
+        .is_some_and(|id| id <= after)
         && event
             .get("camera_id")
             .and_then(Value::as_i64)

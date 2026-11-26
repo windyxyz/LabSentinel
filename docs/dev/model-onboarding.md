@@ -7,10 +7,10 @@
 
 | 角色 | 文件 | 位置 | 说明 |
 |---|---|---|---|
-| 人员检测 FP32 | `yolo11n.onnx` | `m0-spike/` | COCO 80 类，person=0；DirectML/CPU 用 |
-| 人员检测 XINT8（可选） | `yolo11n_xint8_hd.onnx` | `m0-spike/` | NPU 后端用 |
-| 实验服模型 | `yolo11n_ppe.onnx` | `m0-spike/` | 11 类合并词表（见下） |
-| 实验服词表 | `yolo11n_ppe.classes.txt` | `m0-spike/` | **一行一类，顺序=模型输出顺序**（PpeEngine 读取；缺失则用 .env 兜底） |
+| 人员检测 FP32 | `yolo11n.onnx` | `models/` | COCO 80 类，person=0；DirectML/CPU 用 |
+| 人员检测 XINT8（可选） | `yolo11n_xint8_hd.onnx` | `models/` | NPU 后端用 |
+| 实验服模型 | `yolo11n_ppe.onnx` | `models/` | 11 类合并词表（见下） |
+| 实验服词表 | `yolo11n_ppe.classes.txt` | `models/` | **一行一类，顺序=模型输出顺序**（PpeEngine 读取；缺失则用 .env 兜底） |
 
 **classes.txt 是硬契约**：v2 合并模型词表（训练时确定，勿手改顺序）：
 ```
@@ -34,17 +34,17 @@ HairNet
 python -c "from ultralytics import YOLO; YOLO('Resources/runs/detect/<run>/weights/best.pt').val(data='Resources/datasets/merged/data.yaml', split='val')"
 
 # 2) 导出 ONNX（opset13、imgsz640、nms=False——服务端自己后处理）
-python tools/export_onnx.py --weights Resources/runs/detect/<run>/weights/best.pt --out m0-spike/yolo11n_ppe.onnx
+python tools/export_onnx.py --weights Resources/runs/detect/<run>/weights/best.pt --out models/yolo11n_ppe.onnx
 
 # 3) 词表落盘（从训练 data.yaml 生成，不要手敲）
-python -c "import yaml;print('\n'.join(yaml.safe_load(open('Resources/datasets/merged/data.yaml'))['names']))" > m0-spike/yolo11n_ppe.classes.txt
+python -c "import yaml;print('\n'.join(yaml.safe_load(open('Resources/datasets/merged/data.yaml'))['names']))" > models/yolo11n_ppe.classes.txt
 ```
 
 ## 2. 服务端接入（零代码改动）
 
 环境变量（或网页「模型管理」选择路径）：
 ```ini
-LS_PPE_MODEL=D:/User/Desktop/TOOLS/监控识别/m0-spike/yolo11n_ppe.onnx
+LS_PPE_MODEL=D:/User/Desktop/TOOLS/监控识别/models/yolo11n_ppe.onnx
 LS_PPE_CLASS_NAMES=lab coat        # 穿戴证据类别（精确匹配优先）
 LS_PPE_VIOLATION_CLASS=no lab coat # 违规证据类别（只有它触发告警）
 LS_PPE_CONF=0.30                   # 违规判定阈值

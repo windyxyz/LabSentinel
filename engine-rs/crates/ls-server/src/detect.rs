@@ -597,12 +597,15 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
             "sensitivity": sensitivity_preset(s),
             "usage": {"date": usage.date, "count": usage.count,
                       "budget": usage.budget, "exhausted": usage.exhausted()},
-            // UX（2026-11-21）：推理设备（DirectML——DX12 统一层，N/A/Intel 卡
-            // 与核显全通吃；dml 初始化失败自动回落 CPU）
             "runtime": {
                 "ep": runtime_ep_pref(s),
+                "backend": runtime_backend(s),
+                "gpu_id": runtime_gpu_id(s),
+                "vulkan_available": vulkan_gray_available(),
+                "camera_devices": st.workers.inference_devices(),
                 "last_loaded_ep": ls_infer::yolo::ep_used(),
-                "adapter_index": runtime_adapter(s),
+                "adapter_index": legacy_runtime_adapter(s),
+                "effective_adapter_index": ls_infer::ort_session::directml_adapter(),
                 "adapters": crate::gpu_enum::adapters(),
             },
         }))
@@ -611,6 +614,14 @@ pub(crate) async fn detect_config_get(State(st): State<Shared>) -> Response {
 }
 
 /// LS-050 性能开关（Motion Gate）读取：app_settings perf.*。
+pub fn motion_recording_enabled(s: &ls_store::Store) -> bool {
+    s.setting_get("perf.motion_event_recording")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1")
+}
+
 pub fn perf_config(s: &ls_store::Store) -> Value {
     let enabled = s
         .setting_get("perf.motion_gate_enabled")
@@ -625,11 +636,19 @@ pub fn perf_config(s: &ls_store::Store) -> Value {
         .and_then(|v| v.trim().parse::<f32>().ok())
         .filter(|v| v.is_finite() && *v >= 0.0)
         .unwrap_or(ls_analyzer::motion::DEFAULT_MOTION_THRESHOLD);
-    json!({"motion_gate_enabled": enabled, "motion_threshold": threshold})
+    json!({"motion_gate_enabled": enabled, "motion_threshold": threshold,
+        "motion_event_recording": motion_recording_enabled(s)})
 }
 
-/// runtime.ep 设置读取（dml|cpu；缺省 dml=GPU 优先——用户决策 2026-11-21）。
-pub fn runtime_ep_pref(s: &ls_store::Store) -> String {
+pub(crate) fn runtime_backend(s: &ls_store::Store) -> String {
+    s.setting_get("runtime.backend")
+        .ok()
+        .flatten()
+        .filter(|value| matches!(value.as_str(), "dml" | "cpu" | "auto_vulkan" | "vulkan"))
+        .unwrap_or_else(|| legacy_runtime_ep(s))
+}
+
+fn legacy_runtime_ep(s: &ls_store::Store) -> String {
     s.setting_get("runtime.ep")
         .ok()
         .flatten()
@@ -645,7 +664,67 @@ pub fn runtime_ep_pref(s: &ls_store::Store) -> String {
         })
 }
 
+pub fn runtime_ep_pref(s: &ls_store::Store) -> &'static str {
+    if runtime_backend(s) == "cpu" {
+        "cpu"
+    } else {
+        "dml"
+    }
+}
+
+pub(crate) fn vulkan_requested(backend: &str) -> bool {
+    matches!(backend, "auto_vulkan" | "vulkan")
+}
+
+fn vulkan_gray_available() -> bool {
+    cfg!(all(windows, feature = "vulkan-cv"))
+        && crate::deploy::default_install_root()
+            .join("vulkan/ncnn.dll.xz")
+            .is_file()
+}
+
+fn runtime_gpu_id(s: &ls_store::Store) -> String {
+    runtime_vulkan_adapter(s).id()
+}
+
+pub(crate) fn runtime_vulkan_adapter(s: &ls_store::Store) -> ls_infer::yolo::VulkanAdapter {
+    s.setting_get("runtime.gpu_id")
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(ls_infer::yolo::VulkanAdapter::parse)
+        .unwrap_or_default()
+}
+
+pub(crate) fn migrate_runtime_gpu_identity(store: &ls_store::Store) {
+    use ls_infer::yolo::VulkanAdapter;
+    let saved = runtime_vulkan_adapter(store);
+    if let VulkanAdapter::Luid(_) = saved {
+        let stable = crate::gpu_enum::persistable_id(&crate::gpu_enum::adapters(), saved);
+        if stable != saved {
+            if let Err(error) = store.setting_set("runtime.gpu_id", &stable.id()) {
+                eprintln!("[ls-infer] 无法保存 Vulkan 显卡 UUID: {error}");
+            }
+        }
+    }
+}
+
 pub(crate) fn runtime_adapter(store: &ls_store::Store) -> Option<i32> {
+    use ls_infer::yolo::VulkanAdapter::{Luid, Uuid};
+    if vulkan_requested(&runtime_backend(store)) {
+        if let selection @ (Luid(_) | Uuid(_)) = runtime_vulkan_adapter(store) {
+            if let Some(index) =
+                crate::gpu_enum::by_physical_id(&crate::gpu_enum::adapters(), selection)
+                    .and_then(|adapter| adapter.dxgi_index)
+            {
+                return Some(index);
+            }
+        }
+    }
+    legacy_runtime_adapter(store)
+}
+
+fn legacy_runtime_adapter(store: &ls_store::Store) -> Option<i32> {
     store
         .setting_get("runtime.adapter_index")
         .ok()
@@ -805,8 +884,8 @@ pub(crate) async fn detect_config_put(
                 ));
             }
         }
-        // runtime.ep：推理设备切换（dml|cpu）——先校验再落盘，避免半写入
-        let mut ep_write: Option<(String, bool)> = None;
+        let mut backend_changed = false;
+        let mut gpu_changed = false;
         let mut adapter_changed = false;
         static RUNTIME_UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _runtime_guard = body.get("runtime").map(|_| {
@@ -815,17 +894,62 @@ pub(crate) async fn detect_config_put(
                 .unwrap_or_else(|error| error.into_inner())
         });
         if let Some(rt) = body.get("runtime") {
-            if let Some(ep) = rt.get("ep").and_then(|x| x.as_str()) {
-                let ep_l = ep.trim().to_ascii_lowercase();
-                if ep_l != "dml" && ep_l != "cpu" {
+            if !rt.is_object() {
+                return Ok(
+                    detail_err(StatusCode::UNPROCESSABLE_ENTITY, "runtime 必须是对象")
+                        .into_response(),
+                );
+            }
+            let previous = runtime_backend(s);
+            if let Some(request) = rt.get("backend").or_else(|| rt.get("ep")) {
+                let backend = request
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase();
+                let legacy = if backend == "cpu" { "cpu" } else { "dml" };
+                let conflicting = rt.get("ep").is_some_and(|value| {
+                    !value
+                        .as_str()
+                        .is_some_and(|value| value.trim().eq_ignore_ascii_case(legacy))
+                });
+                if conflicting
+                    || !matches!(backend.as_str(), "dml" | "cpu" | "auto_vulkan" | "vulkan")
+                {
                     return Ok(detail_err(
                         StatusCode::UNPROCESSABLE_ENTITY,
-                        "runtime.ep 必须是 dml（GPU）或 cpu",
+                        "请选择支持的推理后端，旧版 runtime.ep 支持 dml 或 cpu",
                     )
                     .into_response());
                 }
-                let cur = runtime_ep_pref(s);
-                ep_write = Some((ep_l.clone(), cur != ep_l));
+                if vulkan_requested(&backend) && backend != previous && !vulkan_gray_available() {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "当前安装包未提供 Vulkan 灰度运行时",
+                    )
+                    .into_response());
+                }
+                backend_changed = backend != previous;
+                writes.push(("runtime.backend".into(), backend));
+                writes.push(("runtime.ep".into(), legacy.into()));
+            }
+            if let Some(value) = rt.get("gpu_id") {
+                use ls_infer::yolo::VulkanAdapter;
+                let Some(requested) = value.as_str().and_then(VulkanAdapter::parse) else {
+                    return Ok(detail_err(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "请选择自动、列表中的物理显卡或有效的 Vulkan 设备编号",
+                    )
+                    .into_response());
+                };
+                let selected = match requested {
+                    VulkanAdapter::Luid(_) => {
+                        crate::gpu_enum::persistable_id(&crate::gpu_enum::adapters(), requested)
+                    }
+                    _ => requested,
+                };
+                gpu_changed = selected != runtime_vulkan_adapter(s);
+                writes.push(("runtime.gpu_id".into(), selected.id()));
             }
             if let Some(value) = rt.get("adapter_index") {
                 let adapter = if value.is_null() {
@@ -847,7 +971,7 @@ pub(crate) async fn detect_config_put(
                     )
                     .into_response());
                 };
-                adapter_changed = adapter != runtime_adapter(s);
+                adapter_changed = adapter != legacy_runtime_adapter(s);
                 writes.push((
                     "runtime.adapter_index".into(),
                     adapter.map_or_else(|| "-1".into(), |index| index.to_string()),
@@ -905,6 +1029,12 @@ pub(crate) async fn detect_config_put(
         }
         // LS-050：性能开关（Motion Gate）——即时生效，worker 下次取帧即读新值
         if let Some(perf) = body.get("perf") {
+            if let Some(value) = perf.get("motion_event_recording").and_then(Value::as_bool) {
+                writes.push((
+                    "perf.motion_event_recording".into(),
+                    if value { "1" } else { "0" }.into(),
+                ));
+            }
             if let Some(e) = perf.get("motion_gate_enabled").and_then(|x| x.as_bool()) {
                 writes.push((
                     "perf.motion_gate_enabled".into(),
@@ -964,33 +1094,29 @@ pub(crate) async fn detect_config_put(
             }
         }
         let tx = s.conn().unchecked_transaction()?;
-        let mut ep_changed = false;
-        if let Some((ep_l, changed)) = ep_write {
-            s.setting_set("runtime.ep", &ep_l)?;
-            ep_changed = changed;
-        }
         for (k, v) in &writes {
             s.setting_set(k, v)?;
         }
         tx.commit()?;
-        if adapter_changed {
+        if backend_changed || gpu_changed || adapter_changed {
             ls_infer::ort_session::select_directml_adapter(runtime_adapter(s));
         }
-        if ep_changed || adapter_changed {
+        if backend_changed || gpu_changed || adapter_changed {
             st.faces.reset_model();
         }
         // 即时生效：EP 变化时全部重启（避免先 restart_following_global 再 restart_all_running 双重重启）
-        let restarted = if ep_changed || adapter_changed || sensitivity.is_some() {
-            crate::worker::restart_all_running(&st, s)
-        } else if vlm.is_some()
-            || cascade.is_some()
-            || body.get("mode").is_some()
-            || body.get("vlm_prompt").is_some()
-        {
-            reload_verifier(&st, s, &previous)
-        } else {
-            crate::worker::restart_following_global(&st, s)
-        };
+        let restarted =
+            if backend_changed || gpu_changed || adapter_changed || sensitivity.is_some() {
+                crate::worker::restart_all_running(&st, s)
+            } else if vlm.is_some()
+                || cascade.is_some()
+                || body.get("mode").is_some()
+                || body.get("vlm_prompt").is_some()
+            {
+                reload_verifier(&st, s, &previous)
+            } else {
+                crate::worker::restart_following_global(&st, s)
+            };
         let cfg = DetectCfg::load(s, data_dir);
         let usage = usage_today(s, &cfg);
         Ok(Json(json!({

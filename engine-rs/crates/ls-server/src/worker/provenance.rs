@@ -27,7 +27,13 @@ impl Inputs {
         let ppe = cfg.ppe.as_ref().filter(|_| ppe_loaded);
         Self(json!({
             "version": version, "source_type": cfg.spec.type_, "analysis_mode": mode,
-            "requested_backend": if cfg.detector.use_gpu { "directml" } else { "cpu" },
+            "requested_backend": if cfg.cv_backend == "dml" { "directml" } else { &cfg.cv_backend },
+            "vulkan_adapter": if let ls_infer::yolo::VulkanAdapter::Index(index) = cfg.vulkan_adapter {
+                Some(index)
+            } else {
+                None
+            },
+            "vulkan_gpu_id": cfg.vulkan_adapter.id(),
             "directml_adapter": ls_infer::ort_session::directml_adapter(),
             "person_model": cfg.detector.model_path.as_deref().and_then(model),
             "person_confidence": cfg.detector.conf, "person_iou": cfg.detector.iou,

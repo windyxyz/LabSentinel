@@ -1,10 +1,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted, nextTick, ref, watch } from 'vue'
-import { api, CHANNEL_NAMES, TYPE_TEXT, STATUS_TEXT, mediaUrl } from '../api'
+import { api, CHANNEL_NAMES, TYPE_TEXT, STATUS_TEXT, mediaUrl, connectEvents, downloadBinary } from '../api'
 import AnnotatorModal from '../components/AnnotatorModal.vue'
 import AsyncState from '../components/AsyncState.vue'
 import SnapshotOverlay from '../components/SnapshotOverlay.vue'
 import EventExplanation from '../components/EventExplanation.vue'
+import EventVideo from '../components/EventVideo.vue'
 import SuppressionReview from '../components/SuppressionReview.vue'
 import ExploreGrid from '../components/ExploreGrid.vue'
 
@@ -100,7 +101,7 @@ const deliveryLoading = ref(false)
 const deliveryReload = ref(0)
 const retrying = ref(null)
 const actionNotice = ref('')
-const DELIVERY_LABELS = { ok: '已送达', pending: '等待发送', retry: '等待重试', failed: '失败', dead_letter: '重试结束' }
+const DELIVERY_LABELS = { ok: '渠道已接收', pending: '等待发送', sending: '正在发送', retry: '等待重试', failed: '失败', dead_letter: '重试结束', unconfirmed: '待核实' }
 const actorLabel = actor => actor === 'admin' ? '管理员' : actor === 'anonymous(auth-off)' ? '本机操作' : (actor || '—').replace(/^device:/, '')
 
 watch(() => drawer.value?.id, async (id, _, onCleanup) => {
@@ -295,6 +296,21 @@ const exportFilteredUrl = computed(() => {
   if (aiVerdict.value) p.set('ai_verdict', aiVerdict.value)
   return '/api/export/events.csv?' + p
 })
+const auditExportBusy = ref(false)
+const auditExportError = ref('')
+async function exportAuditPack() {
+  if (auditExportBusy.value) return
+  auditExportBusy.value = true
+  auditExportError.value = ''
+  try {
+    const url = exportFilteredUrl.value.replace('/api/export/events.csv?', '/api/export/audit-pack.zip?')
+    await downloadBinary(url, 'labsentinel-audit.zip')
+  } catch (error) {
+    auditExportError.value = String(error.message || error)
+  } finally {
+    auditExportBusy.value = false
+  }
+}
 
 let qTimer = null
 function onQInput() { clearTimeout(qTimer); qTimer = setTimeout(resetAndLoad, 300) }
@@ -338,14 +354,24 @@ async function openLinkedEvent() {
   }
 }
 watch(() => props.routeQuery, () => { applyRoute(); resetAndLoad({ keepHour: true }); openLinkedEvent() })
+let stopEventUpdates
 onMounted(() => {
   applyRoute()
   window.addEventListener('keydown', onKey)
   load(); loadTimeline()
   openLinkedEvent()
+  stopEventUpdates = connectEvents(() => {}, null, (event) => {
+    if (event.op !== 'recording_update' || event.has_video !== true) return
+    const index = rows.value.findIndex(row => row.id === event.id)
+    if (index >= 0) rows.value[index] = { ...rows.value[index], has_video: true }
+    if (drawer.value?.id === event.id) drawer.value = { ...drawer.value, has_video: true }
+  })
   api.cameras().then(list => { cams.value = Array.isArray(list) ? list : [] }).catch(() => { /* 筛选下拉留空即可 */ })
 })
-onUnmounted(() => window.removeEventListener('keydown', onKey))
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKey)
+  stopEventUpdates?.()
+})
 
 // LS-052：键盘快审——J/↓ 下一条、K/↑ 上一条、A 确认、F 误报、I 忽略、Space 播放/暂停、Esc 关闭。
 // 焦点在 input/textarea/select 时不触发（避免误伤搜索框/下拉）。
@@ -520,6 +546,10 @@ async function rememberSpot(event) {
       <a :href="mediaUrl(exportFilteredUrl)" download>
         <button class="ghost">导出当前筛选</button>
       </a>
+      <button type="button" class="ghost" :disabled="auditExportBusy" @click="exportAuditPack">
+        {{ auditExportBusy ? '正在导出审计包…' : '下载审计包' }}
+      </button>
+      <span v-if="auditExportError" class="st-err" role="alert">{{ auditExportError }}</span>
     </div>
     <!-- LS-052：键盘快审提示条（浅/深主题均用设计令牌） -->
     <div class="kbd-hints muted">
@@ -660,8 +690,7 @@ async function rememberSpot(event) {
                @error="previewUnavailable = true" @zoom="url => zoom = url" />
           <p v-else-if="previewUnavailable" class="muted">事件图片已不可用。</p>
           <button v-if="exploreEnabled && drawer.has_snapshot" class="ghost" @click="findSimilar(drawer)">找相似画面</button>
-          <video v-if="drawer.has_video" :src="mediaUrl(`/api/events/${drawer.id}/video`)" controls
-                 style="width:100%; border-radius:var(--overlay-radius); background:#000" />
+          <EventVideo v-if="drawer.has_video" :event-id="drawer.id" />
           <div v-if="drawer.status === 'new'" class="row">
             <button :disabled="busyEvent !== null" @click="mark(drawer, 'acked')">确认</button>
             <button class="ghost" :disabled="busyEvent !== null" @click="mark(drawer, 'false_positive')">误报</button>
@@ -706,9 +735,12 @@ async function rememberSpot(event) {
               <li v-for="delivery in deliveries" :key="delivery.id">
                 <div class="row delivery-row">
                   <b>{{ CHANNEL_NAMES[delivery.channel] || delivery.channel }} · {{ DELIVERY_LABELS[delivery.status] || delivery.status }}</b>
-                  <button v-if="['retry', 'failed', 'dead_letter'].includes(delivery.status)" type="button" class="ghost"
+                  <button v-if="['retry', 'failed', 'dead_letter', 'unconfirmed'].includes(delivery.status)" type="button" class="ghost"
                     :disabled="retrying !== null" @click="retryDelivery(delivery.id)">{{ retrying === delivery.id ? '重试中…' : '立即重试' }}</button>
                 </div>
+                <p v-if="delivery.delivered_ts || delivery.receipt_code" class="muted">
+                  {{ delivery.delivered_ts?.replace('T', ' ') }}<span v-if="delivery.receipt_code"> · HTTP {{ delivery.receipt_code }}</span><span v-if="Number.isFinite(delivery.latency_ms)"> · {{ delivery.latency_ms }} ms</span>
+                </p>
                 <p v-if="delivery.last_error" class="muted">{{ delivery.last_error }}</p>
                 <ol v-if="Array.isArray(delivery.history) && delivery.history.length" class="muted">
                   <li v-for="(attempt, index) in delivery.history" :key="index">{{ attempt.ts }} · {{ DELIVERY_LABELS[attempt.status] || attempt.status }}<span v-if="attempt.error"> · {{ attempt.error }}</span></li>
@@ -727,7 +759,7 @@ async function rememberSpot(event) {
   </div>
 
   <div v-if="videoZoom !== null" style="position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center; cursor:zoom-out" @click="videoZoom = null">
-    <video :src="mediaUrl(`/api/events/${videoZoom}/video`)" controls autoplay aria-label="事件视频回放" style="max-width:92vw; max-height:92vh" @click.stop />
+    <EventVideo :event-id="videoZoom" autoplay style="max-width:92vw" @click.stop />
   </div>
   <AnnotatorModal v-if="annotation" :sample="annotation" :image-url="`/api/dataset/samples/${annotation.id}/image`"
     @close="annotation = null" @saved="annotation = null" />

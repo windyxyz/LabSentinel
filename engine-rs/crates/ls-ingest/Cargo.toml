@@ -9,6 +9,11 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 ls-core = { path = "../ls-core" }  # R2-301: unified ffmpeg lookup
+futures-util = "0.3"
+percent-encoding = "2"
+retina = "0.4.22"
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

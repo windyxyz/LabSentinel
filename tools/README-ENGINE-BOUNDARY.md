@@ -18,7 +18,7 @@
 模型路径由 `LS_MODEL_FP32` 传入；缺失时 `ls-analyzer` 自动回退空检测（数据面/状态机照常）。
 
 ## 交付契约（Python → Rust 引擎，唯一接口）
-模型目录（`models/` 或 `m0-spike/`）中的文件契约：
+模型目录 `models/` 中的文件契约如下。
 
 1. `<model>.onnx` 使用单张 RGB NCHW 输入。支持 YOLO 逐类置信度或带类别编号的端到端输出，也支持 Ultralytics RT-DETR 的两种输出。
 2. `<model>.classes.txt` —— 类别名，一行一类，**顺序敏感**（与训练 `data.yaml names` 一致）

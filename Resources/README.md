@@ -1,17 +1,20 @@
-# Resources
+# 项目资源
 
-非项目源码文件统一归集目录。根目录只保留项目文件：`engine-rs/`、`web/`、`android/`、
-`tools/`、`scripts/`、`docs/`、`m0-spike/` 与入口文件（README/一键启动.bat 等）。
+| 位置 | 内容 |
+| --- | --- |
+| [本地发行包](本地发行包/) | 按版本查找安装器、便携 ZIP 和 SHA-256 校验文件，当前为 [0.9.6](本地发行包/0.9.6/) |
+| [验收归档](验收归档/) | 按识别、性能、发布、取流、AI、权限等用途命名的历史报告及测试沙箱 |
+| `dist/` | 构建脚本使用的临时输出，提交到 GitHub 时自动忽略 |
+| `datasets/` | 已下载的数据集、采集样本及合并标注 |
+| `runs/` | 训练输出、实验服输入尺寸对照、Vulkan 推理后端对照 |
+| `logs/` | 本地构建和清理日志 |
+| `旧开发环境/` | 早期实验留下的 Python 环境 |
+| [验收图片](acceptance/imgs/) | 代码测试使用的固定图像 |
+| [效果演示](效果演示/) | 演示生成脚本与素材来源 |
+| [插件示例](examples/plugins/) | 可读的插件样例 |
 
-| 子目录 | 内容 | 入库状态 |
-|---|---|---|
-| `效果演示/` | 检测效果演示视频（`make_demo.py` 生成）与生成脚本 | 脚本入库；mp4/jpg 不入库（Mixkit 派生素材仅个人使用） |
-| `examples/` | 插件示例（event-logger 等），配合 docs/dev/plugin-guide.md | 入库 |
-| `datasets/` | 训练/评估数据集（Roboflow 下载、抽帧、标注产物） | 不入库（1.4GB+） |
-| `runs/` | 训练产物（Ultralytics runs，best.pt 等） | 不入库 |
-| `logs/` | 构建/验收脚本的输出与缓存 | 不入库 |
-| `dist/` | 发行包构建产物（`build_rust.py --zip` / `prepare_rust_assets.py`） | 不入库 |
-| `acceptance/` | 验收素材（VLM 验收用图片帧等） | 入库（小体积） |
+`本地发行包/`、`验收归档/`、`dist/`、`datasets/` 和 `runs/` 都随本地工作区保存。历史报告中的绝对路径记录了当时的测试环境。查找现有报告时，以当前归档目录为准。
 
-服务端运行数据（事件库/截图/视频/告警）默认在 `data/` 或
-`%LOCALAPPDATA%\LabSentinel\data`，与本目录无关。
+应用事件库、截图、告警与录像由程序存储管理，Windows 默认位置为 `%LOCALAPPDATA%\LabSentinel\data`。
+
+重复验收产物可运行 [清理重复验收缓存.ps1](../scripts/清理重复验收缓存.ps1) 预览，加 `-Apply` 后处理哈希相同的副本。

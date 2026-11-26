@@ -21,6 +21,7 @@
 //!   L3 控制面迁移时用 `std::process` + 显式白名单环境重做（语义表已在
 //!   `server/app/plugins.py` 与 `docs/dev/plugin-guide.md`，可直接翻译）。
 
+pub mod actuator;
 pub mod backup;
 pub mod escalation;
 pub mod paths;
@@ -47,7 +48,7 @@ const RETENTION_INTERVAL_S: u64 = 6 * 3600;
 const ESCALATION_INTERVAL_S: u64 = 60;
 const BACKUP_CHECK_MAX_S: u64 = 3600;
 /// LS-053：告警失败重试消费者轮询间隔
-const RETRY_INTERVAL_S: u64 = 30;
+const RETRY_INTERVAL_S: u64 = 1;
 /// LS-053：日报/周报调度检查间隔
 const REPORT_CHECK_S: u64 = 60;
 /// LS-053：最大重试次数（超过即 dead_letter 死信）
@@ -256,13 +257,11 @@ pub struct Jobs {
     /// UX（2026-11-21）：告警文案网页编辑的运行时覆盖（PUT /api/alert-template
     /// 写 app_settings 并同步此处；None=用 cfg.escalation.template_text）
     alert_template_override: Mutex<Option<String>>,
-    /// UX（2026-11-21）：推送冷却去重（camera|type|track → 上次推送时刻；
-    /// alert.push_cooldown_s 秒窗口内同人同行为只推渠道一次）
-    push_dedup: Mutex<std::collections::HashMap<String, Instant>>,
     /// LS-053：日报/周报最近发送日期（防同日重复推送）
     report_last_daily: Mutex<Option<String>>,
     report_last_weekly: Mutex<Option<String>>,
     retry_consumer: Mutex<()>,
+    actuator_status: Mutex<actuator::Status>,
 }
 
 impl Jobs {
@@ -279,11 +278,15 @@ impl Jobs {
             handles: Mutex::new(Vec::new()),
             alert_channels: Mutex::new(None),
             alert_template_override: Mutex::new(None),
-            push_dedup: Mutex::new(std::collections::HashMap::new()),
             report_last_daily: Mutex::new(None),
             report_last_weekly: Mutex::new(None),
             retry_consumer: Mutex::new(()),
+            actuator_status: Mutex::new(actuator::Status::default()),
         }
+    }
+
+    pub fn actuator_status(&self) -> actuator::Status {
+        lock(&self.actuator_status).clone()
     }
 
     /// R2-305：注入渠道快照（网页端配置的生效值；None=回退 channels_from_env）。
@@ -432,79 +435,92 @@ impl Jobs {
         escalation::status_json(&store, &self.cfg.escalation, last.as_ref())
     }
 
-    /// RA1.3（ADR-0011）：单事件首发派发（worker 候选事件 → 8 渠道外部投递）。
-    /// 复用 escalation 同一链路组件：注入渠道（或 env 回退）→ 静默 → 渠道过滤 →
-    /// 限流门 → add_delivery → deliver → update_delivery。返回成功投递的渠道数。
-    /// （escalation 的「未处置事件升级提醒」仍走 escalate_once；两者共享渠道快照
-    /// 与限流器，事件不重复入队——首发只针对新落地事件。）
-    pub fn dispatch_event(&self, store: &Store, ev: &ls_dispatch::DispatchEvent) -> usize {
-        self.dispatch_with_cooldown(store, ev, true)
-    }
-
-    pub fn dispatch_episode_upgrade(
-        &self,
-        store: &Store,
-        ev: &ls_dispatch::DispatchEvent,
-    ) -> usize {
-        self.dispatch_with_cooldown(store, ev, false)
-    }
-
-    fn dispatch_with_cooldown(
-        &self,
-        store: &Store,
-        ev: &ls_dispatch::DispatchEvent,
-        cooldown: bool,
-    ) -> usize {
-        let channels: Vec<(ls_dispatch::Channel, ls_dispatch::ChannelConfig)> =
-            match self.alert_channels.lock().ok().and_then(|g| g.clone()) {
-                Some(injected) if !injected.is_empty() => injected,
-                _ => ls_dispatch::channels_from_env(),
-            };
+    fn plan_pending_alerts(&self, store: &Store) -> rusqlite::Result<()> {
+        let pending = store.pending_alerts()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let channels = match lock(&self.alert_channels).clone() {
+            Some(channels) if !channels.is_empty() => channels,
+            _ => ls_dispatch::channels_from_env(),
+        };
         let filters = parse_alert_filters();
         let silences = active_silences(store);
         let now_iso = ls_time::local_now_iso();
-        if let Some(idx) = ls_dispatch::match_silence(&silences, ev, &now_iso) {
+        let push_cooldown = store
+            .setting_get("alert.push_cooldown_s")?
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(60)
+            .clamp(0, 3600);
+        for (outbox_id, event_id, kind) in pending {
+            if self.stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let (candidates, cooldown_s) = match store.event_by_id(event_id)? {
+                Some(event) if event.vlm_suppressed == 0 => {
+                    let cooldown_s =
+                        if matches!(event.type_.as_str(), "camera_offline" | "camera_recovered") {
+                            0
+                        } else {
+                            push_cooldown
+                        };
+                    if cooldown_s > 0
+                        && kind == ls_store::AlertDispatchKind::Initial
+                        && store.alert_on_cooldown(&event, cooldown_s)?
+                    {
+                        store.plan_alert_deliveries(outbox_id, &[], 0)?;
+                        continue;
+                    }
+                    let ev = ls_dispatch::DispatchEvent {
+                        id: event.id,
+                        camera_id: event.camera_id,
+                        type_: event.type_,
+                        level: event.level,
+                        detail: event.detail,
+                        ts: event.ts,
+                        camera_name: store
+                            .camera(event.camera_id)?
+                            .map(|c| c.name)
+                            .unwrap_or_default(),
+                        track_id: event.track_id,
+                        snapshot_path: event.snapshot,
+                    };
+                    (
+                        self.plan_channels(&ev, &channels, &filters, &silences, &now_iso),
+                        cooldown_s,
+                    )
+                }
+                _ => (Vec::new(), 0),
+            };
+            store.plan_alert_deliveries(outbox_id, &candidates, cooldown_s)?;
+        }
+        Ok(())
+    }
+
+    fn plan_channels(
+        &self,
+        ev: &ls_dispatch::DispatchEvent,
+        channels: &[(ls_dispatch::Channel, ls_dispatch::ChannelConfig)],
+        filters: &HashMap<String, Value>,
+        silences: &[ls_dispatch::Silence],
+        now_iso: &str,
+    ) -> Vec<(String, String)> {
+        if let Some(idx) = ls_dispatch::match_silence(silences, ev, now_iso) {
             println!(
                 "[alert] event#{} 首发命中静默 #{}——外部渠道不推送",
                 ev.id, silences[idx].target
             );
-            return 0;
+            return Vec::new();
         }
-        // UX（2026-11-21）：推送冷却——同 camera|type|track 在
-        // alert.push_cooldown_s 秒内只推渠道一次（事件照常入库/WS 广播，
-        // 仅外部渠道静默）；0=关闭。API(vlm) 判定无 track → 同键合并兜底。
-        let cooldown_s: u64 = store
-            .setting_get("alert.push_cooldown_s")
-            .ok()
-            .flatten()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(60);
-        if cooldown_s > 0 && !matches!(ev.type_.as_str(), "camera_offline" | "camera_recovered") {
-            let key = format!("{}|{}|{}", ev.camera_id, ev.type_, ev.track_id);
-            let mut dedup = lock(&self.push_dedup);
-            let suppressed = dedup
-                .get(&key)
-                .map(|t| t.elapsed() < Duration::from_secs(cooldown_s))
-                .unwrap_or(false);
-            if cooldown && suppressed {
-                println!(
-                    "[alert] event#{} 冷却窗口内同人同行为——渠道不重复推送",
-                    ev.id
-                );
-                return 0;
-            }
-            dedup.insert(key, Instant::now());
-        }
-        let image = self.alert_image(store, ev.snapshot_path.as_deref());
         let camera = if ev.camera_name.is_empty() {
             format!("#{}", ev.camera_id)
         } else {
             ev.camera_name.clone()
         };
         let message = event_alert_text(ev.level, &ev.type_, &camera, &ev.detail);
-        let mut submitted = 0;
-        for (ch, ch_cfg) in &channels {
-            if let Some(reason) = ls_dispatch::channel_filtered(*ch, ev, &filters) {
+        let mut candidates = Vec::new();
+        for (ch, _) in channels {
+            if let Some(reason) = ls_dispatch::channel_filtered(*ch, ev, filters) {
                 println!(
                     "[alert] event#{} 渠道 {} 被过滤（{reason}）——不建投递行",
                     ev.id,
@@ -520,21 +536,9 @@ impl Jobs {
             if pending > 0 {
                 text.push_str(&format!("\n（上一窗口合并 {pending} 条）"));
             }
-            let did = store.add_delivery(ev.id, ch.name()).ok();
-            let d = ls_dispatch::deliver_with_image(*ch, ch_cfg, ev.level, &text, image.as_deref());
-            if let Some(id) = did {
-                let _ = store.update_delivery(
-                    id,
-                    if d.ok { "ok" } else { "failed" },
-                    d.attempts as i64,
-                    d.error.as_deref(),
-                );
-            }
-            if d.ok {
-                submitted += 1;
-            }
+            candidates.push((ch.name().to_owned(), text));
         }
-        submitted
+        candidates
     }
 
     fn alert_image(&self, store: &Store, snapshot: Option<&str>) -> Option<Vec<u8>> {
@@ -657,6 +661,11 @@ impl Jobs {
     }
 
     fn consume_retries_locked(&self, store: &ls_store::Store, delivery_id: Option<i64>) {
+        if delivery_id.is_none() {
+            if let Err(error) = self.plan_pending_alerts(store) {
+                eprintln!("[alert] 无法规划待发告警: {error}");
+            }
+        }
         let cutoffs = std::array::from_fn(|i| {
             ls_core::time::format_iso(ls_core::time::local_offset_secs(
                 -(retry_backoff_s(i as i64) as i64),
@@ -670,7 +679,7 @@ impl Jobs {
             return;
         }
         let channels = self.alert_channels_snapshot();
-        for (did, event_id, channel_name, attempts) in rows {
+        for (did, event_id, channel_name, attempts, outbox) in rows {
             if self.stop.load(Ordering::SeqCst) {
                 break;
             }
@@ -693,6 +702,10 @@ impl Jobs {
                 .map_or_else(|| format!("#{}", ev.camera_id), |row| row.name);
             let text = event_alert_text(ev.level, &ev.type_, &camera, &ev.detail);
             let image = self.alert_image(store, ev.snapshot.as_deref());
+            if outbox {
+                self.deliver_outbox(store, did, attempts, ch, &cfg, ev.level, image.as_deref());
+                continue;
+            }
             let d = ls_dispatch::deliver_with_backoff(
                 ch,
                 &cfg,
@@ -710,6 +723,55 @@ impl Jobs {
             } else {
                 let _ = store.update_delivery(did, "retry", next_attempts, d.error.as_deref());
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_outbox(
+        &self,
+        store: &Store,
+        id: i64,
+        attempts: i64,
+        channel: ls_dispatch::Channel,
+        cfg: &ls_dispatch::ChannelConfig,
+        level: i64,
+        image: Option<&[u8]>,
+    ) {
+        let (key, text) = match store.begin_outbox_delivery(id) {
+            Ok(Some(claimed)) => claimed,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("[alert] 无法领取投递 #{id}: {error}");
+                return;
+            }
+        };
+        let start = Instant::now();
+        let delivery = ls_dispatch::deliver_outbox(channel, cfg, level, &text, image, &key);
+        let (status, retry_at) = if delivery.ok {
+            ("ok", None)
+        } else if delivery.acceptance_uncertain {
+            ("unconfirmed", None)
+        } else if attempts + 1 >= MAX_RETRY_ATTEMPTS {
+            ("dead_letter", None)
+        } else {
+            let delay = retry_backoff_s(attempts + 1) as i64;
+            (
+                "retry",
+                Some(ls_time::format_iso(ls_time::local_offset_secs(delay))),
+            )
+        };
+        if let Err(error) = store.finish_outbox_delivery(
+            id,
+            ls_store::AlertDeliveryOutcome {
+                status,
+                error: delivery.error.as_deref(),
+                latency_ms: start.elapsed().as_millis() as i64,
+                receipt: delivery.receipt_code.map(i64::from),
+                receipt_summary: delivery.receipt_summary.as_deref(),
+                retry_after: retry_at.as_deref(),
+            },
+        ) {
+            eprintln!("[alert] 无法保存投递 #{id} 的回执: {error}");
         }
     }
 
@@ -842,7 +904,25 @@ impl Jobs {
             Ok(_) => (),
             Err(error) => eprintln!("[jobs] 无法恢复中断的告警投递: {error}"),
         }
+        if let Err(error) = ls_store::Store::open(&self.db_path.to_string_lossy())
+            .and_then(|store| store.recover_interrupted_recordings())
+        {
+            eprintln!("[jobs] 无法记录中断的事件录像: {error}");
+        }
         self.stop.store(false, Ordering::SeqCst);
+        let jobs = Arc::clone(self);
+        match thread::Builder::new()
+            .name("ls-actuator".into())
+            .spawn(move || {
+                actuator::run(
+                    &jobs.db_path.to_string_lossy(),
+                    &jobs.stop,
+                    &jobs.actuator_status,
+                );
+            }) {
+            Ok(handle) => handles.push(handle),
+            Err(error) => eprintln!("[jobs] 无法启动声光联动线程: {error}"),
+        }
         handles.push(spawn_loop(
             "retention",
             Arc::clone(self),

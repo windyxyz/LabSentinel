@@ -19,8 +19,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_INPUT = ROOT / "m0-spike" / "yolo11n_ppe.onnx"
-DEFAULT_OUTPUT = ROOT / "m0-spike" / "yolo11n_ppe_xint8.onnx"
+DEFAULT_INPUT = ROOT / "models" / "yolo11n_ppe.onnx"
+DEFAULT_OUTPUT = ROOT / "models" / "yolo11n_ppe_xint8.onnx"
 DEFAULT_CALIB = ROOT / "Resources" / "datasets" / "lab-ppe" / "valid" / "images"
 HEAD_PREFIX = "/model.23"  # YOLO 检测头子图前缀（Quark 导出的节点名以 /model.23/ 开头）
 
@@ -228,7 +228,7 @@ def main():
         probes = [p for p in (head_probe, "/model.0/conv/Conv") if p]
         if probes:
             check_weight_dtype(out, probes)
-    print("[next] NPU 推理验证参考 m0-spike/s2c_fps_npu.py（onnxruntime-vitisai, VitisAIExecutionProvider）")
+    print("[next] NPU 推理验证参考 tools/legacy/model-experiments/s2c_fps_npu.py（onnxruntime-vitisai, VitisAIExecutionProvider）")
 
 
 if __name__ == "__main__":

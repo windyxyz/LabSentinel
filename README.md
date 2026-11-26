@@ -1,141 +1,74 @@
 <div align="center">
 
-<img src="docs/assets/labsentinel-project.png" alt="LabSentinel 实验室哨兵" width="400" />
+<img src="docs/assets/labsentinel-project.png" alt="LabSentinel 实验室哨兵" width="360" />
 
-# 🧪 LabSentinel · 实验室哨兵
+# LabSentinel · 实验室哨兵
 
-**开源实验室安全行为智能监控系统**：接入现有摄像头（RTSP）、USB/视频文件，或外部软件持续截图的图片文件夹，自动识别进入安全区未穿实验服、统计人数，异常实时多渠道告警。全本地部署，隐私可控。
+接入现有摄像头和本地素材，检测实验室人员、白大褂、口罩与区域违规，发出警示并保留可复核的事件证据。
 
-![Version](https://img.shields.io/badge/Version-0.5.0-blue) ![Rust](https://img.shields.io/badge/Rust-单二进制-dea584) ![Vue](https://img.shields.io/badge/Vue-3-42b883) ![License](https://img.shields.io/badge/License-AGPL--3.0-red) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
+Windows x64 · Rust · Vue 3 · AGPL-3.0
 
 </div>
 
-## ✨ 功能一览（30 秒了解）
+## 快速开始
 
-v0.5.0 增加运动预筛、单人留守规则、实时检测框、全屏值守、告警重试、日报周报、网页标注和模型对比评测。 [完整变更](CHANGELOG.md#050---2026-11-22)
+本仓库当前为 **0.9.6 本地候选**。已发布的版本和校验文件可在项目发布页查看。 [GitHub Releases](https://github.com/windyxyz/LabSentinel/releases)
 
-- 🔍 **白大褂检测**：进入安全区自动判定穿着状态（证据分级判定，不把“看不清”当“违规”误报）
-- 🖼️ **图片文件夹自动识别**：外部截图软件持续写入目录 → 自动识别关键图片（有人/违规）并按摄像头/时间汇报，原始截图只读
-- 👥 **人数统计**：安全区在场人数统计与超限告警
-- 🚨 **事件闭环**：告警 → 确认/误报/忽略 → 误报样本自动进标注池反哺模型
-- 📢 **多渠道告警**：企业微信 / 钉钉 / 飞书 / 微信（Server酱·PushPlus）/ QQ（Qmsg）/ 邮件，失败重试+死信可查；网页端保存即生效，密钥加密存储
-- 🖥️ **实时画面**：go2rtc 提供 WebRTC 和可撤销的视频中继，取流异常时显示最新快照及时间
-- 🔐 **访问控制**：支持本机访问密码、局域网 HTTPS 登录和可撤销的浏览器会话
-- 📊 **统计报表**：日/小时趋势、CSV / PDF 月报导出（安全汇报直接用）
-- 🎥 **视频存证**：事件前后各 2 秒 H.264 短视频 + 证据包 ZIP 导出
-- 🤖 **模型模块化**：实验服模型随包并可开关/替换；外部联网模型（OpenAI 兼容、Ollama、Gemini）支持**多接入档案**——保存多套服务、随时切换、自动拉取上游模型清单；按摄像头切换
-- 👤 **人脸比对**（默认关闭）：CompreFace 集成，合规红线齐备
-- 🎛️ **双主题 UI**：WinUI 3 设计令牌，浅色/深色随系统，首次打开有配置向导
+Windows 包面向 Windows 10/11 x64。运行使用包内组件，无需另装 Python、Node.js 或数据库。 [部署环境要求](docs/guide/部署指南.md)
 
-## 🖼️ 界面预览
+1. **Windows 安装器**。运行 `LabSentinel-setup-<版本>.exe`。个人安装通过托盘打开控制台。全用户安装可选择原生 Windows 服务，在管理员配置后开机值守。 [安装、升级与卸载](docs/guide/安装与卸载.md)
+2. **便携 ZIP**。解压至可写目录，双击 `LabSentinel.bat`。随包包含基础检测模型、推理库、FFmpeg、go2rtc 和 Web 控制台。打开 `http://127.0.0.1:8000` 即可查看。
+3. **添加来源**。在「监控源」添加 RTSP、USB、视频文件或图片文件夹。预览画面，按需设置检测区域与规则，启动检查后在「事件」查看结果。 [摄像头接入](docs/guide/摄像头接入Runbook.md) · [图片文件夹接入](docs/guide/图片文件夹接入.md)
 
-| 仪表盘 | 事件查询与处置 |
-|---|---|
-| ![仪表盘](docs/assets/dashboard.png) | ![事件查询与详情抽屉](docs/assets/events-drawer.png) |
-| **安全区配置** | **统计报表** |
-| ![安全区配置](docs/assets/zones.png) | ![统计报表](docs/assets/reports.png) |
+个人安装的数据默认保存于 `%LOCALAPPDATA%\LabSentinel\data`。安装器覆盖升级前归档旧版，卸载时默认保留数据。调整端口和局域网访问请使用「设置」。 [部署指南](docs/guide/部署指南.md)
 
-> 更多截图见 [docs/assets/](docs/assets/README.md)（含人脸管理页）。
+## 功能
 
-## 🚀 快速开始
+| 功能 | 使用场景 |
+| --- | --- |
+| 本地识别 | 人员在场、白大褂、口罩、区域和人数规则。按机位配置检测范围和模型。画面证据不足时显示未知。 |
+| 多路监控源 | 接入独立相机或录像机通道，可用主码流预览、辅码流分析。通过授权局域网 RTSP 接入大华；乐橙取流取决于设备型号及固件。 |
+| 事件和录像 | 正常检查、告警与恢复均可查。保留截图和触发片段，支持实时大屏、事件回放、导出证据及审计包。连续录像由现有录像机负责。 |
+| AI 复核和问答 | 可使用本地视觉服务或配置外部视觉 API 复核，按人合并时窗内的重复请求。支持围绕事件自然语言追问、生成报告和本地语义搜图。 |
+| 授权与联动 | 本机访问密码、按机位配对设备、可撤销凭证和逐工具授权的本地 MCP；支持通知渠道、告警重试和外部设备联动。 |
+| 样本与空间 | 从事件收集、标注并按类别导出训练样本。按类别查看占用，预览、确认清理或设置自动保留规则。 |
 
-### 方式 A：安装器（推荐，双击安装）
+安装包和便携 ZIP 随附人员、实验服和口罩模型。本地识别使用 Windows DirectML，GPU 初始化或执行失败时回退 CPU。支持 Vulkan 的本地候选可在设置中切换试用。可选的离线视觉问答和语义搜图需另备对应权重。人脸比对默认关闭，可经授权配置本地或外部服务。 [模型接入](docs/dev/model-onboarding.md) · [人脸模型与人员录入](docs/guide/人脸模型.md)
 
-下载 **`LabSentinel-setup-<版本>.exe`**（[Releases](https://github.com/windyxyz/LabSentinel/releases)）→
-双击安装（中英双语；默认「仅为我安装」，可选「为所有用户安装」）→ 完成页生成
-开始菜单/桌面快捷方式 → 双击 **LabSentinel** 打开控制台。
+## 界面
 
-- 安装器在升级时自动归档旧版（`versions\`），装完自动 `--selftest-http` 探活
-- 卸载走后「设置 → 应用」；数据目录 `%LOCALAPPDATA%\LabSentinel` 不随卸载删除
-- **无黑框**：启动后任务栏托盘常驻（双击开控制台；右键可优雅退出）；
-  检测模式三选一（仅本地 / 仅 API / **本地+API 协作省费用**）在设置 → 模型与检测；
-  **GPU 推理默认开启**（DirectML——N 卡/A 卡/Intel 卡/核显通用，失败自动回落
-  CPU，可在设置里切换）
+以下截图由 0.9.6 本地候选生成，使用合成画面和测试事件。
 
-### 方式 B：便携 zip（免安装）
+| 控制台 | 事件与证据 |
+| --- | --- |
+| ![控制台中的监控状态和事件统计](docs/assets/dashboard-0.9.6.png) | ![事件详情中的截图、录像和证据](docs/assets/events-0.9.6.png) |
 
-下载 **`labsentinel-rust-<版本>-<日期>.zip`** →
-解压到可写目录 → 双击 **`LabSentinel.bat`** → 浏览器自动打开控制台。
+[查看存储管理界面](docs/assets/storage-0.9.6.png)
 
-- 包内自带模型、ffmpeg、onnxruntime 与前端，**不需要安装 Python / Node**，运行无需联网
-- 数据默认在 `%LOCALAPPDATA%\LabSentinel\data`；换端口/局域网访问见
-  [安装与卸载](docs/guide/安装与卸载.md)
-- 升级/回滚：`labsentinel-server.exe --archive .` / `--rollback .`（详见同上文档）
+## 验收范围
 
-### 方式 C：源码运行（开发模式）
+Windows 候选已验证照片与视频检查、AMD Vulkan 四路和九路短测、事件回放、以图搜图、机位权限收窄，以及个人安装、覆盖安装、回滚和保留数据卸载。
 
-```bash
-# 1) 前端
-cd web
-npm ci --registry=https://registry.npmmirror.com
-npm run build
+白大褂检测仍受远景、逆光和遮挡影响。现场通道、异厂显卡、管理员服务和签名在对应环境继续验收。 [当前进度与实测记录](docs/maintenance/progress.md) · [版本路线图](docs/plan/v1.0.0-roadmap.md) · [变更记录](CHANGELOG.md)
 
-# 2) 资产（模型/ffmpeg/onnxruntime；已存在则跳过；需要 Python 3.12 作为构建工具）
+## 开发
+
+Rust 后端在 [engine-rs](engine-rs/)，Vue 前端在 [web](web/)。[模型权重](models/)、[构建脚本](scripts/)、[训练工具](tools/) 各有独立目录。[文档索引](docs/) 包含使用指南和维护记录，[本地资源索引](Resources/) 可查发行包、验收、数据集和训练输出。
+
+前端构建产物由 Rust 服务托管。Windows 中文路径的构建配方见接力开发规范。 [开发环境和验证命令](AGENTS.md)
+
+```powershell
+# 仓库根目录
+npm --prefix web ci
+npm --prefix web run build
 python scripts/prepare_rust_assets.py
 
-# 3) 服务端（Rust）
-cd engine-rs
+Set-Location engine-rs
 cargo run -p ls-server -- --launch
-# 或打包：python scripts/build_rust.py --strict --zip
 ```
 
-开发时前端热更新：`cd web && npm run dev`（Vite 代理到 8000），服务端照常用
-`cargo run -p ls-server`；用 `LS_WEB_DIST=web/dist` 让 Rust 直接托管构建产物。
+Python 用于开发期资产准备、训练和验收。Rust 工作区位于 `engine-rs/`，前端位于 `web/`，部署脚本位于 `deploy/`。 [架构](docs/dev/架构设计.md) · [API 参考](docs/dev/api-reference.md) · [运维手册](docs/guide/运维手册.md)
 
-> 仓库内的 Python 仅用于**训练/标注工具链（`tools/`）与验收驱动（`scripts/*.py`）**，
-> 不是运行时依赖。原 Python 服务端已在 ADR-0011 过渡期结束后退役。
+## 许可
 
-## 🧭 文档索引（docs/ 已按用途分组）
-
-| 分组 | 内容 |
-|---|---|
-| **[docs/guide/](docs/guide/)** — 使用与部署 | [安装与卸载](docs/guide/安装与卸载.md)、[部署指南](docs/guide/部署指南.md)、[运维手册](docs/guide/运维手册.md)、[摄像头接入 Runbook](docs/guide/摄像头接入Runbook.md)、[图片文件夹接入](docs/guide/图片文件夹接入.md)、[部署 FAQ](docs/guide/部署FAQ.md)、[杀毒软件误报说明](docs/guide/杀毒软件误报说明.md) |
-| **[docs/dev/](docs/dev/)** — 开发者 | [架构设计](docs/dev/架构设计.md)、[API 参考](docs/dev/api-reference.md)（+openapi.json）、[MQTT 协议](docs/dev/mqtt-protocol.md)、[插件指南](docs/dev/plugin-guide.md)、[模型接入](docs/dev/model-onboarding.md)、[数据飞轮](docs/dev/data-flywheel.md)、[术语表](docs/dev/GLOSSARY.md) |
-| **[docs/releases/](docs/releases/)** — 发布 | [0.2.0 发布说明](docs/releases/release-notes-v0.2.0.md)、[风险登记册](docs/releases/risk-register.md)、[性能基线](docs/releases/perf-baseline.md) |
-| **[docs/adr/](docs/adr/)** — 架构决策 | 0011 Rust-first 全面重构（含退役记录）· 0010 安装包策略 · 0009 对齐与 GPU · 0006 ffmpeg 视频栈 · 0003 Flutter · 0002 服务端分析 · 0001 AGPL |
-| **[docs/plan/](docs/plan/)** — 项目管理 | [状态台账](docs/plan/status.md)（持续更新） |
-| **[docs/archive/](docs/archive/)** — 历史留存 | M0 路线图、v0.1 发布草稿、S7 验证记录、预研报告 |
-
-## 📁 仓库结构
-
-```
-engine-rs/       Rust 工作区：控制面（axum 单二进制）+ 分析/跟踪/告警/存储/取流
-web/             Vue3 Web 客户端（构建产物由 Rust 直接托管）
-scripts/         构建（Rust 单包）/资产准备/冒烟/端到端验收（Python 仅作开发工具）
-tools/           训练/量化/标注工具链 + go2rtc 网关 + ffmpeg（开发资产）
-deploy/          部署参考：systemd / Windows 服务
-docs/            guide（使用）/ dev（开发者）/ releases / adr / plan / archive
-android/         Flutter 客户端骨架（暂缓）
-m0-spike/        M0 技术验证记录与模型资产（历史保留）
-Resources/       效果演示/插件示例/数据集/构建产物（见 Resources/README.md）
-```
-
-## 🔒 环境变量（前缀 LS_）
-
-常用项（全部可省略，网页端能配的优先在网页配）：
-
-| 变量 | 说明 | 默认 |
-|---|---|---|
-| LS_PORT | 监听端口 | 8000 |
-| LS_HOST | 监听地址（非回环必须配 `LS_ADMIN_TOKEN`） | 127.0.0.1 |
-| LS_ADMIN_TOKEN | API 管理令牌，直接监听局域网地址时必设 | 空，网页密码可在「访问控制」设置 |
-| LS_DATA_DIR / LS_DB_PATH | 数据目录 / 数据库路径 | `%LOCALAPPDATA%\LabSentinel\data` |
-| LS_MODEL_PATH | 本地检测模型（ONNX） | 包内 `models/yolo11n.onnx`（由启动器注入） |
-| LS_PPE_MODEL | 实验服 PPE 模型 | 包内 `models/yolo11n_ppe.onnx`（自 0.3.1 随包提供，未设时自动使用） |
-| LS_VLM_URL / LS_VLM_KEY / LS_VLM_MODEL | 外部联网视觉模型（OpenAI 兼容端点） | 未配置 |
-| LS_ANALYSIS_FPS | 每路分析帧率上限 | 5.0 |
-| LS_FACE_ENABLED | 旧版 CompreFace 初始开关，网页保存后应用网页设置 | **false** |
-
-告警渠道推荐在网页端配置（保存即生效、密钥加密存储），无需改环境变量。
-
-## ⚖️ 开源协议与合规
-
-AGPL-3.0（与 Ultralytics 生态联动决策见 [docs/adr/0001](docs/adr/0001-agpl-and-ultralytics.md)）。实验服 PPE 模型自 0.3.1 随发行包分发（LAB PPE 数据集 CC BY 4.0，署名与哈希见 `NOTICE`）；其余模型与数据集不入库。
-人脸比对模块**默认关闭**，可在网页选择本地或 CompreFace。模型配置、录入授权及撤回见 [人脸模型与人员录入](docs/guide/人脸模型.md)。
-
-## 🛡️ 已知限制
-
-- 未签名预览版：SmartScreen 可能提示「未知发布者」，请先校验 `SHA256SUMS-rust.txt`
-- Windows USB 摄像头已支持 `dshow` 自动枚举（Linux 仍需手动填写设备路径；RTSP/视频文件/图片文件夹全平台可用）
-- 外部联网模型的质量取决于所选服务商；离线环境请使用包内/自带的 ONNX 模型
-- Linux 以源码构建运行（systemd 示例见 `deploy/systemd/`），发布包目前面向 Windows
+项目按 AGPL-3.0 发布。第三方组件和随包模型的来源、署名及适用许可见声明文件。 [LICENSE](LICENSE) · [NOTICE](NOTICE)

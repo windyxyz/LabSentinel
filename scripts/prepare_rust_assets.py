@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import fetch_assets  # noqa: E402
 
-MODELS = ROOT / "m0-spike"
+MODELS = ROOT / "models"
 FFDIR = ROOT / "tools" / "ffmpeg"
 ORTDIR = ROOT / "tools" / "onnxruntime"
 MODEL_ASSETS = ("yolo11n_ppe.onnx", "yolo11n_ppe.classes.txt", "labcoat-confirm.onnx")

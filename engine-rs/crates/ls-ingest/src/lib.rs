@@ -16,10 +16,13 @@ pub mod capture;
 /// kill-on-close，主进程任何时候死亡都不留孤儿；Drop 自动杀进程。
 /// 复用 winjob 内部已收口的 unsafe，本模块零新增 unsafe。
 pub mod child_guard;
+pub mod recording;
+mod rtsp;
 
 use std::io::Read;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// 可被控制线程共享的 ffmpeg 子进程句柄（stop 时强杀 → 读管道 EOF → 阻塞的
@@ -66,6 +69,8 @@ pub struct Ingest {
     cfg: IngestConfig,
     child: Option<ChildSlot>,
     stdout: Option<ChildStdout>,
+    recording: Option<JoinHandle<()>>,
+    rtsp: Option<rtsp::Pump>,
     frame_index: u64,
     frame_bytes: usize,
     /// 孤儿治理（2026-11-21）：所有 ffmpeg 子进程 assign 进此 job——server 进程
@@ -81,23 +86,40 @@ impl Ingest {
             cfg,
             child: None,
             stdout: None,
+            recording: None,
+            rtsp: None,
             frame_index: 0,
             frame_bytes,
             job: crate::winjob::JobHandle::new(),
         }
     }
 
-    fn build_cmd(&self) -> Command {
+    fn build_cmd(&self, recording: bool, retina: bool) -> Command {
         // R2-301/N-22: portable layout keeps ffmpeg in tools/ (not on PATH).
         let mut c = Command::new(ls_core::bin::find("ffmpeg"));
         c.stdout(Stdio::piped()).stderr(Stdio::null());
+        if recording {
+            // FFmpeg writes the optional encoded output to this second pipe.
+            c.args(["-loglevel", "quiet", "-nostats", "-nostdin"])
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null());
+        }
         // LS-043：GUI 子系统下禁止弹 cmd 黑框
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x0800_0000);
         }
-        if self.cfg.source.starts_with("rtsp") {
+        if retina {
+            c.stdin(Stdio::piped()).args([
+                "-f",
+                "matroska",
+                "-analyzeduration",
+                "1",
+                "-fpsprobesize",
+                "0",
+            ]);
+        } else if self.cfg.source.starts_with("rtsp") {
             if self.cfg.rtsp_transport_tcp {
                 c.arg("-rtsp_transport").arg("tcp");
             }
@@ -116,12 +138,18 @@ impl Ingest {
             c.arg("-f").arg("dshow");
         }
         c.arg("-i")
-            .arg(&self.cfg.source)
+            .arg(if retina { "pipe:0" } else { &self.cfg.source })
             .args(["-an", "-sn", "-dn"]);
+        if recording {
+            c.args(["-map", "0:v:0"]);
+        }
         if let Some(vf) = self.filter_chain() {
             c.args(["-vf", &vf]);
         }
         c.args(["-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]);
+        if recording {
+            recording::add_ffmpeg_output(&mut c);
+        }
         c
     }
 
@@ -147,29 +175,53 @@ impl Ingest {
 
     /// 用外部持有的 slot 启动：控制线程可 `Ingest::kill_slot(&slot)` 强杀。
     pub fn spawn_with_slot(&mut self, slot: ChildSlot) -> std::io::Result<()> {
+        self.spawn_session(slot, false, false).map(|_| ())
+    }
+
+    fn spawn_session(
+        &mut self,
+        slot: ChildSlot,
+        recording: bool,
+        retina: bool,
+    ) -> std::io::Result<Option<recording::Recorder>> {
+        self.stop();
         Ingest::kill_slot(&slot); // 清理上次退出的进程
-        let mut c = self.build_cmd().spawn()?;
+        let mut c = self.build_cmd(recording, retina).spawn()?;
         // 孤儿治理：子进程挂进 server 生命期的 job（kill-on-close）——assign
         // 失败（进程秒退等）无害，正常 kill_slot 路径不受影响
         if let Some(job) = &self.job {
             let _ = job.assign_child(&c);
         }
+        let stdin = c.stdin.take();
         self.stdout = c.stdout.take();
-        if let Ok(mut guard) = slot.lock() {
-            *guard = Some(c);
-        }
+        let recorder = c.stderr.take().and_then(|pipe| {
+            let (recorder, thread) = recording::Recorder::start(pipe).ok()?;
+            self.recording = Some(thread);
+            Some(recorder)
+        });
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(c);
         self.child = Some(slot);
+        if retina {
+            let started = stdin
+                .ok_or_else(|| std::io::Error::other("Retina decoder pipe missing"))
+                .and_then(|pipe| rtsp::Pump::start(self.cfg.source.clone(), pipe));
+            match started {
+                Ok(pump) => self.rtsp = Some(pump),
+                Err(error) => {
+                    self.stop();
+                    return Err(error);
+                }
+            }
+        }
         self.frame_index = 0;
-        Ok(())
+        Ok(recorder)
     }
 
     /// 强杀 slot 里的 ffmpeg（可从任意线程调用；已空则 no-op）。
     pub fn kill_slot(slot: &ChildSlot) {
-        if let Ok(mut guard) = slot.lock() {
-            if let Some(mut c) = guard.take() {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
+        if let Some(mut c) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = c.kill();
+            let _ = c.wait();
         }
     }
 
@@ -206,6 +258,12 @@ impl Ingest {
         self.stdout = None;
         if let Some(slot) = self.child.take() {
             Ingest::kill_slot(&slot);
+        }
+        if let Some(pump) = self.rtsp.take() {
+            pump.stop();
+        }
+        if let Some(thread) = self.recording.take() {
+            let _ = thread.join();
         }
     }
 

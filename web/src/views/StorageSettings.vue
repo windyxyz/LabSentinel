@@ -4,6 +4,7 @@ import { api } from '../api'
 
 const options = {
   cache: { label: '缩略图缓存', days: 7, detail: '清理后缩略图会按需生成。' },
+  vulkan_cache: { label: 'Vulkan 编译缓存', days: 30, detail: '清理后下次启动检测时会按需重新编译，首次启动可能稍慢。' },
   logs: { label: '历史运行日志', days: 14, detail: '保留当天正在写入的日志。' },
   events: { label: '已处置事件', days: 180, detail: '删除符合条件的事件及无其他引用的证据。保留未处置告警、进行中事件和待投递证据。' },
   normal_checks: { label: '正常图片检查副本', days: 30, detail: '清理无违规检查的派生截图与缩略图，保留原图和导入记录。' },
@@ -13,6 +14,7 @@ const options = {
 const groupNames = {
   logs: '运行日志', thumbs: '缩略图缓存', snapshots: '截图与事件证据', videos: '视频证据',
   dataset_pool: '标注池', annotation_pool: '旧标注池', backups: '备份', database: '数据库',
+  vulkan_cache: 'Vulkan 编译缓存',
 }
 const usage = ref(null)
 const category = ref('cache')

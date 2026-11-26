@@ -330,6 +330,57 @@ pub(crate) async fn update_rule_grace(
     })
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuleEnabledInput {
+    enabled: bool,
+}
+
+pub(crate) async fn update_rule_enabled(
+    State(st): State<Shared>,
+    AxPath(rid): AxPath<i64>,
+    Json(input): Json<RuleEnabledInput>,
+) -> Response {
+    with_store(&st, |store| {
+        let revision = match rule_target(store, rid)? {
+            Some((cid, _)) => set_rule_enabled(&st, store, cid, rid, input.enabled)?,
+            None => None,
+        };
+        Ok(match revision {
+            Some(revision) => Json(json!({"ok": true, "id": rid, "enabled": input.enabled,
+                "policy_revision": revision}))
+            .into_response(),
+            None => detail_err(StatusCode::NOT_FOUND, "rule not found"),
+        })
+    })
+}
+
+pub(crate) fn rule_target(
+    store: &ls_store::Store,
+    rid: i64,
+) -> rusqlite::Result<Option<(i64, String)>> {
+    use rusqlite::OptionalExtension;
+    store.conn().query_row(
+        "SELECT r.camera_id,r.behavior FROM rules r JOIN cameras c ON c.id=r.camera_id WHERE r.id=?",
+        [rid],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()
+}
+
+pub(crate) fn set_rule_enabled(
+    st: &Shared,
+    store: &ls_store::Store,
+    cid: i64,
+    rid: i64,
+    enabled: bool,
+) -> rusqlite::Result<Option<u64>> {
+    let changed = store.conn().execute(
+        "UPDATE rules SET enabled=? WHERE id=? AND camera_id=?",
+        rusqlite::params![enabled, rid, cid],
+    )?;
+    Ok((changed == 1).then(|| st.workers.notify_policy_changed()))
+}
+
 pub(crate) async fn delete_rule(State(st): State<Shared>, AxPath(rid): AxPath<i64>) -> Response {
     with_store(&st, |s| {
         if s.delete_rule(rid)? > 0 {

@@ -92,6 +92,8 @@ function editAnalysis(camera) {
   analysis.value = {
     id: camera.id, name: camera.name,
     mode: camera.analysis_mode || 'main', source: '',
+    backend: camera.capture_preference === 'retina' ? 'retina' : 'ffmpeg',
+    activeBackend: camera.capture_backend,
     hasSubstream: camera.analysis_mode === 'substream',
   }
 }
@@ -102,7 +104,9 @@ async function saveAnalysis() {
   analysisSaving.value = true
   analysisError.value = ''
   try {
-    await api.setAnalysisSource(current.id, { mode: current.mode, source: current.source.trim() })
+    await api.setAnalysisSource(current.id, {
+      mode: current.mode, source: current.source.trim(), capture_backend: current.backend,
+    })
     analysis.value = null
     await refresh()
   } catch (error) {
@@ -543,6 +547,12 @@ function watchLive(cam) {
             <option value="substream">单独使用子码流</option>
           </select>
         </label>
+        <label>RTSP 取流方式
+          <select v-model="analysis.backend" :disabled="analysisSaving">
+            <option value="ffmpeg">FFmpeg（默认）</option>
+            <option value="retina">Retina（试用）</option>
+          </select>
+        </label>
         <label v-if="analysis.mode === 'substream'">子码流地址
           <input v-model="analysis.source" type="password" autocomplete="off" :disabled="analysisSaving"
             :placeholder="analysis.hasSubstream ? '留空保留已保存的地址' : 'rtsp://摄像头地址/子码流'"
@@ -551,6 +561,8 @@ function watchLive(cam) {
       </div>
       <p v-if="analysis.mode === 'substream'" class="muted">请选择与主码流视角、宽高比一致的子码流。实时预览继续使用主码流。</p>
       <p v-if="analysis.mode !== 'main'" class="muted">分析源失联时回退到直连主码流。</p>
+      <p v-if="analysis.backend === 'retina'" class="muted">支持 H.264/H.265 RTSP。连接或取帧失败时，使用 FFmpeg 重试同一码流。</p>
+      <p v-if="analysis.activeBackend" class="muted">当前取流方式 {{ analysis.activeBackend === 'retina' ? 'Retina' : 'FFmpeg' }}</p>
       <p v-if="analysisError" class="st-err" role="alert">{{ analysisError }}</p>
       <div class="row">
         <button type="submit" :disabled="analysisSaving">{{ analysisSaving ? '保存中…' : '保存' }}</button>

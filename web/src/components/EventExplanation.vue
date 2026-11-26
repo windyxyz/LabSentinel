@@ -25,6 +25,18 @@ const visual = computed(() => value.value?.visual)
 const zone = computed(() => value.value?.zone)
 const episode = computed(() => value.value?.episode)
 const review = computed(() => value.value?.review)
+const recording = computed(() => value.value?.evidence?.recording)
+const recordingStates = {
+  capturing: '正在收集事件前后的画面', original: '已保存原编码视频',
+  reencoded: '已保存重编码视频', expired: '录像已按保留策略清理', unavailable: '录像不可用',
+}
+const recordingReasons = {
+  interrupted: '程序在保存前中断', source_ended: '输入流中断或结束', timestamp_discontinuity: '输入流的时间戳中断',
+  timed_out: '等待录像片段超时', no_keyframe: '没有可用于回放的关键帧', buffer_limit: '超出短时缓存上限',
+  busy: '机位的并发录像已满', unsupported_codec: '源编码无法直接封装', invalid_stream: '未收到可用的原编码数据',
+  write_failed: '无法写入录像文件', database_failed: '无法保存录像索引', encode_failed: '无法生成可回放的录像',
+  worker_start_failed: '无法启动录像处理', unavailable: '原编码录像不可用', invalid_window: '录像范围超出缓存',
+}
 const label = (key) => labels[key] || '—'
 
 async function load() {
@@ -82,6 +94,12 @@ async function load() {
         <dt>违规片段</dt>
         <dd>{{ episode.first_ts }} 至 {{ episode.last_ts }} · {{ Number(episode.duration_s || 0).toFixed(1) }} 秒 · {{ episode.hit_count }} 次</dd>
         <dd v-if="episode.context?.close_reason">{{ label(episode.context.close_reason) }} · {{ episode.context.closed_ts }}</dd>
+      </template>
+      <template v-if="recording">
+        <dt>事件录像</dt>
+        <dd>{{ recordingStates[recording.state] || '录像状态未知' }}<template v-if="recording.codec"> · {{ recording.codec.toUpperCase() }}</template></dd>
+        <dd v-if="recording.start_ts && recording.end_ts">{{ recording.start_ts }} 至 {{ recording.end_ts }}</dd>
+        <dd v-if="recordingReasons[recording.reason]">{{ recordingReasons[recording.reason] }}</dd>
       </template>
       <dt>AI 复核</dt>
       <dd v-if="review?.verdict">{{ label(review.verdict) }} · {{ percent(review.confidence) }}<template v-if="value.review_model"> · {{ value.review_model }}</template></dd>

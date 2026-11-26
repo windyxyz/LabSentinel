@@ -79,38 +79,57 @@ pub(crate) async fn stats_compliance(
         .get("start")
         .map_or(default_start.as_str(), String::as_str);
     let end = query.get("end").map_or(today.as_str(), String::as_str);
-    let is_date = |s: &str| {
-        s.len() == 10
-            && ls_core::time::parse_local_datetime(&format!("{s}T00:00:00"))
-                .is_some_and(|date| ls_core::time::format_date(date) == s)
-    };
-    if !is_date(start) || !is_date(end) || start > end {
+    if !valid_date_range(start, end) {
         return detail_err(StatusCode::BAD_REQUEST, "统计日期范围无效").into_response();
     }
+    let allowed_cameras = browser
+        .device
+        .as_ref()
+        .and_then(|device| device.cameras.as_deref());
     with_store(&st, |store| {
-        let eligible: Vec<_> = store
-            .cameras()?
-            .into_iter()
-            .filter(|c| matches!(c.type_.as_str(), "rtsp" | "usb"))
-            .filter(|c| {
-                camera_id.is_none_or(|id| c.id == id) && group.is_none_or(|g| c.group_name == g)
-            })
-            .filter(|c| {
-                browser
-                    .device
-                    .as_ref()
-                    .is_none_or(|device| device.allows_camera(c.id))
-            })
-            .map(|c| c.id)
-            .collect();
-        let count = store.compliance_counts(start, end, None, Some(&eligible))?;
-        Ok(Json(
-            json!({"start":start, "end":end, "frames":count.frames,
-            "checked":count.checked(), "compliant":count.compliant, "violations":count.violations,
-            "unknown":count.unknown, "observed_cameras":count.cameras, "eligible_cameras":eligible.len(),
-            "rate_percent":count.rate_percent()}),
-        ))
+        Ok(Json(compliance_stats(
+            store,
+            start,
+            end,
+            camera_id,
+            group,
+            allowed_cameras,
+        )?))
     })
+}
+
+pub(crate) fn valid_date_range(start: &str, end: &str) -> bool {
+    let is_date = |value: &str| {
+        value.len() == 10
+            && ls_core::time::parse_local_datetime(&format!("{value}T00:00:00"))
+                .is_some_and(|date| ls_core::time::format_date(date) == value)
+    };
+    is_date(start) && is_date(end) && start <= end
+}
+
+pub(crate) fn compliance_stats(
+    store: &ls_store::Store,
+    start: &str,
+    end: &str,
+    camera_id: Option<i64>,
+    group: Option<&str>,
+    allowed_cameras: Option<&[i64]>,
+) -> rusqlite::Result<Value> {
+    let eligible: Vec<_> = store
+        .cameras()?
+        .into_iter()
+        .filter(|c| matches!(c.type_.as_str(), "rtsp" | "usb"))
+        .filter(|c| {
+            camera_id.is_none_or(|id| c.id == id) && group.is_none_or(|g| c.group_name == g)
+        })
+        .filter(|c| allowed_cameras.is_none_or(|ids| ids.contains(&c.id)))
+        .map(|c| c.id)
+        .collect();
+    let count = store.compliance_counts(start, end, None, Some(&eligible))?;
+    Ok(json!({"start":start, "end":end, "frames":count.frames,
+        "checked":count.checked(), "compliant":count.compliant, "violations":count.violations,
+        "unknown":count.unknown, "observed_cameras":count.cameras, "eligible_cameras":eligible.len(),
+        "rate_percent":count.rate_percent()}))
 }
 
 pub(crate) async fn stats_summary(

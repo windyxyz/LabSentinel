@@ -60,11 +60,11 @@ jobs:
       - name: cargo build -p ls-server
         working-directory: engine-rs
         run: cargo build -p ls-server
-      - name: route coverage report (R2-307)
+      - name: Verify Rust and OpenAPI route registration
         shell: bash
         run: |
           python -I scripts/rust_route_coverage.py \
-            --exe engine-rs/target/debug/labsentinel-server --fail-under 95 | tee route-coverage.txt
+            --exe engine-rs/target/debug/labsentinel-server --strict | tee route-coverage.txt
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/engine-rs/target
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4

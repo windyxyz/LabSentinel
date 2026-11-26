@@ -15,7 +15,7 @@
 | [图片文件夹接入.md](guide/图片文件夹接入.md) | 截图目录接入：关键/违规定义、配置与排障 |
 | [部署FAQ.md](guide/部署FAQ.md) | 踩坑集中答疑；启动失败先看 `/api/health/ready` 的 checks |
 | [杀毒软件误报说明.md](guide/杀毒软件误报说明.md) | 杀软启发式误报的用户处理指引 |
-| [标注与模型迭代手册.md](标注与模型迭代手册.md) | 误报/漏检治理实操：抽帧→标注→训练→接入（数据飞轮） |
+| [标注与模型迭代手册](guide/标注与模型迭代手册.md) | 抽帧、标注、训练及接入流程 |
 | [快速开始.md](guide/快速开始.md) | 发布包/源码运行入口 |
 
 ## dev/ — 开发者
@@ -46,8 +46,15 @@
 |---|---|
 | [status.md](plan/status.md) | **任务状态台账**（R2 轮持续更新，附实测证据） |
 | [78-review-round2-plan-2026-11-07.md](plan/78-review-round2-plan-2026-11-07.md) | 二轮审查与推进计划（归档正本） |
+| [版本路线图](plan/v1.0.0-roadmap.md) | 当前版本和后续验收安排 |
+
+## maintenance/ — 维护与接力
+
+[维护索引](maintenance/) 汇总任务登记、开发计划、审阅发现、进度和会话记录。
 
 ## archive/ — 历史留存（只读）
+
+[1.0.0 早期规划草案](archive/1.0.0-早期规划草案.md) · [Android 原型](archive/android-prototype/)。
 
 [00-vision.md](archive/00-vision.md)（愿景 v0.2）· [40-roadmap.md](archive/40-roadmap.md)（M0 手册）·
 [70-release-plan.md](archive/70-release-plan.md)（v0.1 发布规划）· [58-packaging-strategy.md](archive/58-packaging-strategy.md)（打包方案对比）·

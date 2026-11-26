@@ -316,6 +316,9 @@ pub struct Delivery {
     pub ok: bool,
     pub attempts: u32,
     pub error: Option<String>,
+    pub receipt_code: Option<u16>,
+    pub receipt_summary: Option<String>,
+    pub acceptance_uncertain: bool,
 }
 
 /// 单渠道投递（真实 HTTP；失败按 Python RETRY_BACKOFF=[1,4,15] 重试）。
@@ -345,6 +348,29 @@ pub fn deliver_with_backoff(
     image: Option<&[u8]>,
     backoff_secs: &[u64],
 ) -> Delivery {
+    deliver_http_or_email(ch, cfg, level, text, image, backoff_secs, None)
+}
+
+pub fn deliver_outbox(
+    ch: Channel,
+    cfg: &ChannelConfig,
+    level: i64,
+    text: &str,
+    image: Option<&[u8]>,
+    key: &str,
+) -> Delivery {
+    deliver_http_or_email(ch, cfg, level, text, image, &[], Some(key))
+}
+
+fn deliver_http_or_email(
+    ch: Channel,
+    cfg: &ChannelConfig,
+    level: i64,
+    text: &str,
+    image: Option<&[u8]>,
+    backoff_secs: &[u64],
+    key: Option<&str>,
+) -> Delivery {
     if ch == Channel::Email {
         return deliver_email(cfg, level, text);
     }
@@ -353,9 +379,15 @@ pub fn deliver_with_backoff(
             ok: false,
             attempts: 0,
             error: Some(e),
+            receipt_code: None,
+            receipt_summary: None,
+            acceptance_uncertain: false,
         };
     }
     let mut error = None;
+    let mut receipt_code = None;
+    let mut receipt_summary = None;
+    let mut acceptance_uncertain = false;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(5)))
         .http_status_as_error(false)
@@ -403,13 +435,18 @@ pub fn deliver_with_backoff(
                 // 多 body：任一失败即返回失败状态（外层 attempt 重试整组——
                 // text 会重复一条，好于丢图）
                 let mut last: (u16, String) = (200, String::new());
-                for body in &bodies {
+                for (index, body) in bodies.iter().enumerate() {
                     let req = agent
                         .post(&cfg.url)
                         .header("Content-Type", "application/json");
                     let req = if ch == Channel::Webhook {
                         let ts = unix_secs().to_string();
-                        let r = req
+                        let r = if let Some(key) = key {
+                            req.header("Idempotency-Key", key)
+                        } else {
+                            req
+                        };
+                        let r = r
                             .header("X-LS-Event", "alert")
                             .header("X-LS-Timestamp", &ts);
                         if !cfg.secret.is_empty() {
@@ -424,24 +461,37 @@ pub fn deliver_with_backoff(
                     };
                     last = resp_body(req.send(body.as_str()));
                     if !is_ok(ch, last.0, &last.1) {
+                        acceptance_uncertain |= index > 0;
                         break;
                     }
                 }
                 last
             }
         };
+        receipt_code = (status > 0).then_some(status);
+        receipt_summary = response_codes(&resp_body);
+        acceptance_uncertain |= status == 0;
         if is_ok(ch, status, &resp_body) {
             return Delivery {
                 ok: true,
                 attempts: attempt + 1,
                 error: None,
+                receipt_code,
+                receipt_summary,
+                acceptance_uncertain: false,
             };
         }
-        error = Some(format!(
-            "HTTP {}: {}",
-            status,
-            resp_body.chars().take(120).collect::<String>()
-        ));
+        error = Some(if key.is_none() {
+            format!(
+                "HTTP {}: {}",
+                status,
+                resp_body.chars().take(120).collect::<String>()
+            )
+        } else if acceptance_uncertain {
+            "渠道请求结束时未能确认是否完整接收".to_owned()
+        } else {
+            format!("渠道拒绝请求（HTTP {status}）")
+        });
         if attempt + 1 < max_attempts {
             // 退避可注入（N-34）：越界/0 值不等待
             if let Some(&s) = backoff_secs.get(attempt as usize) {
@@ -455,7 +505,25 @@ pub fn deliver_with_backoff(
         ok: false,
         attempts: max_attempts,
         error,
+        receipt_code,
+        receipt_summary,
+        acceptance_uncertain,
     }
+}
+
+// 保留可核对的业务码，避免渠道响应回显配置或发送内容。
+fn response_codes(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let mut codes = serde_json::Map::new();
+    for key in ["errcode", "code", "success"] {
+        if let Some(code) = value
+            .get(key)
+            .filter(|field| field.is_number() || field.is_boolean())
+        {
+            codes.insert(key.into(), code.clone());
+        }
+    }
+    (!codes.is_empty()).then(|| Value::Object(codes).to_string())
 }
 
 fn resp_body(r: Result<http::Response<ureq::Body>, ureq::Error>) -> (u16, String) {
@@ -514,6 +582,9 @@ pub fn deliver_email(cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
             ok: false,
             attempts: 0,
             error: Some("email 未配置（host/to 缺失）".into()),
+            receipt_code: None,
+            receipt_summary: None,
+            acceptance_uncertain: false,
         };
     }
     let email = match build_email(level, text, ec) {
@@ -523,6 +594,9 @@ pub fn deliver_email(cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
                 ok: false,
                 attempts: 0,
                 error: Some(e),
+                receipt_code: None,
+                receipt_summary: None,
+                acceptance_uncertain: false,
             }
         }
     };
@@ -539,6 +613,9 @@ pub fn deliver_email(cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
                     ok: false,
                     attempts: 0,
                     error: Some("LS_SMTP_SECURITY=none 仅允许私网 SMTP（明文口令风险）".into()),
+                    receipt_code: None,
+                    receipt_summary: None,
+                    acceptance_uncertain: false,
                 };
             }
             Ok(lettre::SmtpTransport::builder_dangerous(&ec.host).port(ec.port))
@@ -548,6 +625,9 @@ pub fn deliver_email(cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
                 ok: false,
                 attempts: 0,
                 error: Some(format!("未知 LS_SMTP_SECURITY: {other}")),
+                receipt_code: None,
+                receipt_summary: None,
+                acceptance_uncertain: false,
             }
         }
     };
@@ -558,6 +638,9 @@ pub fn deliver_email(cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
                 ok: false,
                 attempts: 0,
                 error: Some(format!("SMTP 传输构造失败: {e}")),
+                receipt_code: None,
+                receipt_summary: None,
+                acceptance_uncertain: false,
             }
         }
     };
@@ -575,11 +658,17 @@ pub fn deliver_email(cfg: &ChannelConfig, level: i64, text: &str) -> Delivery {
             ok: true,
             attempts: 1,
             error: None,
+            receipt_code: None,
+            receipt_summary: None,
+            acceptance_uncertain: false,
         },
         Err(e) => Delivery {
             ok: false,
             attempts: 1,
             error: Some(format!("send failed: {e}")),
+            receipt_code: None,
+            receipt_summary: None,
+            acceptance_uncertain: e.status().is_none(),
         },
     }
 }

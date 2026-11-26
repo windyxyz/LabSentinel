@@ -4,8 +4,8 @@
 单帧耗时（onnxruntime）、检出数量；输出 Markdown 对比表。
 
 用法：
-    python tools/eval_report.py --old m0-spike/yolo11n_ppe.onnx \
-        --new m0-spike/yolo11n_ppe_v2.onnx --data Resources/datasets/merged/data.yaml
+    python tools/eval_report.py --old models/yolo11n_ppe.onnx \
+        --new models/yolo11n_ppe_v2.onnx --data Resources/datasets/merged/data.yaml
 """
 from __future__ import annotations
 

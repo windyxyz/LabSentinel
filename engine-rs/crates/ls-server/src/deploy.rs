@@ -16,7 +16,14 @@ use std::path::{Path, PathBuf};
 pub const CURRENT_MARK: &str = "current.txt";
 pub const VERSIONS_DIRNAME: &str = "versions";
 /// 归档时跳过的目录：数据、历史归档、字节码缓存、待删除标记。
-const IGNORED_DIRS: [&str; 4] = ["data", VERSIONS_DIRNAME, "__pycache__", "PENDING_DELETE"];
+const IGNORED_DIRS: [&str; 6] = [
+    "data",
+    "service-data",
+    "service-status",
+    VERSIONS_DIRNAME,
+    "__pycache__",
+    "PENDING_DELETE",
+];
 
 /// 安装根默认值：`LS_INSTALL_DIR` → 可执行文件所在目录（`app/` 下则取上一级）。
 pub fn default_install_root() -> PathBuf {

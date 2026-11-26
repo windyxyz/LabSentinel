@@ -5,6 +5,7 @@ use rusqlite::{ffi, params, OptionalExtension, Transaction, TransactionBehavior}
 use crate::{Event, Store};
 
 pub const EMBEDDING_DIMS: usize = 768;
+const VECTOR_READ_MAP_BYTES: i64 = 128 * 1024 * 1024;
 
 pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS event_embeddings_meta(
     event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
@@ -134,25 +135,70 @@ impl Store {
         skip_event: Option<i64>,
         limit: i64,
     ) -> rusqlite::Result<Vec<(i64, f32)>> {
+        self.rank_event_embeddings_scoped(encoder, embedding, camera_scope, skip_event, limit, None)
+    }
+
+    pub fn rank_event_embeddings_scoped(
+        &self,
+        encoder: &str,
+        embedding: &[f32],
+        camera_scope: Option<&[i64]>,
+        skip_event: Option<i64>,
+        limit: i64,
+        allowed_types: Option<&[&str]>,
+    ) -> rusqlite::Result<Vec<(i64, f32)>> {
         if camera_scope == Some(&[]) {
             return Ok(Vec::new());
         }
         let bytes = embedding_bytes(embedding)?;
         let scope = camera_scope.map(|ids| serde_json::json!(ids).to_string());
-        let mut stmt = self.conn().prepare(
+        let types = allowed_types.map(|types| serde_json::json!(types).to_string());
+        let conn = self.conn();
+        // vec0 reads entire vector chunks. Map the WAL database only while
+        // ranking so Windows can still truncate it during storage maintenance.
+        let previous_map = if cfg!(windows)
+            && conn
+                .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                .is_ok_and(|mode| mode == "wal")
+        {
+            conn.pragma_query_value(None, "mmap_size", |row| row.get::<_, i64>(0))
+                .ok()
+                .filter(|&size| size < VECTOR_READ_MAP_BYTES)
+                .filter(|_| {
+                    conn.pragma_update(None, "mmap_size", VECTOR_READ_MAP_BYTES)
+                        .is_ok()
+                })
+        } else {
+            None
+        };
+        let result = (|| {
+            let mut stmt = conn.prepare(
             "SELECT rowid,distance FROM vec_event_embeddings
              WHERE embedding MATCH ?1 AND k=?2 AND rowid IN (
                SELECT m.event_id FROM event_embeddings_meta m JOIN events e ON e.id=m.event_id
                WHERE m.encoder=?3 AND e.snapshot=m.snapshot_path AND e.snapshot_sha256 IS m.event_snapshot_sha256
                  AND (?4 IS NULL OR e.camera_id IN (SELECT value FROM json_each(?4)))
                  AND (?5 IS NULL OR e.id!=?5)
+                 AND (?6 IS NULL OR e.type IN (SELECT value FROM json_each(?6)))
              ) ORDER BY distance",
-        )?;
-        let rows = stmt.query_map(
-            params![bytes, limit.clamp(1, 100), encoder, scope, skip_event],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        rows.collect()
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    bytes,
+                    limit.clamp(1, 100),
+                    encoder,
+                    scope,
+                    skip_event,
+                    types
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            rows.collect()
+        })();
+        if let Some(size) = previous_map {
+            conn.pragma_update(None, "mmap_size", size)?;
+        }
+        result
     }
 
     pub fn prune_event_vectors(&self) -> rusqlite::Result<usize> {
@@ -186,7 +232,9 @@ mod tests {
 
     #[test]
     fn ranking_filters_before_top_k_and_ignores_old_evidence() {
-        let store = Store::open(":memory:").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("vectors.db");
+        let store = Store::open(path.to_str().unwrap()).unwrap();
         store.ensure_schema().unwrap();
         store.migrate().unwrap();
         let mut query = vec![0.0; EMBEDDING_DIMS];
@@ -233,5 +281,14 @@ mod tests {
             .unwrap();
         assert!(rank(Some(&[2]), None).is_empty());
         assert_eq!(store.prune_event_vectors().unwrap(), 1);
+        if cfg!(windows) {
+            let map: i64 = store
+                .conn()
+                .pragma_query_value(None, "mmap_size", |row| row.get(0))
+                .unwrap();
+            assert_eq!(map, 0);
+        }
+        store.conn().execute_batch("VACUUM").unwrap();
+        assert_eq!(store.integrity_check().unwrap(), "ok");
     }
 }

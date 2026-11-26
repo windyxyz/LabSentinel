@@ -7,6 +7,527 @@ use serde_json::json;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn actuator_config_requires_admin_and_rejects_public_endpoints() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("actuator.db");
+    let db = path.to_str().unwrap();
+    ls_store::Store::open(db).unwrap().ensure_schema().unwrap();
+    let app = build_router(test_state_cfg_dir(
+        db,
+        "admin-test",
+        true,
+        temp.path().to_str().unwrap(),
+    ));
+    let endpoint = "/api/alerts/actuator";
+    let headers = [("x-admin-token", "admin-test")];
+    let valid =
+        json!({"target": {"type": "http", "url": "http://192.168.1.9/signal"}, "minimum_level": 2});
+    assert_eq!(
+        req(&app, "GET", endpoint, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        req(&app, "PUT", endpoint, Some(valid.clone()))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let bad = json!({"target": {"type": "http", "url": "http://8.8.8.8/"}});
+    assert_eq!(
+        req_hdr(&app, "PUT", endpoint, Some(bad), &headers)
+            .await
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        req_hdr(&app, "PUT", endpoint, Some(valid.clone()), &headers)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let response = req_hdr(&app, "GET", endpoint, None, &headers).await;
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["config"],
+        valid
+    );
+}
+
+#[tokio::test]
+async fn audit_pack_exports_filtered_evidence_and_verifiable_manifest() {
+    use std::io::{Cursor, Read};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit.db");
+    let root = temp.path().join("data");
+    std::fs::create_dir(&root).unwrap();
+    let db = path.to_str().unwrap();
+    let store = ls_store::Store::open(db).unwrap();
+    store.ensure_schema().unwrap();
+    let add = |camera_id, detail, snapshot| {
+        store
+            .add_event(&ls_store::NewEvent {
+                camera_id,
+                type_: "no_mask",
+                level: 2,
+                track_id: 1,
+                detail,
+                snapshot,
+                ts: "2026-11-25T12:00:00",
+            })
+            .unwrap()
+    };
+    let cid = store.conn_add_camera("Local", "fixture", "rtsp").unwrap();
+    let other = store.conn_add_camera("Other", "fixture", "rtsp").unwrap();
+    std::fs::write(root.join("photo.jpg"), b"\xff\xd8\xffsafe-fixture").unwrap();
+    std::fs::write(temp.path().join("outside.mp4"), b"not-in-export").unwrap();
+    let first = add(cid, "=HYPERLINK(\"<script>\")", Some("photo.jpg"));
+    let second = add(other, "out of filter", None);
+    store.set_event_video(first, "../outside.mp4").unwrap();
+    let app = build_router(test_state_cfg_dir(db, "", false, root.to_str().unwrap()));
+    let response = req(
+        &app,
+        "GET",
+        &format!("/api/export/audit-pack.zip?camera_id={cid}"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/zip");
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    fn entry(zip: &mut zip::ZipArchive<Cursor<axum::body::Bytes>>, name: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        zip.by_name(name).unwrap().read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+    let index: serde_json::Value = serde_json::from_slice(&entry(&mut zip, "events.json")).unwrap();
+    assert_eq!(index["events"].as_array().unwrap().len(), 1);
+    assert_eq!(index["events"][0]["id"], first);
+    assert_eq!(index["events"][0]["media"]["video"]["state"], "unavailable");
+    assert!(!zip
+        .file_names()
+        .map(Result::unwrap)
+        .any(|name| name.contains("outside") || name.starts_with(&format!("media/{second}/"))));
+    let html = String::from_utf8(entry(&mut zip, "index.html")).unwrap();
+    assert!(html.contains("&lt;script&gt;"));
+    assert!(!html.contains("<script>"));
+    let csv = String::from_utf8(entry(&mut zip, "events.csv")).unwrap();
+    assert!(csv.contains("'=HYPERLINK"));
+    let manifest = String::from_utf8(entry(&mut zip, "manifest.sha256")).unwrap();
+    assert_eq!(manifest.lines().count(), zip.len() - 1);
+    for line in manifest.lines() {
+        let (hash, name) = line.split_once("  ").unwrap();
+        assert_eq!(
+            crate::util::sha256_hex(&entry(&mut zip, name)),
+            hash,
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn mcp_is_disabled_by_default_and_uses_only_its_own_bearer_credentials() {
+    use axum::{body::Body, extract::ConnectInfo, http::Request};
+    use std::net::SocketAddr;
+
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("mcp.db");
+    let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+    store.ensure_schema().unwrap();
+    let camera = store
+        .conn_add_camera("allowed", "fixture.mp4", "file")
+        .unwrap();
+    let other = store
+        .conn_add_camera("outside scope", "fixture.mp4", "file")
+        .unwrap();
+    let add = |camera_id| {
+        store
+            .add_event(&ls_store::NewEvent {
+                camera_id,
+                type_: "no_mask",
+                level: 2,
+                track_id: 1,
+                detail: "fixture",
+                snapshot: None,
+                ts: "2026-11-25T12:00:00",
+            })
+            .unwrap()
+    };
+    let event = add(camera);
+    let outside = add(other);
+    let app = build_router(test_state_cfg_dir(
+        db.to_str().unwrap(),
+        "admin-test",
+        true,
+        temp.path().to_str().unwrap(),
+    ));
+    async fn send(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        body: serde_json::Value,
+        headers: &[(&str, &str)],
+    ) -> axum::response::Response {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "127.0.0.1")
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(
+                "127.0.0.1:37800".parse::<SocketAddr>().unwrap(),
+            ));
+        for &(name, value) in headers {
+            request = request.header(name, value);
+        }
+        app.clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+    }
+    let rpc = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    let config = send(
+        &app,
+        "GET",
+        "/api/mcp/config",
+        json!(null),
+        &[("x-admin-token", "admin-test")],
+    )
+    .await;
+    assert_eq!(config.status(), StatusCode::OK);
+    assert_eq!(body_json(config).await["enabled"], false);
+    assert_eq!(
+        send(&app, "POST", "/mcp", rpc.clone(), &[]).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(
+            &app,
+            "PUT",
+            "/api/mcp/config",
+            json!({"enabled":true}),
+            &[("x-admin-token", "admin-test")]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(
+            &app,
+            "POST",
+            "/mcp",
+            rpc.clone(),
+            &[
+                ("cookie", "ls_session=fake"),
+                ("x-admin-token", "admin-test")
+            ]
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let issue = send(
+        &app,
+        "POST",
+        "/api/mcp/tokens",
+        json!({"name":"fixture","scope":"read_only","ttl_days":1}),
+        &[("x-admin-token", "admin-test")],
+    )
+    .await;
+    assert_eq!(issue.status(), StatusCode::CREATED);
+    let issued = body_json(issue).await;
+    let bearer = format!("Bearer {}", issued["token"].as_str().unwrap());
+    let remote = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "127.0.0.1")
+        .header("content-type", "application/json")
+        .header("authorization", &bearer)
+        .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 10], 37800))))
+        .body(Body::from(rpc.to_string()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(remote).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(
+            &app,
+            "POST",
+            "/mcp",
+            rpc.clone(),
+            &[
+                ("authorization", &bearer),
+                ("origin", "https://external.example")
+            ]
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let tools = send(
+        &app,
+        "POST",
+        "/mcp",
+        rpc.clone(),
+        &[("authorization", &bearer)],
+    )
+    .await;
+    assert_eq!(tools.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(tools).await["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        11
+    );
+    let path = format!("/api/mcp/tokens/{}", issued["id"].as_i64().unwrap());
+    assert_eq!(
+        send(
+            &app,
+            "DELETE",
+            &path,
+            json!(null),
+            &[("x-admin-token", "admin-test")]
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send(&app, "POST", "/mcp", rpc, &[("authorization", &bearer)])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let admin = [("x-admin-token", "admin-test")];
+    let invalid_policy = send(
+        &app,
+        "PUT",
+        "/api/mcp/config",
+        json!({"allowed_write_tools":["stop_camera"]}),
+        &admin,
+    )
+    .await;
+    assert_eq!(invalid_policy.status(), StatusCode::CONFLICT);
+    let approved = send(
+        &app,
+        "PUT",
+        "/api/mcp/config",
+        json!({"allowed_write_tools":["add_event_note"]}),
+        &admin,
+    )
+    .await;
+    assert_eq!(approved.status(), StatusCode::OK);
+    let issued = body_json(
+        send(
+            &app,
+            "POST",
+            "/api/mcp/tokens",
+            json!({"name":"scoped","scope":"policy","camera_ids":[camera]}),
+            &admin,
+        )
+        .await,
+    )
+    .await;
+    let scoped_bearer = format!("Bearer {}", issued["token"].as_str().unwrap());
+    let scoped = [("authorization", scoped_bearer.as_str())];
+    let invoke = |name, arguments| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}});
+    let list = body_json(
+        send(
+            &app,
+            "POST",
+            "/mcp",
+            invoke("list_events", json!({})),
+            &scoped,
+        )
+        .await,
+    )
+    .await;
+    let visible = list["result"]["structuredContent"]["events"]
+        .as_array()
+        .unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0]["id"], event);
+    let denied = body_json(
+        send(
+            &app,
+            "POST",
+            "/mcp",
+            invoke(
+                "add_event_note",
+                json!({"event_id":outside,"text":"foreign"}),
+            ),
+            &scoped,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(denied["error"]["code"], -32003);
+    let allowed = body_json(
+        send(
+            &app,
+            "POST",
+            "/mcp",
+            invoke(
+                "add_event_note",
+                json!({"event_id":event,"text":"permitted"}),
+            ),
+            &scoped,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(store.event_notes(event).unwrap().len(), 1);
+    assert!(store.event_notes(outside).unwrap().is_empty());
+    let mut receipt = allowed["result"]["structuredContent"]["_receipt"].clone();
+    assert_eq!(receipt["claims"]["events"][0]["event_id"], event);
+    let verified = body_json(
+        send(
+            &app,
+            "POST",
+            "/api/mcp/receipts/verify",
+            receipt.clone(),
+            &admin,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(verified["valid"], true);
+    receipt["claims"]["events"][0]["event_id"] = json!(outside);
+    let invalid =
+        body_json(send(&app, "POST", "/api/mcp/receipts/verify", receipt, &admin).await).await;
+    assert_eq!(invalid["valid"], false);
+    let (rows, _) = store
+        .audit_list(20, 0, Some("mcp:add_event_note"), None)
+        .unwrap();
+    assert!(rows.iter().any(|row| row
+        .detail
+        .as_deref()
+        .is_some_and(|text| text.contains("denied"))));
+    assert!(rows
+        .iter()
+        .any(|row| row.target.as_deref() == Some(&event.to_string())));
+    let write_tools = [
+        "trigger_folder_scan",
+        "trigger_event_vlm_review",
+        "add_event_note",
+        "triage_event",
+        "start_camera",
+        "delete_alert_silence",
+        "stop_camera",
+        "create_alert_silence",
+        "toggle_rule",
+    ];
+    let tools_list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+    let update = |names: &[&str]| json!({"allowed_write_tools":names,"confirm_high_risk":true});
+    for tool in write_tools {
+        assert_eq!(
+            send(&app, "PUT", "/api/mcp/config", update(&[tool]), &admin)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let list = body_json(send(&app, "POST", "/mcp", tools_list.clone(), &scoped).await).await;
+        let visible = list["result"]["tools"].as_array().unwrap();
+        assert_eq!(visible.len(), 12, "{tool}");
+        assert!(visible.iter().any(|entry| entry["name"] == tool));
+    }
+    assert_eq!(
+        send(&app, "PUT", "/api/mcp/config", update(&write_tools), &admin)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let list = body_json(send(&app, "POST", "/mcp", tools_list, &scoped).await).await;
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 20);
+    for forbidden in [
+        "delete_camera",
+        "delete_event",
+        "list_face_people",
+        "set_config",
+    ] {
+        let denied =
+            body_json(send(&app, "POST", "/mcp", invoke(forbidden, json!({})), &scoped).await)
+                .await;
+        assert_eq!(denied["error"]["code"], -32003, "{forbidden}");
+    }
+    store
+        .conn()
+        .execute(
+            "UPDATE mcp_tokens SET expires_at=0 WHERE id=?",
+            [issued["id"].as_i64().unwrap()],
+        )
+        .unwrap();
+    assert_eq!(
+        send(
+            &app,
+            "POST",
+            "/mcp",
+            invoke("list_events", json!({})),
+            &scoped
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn event_video_supports_bounded_range_playback() {
+    use axum::{body::Body, http::Request};
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("evidence.db");
+    let db = path.to_str().unwrap();
+    let root = temp.path().to_str().unwrap();
+    let store = ls_store::Store::open(db).unwrap();
+    store.ensure_schema().unwrap();
+    let camera = store
+        .conn_add_camera("camera", "fixture.mp4", "file")
+        .unwrap();
+    let id = store
+        .add_event(&ls_store::NewEvent {
+            camera_id: camera,
+            type_: "no_mask",
+            level: 2,
+            track_id: 1,
+            detail: "fixture",
+            snapshot: None,
+            ts: "2026-11-25T12:00:00",
+        })
+        .unwrap();
+    std::fs::write(temp.path().join("event.mp4"), b"0123456789").unwrap();
+    store.set_event_video(id, "event.mp4").unwrap();
+    let app = build_router(test_state_cfg_dir(db, "", false, root));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/events/{id}/video"))
+                .header("host", "127.0.0.1")
+                .header("range", "bytes=3-5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()["content-range"], "bytes 3-5/10");
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(&bytes[..], b"345");
+}
+
+#[tokio::test]
 async fn scene_pack_preview_protects_custom_rules_and_is_idempotent() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("scenes.db");
@@ -150,24 +671,50 @@ async fn analysis_source_settings_persist_without_exposing_stream_credentials() 
             &app,
             "PUT",
             &endpoint,
-            Some(json!({"mode":"substream","source":substream})),
+            Some(json!({"mode":"substream","source":substream,"capture_backend":"retina"})),
         )
         .await,
     )
     .await;
     assert_eq!(saved["analysis_mode"], "substream");
+    assert_eq!(saved["capture_preference"], "retina");
+    assert!(store.camera_uses_retina(cid).unwrap());
     assert_eq!(
         store.camera(cid).unwrap().unwrap().analysis_source,
         substream
     );
     let visible = body_json(req(&app, "GET", "/api/cameras", None).await).await;
     assert_eq!(visible[0]["analysis_mode"], "substream");
+    assert_eq!(visible[0]["capture_preference"], "retina");
+    assert!(visible[0]["capture_backend"].is_null());
     assert!(!visible.to_string().contains("fixture-secret"));
     let relay = body_json(req(&app, "PUT", &endpoint, Some(json!({"mode":"relay"}))).await).await;
     assert_eq!(relay["analysis_mode"], "relay");
+    assert_eq!(relay["capture_preference"], "retina");
     let camera = store.camera(cid).unwrap().unwrap();
     assert!(camera.analysis_shared);
     assert!(camera.analysis_source.is_empty());
+    let invalid = req(
+        &app,
+        "PUT",
+        &endpoint,
+        Some(json!({"mode":"main","capture_backend":"unknown"})),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(store.camera(cid).unwrap().unwrap().analysis_shared);
+    let restored = body_json(
+        req(
+            &app,
+            "PUT",
+            &endpoint,
+            Some(json!({"mode":"relay","capture_backend":"ffmpeg"})),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(restored["capture_preference"], "ffmpeg");
+    assert!(!store.camera_uses_retina(cid).unwrap());
 }
 
 #[tokio::test]
@@ -445,6 +992,90 @@ async fn sensitivity_preset_updates_person_and_ppe_thresholds() {
 }
 
 #[tokio::test]
+async fn detection_runtime_migrates_old_preferences_and_rejects_partial_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("runtime.db");
+    seed_schema(&db);
+    let store = ls_store::Store::open(db.to_str().unwrap()).unwrap();
+    store.setting_set("runtime.ep", "cpu").unwrap();
+    let app = build_router(test_state_cfg(db.to_str().unwrap(), "", false));
+    let response = req(&app, "GET", "/api/detect/config", None).await;
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let prefs: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(prefs["runtime"]["backend"], "cpu");
+    assert_eq!(prefs["runtime"]["ep"], "cpu");
+    assert_eq!(prefs["runtime"]["camera_devices"], json!([]));
+
+    for invalid in [
+        json!({"backend": "dml", "gpu_id": "vulkan:-1"}),
+        json!({"backend": "dml", "gpu_id": "luid:123456789abcdefz"}),
+        json!({"backend": "dml", "gpu_id": "luid:0000000000000000"}),
+        json!({"backend": "dml", "gpu_id": "uuid:00000000000000000000000000000000"}),
+        json!({"backend": "dml", "gpu_id": "uuid:0102030405060708"}),
+        json!({"backend": "dml", "ep": "cpu"}),
+        json!({"backend": 2}),
+    ] {
+        let response = req(
+            &app,
+            "PUT",
+            "/api/detect/config",
+            Some(json!({"runtime": invalid})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(crate::detect::runtime_backend(&store), "cpu");
+    }
+    if prefs["runtime"]["vulkan_available"] == false {
+        let response = req(
+            &app,
+            "PUT",
+            "/api/detect/config",
+            Some(json!({"runtime": {"backend": "auto_vulkan"}})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    store.setting_set("runtime.backend", "auto_vulkan").unwrap();
+    for runtime in [
+        json!({"backend": "dml", "gpu_id": "vulkan:1"}),
+        json!({"ep": "cpu"}),
+    ] {
+        let response = req(
+            &app,
+            "PUT",
+            "/api/detect/config",
+            Some(json!({"runtime": runtime})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(crate::detect::runtime_backend(&store), "cpu");
+    assert_eq!(
+        store.setting_get("runtime.ep").unwrap().as_deref(),
+        Some("cpu")
+    );
+    assert_eq!(
+        crate::detect::runtime_vulkan_adapter(&store),
+        ls_infer::yolo::VulkanAdapter::Index(1)
+    );
+    let response = req(
+        &app,
+        "PUT",
+        "/api/detect/config",
+        Some(json!({"runtime": {"gpu_id": "luid:0102030405060708"}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        store.setting_get("runtime.gpu_id").unwrap().as_deref(),
+        Some("luid:0102030405060708")
+    );
+}
+
+#[tokio::test]
 async fn events_socket_replays_committed_ids_in_order_after_reconnect() {
     use futures_util::StreamExt;
     let dir = tempfile::tempdir().unwrap();
@@ -474,6 +1105,14 @@ async fn events_socket_replays_committed_ids_in_order_after_reconnect() {
         scoped.iter().map(|event| event.id).collect::<Vec<_>>(),
         vec![second]
     );
+    assert_eq!(
+        store.event_replay_state(Some(first), Some(&[1])).unwrap(),
+        (second, false)
+    );
+    assert_eq!(
+        store.event_replay_state(Some(since), Some(&[1])).unwrap(),
+        (second, true)
+    );
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -484,28 +1123,39 @@ async fn events_socket_replays_committed_ids_in_order_after_reconnect() {
     );
     let app = build_router(st.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-    let next_id = async |socket: &mut tokio_tungstenite::WebSocketStream<
+    let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .unwrap();
+    let next = async |socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-                         key: &str| {
+    >| {
         let message = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        serde_json::from_str::<serde_json::Value>(message.to_text().unwrap()).unwrap()[key]
-            .as_i64()
-            .unwrap()
+        serde_json::from_str::<serde_json::Value>(message.to_text().unwrap()).unwrap()
     };
-    assert_eq!(next_id(&mut socket, "stream_cursor").await, since);
-    assert_eq!(next_id(&mut socket, "id").await, second);
-    assert_eq!(next_id(&mut socket, "id").await, third);
+    let initial = next(&mut socket).await;
+    assert_eq!(initial["stream_cursor"], since);
+    assert_eq!(initial["stream_history_reset"], false);
+    assert_eq!(next(&mut socket).await["id"], second);
+    assert_eq!(next(&mut socket).await["id"], third);
     let fourth = add(1);
     let fifth = add(2);
     st.events_tx.send(json!({"id": fifth}).to_string()).unwrap();
-    assert_eq!(next_id(&mut socket, "id").await, fourth);
-    assert_eq!(next_id(&mut socket, "id").await, fifth);
+    assert_eq!(next(&mut socket).await["id"], fourth);
+    assert_eq!(next(&mut socket).await["id"], fifth);
+    store
+        .conn()
+        .execute("DELETE FROM events WHERE id=?", [since])
+        .unwrap();
+    let (mut reconnect, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let expired = next(&mut reconnect).await;
+    assert_eq!(expired["stream_cursor"], since);
+    assert_eq!(expired["stream_history_reset"], true);
+    assert_eq!(next(&mut reconnect).await["id"], second);
+    assert_eq!(next(&mut reconnect).await["id"], third);
     server.abort();
 }
 

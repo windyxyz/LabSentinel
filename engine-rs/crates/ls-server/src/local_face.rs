@@ -501,7 +501,8 @@ fn publish_match_alert(
                 .events_tx
                 .send(crate::handlers::events::event_json(&row).to_string());
         }
-        crate::worker::EventSink::new(Arc::clone(st)).deliver_deferred_pub(id, &event, false);
+        crate::worker::EventSink::new(Arc::clone(st))
+            .publish_committed_mqtt(store, id, &event, false);
     }
 }
 

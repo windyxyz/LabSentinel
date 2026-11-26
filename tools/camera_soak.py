@@ -293,10 +293,9 @@ def preflight(base, timeout, root: Path) -> tuple[list[str], bool]:
         if "admin:admin@" in src or ":12345@" in src:
             row(f"RTSP #{c['id']} 凭证", "WARN", "疑似默认密码（admin:admin / 12345）——请改强密码")
     # 3) 模型/词表
-    for p in (root / "models" / "yolo11n_ppe.onnx", root / "m0-spike" / "yolo11n_ppe.onnx"):
-        if p.exists() and p.stat().st_size > 1_000_000:
-            row("模型", "PASS", f"{p.name} {p.stat().st_size / 1e6:.1f}MB")
-            break
+    model = root / "models" / "yolo11n_ppe.onnx"
+    if model.is_file() and model.stat().st_size > 1_000_000:
+        row("模型", "PASS", f"{model.name} {model.stat().st_size / 1e6:.1f}MB")
     else:
         row("模型", "FAIL", "未找到 yolo11n_ppe.onnx（>1MB）")
         has_fail = True

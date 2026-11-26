@@ -1,4 +1,5 @@
-<!-- T-611 / RA4.2：Windows 服务模式（WinSW 包装，LocalService 账户）。
+<!-- 历史参考（v0.9.5 起使用安装器的原生 SCM 服务；详见安装与卸载文档）。
+     T-611 / RA4.2：Windows 服务模式（WinSW 包装，LocalService 账户）。
      安装（管理员，把本文件与 WinSW.exe 放到解压后的安装根）：
        winsw.exe install deploy\windows\labsentinel-service.xml
        winsw.exe start

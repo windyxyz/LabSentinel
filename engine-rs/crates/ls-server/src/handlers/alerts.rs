@@ -10,6 +10,29 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 
+pub(crate) async fn actuator_get(State(st): State<Shared>) -> Response {
+    with_store(&st, |store| match ls_jobs::actuator::load(store) {
+        Ok(config) => {
+            let status = st.jobs.actuator_status().for_config(&config);
+            Ok(Json(json!({"config": config, "status": status})).into_response())
+        }
+        Err(error) => Ok(detail_err(StatusCode::INTERNAL_SERVER_ERROR, &error)),
+    })
+}
+
+pub(crate) async fn actuator_put(
+    State(st): State<Shared>,
+    Json(config): Json<ls_jobs::actuator::Config>,
+) -> Response {
+    if let Err(error) = config.validate() {
+        return detail_err(StatusCode::UNPROCESSABLE_ENTITY, error).into_response();
+    }
+    with_store(&st, |store| {
+        store.setting_set(ls_jobs::actuator::SETTING_KEY, &json!(config).to_string())?;
+        Ok(Json(json!({"ok": true})).into_response())
+    })
+}
+
 pub(crate) async fn alerts_status(State(st): State<Shared>) -> Response {
     with_store(&st, |s| {
         let counts = s.deliveries(None, 10_000)?;

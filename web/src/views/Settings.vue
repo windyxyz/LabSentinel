@@ -9,7 +9,9 @@ import AccessSettings from './AccessSettings.vue'
 import DetectPanel from './DetectPanel.vue'
 import Devices from './Devices.vue'
 import Face from './Face.vue'
+import McpSettings from './McpSettings.vue'
 import StorageSettings from './StorageSettings.vue'
+import ActuatorSettings from '../components/ActuatorSettings.vue'
 import SemanticSettings from '../components/SemanticSettings.vue'
 import AnnotatorModal from '../components/AnnotatorModal.vue'
 
@@ -18,7 +20,8 @@ const active = ref('detect')
 const sections = [
   { id: 'detect', label: '模型与检测', kw: '检测模式 本地 api 联网 协作 cascade 精判 省钱 预算 置信度 模型 vlm ppe 实验服', icon: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M5 7h6M5 10h4"/>' },
   { id: 'access', label: '访问控制', kw: '密码 令牌 token 登录 认证 会话', icon: '<circle cx="5" cy="8" r="3"/><path d="M7.6 8H14v2.2M12 8v2.2"/>' },
-  { id: 'notify', label: '通知与告警', kw: '渠道 测试 静默 投递 失败 告警 企业微信 钉钉 邮件', icon: '<path d="M8 2.5a3.5 3.5 0 0 1 3.5 3.5v3l1.5 2.5H3l1.5-2.5v-3A3.5 3.5 0 0 1 8 2.5z"/><path d="M6.5 13a1.8 1.8 0 0 0 3 0"/>' },
+  { id: 'mcp', label: 'MCP 接入', kw: '模型上下文协议 工具权限 只读 令牌 token 局域网 审计 客户端', icon: '<path d="m5 4-4 4 4 4m6-8 4 4-4 4M9.5 2.5l-3 11"/>' },
+  { id: 'notify', label: '通知与告警', kw: '渠道 测试 静默 投递 失败 告警 企业微信 钉钉 邮件 声光 联动 继电器 串口', icon: '<path d="M8 2.5a3.5 3.5 0 0 1 3.5 3.5v3l1.5 2.5H3l1.5-2.5v-3A3.5 3.5 0 0 1 8 2.5z"/><path d="M6.5 13a1.8 1.8 0 0 0 3 0"/>' },
   { id: 'template', label: '告警文案', kw: '模板 预览 占位符 文案 标题 正文', icon: '<path d="M3 4h10M3 8h10M3 12h6"/>' },
   { id: 'devices', label: '设备与配对', kw: '设备 配对 令牌 移动端 手机 撤销 三级', icon: '<rect x="4.5" y="2" width="7" height="12" rx="1.5"/><path d="M7 12.2h2"/>' },
   { id: 'face', label: '人脸识别', kw: '人脸 名册 注册 同意 合规 陌生人 删除', icon: '<circle cx="8" cy="5.5" r="2.8"/><path d="M2.5 13.8c.9-2.7 3-4 5.5-4s4.6 1.3 5.5 4"/>' },
@@ -274,7 +277,7 @@ async function saveNetwork() {
     const r = await api.saveNetworkConfig({
       lan: net.value.lan,
       port: net.value.port,
-      read_protected: net.value.lan || net.value.read_protected,
+      read_protected: net.value.lan || net.value.read_protected || net.value.read_protected_required || false,
       trusted_hosts: net.value.trusted_hosts,
       generate_token: net.value.generate_token === true,
     })
@@ -319,7 +322,7 @@ async function sendReportNow() {
   netBusy.value = false
 }
 async function toggleAutostart() {
-  if (!autostart.value?.supported) return
+  if (!autostart.value?.supported || autostart.value.managed_by_scm) return
   netBusy.value = true
   try {
     await api.setAutostart(!autostart.value.enabled)
@@ -552,7 +555,11 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', syncSection))
       <section v-if="show('access')" class="panel">
         <AccessSettings />
       </section>
+      <section v-if="show('mcp')" class="panel">
+        <McpSettings />
+      </section>
       <section v-show="show('notify')" class="panel">
+    <ActuatorSettings v-if="show('notify')" />
     <h3 style="margin:14px 0 10px">告警渠道状态</h3>
     <table>
       <tr><th>渠道</th><th>配置状态</th><th>投递 ok</th><th>failed</th><th>pending</th></tr>
@@ -788,7 +795,7 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', syncSection))
         <template v-if="net">
           <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
             <label class="muted"><input type="checkbox" v-model="net.lan" /> 允许局域网访问</label>
-            <label class="muted"><input type="checkbox" v-model="net.read_protected" :disabled="net.lan" /> 读取保护</label>
+            <label class="muted"><input type="checkbox" v-model="net.read_protected" :disabled="net.lan || net.read_protected_required" /> 读取保护</label>
             <label class="muted">端口 <input v-model.number="net.port" type="number" min="1" max="65535" style="width:90px" /></label>
             <label class="muted">信任主机 <input v-model="net.trusted_hosts" placeholder="可选，逗号分隔" style="width:200px" /></label>
             <span class="muted" style="font-size:12px">令牌：{{ net.admin_token_set ? '已设置' : '未设置' }}</span>
@@ -820,7 +827,8 @@ onBeforeUnmount(() => window.removeEventListener('hashchange', syncSection))
         <template v-if="autostart">
           <div class="row" style="align-items:center;gap:8px;margin-top:8px">
             <b>开机自启</b>
-            <span v-if="!autostart.supported" class="muted">（当前平台不支持）</span>
+            <span v-if="autostart.managed_by_scm" class="muted">由 Windows 服务管理器设置</span>
+            <span v-else-if="!autostart.supported" class="muted">（当前平台不支持）</span>
             <template v-else>
               <span :class="autostart.enabled ? 'st-ok' : 'st-idle'">{{ autostart.enabled ? '已开启' : '已关闭' }}</span>
               <button class="ghost" :disabled="netBusy" @click="toggleAutostart">

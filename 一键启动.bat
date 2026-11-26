@@ -31,9 +31,9 @@ if not exist "%~dp0.data" mkdir "%~dp0.data"
 
 rem 本地模型（存在则注入；不存在时由网页「模型管理」选择）
 if not defined LS_MODEL_PATH if exist "%~dp0models\yolo11n.onnx" set "LS_MODEL_PATH=%~dp0models\yolo11n.onnx"
-if not defined LS_MODEL_PATH if exist "%~dp0m0-spike\yolo11n.onnx" set "LS_MODEL_PATH=%~dp0m0-spike\yolo11n.onnx"
+if not defined LS_MODEL_PATH if exist "%~dp0models\yolo11n.onnx" set "LS_MODEL_PATH=%~dp0models\yolo11n.onnx"
 if not defined LS_PPE_MODEL if exist "%~dp0models\yolo11n_ppe.onnx" set "LS_PPE_MODEL=%~dp0models\yolo11n_ppe.onnx"
-if not defined LS_PPE_MODEL if exist "%~dp0m0-spike\yolo11n_ppe.onnx" set "LS_PPE_MODEL=%~dp0m0-spike\yolo11n_ppe.onnx"
+if not defined LS_PPE_MODEL if exist "%~dp0models\yolo11n_ppe.onnx" set "LS_PPE_MODEL=%~dp0models\yolo11n_ppe.onnx"
 if not defined ORT_DYLIB_PATH if exist "%~dp0tools\onnxruntime\onnxruntime.dll" set "ORT_DYLIB_PATH=%~dp0tools\onnxruntime\onnxruntime.dll"
 
 "%EXE%" --launch

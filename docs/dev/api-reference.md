@@ -83,6 +83,14 @@ webrtc 响应：`{"camera_id": 1, "ws_url": "ws://<host>:1984/api/ws?src=1"}`（
 `GET /api/events/{id}/overlay` 读取截图尺寸和可用的目标或区域坐标。
 `GET /api/detect/config` 的 `runtime.adapters` 列出显卡，
 `PUT /api/detect/config` 接受 `runtime.adapter_index` 作为 DirectML 使用的 DXGI 显卡编号，`null` 恢复自动选择。
+
+Vulkan 支持 `runtime.gpu_id` 取 `auto`、列表中的 `uuid:<32 位小写十六进制>`、兼容标识 `luid:<16 位小写十六进制>` 或 `vulkan:<n>`。UUID 用于恢复跨重启的显卡选择，LUID 用于当次 Vulkan 和 DXGI 设备对应。能唯一定位 UUID 的旧 LUID 在读取已保存配置启动时或提交设置时迁移。旧编号按 ncnn 枚举。`runtime.effective_adapter_index` 返回实际提交给 DirectML 的编号，原 `runtime.adapter_index` 保留手动设置。设备缺失、身份歧义或无法对应 DXGI 时使用原 DirectML 配置及 CPU 回退。
+
+`GET /api/system` 的 `perf.analysis[].latency.gpu_queue_ms` 按帧合计 Vulkan 模型锁等待与 DirectML 调度等待。`vulkan_lock_wait_ms` 单列 Vulkan 模型锁等待，`vulkan_run_ms` 统计拿锁后本机同步调用的总耗时，包含驱动等待和输出复制。`vulkan_first_run_ms` 只纳入包含某个网络首次成功调用的帧。每项返回滚动 `p50`、`p95`、`p99` 与 `samples`，没有适用帧时返回 `null`。
+
+本机视觉管理接口 `GET /api/detect/local-vlm` 返回状态和 `gpu_settings`。加 `?probe=true` 可在 `vulkan_devices` 查看当前 llama.cpp 的设备 ID 和可用显存，探测失败由 `device_error` 说明。设备编号以 llama.cpp 的列表为准。
+
+`POST /api/detect/local-vlm/start` 接受可选的 `vulkan_device`（`auto` 或列表里的 `VulkanN`）、`vram_budget_mb`（0 自动）和 `cv_vram_reserve_mb`（默认 1024 MiB）。省略新字段时沿用已保存值。GPU 启动结果中的 `gpu.layers` 和 `gpu.usable_mb` 是启动估算。可以从 `status` 和 `fallback_reason` 查看是按 GPU 计划启动，还是显存不足或运行时失败后由 CPU 接手。将 `gpu_layers` 设为 0 可直接使用 CPU。
 支持 `VK_EXT_memory_budget` 时读取 Vulkan 的本地显存预算，否则使用可用的 DXGI 数据。显卡映射以 LUID 为准。[Vulkan 显存预算](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_memory_budget.html) · [DXGI 显存查询](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/nf-dxgi1_4-idxgiadapter3-queryvideomemoryinfo)
 
 穿戴规则的 `POST /api/rules` 和 `PUT /api/rules/{rid}` 接受 `grace_s` 与 `warn_ratio`。
@@ -172,7 +180,8 @@ Web 端「摄像头」页内告警面板：状态表 + POST /api/alert-test 一�
 | GET | /api/export/monthly.pdf?month=2026-10 | 月报 PDF（reportlab，中文字体 LS_PDF_FONT；不含截图/人脸） |
 
 ### WS /ws/events
-服务端**主动推送**事件行（结构同 Event）。客户端可发任意文本作心跳（服务端忽略）。断线自动重连由客户端负责（web/src/api.js `connectEvents` 已实现 3s 重试）。
+
+`?since=<非负事件编号>` 按编号递增补发当前权限范围内的事件。首帧 `stream_cursor` 是补发起点，`stream_history_reset: true` 表示原游标在当前可查范围内不可用。收到该标记后，大屏提示并刷新事件列表，同时接收后续事件。`?since=latest` 从当前可见的最新编号开始接收。网页通过 WebSocket 子协议或已授权的浏览器会话连接，断线后使用最近处理过的编号重连。
 
 ## 5.3 维护（任务14）
 
@@ -325,7 +334,7 @@ date 格式错误 → 400。
 1. **前端不调推理**：所有 AI 在服务端（ADR-0002）
 2. 安全区绘制：显示坐标按显示宽度等比换算回 1280×720（Zones.vue 已有实现可参考）
 3. 事件类型/级别文案：以 `constants.py` 为准，Web 端 TYPE_TEXT 保持同步
-4. WebSocket 消息可能乱序（多 worker 线程）——按 id 排序展示
+4. 使用 `since` 的事件流按已提交编号递增发送。`episode_update` 和 `recording_update` 更新已有事件。
 5. 大文件（视频/截图）用 URL 拉取，不进 JSON
 
 ## 8.1 健康探针与错误约定（任务63）- `GET /api/health/live` → `200 {"status":"ok"}`（进程存活即返回，不查 DB/模型；负载均衡存活探测用）
@@ -500,6 +509,13 @@ Invoke-RestMethod "$BASE/api/events?limit=20"
 
 - `tools/e2e_smoke.py`：黑盒全链路（摄像头→安全区→规则→启动→事件→截图→清理），`--base-url` 可指向任意实例
 - `tools/camera_soak.py`：长跑采样/预检（24h 验收与多路稳定性）
+
+`web/scripts/smoke_mcp.mjs` 使用官方 TypeScript 客户端启动隔离的 Windows 发行目录。脚本验证 11 项只读工具、9 项逐项授权的写操作、审计、签名凭证与令牌吊销。模拟视觉复核只监听本机回环。
+
+```powershell
+npm install --prefix Resources/验收归档/MCP - 客户端协议与授权 --ignore-scripts --save-exact @modelcontextprotocol/sdk@1.32.2
+node web/scripts/smoke_mcp.mjs <Windows发行目录> Resources/验收归档/MCP - 客户端协议与授权
+```
 
 ### 10.5 错误码速查（对照实现）
 

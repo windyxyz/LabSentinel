@@ -6,24 +6,27 @@
 .data/
 
 # ---- 模型与权重（不随库分发，见 NOTICE）----
-m0-spike/*.onnx
-m0-spike/*.pt
-m0-spike/*.classes.txt
+models/*.onnx
+models/*.pt
+models/*.classes.txt
 # 2026-11-21：实验服模型随发行包分发（用户决策；CC BY 4.0 署名见 NOTICE）——
 # 实验服专项权重与复核模型入库，CI 可按锁文件校验后直接打包。
-!m0-spike/yolo11n_ppe.onnx
-!m0-spike/yolo11n_ppe.classes.txt
-!m0-spike/labcoat-confirm.onnx
-m0-spike/calib/
-m0-spike/out_s*/
-m0-spike/data/
-m0-spike/quantized_info.csv
+!models/yolo11n_ppe.onnx
+!models/yolo11n_ppe.classes.txt
+!models/labcoat-confirm.onnx
+models/calib/
+models/out_s*/
+models/data/
+models/quantized_info.csv
 
 # ---- Resources：非项目文件归集（资源/示例/数据集/生成物，见 Resources/README.md）----
 Resources/datasets/
 Resources/runs/
 Resources/logs/
 Resources/dist/
+Resources/本地发行包/
+Resources/验收归档/
+Resources/旧开发环境/
 .training.lock
 
 # ---- Python ----

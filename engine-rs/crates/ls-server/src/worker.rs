@@ -5,12 +5,11 @@
 //! - 截图 `ev_{cid}_{ts}_{seq}.jpg` 落 data/snapshots，绝对路径入 DB（与桥同口径，
 //!   serve_event_media 的 `data_dir.join` 对绝对路径整体替换，两种都可播）；
 //! - `add_event` → `event_json` 广播到 `events_tx`（WS；无订阅者时静默丢弃）；
-//! - finalize：帧序列 → `videos/ev_{eid}.mp4`（复用 evidence::encode_mp4）→
-//!   `set_event_video` 回填。
+//! - 事件触发录像：原编码有界缓存，无法使用时回退到事件帧序列，保存后回填录像。
 //!
-//! 告警首发派发（Python dispatcher.dispatch → 8 渠道）已在 RA1.3 随 worker
-//! 生命周期接入（复用 ls_dispatch::deliver + escalation 既有链路）。
+//! 告警首发由数据库投递队列交给 `ls-jobs`，MQTT 继续使用即时事件总线。
 
+use ls_store::AlertDispatchKind;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,6 +23,7 @@ mod episodes;
 mod fall;
 mod lab;
 mod provenance;
+mod recording;
 mod tamper;
 mod visual_scan;
 use crate::performance::{FrameTiming, PerformanceWindow};
@@ -31,6 +31,7 @@ use crate::state::Shared;
 use cascade::{
     finish_cascade_events, group_events, keep_geometry_local, submit_cascade_review, CascadeReview,
 };
+use recording::{spawn_finalize, spawn_finalize_at};
 
 /// 事件去重窗口容量（Python sidecar_events.SEEEN_MAX 同值）。
 const DEDUP_MAX: usize = 4096;
@@ -176,23 +177,28 @@ impl EventSink {
         self.record_ext(cand, snapshot_jpeg, true)
     }
 
-    /// UX2 cascade：`dispatch=false` 时事件入库 + WS 广播，但 **跳过 MQTT 与
-    /// 首发派发**——待 VLM 复核（肯定 → `deliver_deferred` 补投递；否定且
-    /// on_negative=suppress → `set_event_vlm_suppressed` 标记，永不投递）。
+    /// 普通检查和恢复日志可以只入库。需要等待 VLM 的规则事件由 `record_located` 登记。
     pub fn record_ext(
         &self,
         cand: &ls_analyzer::pipeline::Candidate,
         snapshot_jpeg: Option<&[u8]>,
         dispatch: bool,
     ) -> Result<Option<i64>, String> {
-        self.record_located(cand, snapshot_jpeg, dispatch, None, None, None)
+        self.record_located(
+            cand,
+            snapshot_jpeg,
+            dispatch.then_some(AlertDispatchKind::Initial),
+            None,
+            None,
+            None,
+        )
     }
 
     fn record_located(
         &self,
         cand: &ls_analyzer::pipeline::Candidate,
         snapshot_jpeg: Option<&[u8]>,
-        dispatch: bool,
+        dispatch: Option<AlertDispatchKind>,
         bbox: Option<[f32; 4]>,
         overlay: Option<&str>,
         episode_id: Option<i64>,
@@ -239,12 +245,13 @@ impl EventSink {
         };
         let provenance = self.provenance.lock().ok().and_then(|value| value.clone());
         let eid = store
-            .add_event_with_provenance(
+            .add_event_with_outbox(
                 &ev,
                 evidence,
                 provenance
                     .as_ref()
                     .map(|(hash, settings)| (hash.as_str(), settings.as_str())),
+                dispatch,
             )
             .map_err(|error| {
                 if let Some(path) = path {
@@ -265,44 +272,28 @@ impl EventSink {
         if let Ok(Some(row)) = store.event_by_id(eid) {
             let _ = st.events_tx.send(event_json(&row).to_string());
         }
-        let cam_name = store
-            .camera(cand.camera_id)
-            .ok()
-            .flatten()
-            .map(|c| c.name)
-            .unwrap_or_default();
-        if dispatch {
-            self.deliver_deferred(eid, cand, &cam_name, snapshot.is_some(), path);
+        if dispatch == Some(AlertDispatchKind::Initial) {
+            self.publish_committed_mqtt(&store, eid, cand, snapshot.is_some());
         }
         Ok(Some(eid))
     }
 
-    /// 事件外发（MQTT 总线 + 8 渠道首发派发）。record 常规路径立即调用；
-    /// cascade 复核肯定时延迟调用（on_negative=keep 也可先派发后回填判定）。
-    fn deliver_deferred(
+    // 渠道通知由 Jobs 消费已提交的 outbox。MQTT 保留原有即时总线语义。
+    pub(crate) fn publish_committed_mqtt(
         &self,
+        store: &ls_store::Store,
         eid: i64,
         cand: &ls_analyzer::pipeline::Candidate,
-        cam_name: &str,
         has_snapshot: bool,
-        snapshot_path: Option<&str>,
     ) {
-        self.deliver(eid, cand, cam_name, has_snapshot, snapshot_path, false);
-    }
-
-    fn deliver(
-        &self,
-        eid: i64,
-        cand: &ls_analyzer::pipeline::Candidate,
-        cam_name: &str,
-        has_snapshot: bool,
-        snapshot_path: Option<&str>,
-        episode_upgrade: bool,
-    ) {
-        let st = &self.st;
         // RA2-S2：MQTT 总线发布（独立于静默/渠道过滤——Python alerts.dispatch
         // 入口同位；连接失败不阻塞事件链）。zones 契约数组：候选不带区域名，空数组。
-        if let Some(bus) = &st.mqtt {
+        if let Some(bus) = &self.st.mqtt {
+            let cam_name = store
+                .camera(cand.camera_id)
+                .ok()
+                .flatten()
+                .map(|camera| camera.name);
             let api_base = std::env::var("LS_MQTT_API_BASE").unwrap_or_else(|_| {
                 format!(
                     "http://127.0.0.1:{}",
@@ -313,7 +304,7 @@ impl EventSink {
                 id: eid,
                 ts: &cand.ts_iso,
                 camera_id: cand.camera_id,
-                camera_name: Some(cam_name),
+                camera_name: cam_name.as_deref(),
                 type_: &cand.behavior,
                 level: cand.level,
                 track_id: cand.track_id,
@@ -324,93 +315,14 @@ impl EventSink {
             };
             let _ = bus.publish_event(&fields);
         }
-        // RA1.3：告警首发派发（外部 8 渠道；静默/过滤/限流复用 ls-jobs 链路，
-        // 与 escalation 共享渠道快照和限流器）。投递失败只影响外部通知，
-        // 不影响事件已入库/已广播的事实。
-        // 性能 P0-2（审计）：dispatch_event 是同步 ureq——单渠道最坏 ~40s
-        // （4 次尝试+退避），×8 渠道会把帧循环停摆数分钟（ffmpeg 管道积压）。
-        // 改投后台线程（对齐 Python ThreadPoolExecutor 异步语义）。
-        let dev = ls_dispatch::DispatchEvent {
-            id: eid,
-            camera_id: cand.camera_id,
-            type_: cand.behavior.clone(),
-            level: cand.level,
-            detail: cand.detail.clone(),
-            ts: cand.ts_iso.clone(),
-            camera_name: cam_name.to_string(),
-            track_id: cand.track_id,
-            snapshot_path: snapshot_path.map(String::from),
-        };
-        let jobs = Arc::clone(&st.jobs);
-        let db_path = st.db_path.clone();
-        let _ = std::thread::Builder::new()
-            .name(format!("ls-dispatch-{eid}"))
-            .spawn(move || {
-                if let Ok(s) = ls_store::Store::open(&db_path) {
-                    let submitted = if episode_upgrade {
-                        jobs.dispatch_episode_upgrade(&s, &dev)
-                    } else {
-                        jobs.dispatch_event(&s, &dev)
-                    };
-                    if submitted > 0 {
-                        println!("[ls-dispatch] event#{eid} 首发派发 {submitted} 渠道");
-                    }
-                }
-            });
     }
+}
 
-    /// cascade 复核线程的放行入口（cam_name 与 snapshot 现查，确保延迟派发保留事件截图）。
-    pub(crate) fn deliver_deferred_pub(
-        &self,
-        eid: i64,
-        cand: &ls_analyzer::pipeline::Candidate,
-        has_snapshot: bool,
-    ) {
-        let (cam_name, snap_path) = ls_store::Store::open(&self.st.db_path)
-            .ok()
-            .map(|s| {
-                let cn = s
-                    .camera(cand.camera_id)
-                    .ok()
-                    .flatten()
-                    .map(|c| c.name)
-                    .unwrap_or_default();
-                let sp = s
-                    .event_by_id(eid)
-                    .ok()
-                    .flatten()
-                    .and_then(|e| e.snapshot)
-                    .filter(|p| !p.trim().is_empty());
-                (cn, sp)
-            })
-            .unwrap_or_default();
-        self.deliver_deferred(
-            eid,
-            cand,
-            &cam_name,
-            has_snapshot || snap_path.is_some(),
-            snap_path.as_deref(),
-        );
-    }
-
-    /// 存证收尾：帧序列 → MP4 → video 回填（先入库后写视频，与 Python worker
-    /// 「失败只影响存证不影响事件」同口径）。`Ok(Some(rel))`=已回填。
-    pub fn finalize(
-        &self,
-        eid: i64,
-        frames: &[Vec<u8>],
-        fps: f64,
-    ) -> Result<Option<String>, String> {
-        std::fs::create_dir_all(&self.paths.videos)
-            .map_err(|e| format!("创建视频目录失败: {e}"))?;
-        let out = self.paths.videos.join(format!("ev_{eid}.mp4"));
-        ls_analyzer::evidence::encode_mp4(frames, fps, &out)?;
-        let abs = out.to_string_lossy().into_owned();
-        let store = ls_store::Store::open(&self.st.db_path).map_err(|e| e.to_string())?;
-        store
-            .set_event_video(eid, &abs)
-            .map_err(|e| e.to_string())?;
-        Ok(Some(abs))
+fn review_dispatch(dispatch_now: bool) -> AlertDispatchKind {
+    if dispatch_now {
+        AlertDispatchKind::Initial
+    } else {
+        AlertDispatchKind::AwaitReview
     }
 }
 
@@ -450,6 +362,8 @@ pub struct WorkerHandle {
     pub motion_total: Arc<AtomicU64>,
     pub(crate) performance: Mutex<PerformanceWindow>,
     ppe_loaded: OnceLock<bool>,
+    person_device: OnceLock<ls_infer::yolo::InferenceDevice>,
+    ppe_device: OnceLock<ls_infer::yolo::InferenceDevice>,
     pub(crate) applied_policy_revision: AtomicU64,
     image_health: std::sync::atomic::AtomicU8,
 }
@@ -501,6 +415,19 @@ impl Workers {
                     (loaded + usize::from(*ready), failed + usize::from(!ready))
                 })
         })
+    }
+
+    pub(crate) fn inference_devices(&self) -> Vec<serde_json::Value> {
+        let Ok(map) = self.map.lock() else {
+            return Vec::new();
+        };
+        let mut workers: Vec<_> = map.iter().collect();
+        workers.sort_unstable_by_key(|(id, _)| **id);
+        workers.into_iter().map(|(id, worker)| serde_json::json!({
+            "camera_id": id,
+            "person": worker.person_device.get().map(ls_infer::yolo::InferenceDevice::label),
+            "ppe": worker.ppe_device.get().map(ls_infer::yolo::InferenceDevice::label),
+        })).collect()
     }
 
     pub fn get(&self, cid: i64) -> Option<Arc<WorkerHandle>> {
@@ -597,12 +524,15 @@ pub struct WorkerConfig {
     /// "vlm" = 该路强制走外部联网模型判定
     pub analyzer: String,
     pub detector: ls_analyzer::detector::DetectorConfig,
+    cv_backend: String,
+    vulkan_adapter: ls_infer::yolo::VulkanAdapter,
     /// RA2-S1：PPE 级联配置（None = 未配置模型/下载未完成 → 仅人员检测）
     pub ppe: Option<ls_analyzer::ppe::PpeConfig>,
     pub evidence_fps: f64,
     pub max_restarts: u32,
     pub analysis_source: String,
     pub analysis_shared: bool,
+    pub analysis_retina: bool,
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
@@ -743,6 +673,14 @@ fn changed_camera_policy(
 }
 
 impl WorkerConfig {
+    fn vulkan_cv(&self, data_dir: &str) -> Option<ls_infer::yolo::VulkanCv> {
+        crate::detect::vulkan_requested(&self.cv_backend).then(|| ls_infer::yolo::VulkanCv {
+            install_root: crate::deploy::default_install_root(),
+            cache: Path::new(data_dir).join("runtime-cache/vulkan"),
+            adapter: self.vulkan_adapter,
+        })
+    }
+
     /// 从 DB 组装（cameras/zones/rules/calendar）。全局量（analysis_fps/
     /// file_loop/evidence_fps）与 Python 侧同源：进程 env（LS_ANALYSIS_FPS 等，
     /// 默认 5.0/False/10.0）——DB app_settings 只承载 alert.*（渠道），口径一致。
@@ -800,7 +738,8 @@ impl WorkerConfig {
             });
         // UX（2026-11-21）：推理设备偏好（app_settings runtime.ep；默认 dml=GPU，
         // DML 初始化失败 ls-infer 自动回落 CPU——任意厂商 GPU 鲁棒）
-        detector.use_gpu = crate::detect::runtime_ep_pref(s) == "dml";
+        let cv_backend = crate::detect::runtime_backend(s);
+        detector.use_gpu = cv_backend != "cpu";
         // RA2-S1 / LS-041：PPE 级联优先级与 ppe_status 对齐：
         // LS_PPE_MODEL 环境变量 → app_settings["ppe_model"]（网页上传/下载）→ 随包 models/yolo11n_ppe.onnx。
         let selection = resolve_ppe_model(s);
@@ -844,11 +783,16 @@ impl WorkerConfig {
             },
             policy,
             detector,
+            cv_backend,
+            vulkan_adapter: crate::detect::runtime_vulkan_adapter(s),
             ppe,
             evidence_fps: efps,
             max_restarts: DEFAULT_MAX_RESTARTS,
             analysis_source: c.analysis_source,
             analysis_shared: c.analysis_shared,
+            analysis_retina: s
+                .camera_uses_retina(cid)
+                .map_err(|error| error.to_string())?,
         }))
     }
 }
@@ -973,6 +917,8 @@ pub fn start_worker(st: &Shared, cfg: WorkerConfig) -> Result<(), String> {
         motion_total: Arc::new(AtomicU64::new(0)),
         performance: Mutex::new(PerformanceWindow::default()),
         ppe_loaded: OnceLock::new(),
+        person_device: OnceLock::new(),
+        ppe_device: OnceLock::new(),
         applied_policy_revision: AtomicU64::new(u64::MAX),
         image_health: Default::default(),
     });
@@ -1073,7 +1019,7 @@ pub fn restart_all_running(st: &Shared, store: &ls_store::Store) -> usize {
         return 0;
     };
     cams.iter()
-        .filter(|c| c.status == "running")
+        .filter(|c| matches!(c.status.as_str(), "starting" | "running" | "reconnecting"))
         .map(|c| c.id)
         .filter(|cid| restart_camera_if_running(st, store, *cid))
         .count()
@@ -1151,8 +1097,14 @@ fn worker_detector(
     if st.testing && cfg.detector.model_path.is_none() {
         return Some(Box::new(ls_analyzer::pipeline::NullDetector));
     }
-    match ls_analyzer::detector::load_detector(&cfg.detector) {
-        Ok(detector) => Some(detector),
+    let vulkan = cfg.vulkan_cv(&st.data_dir);
+    match ls_analyzer::detector::load_detector_cv(&cfg.detector, vulkan.as_ref()) {
+        Ok(detector) => {
+            if let Some(device) = detector.inference_device() {
+                let _ = handle.person_device.set(device);
+            }
+            Some(detector)
+        }
         Err(error) => {
             crate::logger::error(&format!(
                 "[ls-worker] cam-{} 人员模型加载失败: {error}",
@@ -1178,12 +1130,17 @@ fn worker_detector(
 
 /// 数据面主循环运行在专用线程，事件经 EventSink 落库。
 fn load_worker_ppe(
+    st: &Shared,
     cfg: &WorkerConfig,
     handle: &WorkerHandle,
 ) -> Option<Box<dyn ls_analyzer::pipeline::PpeRunner>> {
     let model = cfg.ppe.as_ref()?;
-    let runner = ls_analyzer::ppe::make_ppe_runner(model);
+    let vulkan = cfg.vulkan_cv(&st.data_dir);
+    let runner = ls_analyzer::ppe::make_ppe_runner_cv(model, vulkan.as_ref());
     let _ = handle.ppe_loaded.set(runner.is_some());
+    if let Some(device) = runner.as_ref().and_then(|model| model.inference_device()) {
+        let _ = handle.ppe_device.set(device);
+    }
     runner
 }
 
@@ -1239,15 +1196,15 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     let mut stationary = crate::spatial::StationaryTracks::default();
     let mut stationary_only = false;
     let mut motion_cfg_stamp = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+    let mut motion_recording_enabled = false;
     // LS-051：实时检测元数据广播节流（≤5Hz），慢客户端由 WS Lagged 丢弃
     let mut last_det_broadcast = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     let mut last_face_sample: Option<std::time::Instant> = None;
     let mut next_face = 0usize;
     // RA2-S1：PPE 级联注入管线（未配置模型 → None → 仅人员检测，ppe 恒 Unknown）
-    let ppe_runner = load_worker_ppe(&cfg, &handle);
+    let ppe_runner = load_worker_ppe(&st, &cfg, &handle);
     pipe.set_ppe(ppe_runner);
     let evidence = Arc::new(ls_analyzer::evidence::Evidence::default());
-    evidence.new_ring(cfg.spec.analysis_fps as f64, cfg.evidence_fps);
     let ingest_config = ls_ingest::IngestConfig {
         source: cfg.spec.source.clone(),
         analysis_fps: cfg.spec.analysis_fps,
@@ -1351,7 +1308,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 ts_iso: ts,
                 evidence_key: String::new(),
             };
-            sink.deliver_deferred_pub(eid, &candidate, false);
+            sink.publish_committed_mqtt(&store, eid, &candidate, false);
         }
     };
     let after_failure = |state: &mut CameraReconnect, reason: &str| {
@@ -1370,6 +1327,8 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     };
     let mut live_index = 0;
     let mut use_main_stream = false;
+    let mut retina_enabled = cfg.analysis_retina;
+    let mut fallback_input = None;
     let mut exit_status = "stopped";
     let video_file = cfg.spec.type_ == "file";
     let mut checked_frames = 0u64;
@@ -1381,31 +1340,48 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         if handle.stop.load(Ordering::SeqCst) {
             break;
         }
-        let mut input = ingest_config.clone();
-        let mut input_kind = "main";
-        if !use_main_stream && cfg.spec.type_ == "rtsp" {
-            if !cfg.analysis_source.is_empty() {
-                input.source.clone_from(&cfg.analysis_source);
-                input_kind = "substream";
-            } else if cfg.analysis_shared {
-                if let Some(source) = st
-                    .go2rtc
-                    .local_analysis_source(cfg.camera_id, &input.source)
-                {
-                    input.source = source;
-                    input_kind = "relay";
+        let (input, input_kind) = fallback_input.take().unwrap_or_else(|| {
+            let mut input = ingest_config.clone();
+            let mut kind = "main";
+            if !use_main_stream && cfg.spec.type_ == "rtsp" {
+                if !cfg.analysis_source.is_empty() {
+                    input.source.clone_from(&cfg.analysis_source);
+                    kind = "substream";
+                } else if cfg.analysis_shared {
+                    if let Some(source) = st
+                        .go2rtc
+                        .local_analysis_source(cfg.camera_id, &input.source)
+                    {
+                        input.source = source;
+                        kind = "relay";
+                    }
                 }
             }
-        }
-        let mut reader = match ls_ingest::capture::FrameReader::start(
-            input,
-            Arc::clone(&handle.ffmpeg),
-            live_capture,
-        ) {
-            Ok(reader) => reader,
+            (input, kind)
+        });
+        let child = Arc::clone(&handle.ffmpeg);
+        let retina =
+            retina_enabled && cfg.spec.type_ == "rtsp" && input.source.starts_with("rtsp://");
+        let retry_with_ffmpeg = retina.then(|| (input.clone(), input_kind));
+        let session = if cfg.spec.type_ == "rtsp" {
+            ls_ingest::capture::FrameReader::start_with_recording(input, child, true, retina)
+        } else {
+            ls_ingest::capture::FrameReader::start(input, child, live_capture)
+                .map(|reader| (reader, None))
+        };
+        let (mut reader, recorder) = match session {
+            Ok(session) => session,
             Err(e) => {
                 if let Ok(mut metrics) = handle.performance.lock() {
                     metrics.reconnect();
+                }
+                if retina {
+                    retina_enabled = false;
+                    fallback_input = retry_with_ffmpeg;
+                    crate::logger::warn(&format!(
+                        "[ls-worker] cam-{cid} Retina 启动失败，使用 FFmpeg 重试同一码流"
+                    ));
+                    continue;
                 }
                 if input_kind != "main" {
                     use_main_stream = true;
@@ -1421,13 +1397,17 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 continue;
             }
         };
+        evidence.flush();
+        evidence.new_ring(cfg.spec.analysis_fps as f64, cfg.evidence_fps);
         let mut falls = fall::Falls::default();
+        let mut motion_recording = recording::MotionRecording::default();
         let stream_index_base = live_index;
         let mut running_marked = false;
         let mut stable = false;
         let mut stream_ended = false;
         if let Ok(mut metrics) = handle.performance.lock() {
             metrics.input_kind = input_kind;
+            metrics.capture_backend = "";
         }
         loop {
             if handle.stop.load(Ordering::SeqCst) {
@@ -1476,6 +1456,9 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         if set_status(status).is_none() {
                             break 'outer;
                         }
+                        if let Ok(mut metrics) = handle.performance.lock() {
+                            metrics.capture_backend = if retina { "retina" } else { "ffmpeg" };
+                        }
                         running_marked = true;
                     }
                     if !stable && reconnect.reset_after_good_frames(captured.arrived) {
@@ -1517,6 +1500,11 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     // 无活跃 track + 低帧差 + 心跳未到 → 跳过 YOLO/PPE 推理。
                     if motion_cfg_stamp.elapsed() >= std::time::Duration::from_secs(1) {
                         motion_cfg_stamp = std::time::Instant::now();
+                        let enabled = crate::detect::motion_recording_enabled(&store);
+                        if enabled != motion_recording_enabled {
+                            motion_recording_enabled = enabled;
+                            motion_recording = Default::default();
+                        }
                         motion_gate.set_config(ls_analyzer::motion::MotionConfig {
                             enabled: store
                                 .setting_get("perf.motion_gate_enabled")
@@ -1535,6 +1523,47 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         });
                     }
                     let ts = ls_core::time::format_system_time_local_iso(captured.timestamp);
+                    if live_capture
+                        && motion_recording_enabled
+                        && motion_recording.observe(
+                            &frame,
+                            captured.arrived,
+                            motion_gate.config().threshold,
+                        )
+                    {
+                        let photo = ev_snapshot
+                            .as_deref()
+                            .and_then(|jpeg| sink.save_snapshot(cid, &ts, jpeg).ok());
+                        match store.add_check_event_with_digest(
+                            cid,
+                            "motion_recording",
+                            "画面发生明显运动，保留触发前后的片段。",
+                            &ts,
+                            photo.as_ref().map(|p| p.path.as_str()),
+                            photo.as_ref().map(|p| p.sha256.as_str()),
+                        ) {
+                            Ok(id) => {
+                                if let Ok(Some(event)) = store.event_by_id(id) {
+                                    let _ = st.events_tx.send(event_json(&event).to_string());
+                                }
+                                spawn_finalize_at(
+                                    &st,
+                                    &evidence,
+                                    id,
+                                    recorder.as_ref(),
+                                    captured.timestamp,
+                                );
+                            }
+                            Err(error) => {
+                                if let Some(photo) = photo {
+                                    let _ = std::fs::remove_file(photo.path);
+                                }
+                                crate::logger::warn(&format!(
+                                    "cam-{cid} 运动录像登记失败: {error}"
+                                ));
+                            }
+                        }
+                    }
                     if let Some(health) = live_capture
                         .then(|| image_monitor.observe(&frame, captured.arrived))
                         .flatten()
@@ -1581,11 +1610,19 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 )
                                 .ok()
                             });
-                            if sink
-                                .record_ext(&cand, jpeg.as_deref(), abnormal.is_some())
-                                .is_ok()
+                            if let Ok(id) =
+                                sink.record_ext(&cand, jpeg.as_deref(), abnormal.is_some())
                             {
                                 image_alarm = abnormal.is_some();
+                                if let Some(id) = id.filter(|_| image_alarm) {
+                                    spawn_finalize_at(
+                                        &st,
+                                        &evidence,
+                                        id,
+                                        recorder.as_ref(),
+                                        captured.timestamp,
+                                    );
+                                }
                             }
                         }
                     }
@@ -1652,6 +1689,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                 if live_capture && consecutive_failures == 3 {
                                     let _ = set_status("model_error");
                                 }
+                                ls_infer::yolo::take_inference_timings();
                                 continue;
                             }
                         }
@@ -1707,7 +1745,6 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                     let dispatch_now = !cascade_suppress;
                     let episode_frame = episodes::EpisodeFrame {
                         camera_id: cid,
-                        camera_name: &cfg.spec.name,
                         time: episode_clock,
                         timestamp: &ts,
                         frame: &frame,
@@ -1862,7 +1899,13 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                         match episodes.process(&store, &sink, &pipe, &policy, &episode_frame) {
                             Ok(events) => {
                                 for (id, candidate) in events {
-                                    spawn_finalize(&st, &evidence, id);
+                                    spawn_finalize_at(
+                                        &st,
+                                        &evidence,
+                                        id,
+                                        recorder.as_ref(),
+                                        captured.timestamp,
+                                    );
                                     alert_events += u64::from(video_file);
                                     ev_round.push((id, candidate));
                                 }
@@ -1906,7 +1949,7 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             match sink.record_located(
                                 &cand,
                                 Some(&snap),
-                                dispatch_now,
+                                Some(review_dispatch(dispatch_now)),
                                 bounds,
                                 overlay.as_deref(),
                                 None,
@@ -1915,7 +1958,13 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                                     if video_file {
                                         alert_events += 1;
                                     }
-                                    spawn_finalize(&st, &evidence, eid);
+                                    spawn_finalize_at(
+                                        &st,
+                                        &evidence,
+                                        eid,
+                                        recorder.as_ref(),
+                                        captured.timestamp,
+                                    );
                                     if let Some(track) = pipe
                                         .last_tracks()
                                         .iter()
@@ -2047,10 +2096,26 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                             rules: rules_elapsed,
                             ort: inference.run,
                             directml_wait: inference.directml_wait,
+                            vulkan: (inference.vulkan_calls > 0).then_some(inference.vulkan_run),
+                            vulkan_first: inference.vulkan_first_run,
+                            vulkan_wait: (inference.vulkan_calls > 0)
+                                .then_some(inference.vulkan_wait),
+                            gpu_queue: (inference.vulkan_calls > 0 || inference.directml_calls > 0)
+                                .then_some(inference.vulkan_wait + inference.directml_wait),
+                            person_ppe: pipe
+                                .ppe_elapsed()
+                                .filter(|_| !motion_skip)
+                                .map(|ppe| detection_elapsed + ppe),
+                            ppe: if motion_skip {
+                                Default::default()
+                            } else {
+                                pipe.ppe_timings()
+                            },
                             analysis: analysis_elapsed,
                             persistence: rules_hit.then(|| received.elapsed()),
                             inferred: inference.calls > 0,
                             directml_calls: inference.directml_calls,
+                            vulkan_calls: inference.vulkan_calls,
                         });
                     }
                 }
@@ -2091,6 +2156,15 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         }
         if let Ok(mut metrics) = handle.performance.lock() {
             metrics.reconnect();
+        }
+        if retina {
+            retina_enabled = false;
+            fallback_input = retry_with_ffmpeg;
+            reconnect.good_since = None;
+            crate::logger::warn(&format!(
+                "[ls-worker] cam-{cid} Retina 画面中断，使用 FFmpeg 重试同一码流"
+            ));
+            continue;
         }
         if input_kind != "main" {
             use_main_stream = true;
@@ -2154,66 +2228,6 @@ fn worker_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
     st.workers
         .remove_and_stop(Some(&store), cid, Some(&handle), exit_status);
 }
-
-/// 存证收尾：candidate 时注册 ActiveRec（pre=环快照），post 帧由 worker 循环
-/// 自动补齐（evidence.feed），到期后本线程拼帧 encode_mp4 → set_event_video。
-fn spawn_finalize(st: &Shared, evidence: &Arc<ls_analyzer::evidence::Evidence>, eid: i64) {
-    // 并发上限（Python MAX_CONCURRENT_RECORDINGS 同口径）：超限拒绝本次回填
-    let (rec, out_fps) = {
-        let pre: Vec<Vec<u8>> = {
-            let ring = evidence.ring.lock().unwrap_or_else(|e| e.into_inner());
-            match ring.as_ref() {
-                Some(r) => r.snapshot().into_iter().map(|f| f.data).collect(),
-                None => return,
-            }
-        };
-        let fps = {
-            let ring = evidence.ring.lock().unwrap_or_else(|e| e.into_inner());
-            ring.as_ref().map(|r| r.out_fps()).unwrap_or(10.0)
-        };
-        let rec = Arc::new(ls_analyzer::evidence::ActiveRec::new(pre));
-        let mut recs = evidence.recs.lock().unwrap_or_else(|e| e.into_inner());
-        if recs.len() >= ls_analyzer::evidence::MAX_CONCURRENT_RECORDINGS {
-            crate::logger::warn("[ls-worker] 并发录像超限，跳过视频回填");
-            return;
-        }
-        recs.push(Arc::clone(&rec));
-        (rec, fps)
-    };
-    let st = Arc::clone(st);
-    let evidence = Arc::clone(evidence);
-    let spawned = std::thread::Builder::new()
-        .name(format!("ls-finalize-{eid}"))
-        .spawn(move || {
-            let deadline =
-                std::time::Instant::now() + std::time::Duration::from_secs_f64(VIDEO_POST_WAIT_S);
-            while std::time::Instant::now() < deadline {
-                if rec.done.load(Ordering::SeqCst) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            let frames = rec.frames.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let sink = EventSink::new(st);
-            match sink.finalize(eid, &frames, out_fps) {
-                Ok(Some(p)) => println!("[ls-worker] event#{eid} 视频已回填: {p}"),
-                Ok(None) => {}
-                Err(e) => {
-                    crate::logger::error(&format!("[ls-worker] event#{eid} 视频回填失败: {e}"))
-                }
-            }
-            // 从活动列表移除（防长跑泄漏）
-            if let Ok(mut recs) = evidence.recs.lock() {
-                recs.retain(|r| !Arc::ptr_eq(r, &rec));
-            }
-        });
-    if let Err(e) = spawned {
-        crate::logger::error(&format!("[ls-worker] event#{eid} 收尾线程创建失败: {e}"));
-    }
-}
-
-/// post 等待 = VIDEO_POST_S + 0.5s 容差（evidence.feed 的 done 判定同值）+ 1s 余量。
-const VIDEO_POST_WAIT_S: f64 = ls_analyzer::evidence::VIDEO_POST_S + 1.5;
 
 // ---------------------------------------------------------------------------
 // RA1.3：folder worker（扫描登记 → folder_images；识别推理 RA2）
@@ -2302,7 +2316,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
         return;
     };
     let api_prompt = crate::vlm::monitor_prompt(&dcfg.effective_prompt());
-    let mut ppe_runner = load_worker_ppe(&cfg, &handle);
+    let mut ppe_runner = load_worker_ppe(&st, &cfg, &handle);
     let mut policy = cfg.policy.clone();
     let sink = EventSink::new(Arc::clone(&st)).use_cascade(mode != "local");
     let provenance = provenance::Inputs::new(
@@ -2886,7 +2900,7 @@ fn folder_loop(st: Shared, cfg: WorkerConfig, handle: Arc<WorkerHandle>) {
                 if let Ok(Some(eid)) = sink.record_located(
                     &cand,
                     snapshot_jpeg.as_deref(),
-                    dispatch_now,
+                    Some(review_dispatch(dispatch_now)),
                     target,
                     overlay.as_deref(),
                     None,
@@ -3088,7 +3102,7 @@ mod tests {
             st.clone(),
             SinkPaths::from_data_dir(tmp.path().to_str().unwrap()),
         );
-        let err = sink.finalize(eid, &[], 5.0).unwrap_err();
+        let err = sink.finalize(eid, &[], 5.0, None).unwrap_err();
         assert_eq!(err, "no frames");
         let s = ls_store::Store::open(&st.db_path).unwrap();
         assert!(s.event_by_id(eid).unwrap().unwrap().video.is_none());
@@ -3481,6 +3495,57 @@ mod tests {
     }
 
     #[test]
+    fn capture_commits_alert_intent_only_for_events_eligible_to_send() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("outbox.db");
+        seed_schema(&db_path);
+        let st = test_state_custom(
+            db_path.to_str().unwrap(),
+            "",
+            false,
+            tmp.path().to_str().unwrap(),
+            true,
+            "",
+        );
+        let store = ls_store::Store::open(&st.db_path).unwrap();
+        let sink = EventSink::new(st);
+        let candidate = ls_analyzer::pipeline::Candidate {
+            camera_id: 1,
+            zone_id: None,
+            behavior: "no_mask".into(),
+            level: 2,
+            track_id: 1,
+            detail: "fixture".into(),
+            ts_iso: "2026-11-25T12:00:00".into(),
+            evidence_key: "alert-outbox-test".into(),
+        };
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_fixture_outbox BEFORE INSERT ON alert_outbox
+             BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END;",
+            )
+            .unwrap();
+        assert!(
+            sink.record_ext(&candidate, None, true).is_err(),
+            "告警意图写入失败应回滚事件"
+        );
+        assert_eq!(store.count_events().unwrap(), 0);
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER reject_fixture_outbox")
+            .unwrap();
+        let event_id = sink.record_ext(&candidate, None, true).unwrap().unwrap();
+        let mut deferred = candidate;
+        deferred.track_id = 2;
+        deferred.evidence_key = "deferred-outbox-test".into();
+        assert!(sink.record_ext(&deferred, None, false).unwrap().is_some());
+        let committed = store.pending_alerts().unwrap();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].1, event_id);
+    }
+
+    #[test]
     fn dispatch_event_no_channels_is_noop() {
         // 无渠道配置（env 空 + 未注入）→ 0 投递、不建 delivery 行（不崩即契约）
         let tmp = tempfile::tempdir().unwrap();
@@ -3506,19 +3571,10 @@ mod tests {
                 ts: "2026-11-13T00:00:00",
             })
             .unwrap();
-        let dev = ls_dispatch::DispatchEvent {
-            id: eid,
-            camera_id: 1,
-            type_: "person_enter".into(),
-            level: 2,
-            detail: "x".into(),
-            ts: "2026-11-13T00:00:00".into(),
-            camera_name: "cam".into(),
-            track_id: 0,
-            snapshot_path: None,
-        };
-        let n = st.jobs.dispatch_event(&store, &dev);
-        assert_eq!(n, 0, "无渠道配置 → 0 投递");
+        store
+            .enqueue_alert(eid, ls_store::AlertDispatchKind::Initial)
+            .unwrap();
+        st.jobs.retry_tick();
         let rows: i64 = store
             .conn()
             .query_row("SELECT COUNT(*) FROM alert_deliveries", [], |r| r.get(0))

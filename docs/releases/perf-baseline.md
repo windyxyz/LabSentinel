@@ -9,7 +9,7 @@
     "cpu_count": 20,
     "onnxruntime": "1.31.1 providers=['AzureExecutionProvider', 'CPUExecutionProvider']"
   },
-  "video": "m0-spike\\data\\lab-walk-24076.mp4",
+  "video": "models\\data\\lab-walk-24076.mp4",
   "thresholds": {
     "cpu_4cam_fps_per_cam": 4.5,
     "dml_8cam_fps_per_cam": 4.5,

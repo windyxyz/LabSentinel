@@ -20,7 +20,7 @@ import time
 
 import httpx
 
-VIDEO = r"D:\User\Desktop\TOOLS\监控识别\m0-spike\data\lab-walk-24076.mp4"
+VIDEO = r"D:\User\Desktop\TOOLS\监控识别\models\data\lab-walk-24076.mp4"
 ZONE_POLYGON = [[520, 180], [1180, 180], [1180, 620], [520, 620]]
 
 

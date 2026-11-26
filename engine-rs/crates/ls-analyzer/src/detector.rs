@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ls_infer::yolo::YoloModel;
+use ls_infer::yolo::{InferenceDevice, VulkanCv, YoloModel};
 use ls_ingest::Frame;
 
 use crate::pipeline::{Detector, NullDetector, PersonDetection, PpeStatus, SceneObject};
@@ -146,6 +146,10 @@ impl Detector for YoloDetector {
     fn objects(&self) -> &[SceneObject] {
         &self.objects
     }
+
+    fn inference_device(&self) -> Option<InferenceDevice> {
+        Some(self.model.device())
+    }
 }
 
 /// 构造检测器：模型缺失/无效/加载失败均回退 `NullDetector`（与 sidecar 原语义一致）。
@@ -157,17 +161,24 @@ pub fn make_detector(cfg: &DetectorConfig) -> Box<dyn Detector> {
 }
 
 pub fn load_detector(cfg: &DetectorConfig) -> Result<Box<dyn Detector>, String> {
+    load_detector_cv(cfg, None)
+}
+
+pub fn load_detector_cv(
+    cfg: &DetectorConfig,
+    vulkan: Option<&VulkanCv>,
+) -> Result<Box<dyn Detector>, String> {
     let raw = cfg.model_path.as_ref().ok_or("未配置人员检测模型")?;
     let path = anchor_model_file(raw)
         .ok_or_else(|| format!("人员检测模型路径无效或不可读: {}", raw.display()))?;
-    let model = YoloModel::load(
+    let model = YoloModel::load_cv(
         &path,
         cfg.imgsz,
         cfg.conf,
         cfg.iou,
         cfg.min_area,
-        None,
         cfg.use_gpu,
+        vulkan,
     )?;
     println!(
         "[ls-analyzer] 模型已加载 {}（imgsz={} conf={} iou={}）",

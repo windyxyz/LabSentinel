@@ -10,7 +10,7 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.json text eol=lf
-m0-spike/yolo11n_ppe.classes.txt text eol=lf
+models/yolo11n_ppe.classes.txt text eol=lf
 *.onnx binary
 *.pt binary
 *.mp4 binary

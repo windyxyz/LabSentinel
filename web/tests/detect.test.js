@@ -52,6 +52,98 @@ describe('api.js detect* 契约', () => {
 })
 
 describe('DetectPanel.vue（UX2）', () => {
+  it('按本机运行时枚举的编号提交预算并显示 CPU 回退原因', async () => {
+    let status = {
+      status: 'stopped',
+      runtime_available: true,
+      gpu_settings: { vulkan_device: 'auto', vram_budget_mb: 800, cv_vram_reserve_mb: 1024 },
+      vulkan_devices: [null, { id: 'Vulkan2', name: 'Test GPU', free_mb: 768 }],
+    }
+    const fn = mockFetch({
+      'GET /api/detect/config': CONFIG,
+      'GET /api/detect/local-vlm': () => status,
+      'POST /api/detect/local-vlm/start': () => {
+        status = { ...status, status: 'cpu_fallback', fallback_reason: '显存不足' }
+        return status
+      },
+    })
+    const view = mount(DetectPanel)
+    await flushPromises()
+    const panel = view.findAll('.panel').find(candidate => candidate.text().includes('离线视觉服务'))
+    const button = text => panel.findAll('button').find(candidate => candidate.text() === text)
+    await panel.get('input[placeholder="视觉模型.gguf"]').setValue('model.gguf')
+    await panel.get('input[placeholder="mmproj-F16.gguf"]').setValue('projector.gguf')
+    await panel.get('input[max="128"]').setValue(12)
+    await button('列出显卡').trigger('click')
+    await flushPromises()
+    await panel.get('select').setValue('Vulkan2')
+    await button('启动').trigger('click')
+    await flushPromises()
+    expect(fn.mock.calls.some(([url]) => url.endsWith('/local-vlm?probe=true'))).toBe(true)
+    const [, request] = fn.mock.calls.find(([url]) => url.endsWith('/local-vlm/start'))
+    expect(JSON.parse(request.body)).toEqual({
+      model: 'model.gguf', projector: 'projector.gguf', gpu_layers: 12,
+      vulkan_device: 'Vulkan2', vram_budget_mb: 800, cv_vram_reserve_mb: 1024,
+    })
+    await vi.waitFor(() => expect(view.text()).toContain('已回退至 CPU'))
+    expect(view.text()).toContain('显存不足')
+    view.unmount()
+  })
+
+  it('仅灰度包显示 Vulkan 选项，按分析源显示人员与 PPE 的实际设备', async () => {
+    let runtime = { ep: 'dml', backend: 'dml', vulkan_available: false }
+    const fn = mockFetch({
+      'GET /api/detect/config': () => ({ ...CONFIG, runtime }),
+      'PUT /api/detect/config': { restarted: 1 },
+    })
+    const ordinary = mount(DetectPanel)
+    await flushPromises()
+    expect(ordinary.find('input[value="auto_vulkan"]').exists()).toBe(false)
+    ordinary.unmount()
+
+    runtime = { ...runtime, vulkan_available: true, gpu_id: 'auto' }
+    const gray = mount(DetectPanel)
+    await flushPromises()
+    runtime = { ...runtime, backend: 'auto_vulkan', camera_devices: [
+      { camera_id: 7, person: 'Vulkan(GPU)', ppe: 'DirectML(GPU)' },
+    ] }
+    await gray.get('input[value="auto_vulkan"]').setValue(true)
+    await flushPromises()
+    const put = fn.mock.calls.find(([, opts]) => opts?.method === 'PUT')
+    expect(JSON.parse(put[1].body)).toEqual({ runtime: { backend: 'auto_vulkan' } })
+    expect(gray.text()).toContain('#7 · 人员 Vulkan(GPU) · PPE DirectML(GPU)')
+    gray.unmount()
+  })
+
+  it('选择物理显卡时保存 UUID 并显示同卡回退', async () => {
+    const id = 'uuid:0102030405060708090a0b0c0d0e0f10'
+    const runtime = {
+      backend: 'auto_vulkan', vulkan_available: true, gpu_id: 'auto',
+      adapter_index: 1, effective_adapter_index: 1,
+      adapters: [
+        { gpu_id: id, name: '物理显卡', dxgi_index: 3, vulkan_index: 0 },
+        { name: '备用显卡', dxgi_index: 1, vulkan_index: null },
+      ],
+    }
+    const fn = mockFetch({
+      'GET /api/detect/config': () => ({ ...CONFIG, runtime }),
+      'PUT /api/detect/config': () => {
+        runtime.gpu_id = id
+        runtime.effective_adapter_index = 3
+        return { restarted: 1 }
+      },
+    })
+    const view = mount(DetectPanel)
+    await flushPromises()
+    const gpuSelect = view.findAll('select').find(select => select.text().includes('物理显卡'))
+    await gpuSelect.setValue(id)
+    await vi.waitFor(() => expect(view.text()).toContain('DirectML 回退使用同一张显卡'))
+    const [, request] = fn.mock.calls.find(([, opts]) => opts?.method === 'PUT')
+    expect(JSON.parse(request.body)).toEqual({ runtime: { gpu_id: id } })
+    expect(gpuSelect.element.value).toBe(id)
+    view.unmount()
+  })
+
   it('三模式卡片渲染且本地模式默认选中', async () => {
     mockFetch({ 'GET /api/detect/config': CONFIG })
     const w = mount(DetectPanel)

@@ -37,6 +37,9 @@ pub(crate) async fn guard_middleware(
     next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
+    if path == crate::mcp::ENDPOINT {
+        return next.run(req).await;
+    }
     let method = req.method().clone();
     let headers = req.headers().clone();
     let authority = headers
@@ -181,6 +184,8 @@ pub(crate) async fn guard_middleware(
     const ADMIN_GETS: &[&str] = &[
         "/api/diagnostics/bundle.zip",
         "/api/storage",
+        "/api/mcp",
+        "/api/detect/local-vlm",
         "/api/dataset",
         "/api/system/network",
         "/api/system/autostart",
@@ -189,6 +194,7 @@ pub(crate) async fn guard_middleware(
         "/api/access/settings",
         "/api/devices",
         "/api/alert-deliveries",
+        "/api/alerts/actuator",
         "/api/face/config",
         "/api/face/persons",
         "/api/face/library",

@@ -21,12 +21,14 @@ use crate::{state::Shared, util::*};
 
 const BATCH: usize = 500;
 const POLICY: &str = "storage.retention";
+const VULKAN_CACHE_DIR: &str = "runtime-cache/vulkan";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, Ord, PartialEq, PartialOrd)]
 #[serde(rename_all = "snake_case")]
 enum Category {
     Logs,
     Cache,
+    VulkanCache,
     Events,
     NormalChecks,
     Dataset,
@@ -34,9 +36,10 @@ enum Category {
 }
 
 impl Category {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Logs,
         Self::Cache,
+        Self::VulkanCache,
         Self::Events,
         Self::NormalChecks,
         Self::Dataset,
@@ -120,6 +123,20 @@ fn directory_files(root: &Path, dir: &str, name_ok: impl Fn(&str) -> bool) -> Ve
         .collect()
 }
 
+fn vulkan_cache_files(root: &Path) -> Vec<FileItem> {
+    directory_files(root, VULKAN_CACHE_DIR, |name| {
+        name.strip_prefix("ncnn-")
+            .and_then(|name| name.strip_suffix(".dpapi"))
+            .and_then(|name| name.split_once("-pipelines-"))
+            .is_some_and(|(hash, gpu)| {
+                hash.len() == 64
+                    && hash.bytes().all(|c| c.is_ascii_hexdigit())
+                    && !gpu.is_empty()
+                    && gpu.bytes().all(|c| c.is_ascii_digit())
+            })
+    })
+}
+
 fn plan(store: &Store, root: &Path, selection: Selection) -> rusqlite::Result<Plan> {
     let days = i64::from(selection.days);
     let cutoff = ls_core::time::local_days_ago_iso(days);
@@ -137,7 +154,8 @@ fn plan(store: &Store, root: &Path, selection: Selection) -> rusqlite::Result<Pl
                 "SELECT id,snapshot,video FROM events WHERE ts < ?1
                  AND status IN ('acked','false_positive','ignored')
                  AND NOT EXISTS(SELECT 1 FROM violation_episodes ep WHERE ep.id=events.episode_id AND ep.closed_ts IS NULL)
-                 AND NOT EXISTS(SELECT 1 FROM alert_deliveries d WHERE d.event_id=events.id AND COALESCE(d.status,'pending') IN ('pending','retry','failed'))
+                 AND NOT EXISTS(SELECT 1 FROM alert_deliveries d WHERE d.event_id=events.id AND COALESCE(d.status,'pending') IN ('pending','retry','failed','sending','unconfirmed'))
+                 AND NOT EXISTS(SELECT 1 FROM alert_outbox o WHERE o.event_id=events.id AND o.status IN ('pending','awaiting_review'))
                  ORDER BY id LIMIT ?2")?;
             for row in stmt.query_map(rusqlite::params![cutoff, BATCH as i64], |r| {
                 Ok((
@@ -204,6 +222,7 @@ fn plan(store: &Store, root: &Path, selection: Selection) -> rusqlite::Result<Pl
                 Category::Cache => directory_files(root, "thumbs", |name| {
                     (name.starts_with("ev_") || name.starts_with("img_")) && name.ends_with(".jpg")
                 }),
+                Category::VulkanCache => vulkan_cache_files(root),
                 Category::Backups => directory_files(root, "backups", |name| {
                     name.starts_with("auto-") && name.ends_with(".zip")
                 }),
@@ -341,10 +360,13 @@ async fn block(
 pub(crate) async fn usage(State(st): State<Shared>) -> Response {
     block(st, |st, root| {
         let directories = ["logs", "thumbs", "snapshots", "videos", "dataset_pool", "annotation_pool", "backups"];
+        let group = |id: &str, files: Vec<FileItem>| {
+            json!({"id": id, "files": files.len(), "bytes": files.iter().map(|file| file.bytes).sum::<u64>()})
+        };
         let mut groups: Vec<_> = directories.iter().map(|&dir| {
-            let files = directory_files(&root, dir, |_| true);
-            json!({"id": dir, "files": files.len(), "bytes": files.iter().map(|file| file.bytes).sum::<u64>()})
+            group(dir, directory_files(&root, dir, |_| true))
         }).collect();
+        groups.push(group("vulkan_cache", vulkan_cache_files(&root)));
         let db_bytes: Vec<_> = [st.db_path.clone(), format!("{}-wal", st.db_path)]
             .iter().filter_map(|path| fs::metadata(path).ok().map(|meta| meta.len())).collect();
         groups.push(json!({"id": "database", "files": db_bytes.len(), "bytes": db_bytes.iter().sum::<u64>()}));
@@ -609,6 +631,24 @@ mod tests {
             true,
             root.to_str().unwrap(),
         ));
+        let runtime = root.join(VULKAN_CACHE_DIR);
+        fs::create_dir_all(&runtime).unwrap();
+        let stem = format!("ncnn-{}", "a".repeat(64));
+        let expired = runtime.join(format!("{stem}-pipelines-0.dpapi"));
+        let current = runtime.join(format!("{stem}-pipelines-1.dpapi"));
+        let dll = runtime.join(format!("{stem}.dll"));
+        let unrelated = runtime.join("ncnn-unrelated-pipelines-0.dpapi");
+        for path in [&expired, &current, &dll, &unrelated] {
+            fs::write(path, [5u8; 100]).unwrap();
+        }
+        for path in [&expired, &dll, &unrelated] {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(2 * 86_400))
+                .unwrap();
+        }
         let headers = [("x-admin-token", "storage-admin")];
         assert_eq!(
             req_hdr(&app, "GET", "/api/storage", None, &[])
@@ -618,11 +658,12 @@ mod tests {
         );
         let status = req_hdr(&app, "GET", "/api/storage", None, &headers).await;
         assert_eq!(status.status(), StatusCode::OK);
-        assert!(body(status).await["groups"]
-            .as_array()
-            .unwrap()
+        let status = body(status).await;
+        let groups = status["groups"].as_array().unwrap();
+        assert!(groups.iter().any(|g| g["id"] == "database"));
+        assert!(groups
             .iter()
-            .any(|g| g["id"] == "database"));
+            .any(|g| { g["id"] == "vulkan_cache" && g["files"] == 2 && g["bytes"] == 200 }));
 
         let preview = async |category: &str| {
             body(
@@ -647,6 +688,15 @@ mod tests {
             )
             .await
         };
+        let planned = preview("vulkan_cache").await;
+        assert_eq!(planned["files"], 1);
+        assert_eq!(planned["bytes"], 100);
+        let cleaned = clean("vulkan_cache", planned["preview"].clone()).await;
+        assert_eq!(cleaned.status(), StatusCode::OK);
+        assert_eq!(body(cleaned).await["freed_bytes"], 100);
+        assert!(!expired.exists());
+        assert!(current.is_file() && dll.is_file() && unrelated.is_file());
+
         let planned = preview("events").await;
         assert_eq!(planned["records"], 2);
         assert_eq!(planned["bytes"], 100);

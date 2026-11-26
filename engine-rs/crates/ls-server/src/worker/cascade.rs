@@ -236,18 +236,29 @@ pub(super) fn finish_cascade_events(
             result["verdict"] = json!(event_verdict(scene, &candidate.behavior, single_target));
         }
         let suppressed = suppress && result["verdict"] == "likely_false";
-        match store.finish_event_vlm(*eid, &result.to_string(), &now, suppressed) {
+        match store.finish_event_vlm(*eid, &result.to_string(), &now, suppressed, suppress) {
             Ok(Some((level, detail))) if suppress && !suppressed => {
                 let mut candidate = candidate.clone();
                 candidate.level = level;
                 candidate.detail = detail;
-                sink.deliver_deferred_pub(*eid, &candidate, false);
+                let has_snapshot = store
+                    .event_by_id(*eid)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|e| e.snapshot.is_some());
+                sink.publish_committed_mqtt(store, *eid, &candidate, has_snapshot);
             }
             Ok(_) => {}
             Err(error) => {
                 crate::logger::error(&format!("[ls-cascade] 事件 #{eid} 复核保存失败: {error}"));
-                if suppress {
-                    sink.deliver_deferred_pub(*eid, candidate, false);
+                if suppress && !suppressed {
+                    match store.enqueue_alert(*eid, ls_store::AlertDispatchKind::Initial) {
+                        Ok(true) => sink.publish_committed_mqtt(store, *eid, candidate, false),
+                        Ok(false) => {}
+                        Err(error) => crate::logger::error(&format!(
+                            "[ls-cascade] 事件 #{eid} 无法登记待发告警: {error}"
+                        )),
+                    }
                 }
             }
         }

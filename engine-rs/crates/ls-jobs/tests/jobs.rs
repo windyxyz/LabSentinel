@@ -677,3 +677,107 @@ fn retry_consumer_honors_delay_and_manual_retry_reaches_dead_letter() {
     assert!(jobs.retry_now(id).unwrap());
     assert_eq!(store.delivery_by_id(id).unwrap().unwrap().1, "dead_letter");
 }
+
+#[test]
+fn committed_alert_intent_delivers_once_with_a_receipt() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("outbox.db");
+    let store = Store::open(db_path.to_str().unwrap()).unwrap();
+    store.ensure_schema().unwrap();
+    let event_id = store
+        .add_event_with_outbox(
+            &ls_store::NewEvent {
+                camera_id: 1,
+                type_: "no_mask",
+                level: 2,
+                track_id: 5,
+                detail: "fixture",
+                snapshot: None,
+                ts: "2026-11-25T12:00:00",
+            },
+            ls_store::EventEvidence::default(),
+            None,
+            Some(ls_store::AlertDispatchKind::Initial),
+        )
+        .unwrap();
+
+    let receiver = TcpListener::bind("127.0.0.1:0").unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/", receiver.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut stream = loop {
+            match receiver.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "告警投递等待超时");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("回环接收失败: {error}"),
+            }
+        };
+        // Windows can inherit the listener's nonblocking mode on accept.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut req = BufReader::new(&mut stream);
+        let mut idempotency = None;
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            assert!(req.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("idempotency-key") {
+                    idempotency = Some(value.trim().to_owned());
+                } else if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+        }
+        req.read_exact(&mut vec![0; length]).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .unwrap();
+        idempotency
+    });
+
+    // 使用新消费者模拟事件提交后、渠道派发前进程退出。
+    let jobs = ls_jobs::Jobs::new(
+        db_path.clone(),
+        ls_jobs::JobsConfig::default_for_db(&db_path),
+    );
+    jobs.set_alert_channels(vec![(
+        ls_dispatch::Channel::Webhook,
+        ls_dispatch::ChannelConfig {
+            url,
+            allow_http: true,
+            ..Default::default()
+        },
+    )]);
+    jobs.retry_tick();
+    let rows = store.deliveries(None, 10).unwrap();
+    assert_eq!(rows.len(), 1, "重启后需消费已提交的告警意图");
+    assert_eq!(rows[0].status, "ok");
+    assert_eq!(rows[0].attempts, 1);
+    let (key, code): (String, i64) = store
+        .conn()
+        .query_row(
+            "SELECT idempotency_key, receipt_code FROM alert_deliveries WHERE event_id=?",
+            [event_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(server.join().unwrap().as_deref(), Some(key.as_str()));
+    assert_eq!(code, 200);
+    assert_eq!(store.recover_interrupted_deliveries().unwrap(), 0);
+    jobs.retry_tick();
+    assert_eq!(store.deliveries(None, 10).unwrap().len(), 1);
+}

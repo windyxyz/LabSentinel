@@ -11,7 +11,7 @@ M0 实测背景见 [../docs/archive/40-roadmap.md](../docs/archive/40-roadmap.md
 | **m0-venv** | `D:\LabSentinel\m0-venv\Scripts\python.exe` | Python 3.14 | 数据下载、训练、导出 ONNX（ultralytics 8.4.188 / roboflow / torch CPU / onnxruntime-directml） |
 | **npu-venv** | `D:\LabSentinel\npu-venv\Scripts\python.exe` | Python 3.12 | 仅量化（amd-quark 0.12 / onnxruntime-vitisai 1.23.2 / numpy 钉 1.26.4） |
 
-快照：`m0-spike/npu-venv-freeze.txt`。**改 venv 包版本是禁忌**（会破坏量化环境与历史复现）。
+快照：`tools/legacy/model-experiments/npu-venv-freeze.txt`。**改 venv 包版本是禁忌**（会破坏量化环境与历史复现）。
 
 ## 一.5 摄像头联调工具（任务 56）
 
@@ -36,15 +36,15 @@ HTTPS_PROXY=http://127.0.0.1:7890 $PY tools/download_datasets.py
 
 # 2) 训练（正式 100 epochs；冒烟 --epochs 1 --name runs/ppe_smoke）
 $PY tools/train_ppe.py --epochs 100 --patience 50 --name runs/ppe_v2
-#   -> runs/detect/<name>/，best.pt 自动复制为 m0-spike/yolo11n_ppe.pt
+#   -> runs/detect/<name>/，best.pt 自动复制为 models/yolo11n_ppe.pt
 
 # 3) 导出 FP32 ONNX（opset 13 / imgsz 640，打印 10 类别顺序并验证输入 1x3x640x640）
 $PY tools/export_onnx.py
-#   -> m0-spike/yolo11n_ppe.onnx（网页「模型管理」选择，或 env LS_PPE_MODEL 指向它）
+#   -> models/yolo11n_ppe.onnx（网页「模型管理」选择，或 env LS_PPE_MODEL 指向它）
 
 # 4) NPU XINT8 量化（必须 npu-venv；检测头 /model.23 保留 FP32；valid 集抽 20 张校准）
 $NPY tools/quantize_npu.py
-#   -> m0-spike/yolo11n_ppe_xint8.onnx（NPU 推理参考 m0-spike/s2c_fps_npu.py）
+#   -> models/yolo11n_ppe_xint8.onnx（NPU 推理参考 tools/legacy/model-experiments/s2c_fps_npu.py）
 ```
 
 ### 各脚本参数速查（均有 `--help`）
@@ -70,7 +70,7 @@ PPE 引擎按**类别名**匹配（`LS_PPE_CLASS_NAMES`），names 顺序变了�
 4. **Quark 量化绕道**：本机无 Visual Studio MSVC，Quark 导入时要 JIT 编译 C++ 扩展会失败——`quantize_npu.py` 内置"注入绕道"（内存中剥掉 `build_custom_ops.py` 末尾 `_initialize_kernels()` 调用后手工加载模块），不修改 npu-venv 文件。正式环境建议装 VS Build Tools 走官方路径。Quark 0.13 的 download.amd.com 直链已失效（0.12 可用）。
 5. **量化必须排除检测头**：`/model.23` 前缀子图（84 节点）保留 FP32——全图量化的两版（通用 QDQ、Quark XINT8 全图）类别输出全部归零；排除后精度恢复（M0 实测 NPU 40 FPS，person conf 0.80 与 FP32 同档）。
 6. **Roboflow key 禁止写死**：只从 `RF_API_KEY` 环境变量读；也不要把 key 写进任何文档/命令历史。
-7. **不要改历史记录**：`m0-spike/`、`docs/20-research/` 是历史实测记录，禁止改动；训练结果目录新开 `--name`，别覆盖已有 runs。
+7. **保留历史记录**。早期模型实验在 `tools/legacy/model-experiments/`，预研记录在 `docs/archive/20-research/`。用新的 `--name` 保存训练结果。
 8. **服务端依赖**：`supervision` 钉 0.25.1（0.26+ 移除 ByteTrack）；服务端改 Python 依赖前先停 uvicorn（DLL 锁）。
 9. **Git Bash curl 发含中文 JSON 会转码损坏**——测试 API 用 python httpx。
 
@@ -89,7 +89,7 @@ PPE 引擎按**类别名**匹配（`LS_PPE_CLASS_NAMES`），names 顺序变了�
 - **训练报 data.yaml 不存在** → 先跑 `download_datasets.py`（需 `RF_API_KEY` + 代理）。
 - **export 后类别顺序与 yaml 不一致** → 脚本会 `[warn]`，检查是否用错了起点权重；PPE 引擎按名称匹配，顺序不一致时优先修 `LS_PPE_CLASS_NAMES`/重训。
 - **quantize 报 `_initialize_kernels`/C++ 编译错误** → 没走注入绕道或换动了 npu-venv；确认用 `npu-venv` 的 python 跑本目录的 `quantize_npu.py`。
-- **NPU 推理验证** → 参考 `m0-spike/s2c_fps_npu.py`（onnxruntime-vitisai + VitisAIExecutionProvider，注意不同后端置信度分布有差异，生产按后端校准阈值）。
+- **NPU 推理验证** → 参考 `tools/legacy/model-experiments/s2c_fps_npu.py`（onnxruntime-vitisai + VitisAIExecutionProvider，注意不同后端置信度分布有差异，生产按后端校准阈值）。
 
 ## 七、标注工具链（数据飞轮首轮，任务 11）
 
@@ -99,7 +99,7 @@ PPE 引擎按**类别名**匹配（`LS_PPE_CLASS_NAMES`），names 顺序变了�
 
 ```bash
 # 单视频：每 2 秒抽 1 帧，最多 300 帧；帧差去重（静态画面自动丢弃）
-python tools/frame_sampler.py --video m0-spike/data/lab-walk-24076.mp4 --out datasets/frames
+python tools/frame_sampler.py --video models/data/lab-walk-24076.mp4 --out datasets/frames
 
 # 目录批量（--interval 越小抽得越密；--diff-thresh 越小保留越多）
 python tools/frame_sampler.py --video-dir D:/lab-videos --out datasets/frames --interval 2.0 --max 300 --diff-thresh 8.0
@@ -112,7 +112,7 @@ python tools/frame_sampler.py --video-dir D:/lab-videos --out datasets/frames --
 
 ```bash
 python tools/preannotate.py --images datasets/frames --out datasets/labels \
-    --model m0-spike/yolo11n_ppe.onnx --classes-file datasets/lab-ppe/data.yaml
+    --model models/yolo11n_ppe.onnx --classes-file datasets/lab-ppe/data.yaml
 ```
 
 - `--classes-file` 支持一行一个类名，或直接给 `data.yaml`（自动解析 `names:` 列表）；**类名顺序必须与模型输出一致**
@@ -133,10 +133,10 @@ python tools/preannotate.py --images datasets/frames --out datasets/labels \
 
 ```bash
 # 训练侧 mAP（与训练同一环境，指标口径稳定）
-$PY -c "from ultralytics import YOLO; YOLO('m0-spike/yolo11n_ppe.onnx').val(data='datasets/merged/data.yaml', split='val')"
+$PY -c "from ultralytics import YOLO; YOLO('models/yolo11n_ppe.onnx').val(data='datasets/merged/data.yaml', split='val')"
 
 # 在线推理口径对齐（Rust 黄金语料运行器，产出 jsonl 事件流）
-engine-rs/target/release/ls-analyzer --golden <video> --out events.jsonl --model m0-spike/yolo11n_ppe.onnx
+engine-rs/target/release/ls-analyzer --golden <video> --out events.jsonl --model models/yolo11n_ppe.onnx
 
 # 两份事件流一致性对比（历史迁移期工具，保留）
 python tools/golden_diff.py a.jsonl b.jsonl
@@ -161,7 +161,7 @@ VERSION.md 含来源清单、类别统计与**脱敏确认清单**——对外�
 （一行一个类名，顺序=输出通道顺序，# 注释与空行忽略）；无该文件才回退 `LS_PPE_CLASS_NAMES`。
 v2 上线步骤：导出 ONNX → 把 11 类词表存为 `<onnx>.classes.txt` 放同目录 → `.env` 改
 `LS_PPE_MODEL` 路径 → 重启服务端（日志会打印 `[engine] ppe classes from ...`）。
-v1 的词表文件 `m0-spike/yolo11n_ppe.classes.txt` 已就位。
+v1 的词表文件 `models/yolo11n_ppe.classes.txt` 已就位。
 
 ## 八、GPU 训练环境（gpu-venv，DirectML 训练路线）
 
@@ -229,10 +229,10 @@ python tools/train_ppe.py --arch yolo11n --data Resources/datasets/_mixed/data.y
 
 # 4) 导出 FP32/FP16 ONNX（自动生成 classes.txt 与 SHA256）
 python tools/export_onnx.py --weights Resources/runs/detect/runs/ppe_v2/weights/best.pt \
-    --data Resources/datasets/_mixed/data.yaml --out m0-spike/yolo11n_ppe_v2.onnx --half
+    --data Resources/datasets/_mixed/data.yaml --out models/yolo11n_ppe_v2.onnx --half
 
 # 5) A/B 对比（mAP50/耗时/灰度召回，Markdown 表）
-python tools/eval_report.py --old m0-spike/yolo11n_ppe.onnx --new m0-spike/yolo11n_ppe_v2.onnx \
+python tools/eval_report.py --old models/yolo11n_ppe.onnx --new models/yolo11n_ppe_v2.onnx \
     --data <独立验证集的data.yaml> --gray-data <灰度子集的data.yaml> --out Resources/runs/eval-v2.md
 
 # 6) 网页端：设置→模型与检测→本地模型→上传替换（或「对比评测」先看差异）

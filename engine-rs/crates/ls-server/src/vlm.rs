@@ -252,6 +252,21 @@ fn mime(bytes: &[u8]) -> &'static str {
     }
 }
 
+fn openai_image(bytes: &[u8], managed_local: bool) -> Result<Value, String> {
+    // The managed llama.cpp decoder accepts JPEG, while event snapshots are stored as WebP.
+    let jpeg = if managed_local && mime(bytes) == "image/webp" {
+        let image = ls_jobs::media::decode_image(bytes).ok_or("无法解码本机复核截图")?;
+        Some(ls_jobs::media::encode_jpeg(&image, 90).ok_or("无法转换本机复核截图")?)
+    } else {
+        None
+    };
+    let image = jpeg.as_deref().unwrap_or(bytes);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(image);
+    Ok(
+        json!({"type":"image_url", "image_url":{"url":format!("data:{};base64,{encoded}", mime(image))}}),
+    )
+}
+
 fn response(
     cfg: &VlmCfg,
     instructions: &str,
@@ -271,19 +286,14 @@ fn response(
     }
     .build()
     .into();
-    let imgs: Vec<String> = frames
-        .iter()
-        .map(|f| base64::engine::general_purpose::STANDARD.encode(f))
-        .collect();
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
     let text = match cfg.provider.as_str() {
         // 外部联网模型通用协议：content 数组逐帧 image_url（多图=时序序列）
         "openai_compat" => {
             let mut content = vec![json!({"type": "text", "text": prompt})];
-            for (image, b64) in frames.iter().zip(&imgs) {
-                content.push(json!({
-                    "type": "image_url",
-                    "image_url": {"url": format!("data:{};base64,{b64}", mime(image))}
-                }));
+            let managed_local = crate::local_vlm::owns_profile(&cfg.url, &cfg.model);
+            for image in frames {
+                content.push(openai_image(image, managed_local)?);
             }
             let ep = openai_endpoint(&cfg.url, "chat/completions");
             let user = json!({"role": "user", "content": content});
@@ -324,8 +334,9 @@ fn response(
         }
         // ollama 本地：images 数组多元素
         "ollama" => {
+            let images: Vec<_> = frames.iter().map(|frame| encode(frame)).collect();
             let mut payload = json!({
-                "model": cfg.model, "prompt": prompt, "images": imgs, "stream": false,
+                "model": cfg.model, "prompt": prompt, "images": images, "stream": false,
                 "options": {"temperature": 0, "num_predict": max_tokens},
             });
             if structured {
@@ -378,7 +389,7 @@ fn response(
                 let data = base64::engine::general_purpose::STANDARD.encode(video);
                 parts.push(json!({"inline_data": {"mime_type": "video/mp4", "data": data}}));
             } else {
-                parts.extend(frames.iter().zip(&imgs).map(|(image, data)| json!({"inline_data": {"mime_type": mime(image), "data": data}})));
+                parts.extend(frames.iter().map(|image| json!({"inline_data": {"mime_type": mime(image), "data": encode(image)}})));
             }
             let url = gemini_endpoint(&cfg.url, &format!("models/{}:generateContent", cfg.model));
             let mut payload = json!({"contents": [{"parts": parts}], "generationConfig": {"temperature": 0, "maxOutputTokens": max_tokens}});
@@ -686,6 +697,32 @@ pub(crate) fn embedding_dimensions(cfg: &VlmCfg, input: &str) -> Result<usize, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_llama_accepts_event_webp_through_jpeg_transport() {
+        use image::ImageEncoder;
+
+        let mut webp = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+            .write_image(&[64; 12], 2, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let direct = openai_image(&webp, false).unwrap();
+        let local = openai_image(&webp, true).unwrap();
+        let base64 = base64::engine::general_purpose::STANDARD;
+        assert_eq!(
+            direct["image_url"]["url"],
+            format!("data:image/webp;base64,{}", base64.encode(&webp))
+        );
+        let encoded = local["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("data:image/jpeg;base64,")
+            .unwrap();
+        let jpeg = base64.decode(encoded).unwrap();
+        assert_eq!(mime(&jpeg), "image/jpeg");
+        assert_eq!(ls_jobs::media::decode_image(&jpeg).unwrap().width(), 2);
+        assert_eq!(openai_image(&jpeg, true).unwrap(), local);
+    }
 
     #[test]
     fn parse_verdict_strict_loose_and_clamps() {

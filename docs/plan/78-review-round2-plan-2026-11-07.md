@@ -154,7 +154,7 @@ CHANGELOG 和 `Dockerfile.rust` 注释中"L3/L4 已替换 Python 运行时"的�
 | 任务 | 状态 | 说明 | 本轮编号 |
 |---|---|---|---|
 | T-401 版本单源 | ✅ | — | — |
-| T-402 发布流水线 | ❌ | CI 上不可能成功：`build_portable.py:54-58` 要求 `.venv`；`m0-spike/yolo11n.onnx` 被 gitignore 且无下载步骤；`build_rust.py` 写死 `D:/tmp/...` | N-09 |
+| T-402 发布流水线 | ❌ | CI 上不可能成功：`build_portable.py:54-58` 要求 `.venv`；`models/yolo11n.onnx` 被 gitignore 且无下载步骤；`build_rust.py` 写死 `D:/tmp/...` | N-09 |
 | T-403 签名 | ⬜ | 占位（等证书/密钥：人工事项） | — |
 | T-404 升级回滚 | 🟡 | 回滚机制存在，但默认健康检查是 `python -c "sys.exit(0)"`（`install_portable.py:338-341`），不会因服务起不来而触发回滚 | N-18 |
 | T-405 安全卸载 | ✅ | 安装标记 + 拒绝非受管目录 + 逐项锚点删除 | — |

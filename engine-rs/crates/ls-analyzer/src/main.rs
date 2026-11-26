@@ -886,9 +886,9 @@ fn resolve_model_path() -> Option<PathBuf> {
             candidates.push(PathBuf::from(p.trim()));
         }
     }
-    candidates.push(PathBuf::from("m0-spike/yolo11n.onnx"));
-    candidates.push(PathBuf::from("../m0-spike/yolo11n.onnx"));
-    candidates.push(PathBuf::from("../../m0-spike/yolo11n.onnx"));
+    candidates.push(PathBuf::from("models/yolo11n.onnx"));
+    candidates.push(PathBuf::from("../models/yolo11n.onnx"));
+    candidates.push(PathBuf::from("../../models/yolo11n.onnx"));
     candidates.into_iter().find(|p| p.is_file())
 }
 
@@ -1020,7 +1020,7 @@ mod tests {
             return;
         }
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let model = repo.join("m0-spike").join("yolo11n.onnx");
+        let model = repo.join("models").join("yolo11n.onnx");
         let demo = repo
             .join("Resources")
             .join("效果演示")

@@ -34,7 +34,6 @@ struct FrameEvidence {
 
 pub(super) struct EpisodeFrame<'a> {
     pub camera_id: i64,
-    pub camera_name: &'a str,
     pub time: Duration,
     pub timestamp: &'a str,
     pub frame: &'a Frame,
@@ -325,8 +324,8 @@ impl EpisodeRuntime {
             evidence_key: format!("episode:{}", persisted.episode_id),
         };
         if let Some(event_id) = persisted.event_id {
-            let reviewed = store
-                .promote_episode_event(event_id, level, &candidate.detail)
+            let dispatch = store
+                .promote_episode_event(event_id, level, &candidate.detail, frame.dispatch)
                 .map_err(|e| e.to_string())?;
             if let Some(event) = store.event_by_id(event_id).map_err(|e| e.to_string())? {
                 let mut payload = super::event_json(&event);
@@ -334,14 +333,12 @@ impl EpisodeRuntime {
                 let _ = sink.st.events_tx.send(payload.to_string());
                 // The first review owns delivery while pending. If it finishes first,
                 // the already-reviewed event can send its normal escalation.
-                if frame.dispatch || reviewed {
-                    sink.deliver(
+                if dispatch {
+                    sink.publish_committed_mqtt(
+                        store,
                         event_id,
                         &candidate,
-                        frame.camera_name,
                         event.snapshot.is_some(),
-                        event.snapshot.as_deref(),
-                        true,
                     );
                 }
             }
@@ -352,7 +349,7 @@ impl EpisodeRuntime {
         let id = sink.record_located(
             &candidate,
             peak.map(|frame| frame.jpeg.as_slice()),
-            frame.dispatch,
+            Some(super::review_dispatch(frame.dispatch)),
             peak.map(|frame| frame.bbox),
             peak.and_then(|frame| frame.overlay.as_deref()),
             Some(persisted.episode_id),
@@ -456,12 +453,7 @@ fn close_persisted(
             ts_iso: ts.into(),
             evidence_key: format!("episode:{}:resolved", persisted.episode_id),
         };
-        let camera_name = store
-            .camera(camera)
-            .map_err(|e| e.to_string())?
-            .map(|camera| camera.name)
-            .unwrap_or_default();
-        sink.deliver_deferred(id, &candidate, &camera_name, false, None);
+        sink.publish_committed_mqtt(store, id, &candidate, false);
     } else if recovered && persisted.event_id.is_none() {
         crate::spatial::audit(
             store,
@@ -696,7 +688,6 @@ mod tests {
                     &policy,
                     &EpisodeFrame {
                         camera_id: cid,
-                        camera_name: "Camera",
                         time: Duration::from_secs(seconds),
                         timestamp: &timestamp,
                         frame: &frame,

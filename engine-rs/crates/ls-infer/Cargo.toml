@@ -14,7 +14,8 @@ tract = ["dep:tract-onnx"]
 # onnxruntime.dll（ORT_DYLIB_PATH），与 Python 同后端 → 黄金语料事件一致率 ≥98%。
 # rc.10+ 绑定层为纯 Rust（无 bindgen/libclang）；default-features=false 关闭二进制下载。
 ort = ["dep:ort", "dep:half", "dep:tokenizers"]
-vulkan-spike = ["ort", "dep:libloading"]
+vulkan-cv = ["ort", "dep:ash", "dep:libloading", "dep:lzma-rust2", "dep:sha2", "dep:tempfile", "dep:windows-sys"]
+vulkan-spike = ["vulkan-cv"]
 
 [dependencies]
 serde = { workspace = true }
@@ -26,7 +27,14 @@ tract-onnx = { version = "0.23", optional = true }
 ort = { version = "2.0.0-rc.15", optional = true, default-features = false, features = ["load-dynamic", "directml", "half"] }
 half = { version = "2", optional = true }
 tokenizers = { version = "=0.22.2", optional = true, default-features = false, features = ["fancy-regex"] }
+
+[target.'cfg(windows)'.dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"], optional = true }
 libloading = { version = "0.9", optional = true }
+lzma-rust2 = { version = "=0.25.0", default-features = false, features = ["std", "xz"], optional = true }
+sha2 = { version = "0.11", optional = true }
+tempfile = { version = "3", optional = true }
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -10,6 +10,9 @@ license.workspace = true
 name = "labsentinel-server"
 path = "src/main.rs"
 
+[features]
+vulkan-cv = ["ls-infer/vulkan-cv"]
+
 [dependencies]
 ls-store = { path = "../ls-store" }
 ls-dispatch = { path = "../ls-dispatch" }
@@ -49,6 +52,7 @@ tempfile = "3"
 # UX4（2026-11-20）：系统托盘（tauri 团队维护，纯 win32；仅 Windows 目标）
 # 不引入 Tauri/Electron 运行时——保持单二进制与体积纪律
 [target.'cfg(windows)'.dependencies]
+windows-service = "=0.8.0"
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
 tray-icon = { version = "0.21", default-features = false }

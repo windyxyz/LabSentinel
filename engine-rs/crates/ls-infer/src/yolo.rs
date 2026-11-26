@@ -29,19 +29,47 @@ use crate::post::{self, Det, LetterboxGeom};
 pub struct InferenceTimings {
     pub run: Duration,
     pub directml_wait: Duration,
+    pub vulkan_run: Duration,
+    pub vulkan_wait: Duration,
+    pub vulkan_first_run: Option<Duration>,
     pub calls: u64,
     pub directml_calls: u64,
+    pub vulkan_calls: u64,
 }
 
 thread_local! {
     static INFERENCE_TIMINGS: std::cell::Cell<InferenceTimings> = const {
-        std::cell::Cell::new(InferenceTimings { run: Duration::ZERO, directml_wait: Duration::ZERO, calls: 0, directml_calls: 0 })
+        std::cell::Cell::new(InferenceTimings {
+            run: Duration::ZERO,
+            directml_wait: Duration::ZERO,
+            vulkan_run: Duration::ZERO,
+            vulkan_wait: Duration::ZERO,
+            vulkan_first_run: None,
+            calls: 0,
+            directml_calls: 0,
+            vulkan_calls: 0,
+        })
     };
 }
 
 /// Collect model calls from the current worker thread since its previous frame.
 pub fn take_inference_timings() -> InferenceTimings {
     INFERENCE_TIMINGS.with(|metrics| metrics.replace(InferenceTimings::default()))
+}
+
+#[cfg(all(windows, feature = "vulkan-cv"))]
+pub(crate) fn record_vulkan_inference(elapsed: Duration, wait: Duration, first: bool) {
+    INFERENCE_TIMINGS.with(|metrics| {
+        let mut totals = metrics.get();
+        totals.calls += 1;
+        totals.vulkan_calls += 1;
+        totals.vulkan_run += elapsed;
+        totals.vulkan_wait += wait;
+        if first {
+            *totals.vulkan_first_run.get_or_insert_default() += elapsed;
+        }
+        metrics.set(totals);
+    });
 }
 
 /// 推理后端种类。
@@ -341,6 +369,8 @@ impl InferBackend for OrtBackend {
 /// YOLO11 ONNX 会话（后端无关，`person_class` 由 model.json 角色声明，缺省 0）。
 pub struct YoloModel {
     backend: Box<dyn InferBackend>,
+    device: InferenceDevice,
+    fallback: Option<std::path::PathBuf>,
     output_format: OutputFormat,
     input_w: u32,
     input_h: u32,
@@ -348,6 +378,69 @@ pub struct YoloModel {
     conf: f32,
     iou: f32,
     min_box_area: f32,
+}
+
+#[derive(Clone)]
+pub struct InferenceDevice(std::sync::Arc<std::sync::RwLock<&'static str>>);
+
+impl InferenceDevice {
+    fn new(label: &'static str) -> Self {
+        Self(std::sync::Arc::new(std::sync::RwLock::new(label)))
+    }
+
+    pub fn label(&self) -> &'static str {
+        *self.0.read().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn set(&self, label: &'static str) {
+        *self.0.write().unwrap_or_else(|error| error.into_inner()) = label;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VulkanCv {
+    pub install_root: std::path::PathBuf,
+    pub cache: std::path::PathBuf,
+    pub adapter: VulkanAdapter,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VulkanAdapter {
+    #[default]
+    Auto,
+    Index(i32),
+    Luid([u8; 8]),
+    Uuid([u8; 16]),
+}
+
+impl VulkanAdapter {
+    pub fn parse(value: &str) -> Option<Self> {
+        if value == "auto" {
+            return Some(Self::Auto);
+        }
+        if let Some(hex) = value.strip_prefix("uuid:") {
+            let uuid = u128::from_str_radix(hex, 16).ok()?;
+            return (uuid != 0 && format!("{uuid:032x}") == hex)
+                .then_some(Self::Uuid(uuid.to_be_bytes()));
+        }
+        if let Some(hex) = value.strip_prefix("luid:") {
+            let luid = u64::from_str_radix(hex, 16).ok()?;
+            return (luid != 0 && format!("{luid:016x}") == hex)
+                .then_some(Self::Luid(luid.to_le_bytes()));
+        }
+        let number = value.strip_prefix("vulkan:")?;
+        let index = number.parse::<i32>().ok()?;
+        (index >= 0 && index.to_string() == number).then_some(Self::Index(index))
+    }
+
+    pub fn id(self) -> String {
+        match self {
+            Self::Auto => "auto".into(),
+            Self::Index(index) => format!("vulkan:{index}"),
+            Self::Luid(luid) => format!("luid:{:016x}", u64::from_le_bytes(luid)),
+            Self::Uuid(uuid) => format!("uuid:{:032x}", u128::from_be_bytes(uuid)),
+        }
+    }
 }
 
 /// Same process-wide guard as the DirectML scheduler, exposed for diagnostics.
@@ -373,6 +466,8 @@ impl YoloModel {
     pub fn spike_backend(backend: Box<dyn InferBackend>) -> Self {
         Self {
             backend,
+            device: InferenceDevice::new("Probe"),
+            fallback: None,
             output_format: OutputFormat::Yolo,
             input_w: 640,
             input_h: 640,
@@ -381,6 +476,110 @@ impl YoloModel {
             iou: 0.45,
             min_box_area: 0.0,
         }
+    }
+
+    /// Open the locked 640×640 Vulkan version of a packaged ONNX model. The caller
+    /// chooses the DirectML/CPU fallback if the optional SDK or device is unavailable.
+    #[cfg(all(windows, feature = "vulkan-cv"))]
+    pub fn load_vulkan(
+        onnx: &Path,
+        install_root: &Path,
+        cache: &Path,
+        adapter: VulkanAdapter,
+        conf: f32,
+        iou: f32,
+        min_box_area: f32,
+    ) -> Result<Self, String> {
+        let files = crate::vulkan_assets::prepare(install_root, cache, onnx)?;
+        let api = crate::ncnn::Api::load(&files.dll)?;
+        let adapter = api.resolve_adapter(adapter)?;
+        let model = crate::ncnn::SharedModel::load(
+            api,
+            &files.model_base,
+            adapter,
+            crate::ncnn::Precision::Fp16Storage,
+        )?;
+        let backend: Box<dyn InferBackend> = if files.coat_head {
+            Box::new(crate::ncnn::CoatHead(model))
+        } else {
+            Box::new(model)
+        };
+        let person_class = read_model_roles(onnx)
+            .get("person_class")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        set_ep_used("Vulkan(GPU)");
+        Ok(Self {
+            backend,
+            device: InferenceDevice::new("Vulkan(GPU)"),
+            fallback: None,
+            output_format: OutputFormat::Yolo,
+            input_w: 640,
+            input_h: 640,
+            person_class,
+            conf,
+            iou,
+            min_box_area,
+        })
+    }
+
+    pub fn device(&self) -> InferenceDevice {
+        self.device.clone()
+    }
+
+    /// With gray-test Vulkan enabled, try the matching packaged model, then ONNX.
+    /// A GPU execution failure retries the same frame on the next backend.
+    pub fn load_cv(
+        path: &Path,
+        imgsz: u32,
+        conf: f32,
+        iou: f32,
+        min_box_area: f32,
+        use_gpu: bool,
+        vulkan: Option<&VulkanCv>,
+    ) -> Result<Self, String> {
+        #[cfg(all(windows, feature = "vulkan-cv"))]
+        if let Some(config) = vulkan.filter(|_| use_gpu) {
+            let filename = path.file_name().and_then(|name| name.to_str());
+            if matches!(
+                filename,
+                Some("yolo11n.onnx" | "yolo11n_ppe.onnx" | "labcoat-confirm.onnx")
+            ) && model_format_override(path)?.is_none_or(|format| format == OutputFormat::Yolo)
+            {
+                match Self::load_vulkan(
+                    path,
+                    &config.install_root,
+                    &config.cache,
+                    config.adapter,
+                    conf,
+                    iou,
+                    min_box_area,
+                ) {
+                    Ok(mut model) => {
+                        model.fallback = Some(path.to_owned());
+                        return Ok(model);
+                    }
+                    Err(error) => eprintln!(
+                        "[ls-infer] Vulkan 初始化失败，切换 ONNX（{}）: {error}",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        let try_ort = vulkan.is_some();
+        let mut model = Self::load(
+            path,
+            imgsz,
+            conf,
+            iou,
+            min_box_area,
+            try_ort.then_some(Backend::Ort),
+            use_gpu,
+        )?;
+        if try_ort && model.device.label() == "DirectML(GPU)" {
+            model.fallback = Some(path.to_owned());
+        }
+        Ok(model)
     }
 
     pub fn use_output_format(&mut self, format: Option<OutputFormat>) {
@@ -414,7 +613,7 @@ impl YoloModel {
             .ok_or("无可用推理后端（tract/ort feature 均未启用）")?;
         let fallback = read_model_imgsz(path).unwrap_or(imgsz);
         let format_override = model_format_override(path)?;
-        let (backend, (input_w, input_h), output_format): (Box<dyn InferBackend>, _, _) =
+        let (backend, (input_w, input_h), output_format, device): (Box<dyn InferBackend>, _, _, _) =
             match backend {
                 #[cfg(feature = "tract")]
                 Backend::Tract => {
@@ -448,6 +647,7 @@ impl YoloModel {
                         Box::new(TractBackend { model: m }),
                         shape,
                         format_override.unwrap_or(OutputFormat::Yolo),
+                        "CPU(tract)",
                     )
                 }
                 #[cfg(not(feature = "tract"))]
@@ -478,13 +678,20 @@ impl YoloModel {
                         Ok((output_format, fp16, input_size(shape, fallback)?))
                     })?;
                     set_ep_used(ep_used);
-                    (Box::new(OrtBackend { session, fp16 }), shape, output_format)
+                    (
+                        Box::new(OrtBackend { session, fp16 }),
+                        shape,
+                        output_format,
+                        ep_used,
+                    )
                 }
                 #[cfg(not(feature = "ort"))]
                 Backend::Ort => return Err("ort feature 未启用".into()),
             };
         Ok(YoloModel {
             backend,
+            device: InferenceDevice::new(device),
+            fallback: None,
             output_format,
             input_w,
             input_h,
@@ -554,12 +761,55 @@ impl YoloModel {
                 BoxGeometry::Normalized { w, h },
             ),
         };
-        let (shape, flat) = self.backend.run(data, self.input_w, self.input_h)?;
-        let rows = OutputRows::new(self.output_format, &shape, &flat)?;
-        Ok(specs
-            .iter()
-            .map(|&(cid, conf, min_area)| rows.decode(&geom, cid, conf, min_area, self.iou))
-            .collect())
+        let output =
+            self.backend
+                .run(data, self.input_w, self.input_h)
+                .and_then(|(shape, flat)| {
+                    let rows = OutputRows::new(self.output_format, &shape, &flat)?;
+                    Ok(specs
+                        .iter()
+                        .map(|&(cid, conf, min_area)| {
+                            rows.decode(&geom, cid, conf, min_area, self.iou)
+                        })
+                        .collect())
+                });
+        let error = match output {
+            Ok(detections) => return Ok(detections),
+            Err(error) => error,
+        };
+        let Some(path) = self.fallback.take() else {
+            return Err(error);
+        };
+        let old_device = self.device.label();
+        let load = |gpu| {
+            Self::load(
+                &path,
+                self.input_w,
+                self.conf,
+                self.iou,
+                self.min_box_area,
+                Some(Backend::Ort),
+                gpu,
+            )
+        };
+        let mut next = if old_device == "Vulkan(GPU)" {
+            load(true).or_else(|_| load(false))
+        } else {
+            load(false)
+        }
+        .map_err(|fallback| format!("{old_device}: {error}，回退失败: {fallback}"))?;
+        if next.device.label() == "DirectML(GPU)" {
+            next.fallback = Some(path);
+        }
+        eprintln!(
+            "[ls-infer] {old_device} 推理失败，切换 {}: {error}",
+            next.device.label()
+        );
+        next.use_output_format(Some(self.output_format));
+        self.device.set(next.device.label());
+        next.device = self.device.clone();
+        *self = next;
+        self.detect_classes(bgr, w, h, specs)
     }
 }
 
@@ -802,61 +1052,145 @@ pub fn resize_u8_linear_cv2(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, cn: 
     if sw == dw && sh == dh {
         return src[..len].to_vec();
     }
-    const COEF_BITS: i32 = 11;
-    const COEF_SCALE: i32 = 1 << COEF_BITS; // 2048
-    const SHIFT: i32 = COEF_BITS * 2; // 22
+    if cn == 3
+        && dw != 0
+        && dh != 0
+        && dw.checked_mul(2) == Some(sw)
+        && dh.checked_mul(2) == Some(sh)
+    {
+        return resize_half_bgr(src, sw as usize, sh as usize);
+    }
+    if cn == 3 {
+        // Specialize the common BGR path so the compiler can unroll the pixel loop.
+        resize_linear_generic(src, sw, sh, dw, dh, 3)
+    } else {
+        resize_linear_generic(src, sw, sh, dw, dh, cn)
+    }
+}
+
+fn resize_half_bgr(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let row_bytes = w * 3;
+    let mut output = vec![0; w / 2 * (h / 2) * 3];
+    let pairs = src[..row_bytes * h].chunks_exact(row_bytes * 2);
+    for (rows, dst) in pairs.zip(output.chunks_exact_mut(row_bytes / 2)) {
+        let (top, bottom) = rows.split_at(row_bytes);
+        let top = top.as_chunks::<6>().0;
+        let bottom = bottom.as_chunks::<6>().0;
+        for ((top, bottom), pixel) in top.iter().zip(bottom).zip(dst.as_chunks_mut::<3>().0) {
+            for c in 0..3 {
+                // At an exact 2:1 scale, all four fixed-point weights equal 1/4.
+                let sum = u16::from(top[c])
+                    + u16::from(top[c + 3])
+                    + u16::from(bottom[c])
+                    + u16::from(bottom[c + 3]);
+                pixel[c] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    output
+}
+
+const RESIZE_COEF_BITS: i32 = 11;
+const RESIZE_SHIFT: i32 = 2 * RESIZE_COEF_BITS;
+const RESIZE_ROUND: i32 = 1 << (RESIZE_SHIFT - 1);
+
+fn resize_upscaled_bgr_rows(
+    src: &[u8],
+    dst: &mut [u8],
+    src_stride: usize,
+    horizontal: &[(usize, usize, i32, i32)],
+    vertical: impl Fn(usize) -> (usize, usize, i32, i32),
+) {
+    let dst_stride = horizontal.len() * 3;
+    let mut filtered = [vec![0; dst_stride], vec![0; dst_stride]];
+    let mut cached_rows = [None, None];
+    for (dy, output) in dst.chunks_exact_mut(dst_stride).enumerate() {
+        let (y0, y1, cy0, cy1) = vertical(dy);
+        // Source rows are adjacent (or equal for a one-row image), so parity
+        // keeps both cached. Retain the full fixed-point sum until the final shift.
+        for y in [y0, y1] {
+            let slot = y % 2;
+            if cached_rows[slot] == Some(y) {
+                continue;
+            }
+            let row = &src[y * src_stride..(y + 1) * src_stride];
+            for (pixel, &(x0, x1, cx0, cx1)) in filtered[slot]
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(horizontal)
+            {
+                for (c, value) in pixel.iter_mut().enumerate() {
+                    *value = i32::from(row[x0 + c]) * cx0 + i32::from(row[x1 + c]) * cx1;
+                }
+            }
+            cached_rows[slot] = Some(y);
+        }
+        for ((value, &a), &b) in output
+            .iter_mut()
+            .zip(&filtered[y0 % 2])
+            .zip(&filtered[y1 % 2])
+        {
+            *value = ((a * cy0 + b * cy1 + RESIZE_ROUND) >> RESIZE_SHIFT) as u8;
+        }
+    }
+}
+
+#[inline]
+fn resize_linear_generic(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, cn: usize) -> Vec<u8> {
+    const COEF_SCALE: i32 = 1 << RESIZE_COEF_BITS; // 2048
     let rint = |v: f32| -> i32 { (v.round_ties_even()) as i32 };
-    let hcoef = |dx: u32| -> (usize, i32, i32) {
-        let scale = sw as f64 / dw as f64;
-        let f = ((dx as f64 + 0.5) * scale - 0.5) as f32;
-        let mut ix = f.floor();
-        let mut fx = f - ix;
-        if ix < 0.0 {
-            fx = 0.0;
-            ix = 0.0;
+    let coefficients = |dst: usize, size: u32, scale: f64| {
+        let f = ((dst as f64 + 0.5) * scale - 0.5) as f32;
+        let mut index = f.floor();
+        let mut fraction = f - index;
+        if index < 0.0 {
+            fraction = 0.0;
+            index = 0.0;
         }
-        if ix >= (sw as f32 - 1.0) {
-            fx = 0.0;
-            ix = sw as f32 - 2.0;
+        if index >= (size as f32 - 1.0) {
+            fraction = 0.0;
+            index = size as f32 - 2.0;
         }
-        let c1 = rint(fx * COEF_SCALE as f32).clamp(0, COEF_SCALE);
-        (ix.max(0.0) as usize, COEF_SCALE - c1, c1)
+        let high = rint(fraction * COEF_SCALE as f32).clamp(0, COEF_SCALE);
+        let first = index.max(0.0) as usize;
+        let second = (first + 1).min(size as usize - 1);
+        (first, second, COEF_SCALE - high, high)
     };
-    let vcoef = |dy: u32| -> (usize, i32, i32) {
-        let scale = sh as f64 / dh as f64;
-        let f = ((dy as f64 + 0.5) * scale - 0.5) as f32;
-        let mut iy = f.floor();
-        let mut fy = f - iy;
-        if iy < 0.0 {
-            fy = 0.0;
-            iy = 0.0;
-        }
-        if iy >= (sh as f32 - 1.0) {
-            fy = 0.0;
-            iy = sh as f32 - 2.0;
-        }
-        let c1 = rint(fy * COEF_SCALE as f32).clamp(0, COEF_SCALE);
-        (iy.max(0.0) as usize, COEF_SCALE - c1, c1)
-    };
-    let horizontal: Vec<_> = (0..dw).map(hcoef).collect();
-    let mut dst = vec![0u8; len];
-    for dy in 0..dh {
-        let (y0, cy0, cy1) = vcoef(dy);
-        let y1 = (y0 + 1).min(sh as usize - 1);
-        for (dx, &(x0, cx0, cx1)) in horizontal.iter().enumerate() {
-            let x1 = (x0 + 1).min(sw as usize - 1);
-            for c in 0..cn {
-                let p00 = src[(y0 * sw as usize + x0) * cn + c] as i32;
-                let p01 = src[(y0 * sw as usize + x1) * cn + c] as i32;
-                let p10 = src[(y1 * sw as usize + x0) * cn + c] as i32;
-                let p11 = src[(y1 * sw as usize + x1) * cn + c] as i32;
-                let v = p00 * cy0 * cx0
-                    + p01 * cy0 * cx1
-                    + p10 * cy1 * cx0
-                    + p11 * cy1 * cx1
-                    + (1 << (SHIFT - 1));
-                let di = ((dy as usize * dw as usize) + dx) * cn + c;
-                dst[di] = (v >> SHIFT).clamp(0, 255) as u8;
+    let dst_stride = dw as usize * cn;
+    if dst_stride == 0 || dh == 0 {
+        return Vec::new();
+    }
+    let src_stride = sw as usize * cn;
+    let scale_x = sw as f64 / dw as f64;
+    let scale_y = sh as f64 / dh as f64;
+    let horizontal: Vec<_> = (0..dw as usize)
+        .map(|dx| {
+            let (x0, x1, cx0, cx1) = coefficients(dx, sw, scale_x);
+            (x0 * cn, x1 * cn, cx0, cx1)
+        })
+        .collect();
+    let mut dst = vec![0; dst_stride * dh as usize];
+    if cn == 3 && dh > sh {
+        resize_upscaled_bgr_rows(src, &mut dst, src_stride, &horizontal, |dy| {
+            coefficients(dy, sh, scale_y)
+        });
+        return dst;
+    }
+    for (dy, row) in dst.chunks_exact_mut(dst_stride).enumerate() {
+        let (y0, y1, cy0, cy1) = coefficients(dy, sh, scale_y);
+        let top = &src[y0 * src_stride..(y0 + 1) * src_stride];
+        let bottom = &src[y1 * src_stride..(y1 + 1) * src_stride];
+        for (pixel, &(x0, x1, cx0, cx1)) in row.chunks_exact_mut(cn).zip(&horizontal) {
+            let weights = [cx0 * cy0, cx1 * cy0, cx0 * cy1, cx1 * cy1];
+            for (c, value) in pixel.iter_mut().enumerate() {
+                // The sum stays in 0..=255 * 2048² before rounding.
+                let v = i32::from(top[x0 + c]) * weights[0]
+                    + i32::from(top[x1 + c]) * weights[1]
+                    + i32::from(bottom[x0 + c]) * weights[2]
+                    + i32::from(bottom[x1 + c]) * weights[3]
+                    + RESIZE_ROUND;
+                *value = (v >> RESIZE_SHIFT) as u8;
             }
         }
     }
@@ -866,6 +1200,113 @@ pub fn resize_u8_linear_cv2(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, cn: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resize_fixture(w: u32, h: u32, channels: usize) -> Vec<u8> {
+        let mut seed = 17u32;
+        (0..w as usize * h as usize * channels)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn half_bgr_resize_is_identical_to_fixed_point_reference() {
+        for (w, h) in [(2, 2), (2, 18), (10, 2), (18, 24), (1280, 720)] {
+            let src = resize_fixture(w, h, 3);
+            assert_eq!(
+                resize_u8_linear_cv2(&src, w, h, w / 2, h / 2, 3),
+                resize_linear_generic(&src, w, h, w / 2, h / 2, 3),
+                "{w}x{h}",
+            );
+        }
+    }
+
+    #[test]
+    fn general_resize_preserves_original_fixed_point_values() {
+        // Checksums measured on the original scalar implementation.
+        for (sw, sh, dw, dh, channels, expected) in [
+            (1920, 1080, 640, 360, 3, 0x7499_9fe8_9042_b8b7_u64),
+            (127, 197, 412, 640, 3, 0xcc64_cc29_e17b_23f6),
+            (172, 370, 297, 640, 3, 0x0a83_cfb7_2e78_aa1f),
+            (383, 239, 640, 399, 3, 0xc141_1dff_cb2a_2b40),
+            (17, 5, 6, 11, 3, 0x2c42_c3ed_b897_fd8a),
+            (1, 7, 19, 20, 3, 0x20c6_6cd9_cc10_6da9),
+            (4, 1, 13, 6, 3, 0x4f73_8f5d_08e2_1a6f),
+            (23, 33, 21, 19, 1, 0xd9a6_21ab_a19b_6ac1),
+            (23, 33, 21, 19, 4, 0x6aed_a28d_ca59_c3bf),
+        ] {
+            let src = resize_fixture(sw, sh, channels);
+            let resized = resize_u8_linear_cv2(&src, sw, sh, dw, dh, channels);
+            let checksum = resized
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                });
+            assert_eq!(
+                checksum, expected,
+                "{sw}x{sh} -> {dw}x{dh}, {channels} channels"
+            );
+        }
+    }
+
+    #[cfg(all(windows, feature = "vulkan-cv"))]
+    #[test]
+    fn vulkan_work_is_counted_without_attributing_it_to_ort() {
+        record_vulkan_inference(Duration::from_millis(5), Duration::from_millis(2), true);
+        record_vulkan_inference(Duration::from_millis(7), Duration::from_millis(3), false);
+        let frame = take_inference_timings();
+        assert_eq!(frame.calls, 2);
+        assert_eq!(frame.vulkan_calls, 2);
+        assert_eq!(frame.vulkan_run, Duration::from_millis(12));
+        assert_eq!(frame.vulkan_wait, Duration::from_millis(5));
+        assert_eq!(frame.vulkan_first_run, Some(Duration::from_millis(5)));
+        assert_eq!(frame.run, Duration::ZERO);
+        assert_eq!(frame.directml_calls, 0);
+        assert_eq!(take_inference_timings().calls, 0);
+    }
+
+    #[cfg(feature = "ort")]
+    #[test]
+    #[ignore = "uses the packaged ONNX model and ORT runtime"]
+    fn failed_gpu_inference_retries_on_cpu_and_updates_the_device_handle() {
+        struct FailingGpu;
+        impl InferBackend for FailingGpu {
+            fn run(
+                &mut self,
+                _: Vec<f32>,
+                _: u32,
+                _: u32,
+            ) -> Result<(Vec<usize>, Vec<f32>), String> {
+                Err("injected GPU execution error".into())
+            }
+        }
+
+        let path =
+            std::env::var_os("LS_BENCH_PERSON_MODEL").expect("path to the packaged person model");
+        let mut model = YoloModel::load(
+            Path::new(&path),
+            640,
+            0.4,
+            0.5,
+            0.0,
+            Some(Backend::Ort),
+            false,
+        )
+        .unwrap();
+        model.backend = Box::new(FailingGpu);
+        model.fallback = Some(path.into());
+        model.device.set("DirectML(GPU)");
+        let observed = model.device();
+        assert!(model.detect(&[], 32, 32).is_err());
+        assert_eq!(observed.label(), "DirectML(GPU)");
+        let frame = vec![0; 32 * 32 * 3];
+        assert!(model.detect(&frame, 32, 32).unwrap().is_empty());
+        assert_eq!(observed.label(), "CPU");
+        assert!(model.fallback.is_none());
+        assert!(model.detect(&frame, 32, 32).unwrap().is_empty());
+    }
 
     #[test]
     fn preprocess_letterbox_padding_is_114() {
@@ -929,7 +1370,7 @@ mod tests {
     #[test]
     fn detect_runs_repo_model_on_blank_frame() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let model = repo.join("m0-spike").join("yolo11n.onnx");
+        let model = repo.join("models").join("yolo11n.onnx");
         if !model.exists() {
             eprintln!("skip: 仓库模型不存在");
             return;

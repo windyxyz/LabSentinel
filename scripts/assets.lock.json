@@ -1,5 +1,30 @@
 {
   "_readme": "T-005 资产哈希清单：scripts/deploy.py 与 scripts/build_portable.py 的所有二进制下载必须经 download_verified() 按 sha256 逐源校验，不匹配即删除残件换下一源。urls 为官方/官方镜像直连（均 https 公网）；mirror_urls 为加速代理源，仅在 LS_ALLOW_MIRROR_PROXY=1 时启用且同样强制校验。更新某个资产时：先从官方渠道下载并核对哈希（有官方校验文件的以官方为准，如 node SHASUMS256.txt），再更新本文件。哈希来源（2026-11-04 实测）：openh264/ffmpeg/ffprobe/ffmpeg-installer 为本次下载实测；python embed 为 python.org 官方产物实测；node 与 nodejs.org/dist/v20.20.2/SHASUMS256.txt 逐字一致。",
+  "vulkan_probe": {
+    "ncnn_release": "20261020",
+    "sdk": {"url": "https://github.com/Tencent/ncnn/releases/download/20261020/ncnn-20261020-windows-vs2019-shared.zip", "size": 15010919, "sha256": "dd67597821aff0d83fd40fe8bdeeef7c423b2f3bd1f328f4a23535420fe74a32e"},
+    "bundle": {"size": 13421960, "sha256": "56abbbabffe7f0b640e235c2de97244de92b757ecd9822c73b349897e0628434"},
+    "dll": {"size": 17206784, "sha256": "3098bf79e73df8cf9e37f2137201b0aa7faf962d8a30786bb341ced1b9dc4114"},
+    "sources": {
+      "yolo11n.onnx": {"size": 10659399, "sha256": "d6ddc4b87afed63c36e5a5dfac2c3238b3e8b440cc38811a33842ce99c110f26"},
+      "yolo11n_ppe.onnx": {"size": 10672088, "sha256": "46a36b0354d0973f034a0ae9a7c81ed3071dbb1c5dd2c06b44d3003b1489de78"},
+      "yolo11n_ppe.classes.txt": {"size": 83, "sha256": "f97c94a26ee1b5218ea05063eff8e42324e84b1d5cbc628253408ded20243b16"}
+    },
+    "members": {
+      "ncnn.dll.xz": {"size": 3655644, "sha256": "19182019204f81414777b4410f29c8486ee276d176452d31afd181ac98cea077"},
+      "spike-yolo11n-fp16.ncnn.param": {"size": 24152, "sha256": "c30097b737b2ec914f186ba8ca0ca8e8467fd7381059ce55a204c18c15c891be"},
+      "spike-yolo11n-fp16.ncnn.bin": {"size": 5350176, "sha256": "88dcec7b64eca4916213010771f348a2e1c4bf253ef78446064c10e53944a232"},
+      "spike-yolo11n_ppe-fp16.ncnn.param": {"size": 24145, "sha256": "6cb08920a225151b388d017b6fa016f85d1f5f227ada28252ea0382acc27148f"},
+      "spike-yolo11n_ppe-fp16.ncnn.bin": {"size": 5315736, "sha256": "be90609c4672f8da66f7eac1d069f6a15c3f3a7bc0ed8994d7ea585c7e8fb8bf"},
+      "manifest.json": {"size": 636, "sha256": "614d7820e2c2a3f4b8d2acc3026575ffe5e55b1ff8aa275d0a79f4769fb9ebcb"}
+    }
+  },
+  "vulkan_coat_head": {
+    "bundle": {"size": 4608, "sha256": "ad47c8e77b00d98bcada02b16aad7eed9959509c327fa9e0c7686f4779549e5d"},
+    "expanded": {"size": 131926, "sha256": "c407d954c3bbd31126fc1f201b44c4593d8f032b0ee04a4f527c6dad61844d8b"},
+    "param": {"size": 27890, "sha256": "ac1aa36e83b5f622116da8b21703ae5e13cc3f7fdcad1d19e35e0f8288634d70"},
+    "bin": {"size": 4899224, "sha256": "75c1e94424e70f6976a5289e03336e3a06da5f4386e00687affed5ead7a3bf04"}
+  },
   "assets": {
     "mask_detector.onnx": {
       "version": "7f17625a18e809737e4ac44d39fc949994c4c1d1",
@@ -72,7 +97,7 @@
     "yolo11n.onnx": {
       "version": "v8.3.0",
       "license": "Ultralytics AGPL-3.0 (bundled with the portable zip; see NOTICE)",
-      "notes": "R2-004/N-09: official-release yolo11n ONNX (640 input / 80 COCO classes) for portable builds from a clean CI checkout. This is NOT the same file as the locally exported m0-spike/yolo11n.onnx (sha256 4758511e...): golden-corpus and contract tests keep using the local export. URL and hash were measured on 2026-11-09; the trade-off and recovery plan are recorded in ADR-0009.",
+      "notes": "R2-004/N-09: official-release yolo11n ONNX (640 input / 80 COCO classes) for portable builds from a clean CI checkout. This is NOT the same file as the locally exported models/yolo11n.onnx (sha256 4758511e...): golden-corpus and contract tests keep using the local export. URL and hash were measured on 2026-11-09; the trade-off and recovery plan are recorded in ADR-0009.",
       "urls": [
         "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx"
       ],

@@ -42,8 +42,9 @@
     </div>
     <aside>
       <h3>实时事件</h3>
+      <p v-if="historyNotice" class="muted" role="status">{{ historyNotice }}</p>
       <ul>
-        <li v-for="e in visibleEvents" :key="e.id" :class="e.resolved_ts ? 'L0' : 'L' + e.level">
+        <li v-for="e in visibleEvents" :key="e.id" :data-event-id="e.id" :class="e.resolved_ts ? 'L0' : 'L' + e.level">
           <span class="ts">{{ (e.ts || '').slice(11, 19) }}</span>
           <span class="ty">{{ TYPE_TEXT[e.type] || e.type }}</span>
           <span class="de">{{ e.detail }}</span>
@@ -79,6 +80,7 @@ const props = defineProps({ readonly: Boolean, signedIn: Boolean, device: Object
 defineEmits(['sign-out'])
 const tracks = ref({})
 const events = ref([])
+const historyNotice = ref('')
 const now = ref('')
 const preferenceKey = `ls-wall-view-${props.device?.id ?? (props.readonly ? 'share' : 'console')}`
 let preferences = {}
@@ -105,6 +107,8 @@ let stopWs = null
 let audioCtx = null
 let toastTimer = null
 let disposed = false
+let historyChanges = null
+let historyRefreshPending = false
 
 const cols = computed(() => (grid.value >= 9 ? 3 : grid.value >= 4 ? 2 : 1))
 const groups = computed(() => [...new Set(cameras.value.map(camera => camera.group_name).filter(Boolean))].sort())
@@ -147,6 +151,35 @@ async function loadStats() {
   } catch { /* 旧服务端无字段：保持 — */ }
 }
 
+async function loadEventHistory() {
+  const changes = new Map()
+  historyChanges = changes
+  try {
+    const result = await api.events({ limit: 50 })
+    const list = Array.isArray(result?.items) ? result.items : result
+    if (disposed || !Array.isArray(list)) return null
+    const rows = new Map(list.filter(row => Number.isSafeInteger(row?.id)).map(row => [row.id, row]))
+    const cursor = Math.max(0, ...rows.keys())
+    for (const [id, row] of changes) rows.set(id, row)
+    events.value = [...rows.values()].sort((a, b) => b.id - a.id).slice(0, 50)
+    return cursor
+  } catch {
+    return null
+  } finally {
+    historyChanges = null
+  }
+}
+
+async function refreshUnavailableHistory() {
+  if (historyChanges) return
+  historyRefreshPending = true
+  historyNotice.value = '部分历史事件已不可用，正在刷新可查列表。'
+  if (await loadEventHistory() !== null && !disposed) {
+    historyRefreshPending = false
+    historyNotice.value = '部分历史事件已不可用，已刷新可查列表。'
+  }
+}
+
 watch(showLatency, (enabled, _, onCleanup) => {
   if (!enabled || props.readonly || props.device) return
   let active = true
@@ -184,10 +217,15 @@ function beep() {
 
 function onNewEvent(ev) {
   if (ev.type === 'alert_resolved' && ev.episode_id) {
-    events.value = events.value.map(event => event.episode_id === ev.episode_id
-      ? { ...event, resolved_ts: ev.ts } : event)
+    events.value = events.value.map(event => {
+      if (event.episode_id !== ev.episode_id) return event
+      const updated = { ...event, resolved_ts: ev.ts }
+      historyChanges?.set(updated.id, updated)
+      return updated
+    })
     if (toast.value?.episode_id === ev.episode_id) toast.value = null
   }
+  historyChanges?.set(ev.id, ev)
   events.value = [ev, ...events.value.filter(event => event.id !== ev.id)].slice(0, 50)
   showAlarm(ev)
 }
@@ -195,7 +233,8 @@ function onNewEvent(ev) {
 function onEpisodeUpdate(ev) {
   const index = events.value.findIndex(event => event.id === ev.id)
   if (index >= 0) events.value.splice(index, 1, ev)
-  showAlarm(ev)
+  if (index >= 0 || historyChanges?.has(ev.id)) historyChanges?.set(ev.id, ev)
+  if (ev.op !== 'recording_update') showAlarm(ev)
 }
 
 function showAlarm(ev) {
@@ -256,16 +295,19 @@ function onFsChange() { isFullscreen.value = !!document.fullscreenElement }
 onMounted(async () => {
   await loadCameras()
   await loadStats()
-  try {
-    const list = await api.events({ limit: 50 })
-    events.value = (Array.isArray(list?.items) ? list.items : Array.isArray(list) ? list : []).slice(0, 50)
-  } catch { /* ignore */ }
+  const since = await loadEventHistory()
   if (disposed) return
-  stopWs = connectEvents(onNewEvent, () => {}, onEpisodeUpdate)
+  stopWs = connectEvents(onNewEvent, null, onEpisodeUpdate, {
+    since, onHistoryReset: refreshUnavailableHistory,
+  })
   clockTimer = setInterval(() => {
     now.value = new Date().toLocaleString('zh-CN', { hour12: false })
   }, 1000)
-  camTimer = setInterval(() => { loadCameras(); loadStats() }, 30000)
+  camTimer = setInterval(() => {
+    loadCameras()
+    loadStats()
+    if (historyRefreshPending) refreshUnavailableHistory()
+  }, 30000)
   document.addEventListener('fullscreenchange', onFsChange)
 })
 

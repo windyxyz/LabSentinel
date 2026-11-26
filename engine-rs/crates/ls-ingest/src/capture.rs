@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime};
 
-use crate::{ChildSlot, Frame, Ingest, IngestConfig};
+use crate::{recording::Recorder, ChildSlot, Frame, Ingest, IngestConfig};
 
 pub struct CapturedFrame {
     pub frame: Frame,
@@ -35,13 +35,34 @@ enum Source {
 
 impl FrameReader {
     pub fn start(cfg: IngestConfig, child: ChildSlot, live: bool) -> io::Result<Self> {
+        Self::start_session(cfg, child, live, false, false).map(|(reader, _)| reader)
+    }
+
+    /// Opt into the original-encoded event buffer for this session.
+    pub fn start_with_recording(
+        cfg: IngestConfig,
+        child: ChildSlot,
+        live: bool,
+        retina: bool,
+    ) -> io::Result<(Self, Option<Recorder>)> {
+        Self::start_session(cfg, child, live, true, retina)
+    }
+
+    fn start_session(
+        cfg: IngestConfig,
+        child: ChildSlot,
+        live: bool,
+        recording: bool,
+        retina: bool,
+    ) -> io::Result<(Self, Option<Recorder>)> {
         let mut ingest = Ingest::new(cfg);
-        ingest.spawn_with_slot(Arc::clone(&child))?;
-        if live {
-            Ok(Self(Source::Live(LatestFrames::start(ingest, child)?)))
+        let recorder = ingest.spawn_session(Arc::clone(&child), recording, retina)?;
+        let source = if live {
+            Source::Live(LatestFrames::start(ingest, child)?)
         } else {
-            Ok(Self(Source::Direct(ingest)))
-        }
+            Source::Direct(ingest)
+        };
+        Ok((Self(source), recorder))
     }
 
     pub fn read(&mut self) -> io::Result<Option<CapturedFrame>> {

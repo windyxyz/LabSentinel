@@ -2,7 +2,7 @@
 
 用法：
   python tools/preannotate.py --images Resources/datasets/frames --out Resources/datasets/labels \
-      --model m0-spike/yolo11n_ppe.onnx --classes-file Resources/datasets/lab-ppe/classes.txt
+      --model models/yolo11n_ppe.onnx --classes-file Resources/datasets/lab-ppe/classes.txt
 
 独立 onnxruntime 实现（不依赖已退役的 Python 服务端）：单进程单线程顺序推理，
 不与在线服务并发；有 DirectML 时优先用它，否则 CPU。

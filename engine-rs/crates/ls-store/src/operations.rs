@@ -107,6 +107,34 @@ impl ComplianceCounts {
 }
 
 impl Store {
+    pub fn events_query_allowed_types(
+        &self,
+        filter: &crate::EventsFilter<'_>,
+        allowed_types: &[&str],
+    ) -> rusqlite::Result<(Vec<crate::Event>, i64)> {
+        let (mut conditions, mut args) = filter.conditions();
+        conditions.push_str(" AND type IN (SELECT value FROM json_each(?))");
+        args.push(Box::new(serde_json::json!(allowed_types).to_string()));
+        let tx = self.conn.unchecked_transaction()?;
+        let total = tx.query_row(
+            &format!("SELECT COUNT(*) FROM events{conditions}"),
+            rusqlite::params_from_iter(&args),
+            |row| row.get(0),
+        )?;
+        args.push(Box::new(filter.limit));
+        args.push(Box::new(filter.offset));
+        let events = {
+            let mut statement = tx.prepare(&format!(
+                "SELECT {} FROM events{conditions} ORDER BY id DESC LIMIT ? OFFSET ?",
+                crate::EVENT_COLUMNS,
+            ))?;
+            let rows = statement.query_map(rusqlite::params_from_iter(args), crate::map_event)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok((events, total))
+    }
+
     pub fn camera_outage_since(&self, camera_id: i64) -> rusqlite::Result<Option<String>> {
         self.conn
             .query_row(
@@ -145,7 +173,9 @@ impl Store {
         let event_id = if changed == 0 {
             None
         } else {
-            Some(self.add_event(event)?)
+            let id = self.add_event(event)?;
+            crate::outbox::enqueue(&transaction, id, crate::AlertDispatchKind::Initial)?;
+            Some(id)
         };
         transaction.commit()?;
         Ok(event_id)

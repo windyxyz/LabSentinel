@@ -41,11 +41,15 @@ pub(crate) async fn config_export(
                 } else {
                     mask_rtsp_creds(c.analysis_source.split('?').next().unwrap_or_default())
                 };
-                json!({"name": c.name, "source": src, "type": c.type_,
+                let mut camera = json!({"name": c.name, "source": src, "type": c.type_,
                        "group_name": c.group_name, "analysis_source": analysis_source,
-                       "analysis_shared": c.analysis_shared})
+                       "analysis_shared": c.analysis_shared});
+                if c.type_ == "rtsp" && s.camera_uses_retina(c.id)? {
+                    camera["capture_backend"] = json!("retina");
+                }
+                Ok(camera)
             })
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         let zones_out: Vec<Value> = zones
             .iter()
             .map(|z| {
@@ -186,6 +190,9 @@ pub(crate) async fn config_import(State(st): State<Shared>, Json(body): Json<Val
                     .unwrap_or(false);
                 if super::cameras::valid_substream(analysis) || (analysis.is_empty() && shared) {
                     s.set_camera_analysis_source(cid, analysis, shared)?;
+                }
+                if c.get("capture_backend").and_then(Value::as_str) == Some("retina") {
+                    s.set_camera_retina(cid, true)?;
                 }
             }
             cam_id_by_name.insert(name.to_string(), cid);

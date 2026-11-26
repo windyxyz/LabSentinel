@@ -9,19 +9,23 @@ Copyright (C) 2026 LabSentinel contributors
 
 组件                版本            许可                用途                  来源
 --------------------------------------------------------------------------------------
-axum / tower-http   0.7 / 0.6       MIT                 Web API 与静态托管    crates.io/crates/axum
+axum / tower-http   0.7 / 0.5       MIT                 Web API 与静态托管    crates.io/crates/axum
 tokio               1.x             MIT                 异步运行时            crates.io/crates/tokio
 rusqlite (SQLite)   0.41 (bundled)  MIT / Public Domain 嵌入式数据库          crates.io/crates/rusqlite
 sqlite-vec          0.1.7           MIT / Apache-2.0     本机事件向量检索      https://github.com/asg017/sqlite-vec
 tokenizers          0.22.2          Apache-2.0           可选视觉搜图分词     https://github.com/huggingface/tokenizers
-ort + DirectML      2.x / 1.24.4    MIT                 ONNX/GPU 推理运行时   crates.io/crates/ort · onnxruntime-directml
+ort + DirectML      2.x / 1.20.1    MIT                 ONNX/GPU 推理运行时   crates.io/crates/ort · Microsoft.ML.OnnxRuntime.DirectML
+ncnn Vulkan         20261020         BSD-3-Clause        可选灰度探针资产       github.com/Tencent/ncnn · 许可随探针包提供
 tract-onnx          0.21            MIT / Apache-2.0    纯 Rust ONNX 推理回落 crates.io/crates/tract-onnx
 ureq / rustls       3.x / 0.23      MIT / Apache-2.0    HTTP 客户端与 TLS     crates.io/crates/ureq
 rumqttc             0.25            Apache-2.0          MQTT 事件总线（可选） crates.io/crates/rumqttc
 jiff                0.2             Unlicense / MIT     本地时区与时间处理    crates.io/crates/jiff
 tray-icon / muda    0.21            MIT / Apache-2.0    Windows 系统托盘      crates.io/crates/tray-icon
-Vue 3 / Vite        3.x / 5.x       MIT                 Web 控制台前端        github.com/vuejs/core
+windows-service     0.8.0           MIT / Apache-2.0    Windows SCM 托管      crates.io/crates/windows-service
+serialport          4.10.1          MPL-2.0             Modbus RTU 串口       crates.io/crates/serialport/4.10.1
+Vue 3 / Vite        3.x / 8.x       MIT                 Web 控制台前端        github.com/vuejs/core
 go2rtc              1.9.15          MIT                 WebRTC 流媒体网关     github.com/AlexxIT/go2rtc（tools/ 外置）
+Retina              0.4.22          MIT OR Apache-2.0   可选 RTSP/RTP 客户端  github.com/scottlamb/retina
 ffmpeg / ffprobe    master 构建     GPL-2.0+ / LGPL     取流与存证编码        github.com/BtbN/FFmpeg-Builds（随包分发时遵守其许可）
 
 完整 Rust 传递依赖清单见 `engine-rs/Cargo.lock`（CI 经 `cargo-deny` 校验许可证白名单）。
@@ -54,7 +58,7 @@ amd-quark           MIT             NPU XINT8 量化
   权重由 Roboflow Universe 上 Gavriel's Workspace 的 LAB PPE 数据集训练派生，数据集许可 **CC BY 4.0**
   （署名要求）；Ultralytics YOLO 生态（AGPL-3.0）。随发行包分发已获项目维护者确认。
   数据来源 https://universe.roboflow.com/gavriels-workspace-e9azv/lab-ppe-p4qe4/dataset/1
-- **白大褂穿戴复核 `labcoat-confirm.onnx`**：Ultralytics YOLOE-26n，AGPL-3.0。
+- **白大褂穿戴复核 `labcoat-confirm.onnx`**：Ultralytics YOLOE-26n，AGPL-3.0。Vulkan 灰度用同一 ONNX 还原的 `coat-head.xz` 转换资产沿用相同来源与许可。
   源权重 https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26n-seg.pt
   源文本编码器 https://github.com/ultralytics/assets/releases/download/v8.4.0/mobileclip2_b.ts
   文本编码器只用于本地生成提示嵌入，其权重不进入发行包。编码器权重许可见 https://huggingface.co/apple/MobileCLIP2-B/blob/main/LICENSE 。

@@ -573,7 +573,6 @@ mod tests {
                     &policy,
                     &EpisodeFrame {
                         camera_id: camera,
-                        camera_name: "Synthetic CCTV",
                         time: Duration::from_secs(second),
                         timestamp: "2026-11-24T11:00:00",
                         frame,

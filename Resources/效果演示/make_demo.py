@@ -1,7 +1,7 @@
 # 生成检测效果演示视频：人(绿) / PPE 类别按 --draw 选择绘制
 # 用法（m0-venv）:
 #   python Resources/效果演示/make_demo.py                        # 默认两段演示视频
-#   python Resources/效果演示/make_demo.py --ppe m0-spike/yolo11n_ppe.onnx --suffix _v2
+#   python Resources/效果演示/make_demo.py --ppe models/yolo11n_ppe.onnx --suffix _v2
 #   python Resources/效果演示/make_demo.py --draw "lab coat,no lab coat,hairnet"   # 扩展绘制类别
 #   python Resources/效果演示/make_demo.py --samples              # 顺带输出抽样 jpg 到 Resources/logs/demo_samples/
 # 类别词表自动从 <ppe模型>.classes.txt 读取（见 server/app/engine.py）；无则回退默认 10 类。
@@ -34,12 +34,12 @@ DEFAULT_DRAW = 'lab coat,no lab coat'
 
 def parse_args():
     ap = argparse.ArgumentParser(description="检测效果演示视频生成（v1/v2 对比时用 --suffix 区分输出）")
-    ap.add_argument("--ppe", default=os.path.join(BASE, 'm0-spike', 'yolo11n_ppe.onnx'),
-                    help="PPE 模型路径（默认 m0-spike/yolo11n_ppe.onnx）")
+    ap.add_argument("--ppe", default=os.path.join(BASE, 'models', 'yolo11n_ppe.onnx'),
+                    help="PPE 模型路径（默认 models/yolo11n_ppe.onnx）")
     ap.add_argument("--suffix", default="",
                     help="输出文件名后缀（如 _v2 → lab-walk-检测效果_v2.mp4）")
     ap.add_argument("--videos", nargs="*", default=[],
-                    help="指定视频路径（默认跑 m0-spike/data 下两段演示视频）")
+                    help="指定视频路径（默认跑 models/data 下两段演示视频）")
     ap.add_argument("--device", default="directml", choices=["directml", "cpu"],
                     help="推理后端：directml（默认，快）/ cpu（慢但结果一致，用于避免与其它推理抢 GPU）")
     ap.add_argument("--draw", default=DEFAULT_DRAW,
@@ -85,7 +85,7 @@ def draw(frame, label, box, conf, color):
 
 def main():
     args = parse_args()
-    person_eng = Engine(model_path=os.path.join(BASE, 'm0-spike', 'yolo11n.onnx'), prefer=args.device)
+    person_eng = Engine(model_path=os.path.join(BASE, 'models', 'yolo11n.onnx'), prefer=args.device)
     # PpeEngine 不支持 prefer 参数，用 backend_order 控制（Engine 构造时读取一次）
     from app.config import settings
     settings.backend_order = args.device
@@ -128,8 +128,8 @@ def main():
         vw.release()
         print('done:', out_name, i, 'frames')
 
-    videos = args.videos or [os.path.join(BASE, 'm0-spike/data/lab-walk-24076.mp4'),
-                             os.path.join(BASE, 'm0-spike/data/lab-equip-21453.mp4')]
+    videos = args.videos or [os.path.join(BASE, 'models/data/lab-walk-24076.mp4'),
+                             os.path.join(BASE, 'models/data/lab-equip-21453.mp4')]
     here = os.path.dirname(__file__)
     for v in videos:
         base = os.path.splitext(os.path.basename(v))[0].split('_')[0]

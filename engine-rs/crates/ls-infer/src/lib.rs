@@ -19,5 +19,11 @@ pub mod ort_session;
 #[cfg(feature = "ort")]
 pub mod pose;
 
+#[cfg(all(windows, feature = "vulkan-cv"))]
+#[doc(hidden)]
+pub mod ncnn;
+#[cfg(all(windows, feature = "vulkan-cv"))]
+pub mod vulkan_assets;
+
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub mod yolo;

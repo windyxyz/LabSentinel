@@ -42,9 +42,22 @@ const apiCardEl = ref(null)
 const urlInputEl = ref(null)
 const runtimeEp = ref('dml')
 const runtimeAdapter = ref(null)
+const runtimeGpuId = ref('auto')
+const manualVulkanId = ref('')
+const vulkanEnabled = computed(() => ['auto_vulkan', 'vulkan'].includes(runtimeEp.value))
+const vulkanAvailable = computed(() => cfg.value?.runtime?.vulkan_available === true)
+const cameraDevices = computed(() => Array.isArray(cfg.value?.runtime?.camera_devices) ? cfg.value.runtime.camera_devices : [])
 const adapters = computed(() => Array.isArray(cfg.value?.runtime?.adapters) ? cfg.value.runtime.adapters : [])
 const directMlAdapters = computed(() => adapters.value.filter(adapter => Number.isInteger(adapter?.dxgi_index)))
 const selectedAdapter = computed(() => directMlAdapters.value.find(adapter => adapter.dxgi_index === runtimeAdapter.value))
+const physicalAdapters = computed(() => adapters.value.filter(adapter =>
+  Number.isInteger(adapter?.vulkan_index) && typeof adapter?.gpu_id === 'string'
+))
+const physicalAdapter = computed(() => physicalAdapters.value.find(adapter => adapter.gpu_id === runtimeGpuId.value))
+const sameDirectMlAdapter = computed(() => vulkanEnabled.value && (
+  Number.isInteger(physicalAdapter.value?.dxgi_index)
+    && physicalAdapter.value.dxgi_index === cfg.value?.runtime?.effective_adapter_index
+))
 const sensitivityPresets = [
   { id: 'conservative', label: '保守' },
   { id: 'balanced', label: '平衡' },
@@ -55,6 +68,7 @@ const sensitivityPresets = [
 const vlmPrompt = ref('')
 const motionGate = ref(false)
 const motionThreshold = ref(2)
+const motionRecording = ref(false)
 
 const MODES = [
   { id: 'local', title: '仅本地', desc: '零成本离线——ONNX 本地推理，数据不出本机', icon: '<rect x="2.5" y="4" width="11" height="8" rx="1.5"/><path d="M5 13.5h6"/>' },
@@ -118,11 +132,14 @@ async function load() {
     personWindow.value = d.cascade?.person_window_s ?? 300
     onNegative.value = d.cascade?.on_negative || 'keep'
     usage.value = d.usage
-    runtimeEp.value = d.runtime?.ep || 'dml'
+    runtimeEp.value = d.runtime?.backend || d.runtime?.ep || 'dml'
     runtimeAdapter.value = Number.isInteger(d.runtime?.adapter_index) ? d.runtime.adapter_index : null
+    runtimeGpuId.value = typeof d.runtime?.gpu_id === 'string' ? d.runtime.gpu_id : 'auto'
+    manualVulkanId.value = runtimeGpuId.value.startsWith('vulkan:') ? runtimeGpuId.value : ''
     vlmPrompt.value = d.vlm_prompt || ''
     motionGate.value = !!d.perf?.motion_gate_enabled
     motionThreshold.value = d.perf?.motion_threshold ?? 2
+    motionRecording.value = d.perf?.motion_event_recording === true
     // 档案接口失败（旧服务端/网络抖动）时回退旧单配置，页面仍可用
     let pf = { profiles: [], active: '' }
     try {
@@ -312,21 +329,29 @@ async function runTest() {
 }
 
 // 推理设备切换（GPU/CPU）：保存后全部运行中相机软重启（模型重新加载）
-async function saveRuntimeEp(ep, includeAdapter = false) {
+async function saveRuntime(patch) {
   busy.value = true
   msg.value = ''
   try {
-    const runtime = includeAdapter ? { ep, adapter_index: runtimeAdapter.value } : { ep }
-    const r = await api.saveDetectConfig({ runtime })
+    const r = await api.saveDetectConfig({ runtime: patch })
     await load()
-    msg.value = ep === 'dml'
-      ? `已切换 GPU 推理（DirectML）——${r.restarted || 0} 路相机已重启生效`
-      : `已切换仅 CPU 推理——${r.restarted || 0} 路相机已重启生效`
+    msg.value = `已保存推理设备设置，${r.restarted || 0} 路分析源已重新启动。`
   } catch (e) {
     await load()
     msg.value = String(e.message || e)
   }
   busy.value = false
+}
+
+async function refreshRuntimeDevices() {
+  try {
+    const current = await api.detectConfig()
+    if (cfg.value?.runtime && current?.runtime) {
+      cfg.value.runtime.camera_devices = current.runtime.camera_devices
+    }
+  } catch (e) {
+    msg.value = String(e.message || e)
+  }
 }
 
 // LS-050：自定义 VLM 提示词（留空=恢复内置默认），即时生效
@@ -347,10 +372,10 @@ async function savePerf() {
   msg.value = ''
   try {
     await api.saveDetectConfig({
-      perf: { motion_gate_enabled: motionGate.value, motion_threshold: Number(motionThreshold.value) },
+      perf: { motion_gate_enabled: motionGate.value, motion_threshold: Number(motionThreshold.value), motion_event_recording: motionRecording.value },
     })
     await load()
-    msg.value = motionGate.value ? '已开启运动预筛（静止空画面跳过推理）' : '已关闭运动预筛（每帧全检）'
+    msg.value = '性能设置已保存'
   } catch (e) { msg.value = String(e.message || e) }
   busy.value = false
 }
@@ -363,12 +388,39 @@ const personBusy = ref(false)
 const localModel = ref('')
 const localProjector = ref('')
 const localLayers = ref(0)
+const localDevice = ref('auto')
+const localBudget = ref(0)
+const localReserve = ref(1024)
+const localDevices = ref([])
+const localDeviceMessage = ref('')
+const localDeviceBusy = ref(false)
 const localBusy = ref(false)
 const localMessage = ref('')
 const localStates = { stopped: '已停止', starting: '加载中', cpu: 'CPU 已就绪', cpu_fallback: '已回退至 CPU', gpu_requested: '已加载，已请求 GPU offload' }
 
-async function refreshLocal() {
-  try { localRuntime.value = await api.localVlm() } catch { localRuntime.value = null }
+async function refreshLocal(loadSettings = false) {
+  try {
+    localRuntime.value = await api.localVlm()
+    if (loadSettings && localRuntime.value?.gpu_settings) {
+      const settings = localRuntime.value.gpu_settings
+      localDevice.value = typeof settings.vulkan_device === 'string' ? settings.vulkan_device : 'auto'
+      localBudget.value = Number.isInteger(settings.vram_budget_mb) ? settings.vram_budget_mb : 0
+      localReserve.value = Number.isInteger(settings.cv_vram_reserve_mb) ? settings.cv_vram_reserve_mb : 1024
+    }
+  } catch { localRuntime.value = null }
+}
+
+async function listLocalDevices() {
+  localDeviceBusy.value = true
+  localDeviceMessage.value = ''
+  try {
+    const result = await api.localVlm(true)
+    localDevices.value = Array.isArray(result?.vulkan_devices) ? result.vulkan_devices.filter(device =>
+      typeof device?.id === 'string' && typeof device?.name === 'string' && Number.isFinite(device?.free_mb)
+    ) : []
+    localDeviceMessage.value = result?.device_error || (localDevices.value.length ? '' : '本机视觉运行时未列出可用的 Vulkan 显卡。')
+  } catch (error) { localDeviceMessage.value = error.message }
+  finally { localDeviceBusy.value = false }
 }
 
 async function refreshPersonModels() {
@@ -392,7 +444,11 @@ async function changeLocal(start) {
   localMessage.value = ''
   try {
     if (start) {
-      await api.startLocalVlm({ model: localModel.value.trim(), projector: localProjector.value.trim(), gpu_layers: localLayers.value })
+      await api.startLocalVlm({
+        model: localModel.value.trim(), projector: localProjector.value.trim(),
+        gpu_layers: Number(localLayers.value), vulkan_device: localDevice.value,
+        vram_budget_mb: Number(localBudget.value), cv_vram_reserve_mb: Number(localReserve.value),
+      })
       localMessage.value = '本机档案已保存，可在 API 服务中启用。'
       await load()
     } else {
@@ -403,7 +459,7 @@ async function changeLocal(start) {
   finally { await refreshLocal(); localBusy.value = false }
 }
 
-onMounted(() => { load(); refreshLocal(); refreshPersonModels() })
+onMounted(() => { load(); refreshLocal(true); refreshPersonModels() })
 </script>
 
 <template>
@@ -438,15 +494,36 @@ onMounted(() => { load(); refreshLocal(); refreshPersonModels() })
         <div class="row" style="align-items:center; margin-bottom:10px">
           <span class="muted" style="flex-shrink:0">推理设备：</span>
           <label style="cursor:pointer"><input type="radio" value="dml" v-model="runtimeEp" :disabled="busy"
-            @change="saveRuntimeEp('dml')" /> GPU（推荐——DirectML，N 卡/A 卡/Intel 卡/核显通用）</label>
+            @change="saveRuntime({ backend: 'dml' })" /> DirectML（默认）</label>
+          <label v-if="vulkanAvailable || vulkanEnabled" style="cursor:pointer"><input type="radio" value="auto_vulkan"
+            :checked="vulkanEnabled" :disabled="busy || !vulkanAvailable" @change="saveRuntime({ backend: 'auto_vulkan' })" /> Vulkan（灰度）</label>
           <label style="cursor:pointer; margin-left:16px"><input type="radio" value="cpu" v-model="runtimeEp" :disabled="busy"
-            @change="saveRuntimeEp('cpu')" /> 仅 CPU</label>
+            @change="saveRuntime({ backend: 'cpu' })" /> 仅 CPU</label>
           <span v-if="runtimeEp === 'dml'" class="muted" style="font-size:12px">
             GPU 初始化失败会自动回落 CPU（看服务日志）</span>
         </div>
-        <div v-if="runtimeEp === 'dml' && (directMlAdapters.length || runtimeAdapter !== null)" class="row">
-          <label>显卡
-            <select v-model="runtimeAdapter" :disabled="busy" @change="saveRuntimeEp('dml', true)">
+        <p v-if="vulkanEnabled" class="muted">随包人员和 PPE 模型优先使用 Vulkan，失败依次回退到 DirectML 和 CPU。其他模型沿用 ONNX 推理。</p>
+        <p v-if="vulkanEnabled && !vulkanAvailable" class="muted">当前安装包没有 Vulkan 灰度运行时，分析源使用 ONNX。</p>
+        <div v-if="vulkanEnabled && vulkanAvailable" class="row">
+          <label>Vulkan 设备
+            <select v-model="runtimeGpuId" :disabled="busy" @change="saveRuntime({ gpu_id: runtimeGpuId })">
+              <option value="auto">自动选择</option>
+              <option v-for="adapter in physicalAdapters" :key="adapter.gpu_id" :value="adapter.gpu_id">{{ adapter.name }}</option>
+              <option v-if="runtimeGpuId !== 'auto' && !physicalAdapter" :value="runtimeGpuId" disabled>
+                {{ runtimeGpuId.startsWith('vulkan:') ? `ncnn 设备 ${runtimeGpuId}` : '已选显卡当前不可用' }}
+              </option>
+            </select>
+          </label>
+          <span v-if="sameDirectMlAdapter" class="muted">DirectML 回退使用同一张显卡</span>
+          <details>
+            <summary>按 ncnn 编号选择</summary>
+            <label>ncnn 设备 <input v-model.trim="manualVulkanId" placeholder="vulkan:0" :disabled="busy" /></label>
+            <button type="button" :disabled="busy || !manualVulkanId" @click="saveRuntime({ gpu_id: manualVulkanId })">保存设备编号</button>
+          </details>
+        </div>
+        <div v-if="runtimeEp !== 'cpu' && !sameDirectMlAdapter && (directMlAdapters.length || runtimeAdapter !== null)" class="row">
+          <label>DirectML 显卡
+            <select v-model="runtimeAdapter" :disabled="busy" @change="saveRuntime({ adapter_index: runtimeAdapter })">
               <option :value="null">自动选择</option>
               <option v-for="adapter in directMlAdapters" :key="adapter.dxgi_index" :value="adapter.dxgi_index">{{ adapter.name }}</option>
               <option v-if="!selectedAdapter && runtimeAdapter !== null" :value="runtimeAdapter" disabled>已配置显卡当前不可用</option>
@@ -457,7 +534,16 @@ onMounted(() => { load(); refreshLocal(); refreshPersonModels() })
           </span>
           <span v-if="selectedAdapter?.vulkan_index != null" class="muted">支持 Vulkan</span>
         </div>
-        <p class="muted">最近加载的推理设备 {{ cfg?.runtime?.last_loaded_ep || '尚无会话数据' }}</p>
+        <div class="row">
+          <span class="muted">分析源的实际推理设备</span>
+          <button type="button" class="ghost" @click="refreshRuntimeDevices">刷新设备状态</button>
+        </div>
+        <ul v-if="cameraDevices.length">
+          <li v-for="device in cameraDevices" :key="device.camera_id">
+            #{{ device.camera_id }} · 人员 {{ device.person || '未加载' }} · PPE {{ device.ppe || '未加载' }}
+          </li>
+        </ul>
+        <p v-else class="muted">启动分析源后可查看实际设备。</p>
         <div class="row" role="group" aria-label="检测灵敏度">
           <span>检测灵敏度</span>
           <button v-for="preset in sensitivityPresets" :key="preset.id" type="button" class="ghost"
@@ -488,6 +574,24 @@ onMounted(() => { load(); refreshLocal(); refreshPersonModels() })
           <button type="button" :disabled="localBusy || !localRuntime.runtime_available || !localModel.trim() || !localProjector.trim()" @click="changeLocal(true)">启动</button>
           <button type="button" class="ghost" :disabled="localBusy || localRuntime.status === 'stopped'" @click="changeLocal(false)">停止</button>
         </div>
+        <div v-if="localLayers > 0" class="row">
+          <label>视觉模型显卡
+            <select v-model="localDevice" :disabled="localBusy">
+              <option value="auto">自动选择</option>
+              <option v-if="localDevice !== 'auto' && !localDevices.some(device => device.id === localDevice)" :value="localDevice">{{ localDevice }}</option>
+              <option v-for="device in localDevices" :key="device.id" :value="device.id">{{ device.id }} · {{ device.name }}（可用 {{ device.free_mb }} MiB）</option>
+            </select>
+          </label>
+          <button type="button" class="ghost" :disabled="localDeviceBusy || localBusy || !localRuntime.runtime_available" @click="listLocalDevices">{{ localDeviceBusy ? '枚举中…' : '列出显卡' }}</button>
+          <label>视觉显存预算（MiB，0 自动） <input v-model.number="localBudget" type="number" min="0" max="1048576" :disabled="localBusy" /></label>
+          <label>检测预留显存（MiB） <input v-model.number="localReserve" type="number" min="0" max="1048576" :disabled="localBusy" /></label>
+        </div>
+        <p v-if="localDeviceMessage" role="status">{{ localDeviceMessage }}</p>
+        <p v-if="localRuntime.gpu" class="muted">
+          {{ localRuntime.gpu.device.name }} · {{ localRuntime.gpu.device.id }} · 视觉预算 {{ localRuntime.gpu.usable_mb }} MiB ·
+          检测预留 {{ localRuntime.gpu.cv_reserve_mb }} MiB · 计划 {{ localRuntime.gpu.layers }} 层
+        </p>
+        <p v-if="localRuntime.fallback_reason" role="status">{{ localRuntime.fallback_reason }}</p>
         <p v-if="!localRuntime.runtime_available" class="muted">等待安装 llama.cpp 运行时。</p>
         <p v-if="localBusy || localMessage" role="status">{{ localBusy ? '正在处理离线服务…' : localMessage }}</p>
       </div>
@@ -566,6 +670,9 @@ onMounted(() => { load(); refreshLocal(); refreshPersonModels() })
         <h3>性能选项</h3>
         <label class="muted" style="display:block;margin:6px 0">
           <input type="checkbox" v-model="motionGate" /> 启用运动预筛（Motion Gate）
+        </label>
+        <label class="muted" style="display:block;margin:6px 0">
+          <input type="checkbox" v-model="motionRecording" /> 实时机位有明显运动时保存短片
         </label>
         <div class="row" style="align-items:center;flex-wrap:wrap">
           <label class="muted">

@@ -22,9 +22,19 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// UX4 / LS-044：优雅关停——防重入 → 停 workers → 停后台 jobs → 停 MQTT → WAL checkpoint → exit(0)。
 /// 网页「停止服务」与托盘「退出」共用（同一函数，不走 HTTP 自环）。
 pub fn graceful_shutdown(st: &Shared, source: &str) {
+    #[cfg(windows)]
+    if crate::service::active() {
+        crate::service::request(crate::service::Command::Stop);
+        return;
+    }
     if SHUTTING_DOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
+    stop_components(st, source);
+    std::process::exit(0);
+}
+
+pub(crate) fn stop_components(st: &Shared, source: &str) {
     let stopped = crate::worker::stop_all_workers(st);
     st.jobs.stop();
     if let Some(bus) = &st.mqtt {
@@ -36,9 +46,8 @@ pub fn graceful_shutdown(st: &Shared, source: &str) {
         let _ = s.checkpoint_wal();
     }
     crate::logger::info(&format!(
-        "[shutdown] {source}：已停 {stopped} 路分析 worker 与后台任务，WAL 已合并——进程退出"
+        "[shutdown] {source}：已停 {stopped} 路分析 worker 与后台任务，已尝试合并 WAL"
     ));
-    std::process::exit(0);
 }
 
 /// 启动托盘（独立消息泵线程）。返回 false = 创建失败（降级：仅日志）。

@@ -1,7 +1,7 @@
 """LAB PPE 微调训练脚本（ultralytics YOLO11n 起点）。
 
-流程: m0-spike/yolo11n.pt（COCO 预训练）+ datasets/lab-ppe/data.yaml
-      -> runs/detect/<name>/ 训练产物 -> best.pt 复制为 m0-spike/yolo11n_ppe.pt
+流程: models/yolo11n.pt（COCO 预训练）+ datasets/lab-ppe/data.yaml
+      -> runs/detect/<name>/ 训练产物 -> best.pt 复制为 models/yolo11n_ppe.pt
 
 用法（m0-venv）:
     D:\\LabSentinel\\m0-venv\\Scripts\\python.exe tools/train_ppe.py                      # 正式训练（100 epochs）
@@ -20,9 +20,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL = ROOT / "m0-spike" / "yolo11n.pt"
+DEFAULT_MODEL = ROOT / "models" / "yolo11n.pt"
 DEFAULT_DATA = ROOT / "Resources" / "datasets" / "lab-ppe" / "data.yaml"
-BEST_COPY_DST = ROOT / "m0-spike" / "yolo11n_ppe.pt"
+BEST_COPY_DST = ROOT / "models" / "yolo11n_ppe.pt"
 IMAGE_TYPES = {".avif", ".bmp", ".dng", ".heic", ".heif", ".jp2", ".jpeg",
                ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
 
@@ -128,7 +128,7 @@ def preflight_dataset(yaml_path: Path) -> tuple[dict, dict[str, int]]:
 
 def parse_args():
     ap = argparse.ArgumentParser(
-        description="LAB PPE 微调训练（YOLO11n 起点），训练后把 best.pt 复制到 m0-spike/yolo11n_ppe.pt"
+        description="LAB PPE 微调训练（YOLO11n 起点），训练后把 best.pt 复制到 models/yolo11n_ppe.pt"
     )
     ap.add_argument("--model", default=str(DEFAULT_MODEL),
                     help=f"起点权重（默认 {DEFAULT_MODEL}，COCO 预训练 yolo11n）")

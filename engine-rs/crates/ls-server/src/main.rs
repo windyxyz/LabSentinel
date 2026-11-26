@@ -39,11 +39,14 @@ mod gpu_enum;
 mod handlers;
 mod local_face;
 mod local_vlm;
+mod mcp;
 mod middleware;
 mod performance;
 mod plugins;
 mod router;
 mod semantic;
+#[cfg(windows)]
+mod service;
 mod spatial;
 mod state;
 mod storage;
@@ -139,16 +142,49 @@ fn is_loopback_host(host: &str) -> bool {
     )
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // UX3：--console 必须早于任何 println!（GUI release 下附着父控制台重指
     // CONOUT$；CI 管道/安装器自检已有控制台，幂等直接返回）
     if std::env::args().any(|x| x == "--console") {
         crate::wincon::attach_parent_console();
     }
+    #[cfg(windows)]
+    if let Some(code) = service::cli() {
+        std::process::exit(code);
+    }
+    let runtime = server_runtime().expect("create server runtime");
+    let code = runtime.block_on(run_server());
+    std::process::exit(code);
+}
+
+fn server_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+}
+
+async fn run_server() -> i32 {
+    #[cfg(windows)]
+    let service_mode = service::active();
+    #[cfg(not(windows))]
+    let service_mode = false;
     let install_root = deploy::default_install_root();
+    #[cfg(windows)]
+    let install_root = if service_mode {
+        match service::install_root() {
+            Ok(path) => path,
+            Err(error) => {
+                crate::logger::error(&format!("[service] {error}"));
+                return 1;
+            }
+        }
+    } else {
+        install_root
+    };
     let explicit_network = envfile::NETWORK_KEYS.map(|key| std::env::var_os(key).is_some());
-    load_dotenv(&install_root);
+    if !service_mode {
+        load_dotenv(&install_root);
+    }
     let dist_layout = install_root.join("web").join("index.html").is_file();
     let env_path = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
     let data_dir = env_path("LS_DATA_DIR").unwrap_or_else(|| {
@@ -158,15 +194,25 @@ async fn main() {
             "data".into()
         }
     });
-    let db_path = env_path("LS_DB_PATH").unwrap_or_else(|| {
-        std::path::Path::new(&data_dir)
-            .join("labsentinel.db")
+    #[cfg(windows)]
+    let data_dir = if service_mode {
+        service::data_dir(&install_root)
             .to_string_lossy()
             .into_owned()
-    });
+    } else {
+        data_dir
+    };
+    let db_path = env_path("LS_DB_PATH")
+        .filter(|_| !service_mode)
+        .unwrap_or_else(|| {
+            std::path::Path::new(&data_dir)
+                .join("labsentinel.db")
+                .to_string_lossy()
+                .into_owned()
+        });
     if let Ok(content) = std::fs::read_to_string(envfile::network_path(&data_dir)) {
         for (key, explicit) in envfile::NETWORK_KEYS.into_iter().zip(explicit_network) {
-            if !explicit {
+            if !explicit || service_mode {
                 if let Some(value) = envfile::get_key(&content, key) {
                     std::env::set_var(key, value);
                 }
@@ -208,8 +254,8 @@ async fn main() {
     }
     // 健康自检（原为容器 HEALTHCHECK 设计，Docker 路线已终止——保留作通用探活）：
     // `labsentinel-server --healthcheck <db>` 只读探活即退出
-    let launch_mode = std::env::args().any(|x| x == "--launch");
-    let tray_mode = std::env::args().any(|x| x == "--tray");
+    let launch_mode = !service_mode && std::env::args().any(|x| x == "--launch");
+    let tray_mode = !service_mode && std::env::args().any(|x| x == "--tray");
     if launch_mode {
         // RA4（ADR-0011）：portable_launcher 消解件——端口试探防双实例：
         // 目标端口已被监听 = 已有实例在跑 → 开浏览器即退（锁文件照写对齐 Python 语义）
@@ -258,7 +304,7 @@ async fn main() {
                     std::process::exit(2);
                 }
             }
-            return;
+            return 0;
         }
         // RA4（ADR-0011）：health_check.py 消解件——真起服务于 127.0.0.1:0，
         // 轮询 /api/health/ready ≤60s（Inno finalize/升级后自检调用；exit 0=通过）。
@@ -306,9 +352,10 @@ async fn main() {
     //   源码开发用 web/dist——此前安装版根路径 404 即因默认 web/dist 不存在。
     let token = std::env::var("LS_ADMIN_TOKEN").unwrap_or_default();
     let read_token = std::env::var("LS_READ_TOKEN").unwrap_or_default();
-    let read_protected = std::env::var("LS_AUTH_READ_PROTECTED")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let read_protected = service_mode
+        || std::env::var("LS_AUTH_READ_PROTECTED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
     // RA4.2：版本号优先 LS_VERSION，其次包内 VERSION/app/VERSION（发行包自带），最后兜底
     let version = env_path("LS_VERSION").unwrap_or_else(|| deploy::read_version(&install_root));
     let web_dist = env_path("LS_WEB_DIST").unwrap_or_else(|| {
@@ -328,6 +375,11 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(8000);
     // LS-045：非回环监听（如 LS_HOST=0.0.0.0）强制要求设置 LS_ADMIN_TOKEN，拒绝无令牌暴露局域网
+    if service_mode && token.trim().len() < 16 {
+        let _ = crate::logger::init(std::path::Path::new(&data_dir));
+        crate::logger::error("[service] 缺少管理令牌，请重新执行服务安装命令重新生成");
+        return 2;
+    }
     if !is_loopback_host(&host) && token.trim().is_empty() {
         let msg = format!(
             "拒绝启动：LS_HOST={host} 为非回环地址，但未配置 LS_ADMIN_TOKEN。\n\
@@ -335,7 +387,7 @@ async fn main() {
         );
         eprintln!("[ls-server] {msg}");
         crate::wincon::fatal_error_box("LabSentinel 安全拦截", &msg);
-        std::process::exit(2);
+        return 2;
     }
     let mut trusted_hosts = vec!["127.0.0.1".into(), "localhost".into(), "::1".into()];
     if !is_loopback_host(&host) && host != "0.0.0.0" && host != "::" {
@@ -437,10 +489,20 @@ async fn main() {
         }
     }
     if let Ok(store) = ls_store::Store::open(&st.db_path) {
+        crate::detect::migrate_runtime_gpu_identity(&store);
         ls_infer::ort_session::select_directml_adapter(crate::detect::runtime_adapter(&store));
         if let Err(error) = store.interrupt_open_episodes(&ls_core::time::local_now_iso()) {
             crate::logger::error(&format!("[start] 未能关闭上次运行中断的事件段: {error}"));
         }
+    }
+    if service_mode
+        && ls_store::Store::open(&st.db_path)
+            .and_then(|s| s.schema_version())
+            .ok()
+            != Some(ls_store::SCHEMA_VERSION_LATEST)
+    {
+        crate::logger::error("[service] 数据库未就绪，请检查数据目录日志");
+        return 1;
     }
     st.access.load(&st.db_path);
     let app = build_router(st.clone());
@@ -464,6 +526,10 @@ async fn main() {
                 "[ls-server] 端口 {port} 绑定失败: {e}——可能已有实例在运行"
             ));
             // UX3：致命启动错误必须可见（GUI 无控制台 → 原生弹窗）
+            if service_mode {
+                crate::tray::stop_components(&st, "服务启动失败");
+                return 1;
+            }
             crate::wincon::fatal_error_box(
                 "LabSentinel 启动失败",
                 &format!(
@@ -480,7 +546,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    st.go2rtc.start(st.db_path.clone(), install_root);
+    st.go2rtc.start(st.db_path.clone(), install_root.clone());
+    #[cfg(windows)]
+    if service_mode {
+        service::resume_cameras(&st);
+    }
     println!("labsentinel-server READY port={port}");
     // UX4：系统托盘（唯一常驻 UI；--tray 开启，安装器快捷方式 = --launch --tray）。
     // 创建失败只 warn 降级，不影响服务。
@@ -506,12 +576,42 @@ async fn main() {
             open_browser(port);
         });
     }
-    axum::serve(
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await
-    .unwrap();
+    );
+    #[cfg(windows)]
+    if service_mode {
+        use std::future::IntoFuture;
+        use std::time::Duration;
+        if let Err(err) = service::running(&install_root, port) {
+            crate::logger::error(&format!("[service] 无法报告 SCM 运行状态: {err:?}"));
+            crate::tray::stop_components(&st, "服务启动失败");
+            return 1;
+        }
+        let (drain, stopped) = tokio::sync::oneshot::channel();
+        let serving = server
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .into_future();
+        tokio::pin!(serving);
+        let code = tokio::select! {
+            result = &mut serving => {
+                crate::logger::error(&format!("[service] HTTP 监听意外结束: {result:?}"));
+                1
+            }
+            () = service::wait_for_stop() => {
+                let _ = drain.send(());
+                let _ = tokio::time::timeout(Duration::from_secs(3), serving).await;
+                0
+            }
+        };
+        crate::tray::stop_components(&st, "Windows SCM");
+        return code;
+    }
+    server.await.unwrap();
+    0
 }
 
 /// RA4：默认浏览器打开服务页（Windows `cmd /C start`；其他平台 xdg-open/open）。

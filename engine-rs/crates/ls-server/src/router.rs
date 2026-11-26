@@ -70,6 +70,15 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/maintenance/preview"),
     ("POST", "/api/maintenance/cleanup"),
     ("GET", "/api/storage"),
+    ("GET", "/api/mcp/config"),
+    ("PUT", "/api/mcp/config"),
+    ("GET", "/api/mcp/tokens"),
+    ("POST", "/api/mcp/tokens"),
+    ("DELETE", "/api/mcp/tokens/:id"),
+    ("POST", "/api/mcp/receipts/verify"),
+    ("POST", "/mcp"),
+    ("GET", "/mcp"),
+    ("DELETE", "/mcp"),
     ("POST", "/api/storage/preview"),
     ("POST", "/api/storage/cleanup"),
     ("POST", "/api/storage/compact"),
@@ -79,14 +88,16 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/events/explore"),
     ("GET", "/api/events/explore/settings"),
     ("PUT", "/api/events/explore/settings"),
-    ("GET", "/api/ws/events"),
-    ("GET", "/api/ws/detections/:cid"), // LS-051（root /ws/detections/:cid）
+    ("GET", "/ws/events"),
+    ("GET", "/ws/detections/:cid"),
+    ("GET", "/ws/webrtc/:cid"),
     // ---- R2-309 批次 1：cameras 扩展 ----
     ("DELETE", "/api/cameras/:id"),
     ("PUT", "/api/cameras/:id/group"),
     ("PUT", "/api/cameras/:id/analyzer"),
     ("PUT", "/api/cameras/:id/analysis-source"),
     ("POST", "/api/cameras/:id/start"),
+    ("POST", "/api/cameras/:id/stop"),
     ("GET", "/api/cameras/:id/webrtc"),
     ("GET", "/api/camera-groups"),
     ("POST", "/api/cameras/bulk"),
@@ -110,6 +121,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/rules"),
     ("DELETE", "/api/rules/:rid"),
     ("PUT", "/api/rules/:rid"),
+    ("PATCH", "/api/rules/:rid/enabled"),
     ("GET", "/api/rule-templates"),
     ("GET", "/api/scene-packs"),
     ("POST", "/api/scene-packs/preview"),
@@ -196,6 +208,7 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("POST", "/api/config/import"),
     ("GET", "/api/events/:eid/evidence.zip"),
     ("GET", "/api/export/evidence.zip"),
+    ("GET", "/api/export/audit-pack.zip"),
     ("GET", "/api/plugins/:pid/logs"),
     ("POST", "/api/plugins/:pid/enable"),
     ("POST", "/api/plugins/:pid/disable"),
@@ -237,6 +250,8 @@ pub const ROUTE_INVENTORY: &[(&str, &str)] = &[
     ("GET", "/api/cameras/:cid/snapshot"),
     // ---- R2-309 批次 4（L3 门槛冲刺） ----
     ("GET", "/api/alerts/config"),
+    ("GET", "/api/alerts/actuator"),
+    ("PUT", "/api/alerts/actuator"),
     ("GET", "/api/alerts/push-policy"), // UX：推送策略（带图/冷却）
     ("PUT", "/api/alerts/push-policy"),
     ("PUT", "/api/alerts/config"),
@@ -309,6 +324,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/cameras/:id/analyzer", put(set_camera_analyzer))
         .route("/cameras/:id/analysis-source", put(set_analysis_source))
         .route("/cameras/:id/start", post(start_camera))
+        .route("/cameras/:id/stop", post(stop_camera))
         .route("/cameras/:id/webrtc", get(camera_webrtc))
         .route("/camera-groups", get(camera_groups))
         .route("/cameras/bulk", post(cameras_bulk))
@@ -335,6 +351,7 @@ pub fn build_router(state: Shared) -> Router {
         )
         .route("/rules", get(rules_list).post(add_rule))
         .route("/rules/:rid", delete(delete_rule).put(update_rule_grace))
+        .route("/rules/:rid/enabled", patch(update_rule_enabled))
         .route("/rule-templates", get(templates_list).post(add_template))
         .route("/scene-packs", get(scene_packs))
         .route("/scene-packs/preview", post(scene_preview))
@@ -357,6 +374,16 @@ pub fn build_router(state: Shared) -> Router {
         .route("/maintenance/preview", get(maintenance_preview))
         .route("/maintenance/cleanup", post(maintenance_cleanup))
         .route("/storage", get(storage::usage))
+        .route(
+            "/mcp/config",
+            get(crate::mcp::config).put(crate::mcp::update_config),
+        )
+        .route(
+            "/mcp/tokens",
+            get(crate::mcp::tokens).post(crate::mcp::issue_token),
+        )
+        .route("/mcp/tokens/:id", delete(crate::mcp::revoke_token))
+        .route("/mcp/receipts/verify", post(crate::mcp::verify_receipt))
         .route("/storage/preview", post(storage::preview))
         .route("/storage/cleanup", post(storage::cleanup))
         .route("/storage/compact", post(storage::compact))
@@ -434,6 +461,7 @@ pub fn build_router(state: Shared) -> Router {
         .route("/config/import", post(config_import))
         .route("/events/:eid/evidence.zip", get(event_evidence_zip))
         .route("/export/evidence.zip", get(export_evidence_zip))
+        .route("/export/audit-pack.zip", get(export_audit_pack))
         .route("/plugins/:pid/logs", get(plugin_logs))
         .route("/plugins/:pid/enable", post(plugin_action))
         .route("/plugins/:pid/disable", post(plugin_action))
@@ -497,6 +525,7 @@ pub fn build_router(state: Shared) -> Router {
             get(push_policy_get).put(push_policy_put),
         )
         .route("/alerts/config/reset", post(alerts_config_reset))
+        .route("/alerts/actuator", get(actuator_get).put(actuator_put))
         .route("/discovery/cameras", get(discovery_cameras))
         .route("/discovery/probe", post(discovery_probe))
         // ---- UX2：检测模式全局策略 ----
@@ -521,7 +550,12 @@ pub fn build_router(state: Shared) -> Router {
     // - 放在 guard 中间件内：Host 白名单（防 DNS Rebinding）同样覆盖静态资源；
     //   读保护只拦 /api/*，页面本身公开（令牌由前端注入）
     // web_dist 为空（测试/内嵌模式）时不挂载，保持纯 API。
-    let mut app = Router::new().nest("/api", api).merge(ws);
+    let mut app = Router::new().nest("/api", api).merge(ws).route(
+        crate::mcp::ENDPOINT,
+        post(crate::mcp::handle)
+            .get(crate::mcp::no_stream)
+            .delete(crate::mcp::no_stream),
+    );
     if !state.web_dist.is_empty() {
         let index = std::path::Path::new(&state.web_dist).join("index.html");
         // 注意用 .fallback() 而非 .not_found_service()：后者会用 SetStatus 把回退

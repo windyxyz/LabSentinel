@@ -13,7 +13,9 @@ R2-003/R2-506：不再写死 D:/tmp 路径。
     默认工具链（CI 的 MSVC / Linux 走这条）。rust-toolchain.toml 只钉 channel，
     目标三元组由显式 `cargo +stable-x86_64-pc-windows-gnu` 选择。
 """
+import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -22,6 +24,7 @@ from datetime import date
 from pathlib import Path
 
 from prepare_rust_assets import GO2RTC, MODELS, PORTABLE_MODEL_ASSETS, valid_model_asset, valid_go2rtc
+from vulkan_assets import read_bundle as read_vulkan_bundle
 
 ROOT = Path(__file__).resolve().parent.parent
 ENGINE_RS = ROOT / "engine-rs"
@@ -40,7 +43,7 @@ def _gcc_lib_dir(w64: Path) -> Path:
     return versions[-1] if versions else base
 
 
-def build_binary() -> Path:
+def build_binary(vulkan_cv: bool = False) -> Path:
     """CI（MSVC/Linux）走宿主默认工具链；本机 w64devkit 配方按 LS_W64DEVKIT 启用。"""
     env = dict(os.environ)
     args = [str(CARGO)]
@@ -56,6 +59,8 @@ def build_binary() -> Path:
                             f"-L {_gcc_lib_dir(W64)} "
                             f"-L {W64 / 'lib'} -C link-arg=-lucrt")
     args += ["build", "--release", "-p", "ls-server"]
+    if vulkan_cv:
+        args += ["--features", "vulkan-cv"]
     env.setdefault("CARGO_TARGET_DIR", str(TARGET))
     r = subprocess.run(args, cwd=ENGINE_RS, env=env,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -68,9 +73,12 @@ def build_binary() -> Path:
     return exe
 
 
-def assemble(strict: bool = False) -> None:
+def assemble(strict: bool = False, vulkan_probe: Path | None = None) -> None:
+    if vulkan_probe and (sys.platform != "win32" or platform.machine().lower() not in {"amd64", "x86_64"}):
+        raise SystemExit("[失败] Vulkan 探针包当前仅支持 Windows x64")
+    vulkan = read_vulkan_bundle(vulkan_probe, MODELS) if vulkan_probe else None
     invalid_models = {name for name in PORTABLE_MODEL_ASSETS if not valid_model_asset(MODELS / name)}
-    if strict and invalid_models:
+    if (strict or vulkan is not None) and invalid_models:
         names = ", ".join(sorted(invalid_models))
         raise SystemExit(f"[失败] 权重缺失或校验失败 {names}（scripts/prepare_rust_assets.py）")
     # LS-045：先清空 staging 目录再组装，防止历史版本废弃资产残留进新发行包
@@ -78,7 +86,7 @@ def assemble(strict: bool = False) -> None:
         shutil.rmtree(DIST)
     DIST.mkdir(parents=True, exist_ok=True)
     missing: list[str] = []
-    exe = build_binary()
+    exe = build_binary(vulkan_cv=True) if vulkan is not None else build_binary()
     shutil.copy2(exe, DIST / exe.name)
     web = ROOT / "web" / "dist"
     if (web / "index.html").exists():
@@ -100,6 +108,11 @@ def assemble(strict: bool = False) -> None:
             target.unlink()
         missing.append(f"模型缺失或校验失败 {src}（scripts/prepare_rust_assets.py）")
     shutil.copy2(ROOT / "docs/licenses/close-mask-MIT.txt", models / "close-mask-LICENSE.txt")
+    if vulkan is not None:
+        target = DIST / "vulkan"
+        target.mkdir()
+        for name, data in vulkan.items():
+            (target / name).write_bytes(data)
     # RA4.2：ffmpeg/ffprobe（RTSP/视频取流与存证）与 onnxruntime（ORT_DYLIB_PATH）
     ff_src = ROOT / "tools" / "ffmpeg"
     if ff_src.is_dir() and (ff_src / "ffmpeg.exe").is_file():
@@ -172,13 +185,15 @@ def assemble(strict: bool = False) -> None:
         "# LS_MODEL_PATH=models/yolo11n.onnx\n"
         "# LS_PPE_MODEL=models/yolo11n_ppe.onnx\n", encoding="utf-8")
     if missing:
-        if strict:
+        if strict or vulkan is not None:
             raise SystemExit("[失败] 发行包缺少必需资产：\n  - " + "\n  - ".join(missing))
         print("[警告] 发行包资产不完整：" + "；".join(missing))
 
 
-def zip_it() -> Path:
-    out = ROOT / "Resources" / "dist" / f"labsentinel-rust-{VERSION}-{date.today():%Y%m%d}.zip"
+def zip_it(output_dir: Path | None = None) -> Path:
+    variant = "vulkan-probe" if (DIST / "vulkan").is_dir() else "rust"
+    output_dir = output_dir if output_dir is not None else ROOT / "Resources" / "dist"
+    out = output_dir / f"labsentinel-{variant}-{VERSION}-{date.today():%Y%m%d}.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for f in DIST.rglob("*"):
             if f.is_file():
@@ -188,7 +203,14 @@ def zip_it() -> Path:
 
 
 if __name__ == "__main__":
-    assemble(strict="--strict" in sys.argv)
-    if "--zip" in sys.argv:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--zip", action="store_true")
+    parser.add_argument("--vulkan-probe", type=Path, help="use the pinned Vulkan probe bundle in a separate staging directory")
+    options = parser.parse_args()
+    if options.vulkan_probe:
+        DIST = DIST.with_name("labsentinel-vulkan-probe")
+    assemble(strict=options.strict, vulkan_probe=options.vulkan_probe)
+    if options.zip:
         zip_it()
     print("[L4 构建] 完成")

@@ -11,7 +11,7 @@ Rust 默认后端 tract 也是纯 CPU。对齐目标达成（L1 轨迹 322/322 �
 但产品在 Windows 上失去了 GPU 加速，多路吞吐明显下降（N-20），且当时没有
 性能基线数据（T-307 未做）来量化代价。
 
-同时 `m0-spike/yolo11n.onnx` 被 `.gitignore` 排除、release 流水线在干净检出时
+同时 `models/yolo11n.onnx` 被 `.gitignore` 排除、release 流水线在干净检出时
 缺模型（N-09）。R2-004 让 CI 通过 `scripts/fetch_assets.py` 下载
 Ultralytics 官方 release 的 `yolo11n.onnx`（sha256 `634279b4…`）——它与本地
 自行导出的模型（sha256 `4758511e…`）**不是同一个文件**。
