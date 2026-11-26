@@ -148,13 +148,18 @@ fn ffmpeg() -> Command {
 }
 
 fn media_command(name: &str) -> Command {
-    let mut cmd = Command::new(ls_core::bin::find(name));
+    let path = ls_core::bin::find(name);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new(path);
         cmd.creation_flags(0x0800_0000);
+        cmd
     }
-    cmd
+    #[cfg(not(windows))]
+    {
+        Command::new(path)
+    }
 }
 
 fn run(cmd: &mut Command) -> Output {
